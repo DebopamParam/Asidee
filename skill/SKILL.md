@@ -28,7 +28,8 @@ Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing depende
 - A name is lowercase letters, digits and hyphens.
 - `exec` needs a running sandbox; it does not start one.
 - If a check fails, report the check's title and detail to the user as they are. Do not work around it.
-- A sandbox can be stopped without you asking: by a failed check, by the disk watch, or because the daemon stopped.
+- A sandbox can be stopped without you asking: by a failed check, by the disk watch, because the daemon stopped, or
+  by the engine when it passes its memory or task limit.
   `paddock list` shows the reason. Report it; start the sandbox again only if the reason is gone.
 - Long operations print progress lines starting with `…` on stderr. Stdout stays the result.
 - A sandbox has no host folders. Send a text file in with `paddock exec NAME --stdin -- sh -c 'cat > FILE' < local-file`,
@@ -80,6 +81,13 @@ Keep showing each check's status and detail as the API returns them.
 ### Change defaults
 
 `~/.config/paddock/config.json`: `{ "defaults": { "image": "ubuntu:24.04", "cpus": 2, "memoryGb": 4, "diskGb": 20 }, "engine": "gvisor:orbstack" }`.
+The defaults obey the same limits as the flags. A mistake in this file makes `paddock create` fail with a message that
+names it, so run a create after editing it.
+
+### Check your changes
+
+After changing anything, run `paddock verify NAME` on a sandbox. If you changed Paddock's own source, run
+`bun evals/run.ts` from it: it measures the claims Paddock makes from outside and prints which ones no longer hold.
 
 ## What you cannot do, by design
 

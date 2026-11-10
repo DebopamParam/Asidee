@@ -3,10 +3,10 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { blockers, CHECKLIST, complete } from "../../core/checks"
-import { Core } from "../../core/core"
+import { Core, UNCHECKED_PASSES } from "../../core/core"
 import { fieldValues, loadExtensions, parseExtension } from "../../core/extensions"
 import { configChecks, gvisorSetup, network, unsafeRuntimeArgs, type GuardState } from "../../core/providers/gvisor"
-import { validSpec } from "../../core/state"
+import { readConfig, validSpec } from "../../core/state"
 import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type Stage } from "../../core/types"
 
 const engine: Engine = { id: "fake:1", provider: "fake", label: "Fake engine", ready: true, problems: [], data: { context: "fake", runtime: "runsc" }, capabilities: { kernelIsolation: "gvisor", diskLimit: "watched", networkGuard: true } }
@@ -29,6 +29,7 @@ function fakeProvider(overrides: Partial<Record<Stage, CheckResult[]>> = {}) {
     attachArgv: () => [],
     checks: async (_manifest, stage) => state.overrides[stage] ?? allPass(stage),
     diskUsedBytes: async () => 0,
+    stoppedWhy: async () => undefined,
     sweep: async () => {},
   }
   return { provider, state }
@@ -213,4 +214,56 @@ test("extensions are declarations: bad ones are reported, field values are check
   const loaded = await loadExtensions({ state: root, config: root })
   expect(loaded.extensions.map((entry) => entry.id)).toEqual(["good"])
   expect(loaded.errors.length).toBe(1)
+})
+
+test("a running sandbox that cannot be checked for several passes in a row is stopped; one clear pass resets the count", async () => {
+  const { provider, state } = fakeProvider(); const paddock = await core(provider)
+  await paddock.create({ name: "demo" })
+  const blind = allPass("config").map((entry) => entry.id === "network-guard" ? { ...entry, status: "unknown" as const } : entry)
+  state.overrides.config = blind
+  for (let pass = 1; pass < UNCHECKED_PASSES; pass++) await paddock.enforce()
+  expect(state.running).toBe(true)
+  delete state.overrides.config; await paddock.enforce()
+  state.overrides.config = blind
+  for (let pass = 1; pass < UNCHECKED_PASSES; pass++) await paddock.enforce()
+  expect(state.running).toBe(true)
+  await paddock.enforce()
+  expect(state.running).toBe(false)
+  expect((await paddock.get("demo")).stopReason).toContain("could not check")
+})
+
+test("a config file with a mistake is refused by name, and its defaults obey the same limits as a request", async () => {
+  const root = await mkdtemp(join(tmpdir(), "paddock-config-")); const dirs = { state: join(root, "state"), config: root }
+  expect(await readConfig(dirs)).toEqual({ defaults: {} })
+  for (const bad of ["{ nope", "[]", "null", '{"defaults":"x"}', '{"engine":5}', '{"defaults":{"cpus":"lots"}}', '{"defaults":{"image":"--privileged"}}', '{"defaults":{"memoryGb":100000}}']) {
+    await writeFile(join(root, "config.json"), bad)
+    await expect(readConfig(dirs)).rejects.toThrow("config.json")
+  }
+  await writeFile(join(root, "config.json"), '{"defaults":{"image":"alpine:3","cpus":1,"privileged":true,"name":"x"},"engine":"gvisor:orbstack"}')
+  expect(await readConfig(dirs)).toEqual({ defaults: { image: "alpine:3", cpus: 1 }, engine: "gvisor:orbstack" })
+})
+
+test("a damaged state file is listed as damaged and the other sandboxes still work", async () => {
+  const { provider } = fakeProvider(); const paddock = await core(provider)
+  await paddock.create({ name: "demo" })
+  await writeFile(join(paddock.dirs.state, "sandboxes", "broken.json"), "{ nope")
+  await writeFile(join(paddock.dirs.state, "sandboxes", "other.json"), '{"name":"someone-else"}')
+  const list = await paddock.list()
+  expect(list.map((entry) => `${entry.name}:${entry.status}`)).toEqual(["demo:running", "broken:damaged", "other:damaged"])
+  expect(list[1]!.stopReason).toContain("broken.json")
+  await paddock.enforce()
+  expect((await paddock.verify("demo")).ok).toBe(true)
+})
+
+test("a setup hook runs after the sandbox is free, so it can call back into it", async () => {
+  const { provider } = fakeProvider()
+  const root = await mkdtemp(join(tmpdir(), "paddock-hook-")); const dirs = { state: join(root, "state"), config: join(root, "config") }
+  await mkdir(join(dirs.config, "extensions", "setup"), { recursive: true })
+  await writeFile(join(dirs.config, "extensions", "setup", "extension.json"), JSON.stringify({ name: "Setup", hooks: { postCreate: ["./setup.sh"] } }))
+  let paddock: Core
+  // The hook's command stands in for a script that runs `paddock verify` on the new sandbox.
+  paddock = new Core([provider], dirs, async (_argv, options) => ({ exitCode: 0, stdout: String((await paddock.verify(options!.env!.PADDOCK_SANDBOX!)).ok), stderr: "" }), "/nowhere")
+  const made = await Promise.race([paddock.create({ name: "demo" }), Bun.sleep(2000).then(() => "stuck" as const)])
+  expect(made).not.toBe("stuck")
+  expect((made as Awaited<ReturnType<Core["create"]>>).hooks).toEqual([{ extension: "setup", exitCode: 0, output: "true" }])
 })

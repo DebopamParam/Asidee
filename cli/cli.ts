@@ -5,9 +5,9 @@ import { dirname, join } from "node:path"
 import { parseArgs } from "node:util"
 import { CHECKLIST } from "../core/checks"
 import type { SandboxView } from "../core/core"
-import { readDaemonFile, runDaemon, VERSION } from "../core/daemon"
+import { BUILD, readDaemonFile, runDaemon, VERSION } from "../core/daemon"
 import type { Extension } from "../core/extensions"
-import { defaultDirs, socketPath } from "../core/state"
+import { checkSocketPath, defaultDirs, socketPath } from "../core/state"
 import { PaddockError, type CheckResult, type Engine, type ErrorCode, type RunResult } from "../core/types"
 
 // A thin client: every command is one call to the daemon, which is started on first use.
@@ -55,11 +55,12 @@ async function daemonGone(): Promise<boolean> {
 let daemonReady = false
 async function ensureDaemon(): Promise<void> {
   if (daemonReady) return
-  const probe = () => request<{ version: string; stopping?: boolean }>("version").catch(() => undefined)
-  const version = () => probe().then((reply) => reply?.version)
+  checkSocketPath(dirs)
+  const probe = () => request<{ version: string; build?: string; stopping?: boolean }>("version").catch(() => undefined)
+  const build = () => probe().then((reply) => reply?.build)
   let running = await probe()
   if (running?.stopping) { await daemonGone(); running = undefined }
-  if (running?.version !== VERSION) {
+  if (running?.build !== BUILD) {
     if (running) {
       await request("shutdown", { keepSandboxes: true }).catch(() => {})
       await daemonGone()
@@ -67,8 +68,8 @@ async function ensureDaemon(): Promise<void> {
     mkdirSync(dirs.state, { recursive: true, mode: 0o700 })
     const log = openSync(join(dirs.state, "daemon.log"), "a", 0o600)
     spawn(self[0]!, [...self.slice(1), "daemon", "run"], { detached: true, stdio: ["ignore", log, log] }).unref()
-    for (let attempt = 0; attempt < 100 && await version() !== VERSION; attempt++) await Bun.sleep(100)
-    if (await version() !== VERSION) throw new PaddockError("runtime", `The daemon did not start. See ${join(dirs.state, "daemon.log")}.`)
+    for (let attempt = 0; attempt < 100 && await build() !== BUILD; attempt++) await Bun.sleep(100)
+    if (await build() !== BUILD) throw new PaddockError("runtime", `The daemon did not start. See ${join(dirs.state, "daemon.log")}.`)
   }
   daemonReady = true
 }
@@ -97,8 +98,10 @@ function printSandbox(view: SandboxView): void {
   console.log(`${view.name}: ${view.status} on ${view.engine}${view.stopReason ? `\n  ${view.stopReason}` : ""}`)
 }
 
-function printRun(output: RunResult): never {
-  process.stdout.write(output.stdout); process.stderr.write(output.stderr)
+// Waits for the output to be written before exiting: into a pipe, an exit right after a write loses what did not fit.
+async function printRun(output: RunResult, asJson = false): Promise<never> {
+  if (asJson) await Bun.write(Bun.stdout, `${JSON.stringify({ ok: true, data: output })}\n`)
+  else { await Bun.write(Bun.stdout, output.stdout); await Bun.write(Bun.stderr, output.stderr) }
   process.exit(output.exitCode)
 }
 
@@ -118,8 +121,8 @@ async function main(argv: string[]): Promise<void> {
 
   try {
     switch (command) {
-      case undefined: case "help": case "--help": case "-h": console.log(HELP); return
-      case "version": case "--version": console.log(VERSION); return
+      case undefined: case "help": case "--help": case "-h": return out({ help: HELP }, () => console.log(HELP))
+      case "version": case "--version": return out({ version: VERSION }, () => console.log(VERSION))
       case "doctor": case "init": {
         const engines = await call<Engine[]>("engines")
         return out(engines, () => {
@@ -148,6 +151,7 @@ async function main(argv: string[]): Promise<void> {
           if (!list.length) console.log("No sandboxes. Create one with `paddock create NAME`.")
           for (const view of list) {
             const verified = view.lastVerify ? `verified ${view.lastVerify.at.slice(0, 16).replace("T", " ")} UTC, ${view.lastVerify.results.filter((check) => check.status === "fail").length} failed` : "never verified"
+            if (view.status === "damaged") { console.log(`${view.name.padEnd(24)} damaged\n    ${view.stopReason}`); continue }
             console.log(`${view.name.padEnd(24)} ${view.status.padEnd(8)} ${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  ${view.engine}  (${verified})${view.stopReason ? `\n    ${view.stopReason}` : ""}`)
           }
         })
@@ -171,8 +175,7 @@ async function main(argv: string[]): Promise<void> {
         const { values, positionals } = parse({ user: { type: "string" }, stdin: { type: "boolean" } })
         if (!tail.length) throw new PaddockError("usage", "Give the command after --, as in `paddock exec NAME -- ls -la`.")
         const output = await call<RunResult>("exec", { name: need(positionals[0], "a name"), argv: tail, user: values.user, stdin: values.stdin ? await Bun.stdin.text() : undefined })
-        if (asJson) { console.log(JSON.stringify({ ok: true, data: output })); process.exit(output.exitCode) }
-        return printRun(output)
+        return printRun(output, asJson)
       }
       case "shell": {
         const { argv: attach } = await call<{ argv: string[] }>("attach", { name: need(rest[0], "a name"), argv: tail.length ? tail : undefined })
@@ -191,18 +194,20 @@ async function main(argv: string[]): Promise<void> {
           })
         }
         if (rest[0] !== "run") throw new PaddockError("usage", "Use `paddock ext list` or `paddock ext run EXTENSION ACTION [SANDBOX]`.")
-        const { values, positionals } = parseArgs({ args: rest.slice(1), options: { set: { type: "string", multiple: true } }, allowPositionals: true })
+        let parsed
+        try { parsed = parseArgs({ args: rest.slice(1), options: { set: { type: "string", multiple: true } }, allowPositionals: true }) } catch (error) { throw new PaddockError("usage", (error as Error).message) }
+        const { values, positionals } = parsed
         const fields = Object.fromEntries((values.set ?? []).map((pair) => { const at = pair.indexOf("="); return at < 0 ? [pair, "true"] : [pair.slice(0, at), pair.slice(at + 1)] }))
         const output = await call<RunResult>("action", { extension: need(positionals[0], "an extension"), action: need(positionals[1], "an action"), sandbox: positionals[2], values: fields })
-        if (asJson) { console.log(JSON.stringify({ ok: true, data: output })); process.exit(output.exitCode) }
-        return printRun(output)
+        return printRun(output, asJson)
       }
       case "ui": {
         await ensureDaemon()
         const daemon = await readDaemonFile(dirs)
         if (!daemon) throw new PaddockError("runtime", "The daemon is not running.")
         const url = `http://127.0.0.1:${daemon.port}/#token=${daemon.token}`
-        if (rest.includes("--open")) Bun.spawn([process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open", url])
+        // On Windows `start` is part of cmd, not a program; its first quoted argument is a window title.
+        if (rest.includes("--open")) Bun.spawn(process.platform === "darwin" ? ["open", url] : process.platform === "win32" ? ["cmd", "/c", "start", "", url] : ["xdg-open", url])
         return out({ url }, () => console.log(url))
       }
       case "daemon": {

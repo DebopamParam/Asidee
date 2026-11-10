@@ -77,6 +77,8 @@ export interface Provider {
   attachArgv(manifest: Manifest, argv: readonly string[]): string[]
   checks(manifest: Manifest, stage: Stage): Promise<CheckResult[]>
   diskUsedBytes(manifest: Manifest): Promise<number | undefined>
+  // Why the engine stopped a sandbox that nobody asked to stop (it ran out of memory, for example), if it knows.
+  stoppedWhy(manifest: Manifest): Promise<string | undefined>
   // Removes what an interrupted run of this provider may have left on an engine. Called when the daemon starts.
   sweep(engine: Engine): Promise<void>
 }

@@ -1,11 +1,15 @@
 import { randomBytes } from "node:crypto"
 import { blockers, complete, failures, titleOf } from "./checks"
 import { fieldValues, loadExtensions, runCommand } from "./extensions"
-import { deleteManifest, listManifests, readConfig, readManifest, validName, validSpec, writeManifest, type Dirs } from "./state"
+import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSpec, writeManifest, type Dirs } from "./state"
 import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type RunResult, type Runner, type Stage } from "./types"
 
+// A running sandbox is stopped when a blocking check could not be made this many timer passes in a row.
+export const UNCHECKED_PASSES = 4
+
 export type SandboxView = {
-  name: string; status: "running" | "stopped" | "missing"; engine: string; spec: Manifest["spec"]; createdAt: string
+  // damaged: its state file cannot be read; stopReason says what is wrong with it.
+  name: string; status: "running" | "stopped" | "missing" | "damaged"; engine: string; spec: Manifest["spec"]; createdAt: string
   capabilities?: Engine["capabilities"]; lastVerify?: Manifest["lastVerify"]; stopReason?: string
   // What a long operation on it is doing right now.
   activity?: string
@@ -16,6 +20,8 @@ export type SandboxView = {
 export class Core {
   private readonly locks = new Map<string, Promise<unknown>>()
   private readonly activity = new Map<string, string>()
+  // Passes in a row in which a blocking check of a running sandbox could not be made.
+  private readonly unchecked = new Map<string, number>()
   constructor(private readonly providers: readonly Provider[], readonly dirs: Dirs, private readonly run: Runner, private readonly cliDir: string) {}
 
   // One operation per sandbox at a time.
@@ -35,12 +41,22 @@ export class Core {
 
   private async view(manifest: Manifest): Promise<SandboxView> {
     let status: SandboxView["status"] = "missing"
-    try { status = await this.provider(manifest).status(manifest) } catch {}
+    let stopReason = manifest.stopReason
+    try {
+      status = await this.provider(manifest).status(manifest)
+      // Paddock did not stop it, so ask the engine why it is not running.
+      if (status === "stopped" && !stopReason) stopReason = await this.provider(manifest).stoppedWhy(manifest)
+    } catch (error) { if (error instanceof PaddockError && error.code === "conflict") stopReason = error.message }
     return { name: manifest.name, status, engine: manifest.engine.label, spec: manifest.spec, createdAt: manifest.createdAt, capabilities: manifest.engine.capabilities,
-      lastVerify: manifest.lastVerify, stopReason: manifest.stopReason, activity: this.activity.get(manifest.name) }
+      lastVerify: manifest.lastVerify, stopReason, activity: this.activity.get(manifest.name) }
   }
 
-  async list(): Promise<SandboxView[]> { return Promise.all((await listManifests(this.dirs)).map((manifest) => this.view(manifest))) }
+  async list(): Promise<SandboxView[]> {
+    const { manifests, damaged } = await scanManifests(this.dirs)
+    return [...await Promise.all(manifests.map((manifest) => this.view(manifest))),
+      ...damaged.map((entry): SandboxView => ({ name: entry.name, status: "damaged", engine: "", spec: { name: entry.name, image: "", cpus: 0, memoryGb: 0, pids: 0, diskGb: 0 }, createdAt: "",
+        stopReason: `Its state file ${entry.file} cannot be read (${entry.problem}). Paddock does nothing with it; fix the file or delete it.` }))]
+  }
   async get(name: string): Promise<SandboxView> { return this.view(await readManifest(this.dirs, name)) }
 
   private async stage(manifest: Manifest, stages: readonly Stage[], running: boolean): Promise<CheckResult[]> {
@@ -96,7 +112,7 @@ export class Core {
   async create(input: Record<string, unknown>): Promise<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }> }> {
     const config = await readConfig(this.dirs)
     const spec = validSpec(input, config.defaults)
-    return this.exclusive(spec.name, async () => {
+    const { manifest, checks } = await this.exclusive(spec.name, async () => {
       if ((await listManifests(this.dirs)).some((entry) => entry.name === spec.name)) throw new PaddockError("conflict", `A sandbox named ${spec.name} already exists.`)
       const engines = await this.engines()
       const wanted = typeof input.engine === "string" && input.engine ? input.engine : config.engine
@@ -111,15 +127,17 @@ export class Core {
       await this.startChecked(manifest)
       const { checks, failed } = await this.verifyNow(manifest)
       if (failed.length) this.refuse(spec.name, failed, "was created but stopped, and is kept for diagnosis")
-      const hooks = []
-      for (const extension of (await loadExtensions(this.dirs)).extensions) {
-        if (!extension.hooks.postCreate) continue
-        this.activity.set(spec.name, `Running ${extension.name}'s setup`)
-        const output = await runCommand(this.run, extension, extension.hooks.postCreate, { PADDOCK_SANDBOX: spec.name }, this.cliDir)
-        hooks.push({ extension: extension.id, exitCode: output.exitCode, output: `${output.stdout}${output.stderr}`.trim() })
-      }
-      return { sandbox: await this.view(manifest), checks, hooks }
+      return { manifest, checks }
     })
+    // Hooks run once the sandbox is free again, so a hook may use any command on it (verify, stop, start).
+    const hooks = []
+    for (const extension of (await loadExtensions(this.dirs)).extensions) {
+      if (!extension.hooks.postCreate) continue
+      this.activity.set(spec.name, `Running ${extension.name}'s setup`)
+      const output = await runCommand(this.run, extension, extension.hooks.postCreate, { PADDOCK_SANDBOX: spec.name }, this.cliDir).finally(() => this.activity.delete(spec.name))
+      hooks.push({ extension: extension.id, exitCode: output.exitCode, output: `${output.stdout}${output.stderr}`.trim() })
+    }
+    return { sandbox: await this.get(spec.name).catch(() => this.view(manifest)), checks, hooks }
   }
 
   start(name: string): Promise<SandboxView> {
@@ -185,8 +203,16 @@ export class Core {
     for (const listed of await listManifests(this.dirs).catch(() => [])) {
       await this.exclusive(listed.name, async () => {
         const manifest = await readManifest(this.dirs, listed.name); const provider = this.provider(manifest)
-        if ((await provider.status(manifest)) !== "running") return
-        const failed = failures(await this.stage(manifest, ["config", "runtime"], true))
+        if ((await provider.status(manifest)) !== "running") { this.unchecked.delete(manifest.name); return }
+        const results = await this.stage(manifest, ["config", "runtime"], true)
+        const failed = failures(results)
+        // One pass that could not check is an engine hiccup. Several in a row is a sandbox nobody is checking.
+        const blind = failed.length ? [] : blockers(results)
+        this.unchecked.set(manifest.name, blind.length ? (this.unchecked.get(manifest.name) ?? 0) + 1 : 0)
+        if (blind.length && this.unchecked.get(manifest.name)! >= UNCHECKED_PASSES) {
+          this.unchecked.delete(manifest.name)
+          return this.stopBecause(manifest, `Stopped by the daemon at ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC: for ${UNCHECKED_PASSES} passes in a row it could not check ${blind.map((entry) => `${titleOf(entry.id)} (${entry.detail})`).join("; ")}`)
+        }
         if (failed.length) return this.stopBecause(manifest, `Stopped by the daemon at ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC: ${failed.map((entry) => `${titleOf(entry.id)} (${entry.detail})`).join("; ")}`)
         if (manifest.engine.capabilities?.diskLimit !== "watched") return
         const used = await provider.diskUsedBytes(manifest)

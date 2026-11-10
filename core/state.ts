@@ -11,6 +11,10 @@ export function defaultDirs(env: Record<string, string | undefined> = process.en
   }
 }
 export const socketPath = (dirs: Dirs) => join(dirs.state, "daemon.sock")
+// The operating system limits a socket's path (104 bytes on macOS, 108 on Linux). Past it the daemon cannot listen.
+export function checkSocketPath(dirs: Dirs): void {
+  if (Buffer.byteLength(socketPath(dirs)) > 100) throw new PaddockError("usage", `The state folder's path is too long for the daemon's socket (${socketPath(dirs)}). Set PADDOCK_STATE_DIR to a shorter path.`)
+}
 export const daemonFile = (dirs: Dirs) => join(dirs.state, "daemon.json")
 
 export const DEFAULT_SPEC = { image: "docker/sandbox-templates:shell-docker", cpus: 2, memoryGb: 4, pids: 4096, diskGb: 20 }
@@ -23,7 +27,7 @@ export function validName(name: unknown): string {
 
 function number(value: unknown, label: string, min: number, max: number, fallback: number): number {
   if (value === undefined || value === null || value === "") return fallback
-  const parsed = Number(value)
+  const parsed = typeof value === "number" || typeof value === "string" ? Number(value) : NaN
   if (!Number.isFinite(parsed) || parsed < min || parsed > max) throw new PaddockError("usage", `${label} must be a number from ${min} to ${max}.`)
   return parsed
 }
@@ -61,12 +65,38 @@ export async function writeManifest(dirs: Dirs, manifest: Manifest): Promise<voi
 
 export const deleteManifest = (dirs: Dirs, name: string) => rm(manifestFile(dirs, name), { force: true })
 
-export async function listManifests(dirs: Dirs): Promise<Manifest[]> {
+// A state file that cannot be read (damaged, or not a sandbox's) is reported beside the sandboxes, never in their way.
+export type Damaged = { name: string; file: string; problem: string }
+export async function scanManifests(dirs: Dirs): Promise<{ manifests: Manifest[]; damaged: Damaged[] }> {
   const files = await readdir(manifestDir(dirs)).catch(() => [] as string[])
-  const names = files.filter((file) => file.endsWith(".json")).map((file) => file.slice(0, -5)).sort()
-  return Promise.all(names.map((name) => readManifest(dirs, name)))
+  const manifests: Manifest[] = []; const damaged: Damaged[] = []
+  for (const name of files.filter((file) => file.endsWith(".json")).map((file) => file.slice(0, -5)).sort()) {
+    try {
+      const manifest = await readManifest(dirs, name)
+      if (manifest?.name !== name || typeof manifest.id !== "string" || typeof manifest.engine?.provider !== "string" || typeof manifest.spec !== "object") throw new Error("it is not a sandbox's state")
+      manifests.push(manifest)
+    } catch (error) { damaged.push({ name, file: join(manifestDir(dirs), `${name}.json`), problem: (error as Error).message }) }
+  }
+  return { manifests, damaged }
 }
+export const listManifests = async (dirs: Dirs) => (await scanManifests(dirs)).manifests
 
-export async function readConfig(dirs: Dirs): Promise<{ defaults?: Partial<typeof DEFAULT_SPEC>; engine?: string }> {
-  try { return JSON.parse(await readFile(join(dirs.config, "config.json"), "utf8")) } catch { return {} }
+export type Config = { defaults: Partial<typeof DEFAULT_SPEC>; engine?: string }
+// A config file with a mistake stops the request and says where, instead of being quietly ignored.
+export async function readConfig(dirs: Dirs): Promise<Config> {
+  const file = join(dirs.config, "config.json")
+  const wrong = (problem: string): never => { throw new PaddockError("usage", `${file} has a mistake: ${problem}. Fix it or delete it.`) }
+  let text: string
+  try { text = await readFile(file, "utf8") } catch { return { defaults: {} } }
+  let data: unknown
+  try { data = JSON.parse(text) } catch (error) { wrong(`it is not valid JSON (${(error as Error).message})`) }
+  const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
+  if (!isObject(data)) return wrong("it must be a JSON object")
+  if (data.defaults !== undefined && !isObject(data.defaults)) wrong("defaults must be an object")
+  if (data.engine !== undefined && typeof data.engine !== "string") wrong("engine must be an engine id, as `paddock doctor` prints it")
+  const defaults = (data.defaults ?? {}) as Record<string, unknown>
+  // The defaults pass the same validation as a request, so config cannot set what a request cannot.
+  try { validSpec({ ...defaults, name: "x" }) } catch (error) { wrong(`in defaults, ${(error as Error).message.replace(/^./, (first) => first.toLowerCase()).replace(/\.$/, "")}`) }
+  const known = Object.fromEntries(Object.entries(defaults).filter(([key]) => key in DEFAULT_SPEC))
+  return { defaults: known as Partial<typeof DEFAULT_SPEC>, engine: data.engine as string | undefined }
 }

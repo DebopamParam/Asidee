@@ -30,7 +30,7 @@ out as "could not be checked", never as a pass.
 | Disk limit | no | before start | The engine's capability: hard, watched or none. Watched needs a runtime with `--overlay2=none`. |
 | Cannot reach the host | yes | verify | Live probe with controls. |
 | Cannot reach other sandboxes | yes | verify | Live probe with controls. |
-| Cannot reach LAN, tailnet, metadata, IPv6 | yes | verify | The loaded rules, plus one live attempt at the metadata address. |
+| Cannot reach LAN, tailnet, metadata, IPv6 | yes | verify | Live probe with controls of a stand-in address in each private range and the tailnet range; one attempt at the metadata address; IPv6 by the loaded rules. |
 | Internet access | no | verify | Live attempt; a disclosure. |
 | Logins inside | no | verify | Looks for the usual credential files; a disclosure. |
 
@@ -43,8 +43,8 @@ switches a limit off (`unsafeRuntimeArgs` in `core/providers/gvisor.ts`), and `p
 ### Staying true after the start
 
 Every 30 seconds the daemon repeats the first seven checks and the disk measurement on each running sandbox, and stops
-one that fails, recording the reason. A check that could not be made in that pass does not stop a running sandbox; only
-a failure does. The probes are not repeated on the timer: they start containers, and `paddock verify` runs them.
+one that fails, recording the reason. A check that could not be made in one pass does not stop a running sandbox: that
+is usually an engine that was busy. Four such passes in a row do, because by then nobody is checking it. The probes are not repeated on the timer: they start containers, and `paddock verify` runs them.
 
 ### How the guard is compared
 
@@ -57,6 +57,12 @@ in front of the drops shows as changed, and the sandbox is stopped.
 A helper container joins the sandbox's own network with the sandbox's runtime and tries to connect to a listener on the
 engine's host and to a listener on another guarded network. A blocked attempt counts only if its controls answered:
 the host reached the helper, and the host reached each listener. Without that, the result is "could not be checked".
+
+For the LAN and the tailnet there is nothing of yours to aim at safely, so the helper on the engine's host makes a
+scratch network namespace, routes one unused address from each private range (10/8, 172.16/12, 192.168/16) and from the
+tailnet range (100.64/10) to a listener inside it, and removes it all afterwards. From the sandbox's side these sit
+where a device on your LAN would: beyond the host, at a private address. A range whose stand-in address the host
+already routes somewhere is skipped and named in the result. One probe runs per engine at a time.
 
 The helper runs from an image built from `core/providers/helper.Dockerfile` (Alpine pinned by digest), never from the
 sandbox's image, so a tampered image cannot fake a result or run as root on the engine's host.
@@ -75,16 +81,19 @@ sandbox's image, so a tampered image cannot fake a result or run as root on the 
   counted.
 - **Between two passes, up to 30 seconds, a weakened sandbox keeps running.** So does one whose guard was changed by
   something with root on the engine's host.
-- **The LAN block is inspected, not probed.** There is no listener on your LAN to test against.
-- **The limits were measured once, on OrbStack, not on every engine.** There, passing the memory limit killed the
-  sandbox, and a process limit of 200 made forks inside fail. The checklist reads the configured limits; it does not
-  repeat the measurement.
+- **The LAN and tailnet blocks are probed against stand-ins, not your devices.** IPv6 and the metadata address have no
+  control: IPv6 is judged by the loaded rules, and metadata by one attempt that did not connect.
+- **The limits are read, not re-measured, by the checklist.** The evals measure them. On OrbStack, passing the memory
+  limit kills the sandbox, and so does running out of the task limit: gVisor's own threads count against it, so a
+  limit of 256 held about a hundred processes. `paddock list` says which of the two happened.
+- **Two Paddocks on one engine share the guard.** Each sweeps only its own probe helpers, but a guard changed for one
+  is changed for both.
 - **Only OrbStack on an Apple Silicon Mac was run.** Docker Desktop, Linux hosts and Windows are untested.
 
 ## The daemon
 
 One daemon per user owns all state and serializes operations per sandbox, so two clients cannot race. A CLI that finds
-a daemon of another version replaces it without stopping the sandboxes. At its start a daemon removes probe containers
+a daemon of another version, or of an older build of the same one, replaces it without stopping the sandboxes. At its start a daemon removes probe containers
 and networks an interrupted verify left behind. A daemon that is stopping refuses new work and a client waits for it to
 finish, so a second daemon never runs beside it. It listens on:
 

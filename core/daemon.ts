@@ -1,4 +1,6 @@
-import { randomBytes, timingSafeEqual } from "node:crypto"
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
+import { statSync } from "node:fs"
+import { hostname } from "node:os"
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { join, normalize } from "node:path"
 import { CHECKLIST } from "./checks"
@@ -6,14 +8,18 @@ import { Core } from "./core"
 import { DockerSandboxesProvider } from "./providers/docker-sandboxes"
 import { GvisorProvider } from "./providers/gvisor"
 import { systemRunner } from "./run"
-import { daemonFile, socketPath, type Dirs } from "./state"
+import { checkSocketPath, daemonFile, socketPath, type Dirs } from "./state"
 import { PaddockError, type ErrorCode } from "./types"
 import builtInUi from "../ui/index.html" with { type: "text" }
+import pkg from "../package.json"
 
 // Bun's types describe an .html import as a page bundle; with type "text" it is the file's text.
 const BUILT_IN_UI = builtInUi as unknown as string
 
-export const VERSION = "0.2.0"
+export const VERSION: string = pkg.version
+// The version plus when this program file was written. A daemon left running by an older build of the same version
+// (a rebuild during development) has another one, and the CLI replaces it.
+export const BUILD: string = (() => { try { return `${VERSION}+${Math.round(statSync(Bun.main.startsWith("/$bunfs/") ? process.execPath : Bun.main).mtimeMs)}` } catch { return VERSION } })()
 const DEFAULT_PORT = 7717
 const ENFORCE_MS = 30_000
 
@@ -24,7 +30,7 @@ type Method = { run: (body: Body) => Promise<unknown>; socketOnly?: boolean }
 // keepSandboxes: the daemon is being replaced (an upgrade), not stopped, so the sandboxes it watches keep running.
 export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, stopping: () => boolean = () => false): Record<string, Method> {
   return {
-    version: { run: async () => ({ version: VERSION, stopping: stopping() }) },
+    version: { run: async () => ({ version: VERSION, build: BUILD, stopping: stopping() }) },
     checklist: { run: async () => CHECKLIST },
     engines: { run: () => core.engines() },
     list: { run: () => core.list() },
@@ -81,13 +87,14 @@ export function createHandler(table: Record<string, Method>, token: string, conf
 }
 
 export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
+  checkSocketPath(dirs)
   await mkdir(dirs.state, { recursive: true, mode: 0o700 })
   const socket = socketPath(dirs)
   const alive = await fetch("http://paddock/api/version", { unix: socket, method: "POST", body: "{}" } as RequestInit).then(() => true, () => false)
   if (alive) throw new PaddockError("conflict", "A Paddock daemon is already running.")
   await rm(socket, { force: true })
 
-  const core = new Core([new GvisorProvider(systemRunner), new DockerSandboxesProvider(systemRunner)], dirs, systemRunner, cliDir)
+  const core = new Core([new GvisorProvider(systemRunner, createHash("sha256").update(`${hostname()}\0${dirs.state}`).digest("hex").slice(0, 10)), new DockerSandboxesProvider(systemRunner)], dirs, systemRunner, cliDir)
   const token = randomBytes(24).toString("hex")
   let stop: (keepSandboxes: boolean) => void = () => {}
   // A daemon that is stopping still answers `version`, so a client waits for it instead of starting a second one, and

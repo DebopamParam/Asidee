@@ -2,7 +2,7 @@
 
 Sandboxes for coding agents, on the engine you already have, that are checked instead of assumed.
 
-"Paddock" is a working name. This is an early alpha (0.2.0): the structure is in place and one engine works end to end.
+"Paddock" is a working name. This is an early alpha (0.3.0): the structure is in place and one engine works end to end.
 
 ## What it does
 
@@ -28,11 +28,14 @@ from the engine's configuration):
 Works, and was run on OrbStack on an Apple Silicon Mac:
 
 - The gVisor provider: any local Docker engine with a gVisor runtime. Create, start, stop, remove, exec, shell.
-- The checklist, with live network probes that have controls, and a stop when a blocking check fails.
+- The checklist, with live network probes that have controls, and a stop when a blocking check fails. The probes
+  cover the host, other sandboxes, and stand-in addresses in each private (LAN) range and the tailnet range.
 - The firewall guard is compared rule for rule with the one Paddock ships, so an added or removed rule shows as changed.
 - A disk limit that the daemon watches (it stops a sandbox that passed its limit; it is not a hard cap). It needs a
   gVisor runtime registered with `--overlay2=none`; without it the checklist says there is no disk limit.
-- A stopped sandbox says why it was stopped, in `paddock list` and the dashboard.
+- A stopped sandbox says why, in `paddock list` and the dashboard: a failed check, the disk watch, the daemon
+  stopping, or the engine killing it at its memory or task limit.
+- A mistake in `config.json` or a damaged state file is reported by name instead of being ignored.
 - The daemon, the CLI with `--json`, a web dashboard, and extensions.
 
 Not built yet:
@@ -63,9 +66,19 @@ enforce the limit afterwards. Their contents stay; `paddock start` brings them b
 `bun run build` makes a standalone `dist/paddock`. `bun test` runs the unit tests; `bun run test:live` creates a real
 sandbox and expects every blocking check to hold.
 
+## How it is measured
+
+`bun evals/run.ts` runs the eval set: about sixty claims this README and the checklist make, each tried from outside
+Paddock with plain engine commands (a connection from inside a sandbox, a fork bomb, a rule slipped into the firewall,
+a container swapped for a privileged one, the dashboard in a real browser). A blocked attempt counts only beside a
+control that shows the same attempt connects when nothing blocks it. [evals/SCORECARD.md](evals/SCORECARD.md) is the
+last run, including the claims nobody has measured yet. [evals/README.md](evals/README.md) says how to run it on
+your own engine, which is the way to find out what holds there.
+
 ## How it is put together
 
 ```
+evals/        the claims, measured from outside
 core/         the rigid part: the spec, the checklist, the providers, the daemon and its API
 cli/          a client of the API
 ui/           a client of the API (one HTML file)

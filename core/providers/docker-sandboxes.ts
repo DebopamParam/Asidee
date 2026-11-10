@@ -26,5 +26,6 @@ export class DockerSandboxesProvider implements Provider {
   attachArgv() { return this.unsupported() }
   checks() { return this.unsupported() }
   diskUsedBytes() { return this.unsupported() }
+  stoppedWhy() { return this.unsupported() }
   async sweep() {}
 }

@@ -3,5 +3,5 @@
     "target": "ESNext", "module": "Preserve", "moduleResolution": "bundler", "lib": ["ESNext"],
     "strict": true, "noUncheckedIndexedAccess": true, "skipLibCheck": true, "noEmit": true, "types": ["bun"]
   },
-  "include": ["core", "cli", "test"]
+  "include": ["core", "cli", "test", "evals"]
 }

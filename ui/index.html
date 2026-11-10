@@ -114,6 +114,7 @@ function render() {
   const list = document.getElementById("sandboxes"); list.replaceChildren()
   if (!sandboxes.length) list.append(el("div", { class: "panel muted" }, "No sandboxes yet. Create one below."))
   for (const sandbox of sandboxes) {
+    if (sandbox.status === "damaged") { list.append(el("div", { class: "panel" }, el("span", { class: "name" }, sandbox.name), " ", el("span", { class: "badge" }, "damaged"), el("div", { class: "error" }, sandbox.stopReason))); continue }
     const is = (key) => busy.has(`${sandbox.name}:${key}`)
     const button = (label, key, task, extra = {}) => el("button", { ...extra, ...(is(key) ? { disabled: "" } : {}), onclick: () => act(sandbox.name, key, task) }, is(key) ? "Working…" : label)
     const failed = sandbox.lastVerify?.results.filter((check) => check.status === "fail").length

@@ -46,10 +46,28 @@ const seesWrites = (args: readonly string[] = []) => args.includes("--overlay2=n
 const SANDBOX_DNS = "nameserver 1.1.1.1\nnameserver 8.8.8.8\n"
 const PROBE_REPLY = "paddock-probe"
 const PROBE_PORT = "7777"
+// One unused address in each private range and in the tailnet range. For a probe, the helper gives each to a listener in
+// a scratch network namespace that the engine's host routes to, where a device on the LAN or the tailnet would sit.
+const FAR_RANGES = [["10.255.255.25", "10.0.0.0/8"], ["172.31.255.25", "172.16.0.0/12"], ["192.168.255.25", "192.168.0.0/16"], ["100.127.255.25", "100.64.0.0/10, the tailnet range"]] as const
+// Runs on the engine's host: a listener on the sandbox's gateway address, then the far listeners. A range whose address
+// the host already routes somewhere specific is left alone and reported as not probed. Everything here lives in the
+// helper's container and goes with it.
+const hostProbeScript = (tag: string, gateway: string, port: string) => `nc -lk -p ${port} -s ${gateway} -e echo ${PROBE_REPLY} &
+( set -e
+  ip netns add far; ip link add pv${tag}a type veth peer name pv${tag}b; ip link set pv${tag}b netns far; ip link set pv${tag}a up
+  ip netns exec far ip link set lo up; ip netns exec far ip link set pv${tag}b up
+  for a in ${FAR_RANGES.map(([address]) => address).join(" ")}; do
+    [ -n "$(ip route show match \${a}4 | grep -v '^default')" ] && continue
+    ip addr add \${a}3/30 dev pv${tag}a; ip netns exec far ip addr add \${a}4/30 dev pv${tag}b
+    ip netns exec far ip route add default via \${a}3 2>/dev/null || true
+    echo "far \${a}4"
+  done
+  ip netns exec far nc -lk -p ${PROBE_PORT} -e echo ${PROBE_REPLY} & ) || true
+echo ready; wait`
 const CREDENTIAL_FILES = [".claude/.credentials.json", ".codex/auth.json", ".config/gh/hosts.yml", ".git-credentials", ".ssh/id_ed25519", ".ssh/id_rsa", ".aws/credentials", ".netrc"]
 
 type Inspect = {
-  State: { Running: boolean }
+  State: { Running: boolean; OOMKilled?: boolean; ExitCode?: number; FinishedAt?: string }
   Config: { Labels: Record<string, string> | null }
   HostConfig: {
     Runtime: string; Privileged: boolean; CapAdd: string[] | null; Devices: unknown[] | null; PidMode: string; IpcMode: string
@@ -107,7 +125,7 @@ export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardS
     !((host.PidsLimit ?? 0) > 0) && "processes", !(host.NanoCpus > 0) && "CPU",
   ].filter(Boolean)
   out.push(unlimited.length ? result("limits", "fail", "inspected", `No limit on ${unlimited.join(", ")}.`)
-    : result("limits", "pass", "inspected", `${host.Memory / 1024 ** 3} GB memory (past it, the sandbox is killed), ${host.PidsLimit} tasks (past it, new processes fail), ${host.NanoCpus / 1e9} CPUs.`))
+    : result("limits", "pass", "inspected", `${host.Memory / 1024 ** 3} GB memory, ${host.PidsLimit} tasks (gVisor's own threads count, so fewer processes than that fit), ${host.NanoCpus / 1e9} CPUs. A sandbox that passes its memory or task limit is killed.`))
 
   const disk = manifest.engine.capabilities?.diskLimit
   out.push(disk === "hard" ? result("disk", "pass", "inspected", `${manifest.spec.diskGb} GB; writes fail at the limit.`)
@@ -121,7 +139,10 @@ export class GvisorProvider implements Provider {
   // Readings in flight, so checks of several sandboxes asked for at once share one. A finished reading is never reused:
   // a check must not be answered from before it was asked.
   private readonly guardReads = new Map<string, Promise<GuardState>>()
-  constructor(private readonly run: Runner) {}
+  // One probe per engine at a time: they share the stand-in addresses on the engine's host.
+  private readonly probing = new Map<string, Promise<unknown>>()
+  // owner: marks this daemon's probe helpers, so a second Paddock on the same engine does not sweep them away.
+  constructor(private readonly run: Runner, private readonly owner = "1") {}
 
   private docker(engine: Engine, args: readonly string[], options?: RunOptions): Promise<RunResult> {
     return this.run(["docker", "--context", engine.data.context!, ...args], options)
@@ -182,10 +203,11 @@ export class GvisorProvider implements Provider {
     const reading = this.guardReads.get(engine.id)
     if (reading) return reading
     const read = (async (): Promise<GuardState> => {
+      await this.ensureHelper(engine)
       const output = await this.docker(engine, ["run", "--rm", "-i", "--runtime", "runc", "--privileged", "--network", "host", "-u", "0", "--entrypoint", "sh", HELPER_IMAGE, "-c", GUARD_COMPARE], { stdin: GUARD_RULES, timeoutMs: 60_000 })
       const word = output.stdout.trim()
       return output.exitCode === 0 && (word === "intact" || word === "changed" || word === "missing") ? word : "unknown"
-    })().finally(() => this.guardReads.delete(engine.id))
+    })().catch((): GuardState => "unknown").finally(() => this.guardReads.delete(engine.id))
     this.guardReads.set(engine.id, read)
     return read
   }
@@ -228,6 +250,17 @@ export class GvisorProvider implements Provider {
   async status(manifest: Manifest) {
     const inspect = await this.inspect(manifest)
     return inspect === undefined ? "missing" as const : inspect.State.Running ? "running" as const : "stopped" as const
+  }
+
+  // Why the engine says a sandbox that Paddock did not stop is not running.
+  async stoppedWhy(manifest: Manifest): Promise<string | undefined> {
+    const state = (await this.inspect(manifest))?.State
+    if (!state || state.Running || !state.FinishedAt || state.FinishedAt.startsWith("0001")) return undefined
+    const at = `${state.FinishedAt.slice(0, 16).replace("T", " ")} UTC`
+    if (state.OOMKilled) return `Killed by the engine at ${at}: it passed its memory limit of ${manifest.spec.memoryGb} GB.`
+    // docker stop ends it with 137 or 143; anything else is the sandbox's own doing.
+    if (state.ExitCode === 137 || state.ExitCode === 143 || state.ExitCode === 0) return undefined
+    return `Ended on its own at ${at} (exit code ${state.ExitCode}). A gVisor sandbox that runs out of its task limit of ${manifest.spec.pids} ends this way.`
   }
 
   async start(manifest: Manifest): Promise<void> {
@@ -274,9 +307,9 @@ export class GvisorProvider implements Provider {
 
   // Probe helpers left behind by a daemon that died mid-probe.
   async sweep(engine: Engine): Promise<void> {
-    const stale = (await this.docker(engine, ["ps", "-aq", "--filter", "label=dev.paddock.probe"])).stdout.split("\n").filter(Boolean)
+    const stale = (await this.docker(engine, ["ps", "-aq", "--filter", `label=dev.paddock.probe=${this.owner}`])).stdout.split("\n").filter(Boolean)
     if (stale.length) await this.docker(engine, ["rm", "-f", ...stale])
-    const networks = (await this.docker(engine, ["network", "ls", "--format", "{{.Name}}", "--filter", "name=paddock-net-probe-"])).stdout.split("\n").filter(Boolean)
+    const networks = (await this.docker(engine, ["network", "ls", "--format", "{{.Name}}", "--filter", `label=dev.paddock.probe=${this.owner}`])).stdout.split("\n").filter(Boolean)
     if (networks.length) await this.docker(engine, ["network", "rm", ...networks])
   }
 
@@ -289,7 +322,9 @@ export class GvisorProvider implements Provider {
       return configChecks(inspect, manifest, await this.guardState(engine), bridgeName.exitCode === 0 ? bridgeName.stdout.trim() : undefined)
     }
     if (stage === "runtime") return [await this.kernelCheck(manifest, inspect)]
-    return this.probe(manifest, inspect)
+    const next = (this.probing.get(manifest.engine.id) ?? Promise.resolve()).then(() => this.probe(manifest, inspect))
+    this.probing.set(manifest.engine.id, next.catch(() => {}))
+    return next
   }
 
   // The runtime the engine reports, confirmed from inside: gVisor's kernel log and version string name it.
@@ -318,8 +353,8 @@ export class GvisorProvider implements Provider {
     const hostC = `paddock-probe-${tag}-host`; const peerC = `paddock-probe-${tag}-peer`; const probeC = `paddock-probe-${tag}-probe`
     const peerNet = `paddock-net-probe-${tag}`
     const listen = (port: string, address?: string) => ["nc", "-lk", "-p", port, ...(address ? ["-s", address] : []), "-e", "echo", PROBE_REPLY]
-    const runHelper = (cname: string, runtime: string, net: string, command: string[]) =>
-      this.docker(engine, ["run", "-d", "--rm", "--name", cname, "--label", "dev.paddock.probe=1", "--runtime", runtime, "--network", net, "--memory", "64m", "--pids-limit", "64", HELPER_IMAGE, ...command], { timeoutMs: 60_000 })
+    const runHelper = (cname: string, runtime: string, net: string, command: string[], privileged = false) =>
+      this.docker(engine, ["run", "-d", "--rm", "--name", cname, "--label", `dev.paddock.probe=${this.owner}`, "--runtime", runtime, "--network", net, "--memory", "64m", "--pids-limit", "64", ...(privileged ? ["--privileged", "-u", "0"] : []), HELPER_IMAGE, ...command], { timeoutMs: 60_000 })
     const address = async (cname: string) => (await this.docker(engine, ["inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", cname])).stdout.trim()
     // True when the listener's reply comes back.
     const reaches = async (from: string, ip: string, port: string) =>
@@ -336,11 +371,14 @@ export class GvisorProvider implements Provider {
       await this.ensureHelper(engine)
       const gateway = (await this.docker(engine, ["network", "inspect", "--format", "{{(index .IPAM.Config 0).Gateway}}", network(name)])).stdout.trim()
       const hostPort = String(20_000 + Math.floor(Math.random() * 40_000))
-      must(await this.docker(engine, ["network", "create", "--label", "dev.paddock.probe=1", "-o", `com.docker.network.bridge.name=${BRIDGE_PREFIX}x${tag}`, peerNet]), "Creating the probe network")
-      must(await runHelper(hostC, "runc", "host", listen(hostPort, gateway)), "Starting the host listener")
+      must(await this.docker(engine, ["network", "create", "--label", `dev.paddock.probe=${this.owner}`, "-o", `com.docker.network.bridge.name=${BRIDGE_PREFIX}x${tag}`, peerNet]), "Creating the probe network")
+      must(await runHelper(hostC, "runc", "host", ["sh", "-c", hostProbeScript(tag, gateway, hostPort)], true), "Starting the host listener")
       must(await runHelper(peerC, "runc", peerNet, listen(PROBE_PORT)), "Starting the peer listener")
       must(await runHelper(probeC, engine.data.runtime!, network(name), listen(PROBE_PORT)), "Starting the probe")
       const [peerIp, probeIp] = [await address(peerC), await address(probeC)]
+      const hostLog = async () => (await this.docker(engine, ["logs", hostC])).stdout
+      await retry(async () => (await hostLog()).includes("ready"))
+      const far = (await hostLog()).split("\n").filter((line) => line.startsWith("far ")).map((line) => line.slice(4).trim())
 
       const probeAlive = await retry(() => reaches(hostC, probeIp, PROBE_PORT))
       const hostListening = probeAlive && await retry(() => reaches(hostC, gateway, hostPort))
@@ -356,12 +394,22 @@ export class GvisorProvider implements Provider {
 
       const guard = await this.guardState(engine)
       const metadata = probeAlive && await connects(probeC, "169.254.169.254", "80")
-      // The stand-in sandbox sits at a private address, so its probe also exercised the private-range rule.
-      const viaPeer = peerListening && /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(peerIp) ? ` The private-range rule was exercised live by the attempt on ${peerIp}.` : ""
+      // Each far listener counts only if the host reached it first.
+      const tried: string[] = []; const reached: string[] = []
+      for (const ip of probeAlive ? far : []) {
+        if (!await retry(() => reaches(hostC, ip, PROBE_PORT))) continue
+        tried.push(ip)
+        if (await reaches(probeC, ip, PROBE_PORT)) reached.push(ip)
+      }
+      const rangeOf = (ip: string) => FAR_RANGES.find(([address]) => ip.startsWith(address))![1]
+      const untried = FAR_RANGES.filter(([address]) => !tried.some((ip) => ip.startsWith(address))).map(([, range]) => range)
+      const rest = `${untried.length ? ` Not probed, because the engine's host already uses the stand-in address: ${untried.join("; ")}.` : ""} The metadata address did not answer. IPv6 is dropped by the same rules and was not probed. No device on your own LAN or tailnet was contacted.`
       out.push(guard === "missing" || guard === "changed" ? result("net-private", "fail", "inspected", `The guard rules on the engine's host are ${guard}, so nothing is known to drop these destinations.`)
-        : guard === "unknown" ? result("net-private", "unknown", "none", "The guard rules on the engine's host could not be read.")
+        : reached.length ? result("net-private", "fail", "probed", `A connection from the sandbox's network reached ${reached.map((ip) => `${ip} (in ${rangeOf(ip)})`).join(", ")}.`)
         : metadata ? result("net-private", "fail", "probed", "The cloud metadata address answered from the sandbox's network.")
-        : result("net-private", "pass", "inspected", `The loaded rules match Paddock's, which drop private, tailnet, link-local and IPv6 destinations.${viaPeer} The metadata address did not answer. Your LAN and tailnet have no listener to test against.`))
+        : guard === "unknown" ? result("net-private", "unknown", "none", "The guard rules on the engine's host could not be read.")
+        : tried.length ? result("net-private", "pass", "probed", `Stand-in listeners at ${tried.map((ip) => `${ip} (in ${rangeOf(ip)})`).join(", ")} answered the host and were unreachable from the sandbox's network.${rest}`)
+        : result("net-private", "pass", "inspected", `The loaded rules match Paddock's, which drop private, tailnet, link-local and IPv6 destinations. No stand-in listener could be set up on the engine's host, so none of them was probed.`))
 
       out.push(!probeAlive ? result("egress", "unknown", "none", noControl("the probe"))
         : await connects(probeC, "1.1.1.1", "443") ? result("egress", "info", "probed", "Open: the sandbox can reach the internet, so anything inside it can be sent out.")
