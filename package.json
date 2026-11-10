@@ -1,0 +1,17 @@
+{
+  "name": "paddock",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "paddock": "cli/cli.ts" },
+  "scripts": {
+    "test": "bun test test/unit",
+    "test:live": "PADDOCK_LIVE=1 bun test test/live",
+    "typecheck": "tsc --noEmit",
+    "build": "bun build --compile --minify --outfile dist/paddock cli/cli.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.0",
+    "typescript": "5.9.2"
+  }
+}

@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paddock</title>
+<style>
+  :root { --bg: #f6f5f1; --panel: #fff; --ink: #1c1b18; --muted: #6b6860; --line: #dedbd2; --accent: #2f5d50; --bad: #a3322a; --warn: #8a5a00; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161614; --panel: #201f1c; --ink: #ecebe6; --muted: #9a978d; --line: #35332e; --accent: #7fc4ad; --bad: #ef8a80; --warn: #e0b060; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 20px; margin: 0 0 4px; } h2 { font-size: 15px; margin: 28px 0 8px; }
+  p.sub { color: var(--muted); margin: 0 0 16px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 10px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .grow { flex: 1; min-width: 160px; }
+  .name { font-weight: 600; } .muted { color: var(--muted); font-size: 13px; }
+  .badge { font-size: 12px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--line); }
+  .badge.running { color: var(--accent); border-color: var(--accent); }
+  button { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+  button:hover { border-color: var(--accent); } button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+  button.danger { color: var(--bad); }
+  input, select { font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); width: 100%; }
+  input[type=checkbox] { width: auto; }
+  label { display: block; font-size: 13px; color: var(--muted); }
+  .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 10px; }
+  ul.checks { list-style: none; margin: 12px 0 0; padding: 12px 0 0; border-top: 1px solid var(--line); }
+  ul.checks li { display: grid; grid-template-columns: 22px 1fr; margin-bottom: 8px; }
+  .mark { font-weight: 700; } .pass .mark { color: var(--accent); } .fail .mark { color: var(--bad); } .weak .mark, .unknown .mark { color: var(--warn); }
+  .detail { grid-column: 2; color: var(--muted); font-size: 13px; }
+  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; margin: 10px 0 0; }
+  .error { color: var(--bad); margin: 8px 0 0; font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Paddock</h1>
+  <p class="sub">Sandboxes for coding agents. Each line under a sandbox is a check the core ran, not a setting.</p>
+  <div id="notice"></div>
+  <h2>Sandboxes</h2>
+  <div id="sandboxes"></div>
+  <h2>New sandbox</h2>
+  <form id="create" class="panel">
+    <div class="fields">
+      <div><label for="f-name">Name</label><input id="f-name" name="name" required pattern="[a-z0-9][a-z0-9-]{0,30}"></div>
+      <div><label for="f-image">Image (blank: default)</label><input id="f-image" name="image"></div>
+      <div><label for="f-cpus">CPUs</label><input id="f-cpus" name="cpus" type="number" step="0.25" placeholder="2"></div>
+      <div><label for="f-memory">Memory (GB)</label><input id="f-memory" name="memoryGb" type="number" step="0.25" placeholder="4"></div>
+      <div><label for="f-disk">Disk (GB)</label><input id="f-disk" name="diskGb" type="number" placeholder="20"></div>
+      <div><label for="f-engine">Engine</label><select id="f-engine" name="engine"></select></div>
+    </div>
+    <button class="primary">Create and verify</button>
+    <div class="error" id="create-error"></div>
+  </form>
+  <h2>Engines</h2>
+  <div id="engines"></div>
+</main>
+<script>
+// A client of the daemon's API and nothing more. To change this dashboard, copy it to CONFIG/ui/index.html (see the
+// skill): the copy gets the same API and token, and cannot change what the checks report from `paddock verify`.
+const hash = new URLSearchParams(location.hash.slice(1))
+if (hash.get("token")) { sessionStorage.setItem("paddock-token", hash.get("token")); history.replaceState(null, "", location.pathname) }
+const token = sessionStorage.getItem("paddock-token") ?? ""
+const MARK = { pass: "✓", weak: "~", fail: "✗", unsupported: "–", unknown: "?", info: "i" }
+const WORD = { weak: "holds in a weaker form", fail: "does not hold", unsupported: "not available on this engine", unknown: "could not be checked" }
+let checklist = [], extensions = [], open = new Set(), busy = new Set(), output = {}
+
+async function api(method, body = {}) {
+  const response = await fetch(`/api/${method}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(body) })
+  const reply = await response.json()
+  if (!reply.ok) throw new Error(reply.error.message)
+  return reply.data
+}
+const el = (tag, attrs = {}, ...children) => {
+  const node = document.createElement(tag)
+  for (const [key, value] of Object.entries(attrs)) key.startsWith("on") ? node.addEventListener(key.slice(2), value) : key === "class" ? node.className = value : node.setAttribute(key, value)
+  node.append(...children.filter((child) => child !== null && child !== undefined && child !== false))
+  return node
+}
+const title = (id) => checklist.find((item) => item.id === id)?.title ?? id
+
+async function act(name, key, task) {
+  busy.add(`${name}:${key}`); delete output[name]; render()
+  try { const result = await task(); if (result && typeof result.exitCode === "number") output[name] = `${result.stdout}${result.stderr}`.trim() || `Done (exit ${result.exitCode}).` }
+  catch (error) { output[name] = error.message }
+  busy.delete(`${name}:${key}`); await refresh()
+}
+
+function actionForm(sandbox, extension, action) {
+  const form = el("form", { class: "row", onsubmit: (event) => {
+    event.preventDefault()
+    const values = Object.fromEntries(action.fields.map((field) => [field.id, field.type === "checkbox" ? String(form.elements[field.id].checked) : form.elements[field.id].value]))
+    act(sandbox.name, `${extension.id}/${action.id}`, () => api("action", { extension: extension.id, action: action.id, sandbox: sandbox.name, values }))
+  } })
+  for (const field of action.fields) {
+    const input = field.type === "select" ? el("select", { name: field.id }, ...field.options.map((option) => el("option", {}, option)))
+      : el("input", { name: field.id, type: field.type === "checkbox" ? "checkbox" : field.type, "aria-label": field.label, placeholder: field.label })
+    if (field.default !== undefined) field.type === "checkbox" ? input.checked = field.default === true : input.value = field.default
+    form.append(el("label", { class: field.type === "checkbox" ? "" : "grow" }, field.type === "checkbox" ? field.label + " " : "", input))
+  }
+  const running = busy.has(`${sandbox.name}:${extension.id}/${action.id}`)
+  form.append(el("button", running ? { disabled: "" } : { title: action.description ?? "" }, running ? "Running…" : action.label))
+  return form
+}
+
+let sandboxes = [], engines = []
+function render() {
+  const list = document.getElementById("sandboxes"); list.replaceChildren()
+  if (!sandboxes.length) list.append(el("div", { class: "panel muted" }, "No sandboxes yet. Create one below."))
+  for (const sandbox of sandboxes) {
+    const is = (key) => busy.has(`${sandbox.name}:${key}`)
+    const button = (label, key, task, extra = {}) => el("button", { ...extra, ...(is(key) ? { disabled: "" } : {}), onclick: () => act(sandbox.name, key, task) }, is(key) ? "Working…" : label)
+    const failed = sandbox.lastVerify?.results.filter((check) => check.status === "fail").length
+    const panel = el("div", { class: "panel" },
+      el("div", { class: "row" },
+        el("div", { class: "grow" }, el("span", { class: "name" }, sandbox.name), " ", el("span", { class: `badge ${sandbox.status}` }, sandbox.status),
+          el("div", { class: "muted" }, `${sandbox.spec.cpus} CPU · ${sandbox.spec.memoryGb} GB memory · ${sandbox.spec.diskGb} GB disk · ${sandbox.engine}`),
+          sandbox.stopReason ? el("div", { class: "muted" }, sandbox.stopReason) : null),
+        sandbox.status === "running" ? button("Stop", "stop", () => api("stop", { name: sandbox.name })) : button("Start", "start", () => api("start", { name: sandbox.name })),
+        button("Verify", "verify", async () => { open.add(sandbox.name); await api("verify", { name: sandbox.name }) }),
+        el("button", { onclick: () => { open.has(sandbox.name) ? open.delete(sandbox.name) : open.add(sandbox.name); render() } },
+          sandbox.lastVerify ? (failed ? `${failed} failed` : "Checks") : "Not verified"),
+        el("button", { class: "danger", onclick: () => { const typed = prompt(`This deletes ${sandbox.name} and everything in it. Type its name to confirm.`); if (typed !== null) act(sandbox.name, "remove", () => api("remove", { name: sandbox.name, confirm: typed })) } }, "Remove")))
+    if (sandbox.status === "running") for (const extension of extensions) for (const action of extension.actions.filter((entry) => entry.scope === "sandbox")) panel.append(el("div", { style: "margin-top:10px" }, actionForm(sandbox, extension, action)))
+    if (output[sandbox.name]) panel.append(el("pre", {}, output[sandbox.name]))
+    if (open.has(sandbox.name) && sandbox.lastVerify) {
+      panel.append(el("ul", { class: "checks" }, ...sandbox.lastVerify.results.map((check) => el("li", { class: check.status },
+        el("span", { class: "mark", title: check.status }, MARK[check.status]),
+        el("span", {}, title(check.id), WORD[check.status] ? el("span", { class: "muted" }, ` — ${WORD[check.status]}`) : null),
+        el("span", { class: "detail" }, `${check.detail}${check.evidence === "none" ? "" : ` (${check.evidence})`}`))),
+        el("li", { class: "muted" }, el("span"), `Checked ${new Date(sandbox.lastVerify.at).toLocaleString()}.`)))
+    }
+    list.append(panel)
+  }
+  const enginesNode = document.getElementById("engines"); enginesNode.replaceChildren()
+  for (const engine of engines) enginesNode.append(el("div", { class: "panel" },
+    el("div", {}, el("span", { class: "name" }, engine.label), " ", el("span", { class: `badge ${engine.ready ? "running" : ""}` }, engine.ready ? "ready" : "not ready")),
+    engine.capabilities ? el("div", { class: "muted" }, `Kernel isolation: ${engine.capabilities.kernelIsolation} · network guard: ${engine.capabilities.networkGuard ? "yes" : "no"} · disk limit: ${engine.capabilities.diskLimit}`) : null,
+    ...engine.problems.map((problem) => el("div", { class: "muted" }, problem)), engine.fix ? el("div", { class: "muted" }, `Fix: ${engine.fix}`) : null))
+  if (!engines.length) enginesNode.append(el("div", { class: "panel muted" }, "No engine found. Paddock needs Docker with a gVisor runtime."))
+  const select = document.getElementById("f-engine"); const chosen = select.value
+  select.replaceChildren(...engines.filter((engine) => engine.ready).map((engine) => el("option", { value: engine.id }, engine.label)))
+  if (chosen) select.value = chosen
+}
+
+async function refresh() {
+  try {
+    sandboxes = await api("list"); document.getElementById("notice").replaceChildren()
+  } catch (error) {
+    document.getElementById("notice").replaceChildren(el("div", { class: "panel error" }, token ? error.message : "Open this page with the link that `paddock ui` prints."))
+  }
+  render()
+}
+
+document.getElementById("create").addEventListener("submit", async (event) => {
+  event.preventDefault()
+  const form = event.target; const button = form.querySelector("button"); const error = document.getElementById("create-error")
+  button.disabled = true; button.textContent = "Creating…"; error.textContent = ""
+  try { const made = await api("create", Object.fromEntries(new FormData(form))); open.add(made.sandbox.name); form.reset() }
+  catch (failure) { error.textContent = failure.message }
+  button.disabled = false; button.textContent = "Create and verify"; await refresh()
+})
+
+;(async () => {
+  try { [checklist, engines, { extensions }] = await Promise.all([api("checklist"), api("engines"), api("extensions")]) } catch {}
+  await refresh(); setInterval(refresh, 5000)
+})()
+</script>
+</body>
+</html>

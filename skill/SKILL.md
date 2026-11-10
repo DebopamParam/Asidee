@@ -1,0 +1,84 @@
+---
+name: paddock
+description: Create, use, verify and remove Paddock sandboxes with the `paddock` CLI, and customize Paddock (extensions, dashboard, defaults) for the user. Use when a task needs an isolated place to run code or an agent, or when the user asks to change how their Paddock looks or behaves.
+---
+
+# Paddock
+
+Paddock runs sandboxes for coding agents and checks each one against a fixed list. You work with it through the
+`paddock` CLI only. Never run `docker` (or another engine command) against a Paddock sandbox, and never edit files under
+`core/`: that is the part the user relies on staying the same.
+
+## Operating sandboxes
+
+Add `--json` to any command for `{"ok":true,"data":…}` or `{"ok":false,"error":{"code","message"}}`.
+
+```sh
+paddock doctor                              # engines and what each needs
+paddock create NAME [--image IMAGE] [--cpus N] [--memory GB] [--disk GB]
+paddock list
+paddock exec NAME [--stdin] -- COMMAND ARG… # exit code, stdout and stderr are the command's
+paddock start NAME | paddock stop NAME
+paddock verify NAME                         # exit 6 if a blocking check failed
+paddock remove NAME --confirm NAME          # deletes everything in it; ask the user first
+```
+
+Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed.
+
+- A name is lowercase letters, digits and hyphens.
+- `exec` needs a running sandbox; it does not start one.
+- If a check fails, report the check's title and detail to the user as they are. Do not work around it.
+- A sandbox has no host folders. Send a text file in with `paddock exec NAME --stdin -- sh -c 'cat > FILE' < local-file`,
+  and read one out with `paddock exec NAME -- cat FILE`. Binary files are not supported this way yet.
+
+## Customizing Paddock
+
+All customization lives in `~/.config/paddock/` (`$PADDOCK_CONFIG_DIR`). None of it can change what a sandbox is or what
+`paddock verify` reports.
+
+### Add an action or a hook: an extension
+
+Create `~/.config/paddock/extensions/ID/extension.json`:
+
+```json
+{
+  "name": "My tools",
+  "actions": [{
+    "id": "install-thing",
+    "label": "Install thing",
+    "scope": "sandbox",
+    "fields": [{ "id": "version", "label": "Version", "type": "text", "default": "latest" }],
+    "run": ["./install.sh"]
+  }],
+  "hooks": { "postCreate": ["./setup.sh"] }
+}
+```
+
+- `run` and `postCreate` are commands as lists. A path starting with `./` is relative to the extension's folder. Make
+  scripts executable.
+- Field types: `text`, `number`, `checkbox`, `select` (with `options`). Add `"required": true` when needed.
+- The command runs on the user's machine, not in the sandbox, with `PADDOCK_SANDBOX` (for `scope: "sandbox"`),
+  `PADDOCK_FIELD_<ID>` for each field, and `paddock` on `PATH`. To act inside the sandbox, call
+  `paddock exec "$PADDOCK_SANDBOX" -- …`.
+- The dashboard shows each sandbox action as a form on running sandboxes; the CLI runs it with
+  `paddock ext run EXTENSION ACTION SANDBOX --set FIELD=VALUE`. Check your work with `paddock ext list`, which also
+  prints what is wrong with an extension that did not load.
+- Because the command runs with the user's rights, tell the user what it does before installing it.
+
+### Change the dashboard
+
+Copy the built-in page (`ui/index.html` in the Paddock source) to `~/.config/paddock/ui/index.html` and edit the copy.
+Other files in that folder are served next to it. The page calls `POST /api/METHOD` with a JSON body and the header
+`Authorization: Bearer TOKEN`; it reads the token from the `#token=` part of the link `paddock ui` prints. Methods:
+`checklist`, `engines`, `list`, `get`, `create`, `start`, `stop`, `remove`, `verify`, `exec`, `extensions`, `action`.
+
+Keep showing each check's status and detail as the API returns them.
+
+### Change defaults
+
+`~/.config/paddock/config.json`: `{ "defaults": { "image": "ubuntu:24.04", "cpus": 2, "memoryGb": 4, "diskGb": 20 }, "engine": "gvisor:orbstack" }`.
+
+## What you cannot do, by design
+
+Mount a host folder, publish a port, pick a non-isolated runtime, add capabilities, or skip a check. If the user needs
+one of these, say that Paddock does not offer it yet instead of reaching around Paddock.

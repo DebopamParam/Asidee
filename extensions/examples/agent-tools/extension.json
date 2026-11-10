@@ -1,0 +1,21 @@
+{
+  "name": "Agent tools",
+  "description": "An example extension: actions that set a sandbox up for a coding agent.",
+  "actions": [
+    {
+      "id": "info",
+      "label": "System info",
+      "description": "Prints the sandbox's kernel and free disk space.",
+      "scope": "sandbox",
+      "run": ["./info.sh"]
+    },
+    {
+      "id": "install-claude-code",
+      "label": "Install Claude Code",
+      "description": "Installs Claude Code with npm. The sandbox's image needs Node.",
+      "scope": "sandbox",
+      "fields": [{ "id": "version", "label": "Version", "type": "text", "default": "latest" }],
+      "run": ["./install-claude-code.sh"]
+    }
+  ]
+}

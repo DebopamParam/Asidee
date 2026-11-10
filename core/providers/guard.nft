@@ -1,0 +1,26 @@
+table inet paddock_guard
+delete table inet paddock_guard
+table inet paddock_guard {
+  chain prerouting {
+    type filter hook prerouting priority mangle - 10; policy accept;
+    iifname != "pdk*" accept
+    ct state established,related accept
+    meta nfproto ipv6 drop
+    meta pkttype { broadcast, multicast } drop
+    fib saddr . iif oif missing drop
+    fib daddr type { local, broadcast, multicast, anycast } drop
+    ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16 } drop
+  }
+  chain forward {
+    type filter hook forward priority filter - 10; policy accept;
+    iifname "pdk*" oifname "pdk*" drop
+  }
+}
+table bridge paddock_guard
+delete table bridge paddock_guard
+table bridge paddock_guard {
+  chain forward {
+    type filter hook forward priority filter - 10; policy accept;
+    meta ibrname "pdk*" drop
+  }
+}
