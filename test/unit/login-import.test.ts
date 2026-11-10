@@ -1,0 +1,308 @@
+import { afterEach, expect, test } from "bun:test"
+import { existsSync } from "node:fs"
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { PassThrough } from "node:stream"
+import { parseExtension } from "../../core/extensions"
+import { execute, type Runner } from "../../extensions/logins/client"
+import { discoverProfiles, hostGithubToken, keychainServices, readCredential, type Host } from "../../extensions/logins/credentials"
+import { GUEST } from "../../extensions/logins/guest"
+import { main, readToken } from "../../extensions/logins/login"
+import { importGithub, importLogin, listLogins, logout } from "../../extensions/logins/logins"
+import { cleanConfig, collectSetup, referencedHomePaths } from "../../extensions/logins/setup"
+import manifest from "../../extensions/logins/extension.json"
+
+const roots: string[] = []
+afterEach(async () => { await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true }))) })
+async function home() { const path = await mkdtemp(join(tmpdir(), "paddock-login-unit-")); roots.push(path); return path }
+async function put(root: string, name: string, text: string, mode = 0o600) {
+  const path = join(root, name); await mkdir(join(path, ".."), { recursive: true }); await writeFile(path, text, { mode })
+}
+const json = async (path: string) => JSON.parse(await readFile(path, "utf8"))
+const secret = "ghp_unit_test_credential_never_in_argv_123456789"
+const credential = JSON.stringify({ tokens: { id_token: `x.${Buffer.from(JSON.stringify({ email: "agent@example.com" })).toString("base64url")}.sig`, refresh_token: secret } })
+
+// Fake the transport only. The exact guest program runs against a temporary HOME, without any sandbox or engine.
+function guestRunner(guestHome: string, prefix = "") {
+  const calls: Array<{ argv: string[]; stdin?: string }> = []
+  const runner: Runner = async (argv, stdin) => {
+    calls.push({ argv: [...argv], stdin })
+    expect(argv[0]).toBe("paddock"); expect(argv[1]).toBe("exec"); expect(argv[2]).toBe("demo")
+    expect(argv.join(" ")).not.toContain(secret)
+    const at = argv.indexOf("--")
+    expect(argv.slice(at + 1, at + 3)).toEqual(["node", "-e"])
+    expect(argv.includes("--stdin")).toBe(stdin !== undefined)
+    const child = Bun.spawn([process.execPath, "-e", prefix + argv[at + 3], ...argv.slice(at + 4)], {
+      env: { ...process.env, HOME: guestHome, XDG_CONFIG_HOME: join(guestHome, ".config"), GH_CONFIG_DIR: join(guestHome, ".config/gh") },
+      stdin: stdin === undefined ? "ignore" : new Blob([stdin]), stdout: "pipe", stderr: "pipe",
+    })
+    const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()])
+    expect(stdout).not.toContain(secret); expect(stderr).not.toContain(secret)
+    return { exitCode, stdout, stderr }
+  }
+  return { runner, calls }
+}
+const host = (root: string, runner: Runner): Host => ({ home: root, platform: "linux", runner })
+
+test("bundled manifest loads and exposes no secret input field", () => {
+  const parsed = parseExtension("logins", "/unused", manifest)
+  expect(parsed.actions.map((action) => action.id)).toEqual(["import", "github", "list", "logout", "profiles"])
+  expect(parsed.actions.flatMap((action) => action.fields).some((field) => /token|secret/.test(field.id))).toBe(false)
+})
+
+test("imports one profile via stdin, writes 0600 atomically, requires replacement, and keeps host logged in", async () => {
+  const h = await home(), g = await home(), transport = guestRunner(g)
+  await put(h, ".codex-work/auth.json", credential); await put(h, ".codex-other/auth.json", '{"secret":"not-selected"}')
+  expect(await discoverProfiles("codex", host(h, transport.runner))).toEqual(["other", "work"])
+  const options = { name: "demo", agent: "codex", profile: "work", replace: false, setup: false } satisfies Parameters<typeof importLogin>[1]
+  expect(await importLogin(host(h, transport.runner), options)).toEqual({ agent: "codex", profile: "work", files: 0, missingCommands: [] })
+  const dest = join(g, ".codex-work/auth.json")
+  expect(await readFile(dest, "utf8")).toBe(credential)
+  expect((await stat(dest)).mode & 0o777).toBe(0o600)
+  expect((await stat(join(g, ".codex-work"))).mode & 0o777).toBe(0o700)
+  expect(await readdir(join(g, ".codex-work"))).toEqual(["auth.json"])
+  expect(existsSync(join(g, ".codex-other"))).toBe(false)
+  expect(transport.calls[0]?.stdin).toContain(secret)
+  await expect(importLogin(host(h, transport.runner), options)).rejects.toThrow("--replace")
+  expect(await readFile(dest, "utf8")).toBe(credential)
+  await importLogin(host(h, transport.runner), { ...options, replace: true })
+  expect(await listLogins(transport.runner, "demo")).toEqual([{ agent: "codex", profile: "work", account: "agent@example.com" }])
+  expect(await logout(transport.runner, "demo", { agent: "codex", profile: "work" })).toEqual([{ agent: "codex", profile: "work", account: "agent@example.com", removed: true, stopped: 0 }])
+  expect(existsSync(dest)).toBe(false)
+  expect(await readFile(join(h, ".codex-work/auth.json"), "utf8")).toBe(credential)
+})
+
+test("validates credential JSON and rejects symlinked, oversized or non-regular host sources without leaking content", async () => {
+  const h = await home(), g = await home(), transport = guestRunner(g)
+  for (const text of [secret, `{"oops":"${secret}",`, "[]", "null", "1"]) {
+    await put(h, ".codex/auth.json", text)
+    await expect(readCredential("codex", "default", host(h, transport.runner))).rejects.toThrow("contents withheld")
+  }
+  await put(h, ".codex/auth.json", " ".repeat(1024 * 1024 + 1))
+  await expect(readCredential("codex", "default", host(h, transport.runner))).rejects.toThrow("1 MiB")
+  await rm(join(h, ".codex/auth.json")); await symlink("/does-not-exist", join(h, ".codex/auth.json"))
+  await expect(readCredential("codex", "default", host(h, transport.runner))).rejects.toThrow("Symlinked")
+  await rm(join(h, ".codex"), { recursive: true }); await put(h, "elsewhere/auth.json", credential); await symlink(join(h, "elsewhere"), join(h, ".codex"))
+  await expect(readCredential("codex", "default", host(h, transport.runner))).rejects.toThrow("Symlinked")
+  expect(transport.calls).toHaveLength(0)
+})
+
+test("Keychain takes precedence, supports canonical and trailing-slash hashes and hex, and never leaks lookup output", async () => {
+  const h = await home(), g = await home(), transport = guestRunner(g), calls: string[][] = []
+  await put(h, ".claude-work/.credentials.json", '{"access_token":"stale"}')
+  const services = keychainServices("work", h), service = services[1]
+  expect(keychainServices("default", h)[0]).toBe("Claude Code-credentials")
+  const runner: Runner = async (argv, stdin) => {
+    calls.push(argv); expect(argv.join(" ")).not.toContain(secret)
+    if (argv[0] !== "security") return transport.runner(argv, stdin)
+    return { exitCode: argv[3] === service ? 0 : 44, stdout: argv.includes("-w") ? Buffer.from(credential).toString("hex") : "attributes only", stderr: secret }
+  }
+  const source: Host = { home: h, platform: "darwin", runner }
+  expect(await discoverProfiles("claude", source)).toEqual(["work"])
+  expect(calls.every((argv) => !argv.includes("-w"))).toBe(true)
+  await importLogin(source, { name: "demo", agent: "claude", profile: "work", replace: false, setup: false })
+  expect(await readFile(join(g, ".claude-work/.credentials.json"), "utf8")).toBe(credential)
+  const denied: Runner = async (argv) => ({ exitCode: argv.includes("-w") ? 51 : 0, stdout: secret, stderr: secret })
+  await expect(readCredential("claude", "work", { ...source, runner: denied })).rejects.toThrow("denied or failed; contents withheld")
+})
+
+test("guest validates JSON itself, rejects credential symlinks and unsafe setup ancestors, and publishes only complete files", async () => {
+  const h = await home(), g = await home(), transport = guestRunner(g)
+  await expect(execute(transport.runner, "demo", GUEST, ["import", "codex", "work", "create"], JSON.stringify({ credential: secret }))).rejects.toThrow("failed")
+  expect(existsSync(join(g, ".codex-work/auth.json"))).toBe(false)
+  await put(h, "auth.json", "untouched")
+  await mkdir(join(g, ".codex-work")); await symlink(join(h, "auth.json"), join(g, ".codex-work/auth.json"))
+  await expect(execute(transport.runner, "demo", GUEST, ["import", "codex", "work", "replace"], JSON.stringify({ credential }))).rejects.toThrow("failed")
+  expect(await readFile(join(h, "auth.json"), "utf8")).toBe("untouched")
+  await rm(join(g, ".codex-work/auth.json")); await symlink(h, join(g, ".codex-work/skills"))
+  const setup = { hostHome: h, files: [{ path: "skills/a.md", data: Buffer.from("setup").toString("base64") }], homeFiles: [] }
+  await expect(execute(transport.runner, "demo", GUEST, ["import", "codex", "work", "create"], JSON.stringify({ credential, setup }))).rejects.toThrow("failed")
+  expect(existsSync(join(h, "a.md"))).toBe(false); expect(existsSync(join(g, ".codex-work/auth.json"))).toBe(false)
+  expect((await readdir(join(g, ".codex-work"))).some((name) => name.startsWith(".login-"))).toBe(false)
+})
+
+test("copies only allowlisted symlinked Claude setup, scripts and state, rewrites paths, and reports missing commands", async () => {
+  const h = await home(), g = await home(), transport = guestRunner(g)
+  await put(h, ".claude-work/.credentials.json", credential)
+  await put(h, ".claude/settings.json", JSON.stringify({ model: "opus", mcpServers: { private: { token: secret } }, enabledPlugins: { private: true }, hooks: { PreToolUse: [{ hooks: [{ command: "paddock-missing-unit-hook --argument secret" }, { command: `${h}/.claude-work/hooks/ok.sh` }] }] }, statusLine: { command: "sh ~/.config/ai/status.sh" } }))
+  await symlink(join(h, ".claude/settings.json"), join(h, ".claude-work/settings.json"))
+  await put(h, ".claude/skills/demo/SKILL.md", `read ${h}/project`)
+  await put(h, ".claude/skills/demo/node_modules/skip.js", "skip")
+  await symlink(join(h, ".claude/skills"), join(h, ".claude-work/skills"))
+  await symlink(join(h, ".claude/skills"), join(h, ".claude/skills/demo/recursive-directory-link"))
+  await put(h, ".claude-work/CLAUDE.md", "top-level")
+  await put(h, ".claude-work/keybindings.json", "[]")
+  await put(h, ".claude-work/hooks/ok.sh", "#!/bin/sh\n", 0o700)
+  await put(h, ".claude-work/plugins/private/file", secret); await put(h, ".claude-work/history.jsonl", secret); await put(h, ".claude-work/projects/transcript.json", secret)
+  await put(h, ".claude-work/.claude.json", JSON.stringify({ oauthAccount: { emailAddress: "claude@example.com" }, theme: "dark", projects: { secret }, mcpServers: { private: secret } }))
+  await put(h, ".config/ai/status.sh", `#!/bin/sh\n# ${h}/project ccstatusline\n`, 0o700)
+  await put(h, ".config/ccstatusline/settings.json", "{}")
+  const bundle = await collectSetup("claude", "work", h)
+  expect(bundle.files.map((file) => file.path)).toEqual(["CLAUDE.md", "hooks/ok.sh", "keybindings.json", "settings.json", "skills/demo/SKILL.md"])
+  expect(bundle.homeFiles.map((file) => file.path)).toEqual([".config/ai/status.sh", ".config/ccstatusline/settings.json"])
+  expect(JSON.stringify(bundle)).not.toContain(secret)
+  const result = await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "work", replace: false, setup: true })
+  expect(result.files).toBe(7); expect(result.missingCommands).toEqual(["paddock-missing-unit-hook"])
+  expect(await readFile(join(g, ".config/ai/status.sh"), "utf8")).toContain(`${g}/project`)
+  expect(await readFile(join(g, ".claude-work/skills/demo/SKILL.md"), "utf8")).toBe(`read ${g}/project`)
+  expect((await stat(join(g, ".claude-work/hooks/ok.sh"))).mode & 0o777).toBe(0o700)
+  const settings = await readFile(join(g, ".claude-work/settings.json"), "utf8")
+  expect(settings).not.toContain(h); expect(settings).not.toContain("mcpServers"); expect(settings).not.toContain("enabledPlugins")
+  expect(await json(join(g, ".claude-work/.claude.json"))).toEqual({ oauthAccount: { emailAddress: "claude@example.com" }, theme: "dark" })
+  expect(await listLogins(transport.runner, "demo")).toEqual([{ agent: "claude", profile: "work", account: "claude@example.com" }])
+  await logout(transport.runner, "demo", "all")
+  expect(await json(join(g, ".claude-work/.claude.json"))).toEqual({ theme: "dark" })
+  expect(existsSync(join(g, ".claude-work/CLAUDE.md"))).toBe(true)
+})
+
+test("Codex setup follows a profile-directory link but strips every TOML spelling of MCP definitions", async () => {
+  const h = await home(), g = await home(), transport = guestRunner(g)
+  await put(h, "dotfiles/config.toml", `model = "gpt-test"\ncwd = "${h}/project"\n[mcp_servers.private]\ncommand = "secret"\n[profiles.work]\nmodel = "other"\n`)
+  await put(h, "dotfiles/AGENTS.md", "instructions"); await put(h, "dotfiles/prompts/a.md", "prompt")
+  await symlink(join(h, "dotfiles"), join(h, ".codex-work"))
+  const bundle = await collectSetup("codex", "work", h)
+  expect(bundle.files.map((file) => file.path)).toEqual(["AGENTS.md", "config.toml", "prompts/a.md"])
+  const setupResponse = await execute(transport.runner, "demo", GUEST, ["import", "codex", "work", "create"], JSON.stringify({ credential, setup: bundle }))
+  expect(setupResponse).toMatchObject({ files: 3 })
+  const copied = Bun.TOML.parse(await readFile(join(g, ".codex-work/config.toml"), "utf8"))
+  expect(copied).toEqual({ model: "gpt-test", cwd: `${g}/project`, profiles: { work: { model: "other" } } })
+  for (const text of ['"mcp_servers" = { private = { token = "secret" } }\nmodel="a"', 'mcp_servers.private.command="secret"\nmodel="a"', '["mcp_servers"."private"]\ncommand="secret"']) {
+    expect(cleanConfig("codex", text)).not.toContain("secret")
+  }
+  expect(referencedHomePaths(["bash ~/.config/a.sh", "${HOME}/b.sh", "$HOME/c.sh", `${h}/d.sh`, "~/../escape"], h)).toEqual([".config/a.sh", "b.sh", "c.sh", "d.sh"])
+})
+
+// HTTPS and gh/git are fixtures here; no real account, credential store, or network is contacted.
+const githubFixture = String.raw`
+const childProcess = require("child_process")
+childProcess.spawnSync = (command, args) => {
+  const fs = require("fs"), file = require("path").join(require("os").homedir(), "git-calls.jsonl")
+  fs.appendFileSync(file, JSON.stringify([command, ...args]) + "\n")
+  return { status: 0 }
+}
+require("https").get = (_url, _opts, callback) => {
+  const { EventEmitter } = require("events"), req = new EventEmitter(), res = new EventEmitter()
+  req.setTimeout = () => {}; req.destroy = () => {}; res.statusCode = 200
+  queueMicrotask(() => { callback(res); res.emit("data", '{"login":"octocat"}'); res.emit("end") })
+  return req
+}
+`
+
+test("GitHub token and named host gh login travel only on stdin; guest storage is private and logout preserves other hosts", async () => {
+  const g = await home(), transport = guestRunner(g, githubFixture), hostCalls: string[][] = []
+  await put(g, ".config/gh/hosts.yml", "enterprise.example:\n    user: enterprise\n    oauth_token: keep-enterprise\n")
+  const runner: Runner = async (argv, stdin) => {
+    if (argv[0] !== "gh") return transport.runner(argv, stdin)
+    hostCalls.push(argv); return { exitCode: 0, stdout: `${secret}\n`, stderr: secret }
+  }
+  expect(await importGithub(runner, "demo", { kind: "host", account: "octocat" }, false)).toEqual({ agent: "github", profile: "~", account: "octocat" })
+  expect(hostCalls).toEqual([["gh", "auth", "token", "--hostname", "github.com", "--user", "octocat"]])
+  const config = join(g, ".config/gh/hosts.yml")
+  expect((await stat(config)).mode & 0o777).toBe(0o600)
+  expect(await readFile(config, "utf8")).toContain(secret)
+  expect(await readFile(join(g, "git-calls.jsonl"), "utf8")).not.toContain(secret)
+  await expect(importGithub(runner, "demo", { kind: "token", value: secret }, false)).rejects.toThrow("--replace")
+  await importGithub(runner, "demo", { kind: "token", value: secret }, true)
+  expect(await listLogins(transport.runner, "demo")).toEqual([{ agent: "github", profile: "~", account: "octocat" }])
+  await logout(transport.runner, "demo", { agent: "github", profile: "~" })
+  expect(await readFile(config, "utf8")).toContain("keep-enterprise")
+  expect(await readFile(config, "utf8")).not.toContain(secret)
+  expect(await listLogins(transport.runner, "demo")).toEqual([])
+})
+
+test("listing includes canonical API-key profiles, logout all removes all copies, and symlinks are skipped", async () => {
+  const g = await home(), outside = await home(), transport = guestRunner(g)
+  await put(g, ".codex/auth.json", JSON.stringify({ OPENAI_API_KEY: secret })); await put(g, ".claude-work/.credentials.json", credential)
+  await put(g, ".claude-work/.claude.json", JSON.stringify({ oauthAccount: { emailAddress: "claude@example.com" }, projects: { keep: true } }))
+  await put(outside, "auth.json", credential); await symlink(outside, join(g, ".codex-linked"))
+  await mkdir(join(g, ".codex-no-login"))
+  expect(await listLogins(transport.runner, "demo")).toEqual([{ agent: "claude", profile: "work", account: "claude@example.com" }, { agent: "codex", profile: "~", account: "API key" }])
+  expect(await logout(transport.runner, "demo", "all")).toHaveLength(2)
+  expect(await json(join(g, ".claude-work/.claude.json"))).toEqual({ projects: { keep: true } })
+  expect(await readFile(join(outside, "auth.json"), "utf8")).toBe(credential)
+  expect(await listLogins(transport.runner, "demo")).toEqual([])
+})
+
+test("failed runner output, spawn errors, invalid JSON and CLI parsing never become secret-bearing errors", async () => {
+  const errorRunner: Runner = async () => { throw new Error(secret) }
+  const outputRunner: Runner = async () => ({ exitCode: 1, stdout: secret, stderr: secret })
+  await expect(hostGithubToken(errorRunner)).rejects.toThrow("Could not read")
+  for (const runner of [errorRunner, outputRunner]) {
+    try { await importGithub(runner, "demo", { kind: "token", value: secret }, false); throw new Error("should fail") }
+    catch (error) { expect(String(error)).not.toContain(secret) }
+  }
+  await expect(main(["github", "demo", "--token", secret])).rejects.toThrow("Never pass tokens in arguments")
+  await expect(execute(async () => ({ exitCode: 0, stdout: secret, stderr: "" }), "demo", GUEST, ["list"])).rejects.toThrow("contents withheld")
+})
+
+test("terminal stdin and manifest fields work through a fake paddock command without putting secrets in argv", async () => {
+  const h = await home(), g = await home(), bin = join(h, "bin")
+  await put(h, "bin/paddock", `#!${process.execPath}\nconst fs = require("fs");\nfs.appendFileSync(process.env.CALLS, JSON.stringify(process.argv.slice(2)) + "\\n");\nconst args = process.argv.slice(2), at = args.indexOf("--");\nconst child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(githubFixture)} + args[at + 3], ...args.slice(at + 4)], { env: { ...process.env, HOME: process.env.GUEST_HOME }, stdin: args.includes("--stdin") ? new Blob([await Bun.stdin.text()]) : "ignore", stdout: "inherit", stderr: "inherit" });\nprocess.exitCode = await child.exited;\n`, 0o700)
+  const env = { ...process.env, HOME: h, GH_CONFIG_DIR: join(g, ".config/gh"), XDG_CONFIG_HOME: join(g, ".config"), PATH: `${bin}:${process.env.PATH}`, GUEST_HOME: g, CALLS: join(h, "calls.jsonl") }
+  const cli = join(import.meta.dir, "../../extensions/logins/login.ts")
+  const invoke = async (args: string[], input?: string, fields: Record<string, string> = {}) => {
+    const child = Bun.spawn([process.execPath, cli, ...args], { env: { ...env, ...fields }, stdin: input === undefined ? "ignore" : new Blob([input]), stdout: "pipe", stderr: "pipe" })
+    const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()])
+    expect(stdout).not.toContain(secret); expect(stderr).not.toContain(secret)
+    return { exitCode, stdout, stderr }
+  }
+  const github = await invoke(["github", "demo"], `${secret}\n`)
+  expect(github.exitCode).toBe(0); expect(github.stdout).toContain("There is no secret proxy")
+  await put(h, ".codex-work/auth.json", credential)
+  const imported = await invoke(["import"], undefined, { PADDOCK_SANDBOX: "demo", PADDOCK_FIELD_AGENT: "codex", PADDOCK_FIELD_PROFILE: "work", PADDOCK_FIELD_SETUP: "false", PADDOCK_FIELD_REPLACE: "false" })
+  expect(imported.exitCode).toBe(0); expect(imported.stdout).toContain('CODEX_HOME="$HOME/.codex-work" codex')
+  expect((await invoke(["list", "demo"])).stdout).toContain("octocat")
+  expect((await invoke(["logout", "demo", "all"])).exitCode).toBe(0)
+  expect(await readFile(env.CALLS, "utf8")).not.toContain(secret)
+  expect(await readdir(g)).not.toContain(".paddock-logins.lock")
+})
+
+test("guest mutations refuse a concurrent writer and never advise replacing to bypass its lock", async () => {
+  const g = await home(), transport = guestRunner(g)
+  await mkdir(join(g, ".paddock-logins.lock"))
+  await expect(importGithub(transport.runner, "demo", { kind: "token", value: secret }, true)).rejects.toThrow("Another login operation")
+  expect(existsSync(join(g, ".config/gh/hosts.yml"))).toBe(false)
+})
+
+test("logout session matching targets only the selected profile, HOME and agent using fake proc data", async () => {
+  const g = await home()
+  await put(g, ".codex-work/auth.json", credential)
+  const prefix = `
+    const fixtureFs = require("fs"), originalRead = fixtureFs.readFileSync, originalDir = fixtureFs.readdirSync;
+    const h = require("os").homedir();
+    fixtureFs.readdirSync = (p, ...args) => p === "/proc" ? ["101", "102", "103", "104"] : originalDir(p, ...args);
+    fixtureFs.readFileSync = (p, ...args) => {
+      if (!String(p).startsWith("/proc/")) return originalRead(p, ...args);
+      const pid = p.split("/")[2];
+      if (p.endsWith("/cmdline")) return (pid === "103" ? "bash" : "codex") + "\\0";
+      return "HOME=" + (pid === "104" ? "/other" : h) + "\\0CODEX_HOME=" + h + (pid === "102" ? "/.codex-other" : "/.codex-work") + "\\0";
+    };
+    process.kill = (pid) => { if (pid !== 101) throw new Error("wrong process"); return true; };
+  `
+  const transport = guestRunner(g, prefix)
+  expect(await logout(transport.runner, "demo", { agent: "codex", profile: "work" })).toEqual([{ agent: "codex", profile: "work", account: "agent@example.com", removed: true, stopped: 1 }])
+})
+
+test("hidden token prompt never echoes input and restores terminal mode on completion or cancellation", async () => {
+  const modes: boolean[] = [], output: string[] = []
+  const input = Object.assign(new PassThrough(), { isTTY: true, isRaw: false, setRawMode: (mode: boolean) => { modes.push(mode) } })
+  const value = readToken(input, { write: (text) => output.push(text) })
+  input.write(`${secret}x\u007f\r`)
+  expect(await value).toBe(secret)
+  expect(modes).toEqual([true, false]); expect(output.join("")).not.toContain(secret)
+  const cancelled = readToken(input, { write: (text) => output.push(text) })
+  input.write(`${secret}\u0003`)
+  await expect(cancelled).rejects.toThrow("cancelled")
+  expect(modes).toEqual([true, false, true, false]); expect(output.join("")).not.toContain(secret)
+  expect(input.listenerCount("data")).toBe(0)
+  input.destroy()
+})
+
+test("GitHub rejects an invalid account token without storing it or returning response contents", async () => {
+  const g = await home(), prefix = githubFixture.replace('res.statusCode = 200', 'res.statusCode = 401')
+  const transport = guestRunner(g, prefix)
+  await expect(importGithub(transport.runner, "demo", { kind: "token", value: secret }, false)).rejects.toThrow("failed")
+  expect(existsSync(join(g, ".config/gh/hosts.yml"))).toBe(false)
+  expect(existsSync(join(g, ".paddock-logins.lock"))).toBe(false)
+})

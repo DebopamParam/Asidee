@@ -98,3 +98,13 @@ dashboard and add extensions freely, and none of that can change what a sandbox 
 - **Defaults** (image, sizes, engine) go in `~/.config/paddock/config.json`.
 
 [skill/SKILL.md](skill/SKILL.md) tells an AI agent how to do each of these.
+
+## Import agent and GitHub logins
+
+The bundled [logins extension](extensions/logins) imports one selected Claude or Codex profile, optionally its setup,
+and a GitHub token from stdin, a hidden prompt, or this machine's `gh` login. It also lists and removes guest logins.
+Run `bun extensions/logins/login.ts --help` with `paddock` on PATH, or install its folder as a Paddock extension.
+It needs Bun on this machine and Node in an already running sandbox; GitHub also needs guest `gh` and `git`.
+Existing credentials require an explicit replace choice. **There is no secret proxy in a gVisor container: the token
+lives inside the sandbox and code there can read and send it out.** Logout leaves this machine logged in.
+This extension has unit coverage with fake transport and temporary homes; live login imports and evals are unverified.

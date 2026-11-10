@@ -1,0 +1,49 @@
+{
+  "name": "Agent logins",
+  "description": "Copy one selected host login into a running sandbox. Credentials live inside it and can leave over the internet.",
+  "actions": [
+    {
+      "id": "import",
+      "label": "Import an agent login",
+      "scope": "sandbox",
+      "description": "Reads only the selected profile's login. macOS may ask for Keychain access. Setup copying overwrites allowlisted settings files.",
+      "fields": [
+        { "id": "agent", "label": "Agent", "type": "select", "options": ["claude", "codex"], "default": "claude" },
+        { "id": "profile", "label": "Host profile (default means canonical)", "type": "text", "default": "default" },
+        { "id": "target", "label": "Guest profile (blank keeps host name)", "type": "text" },
+        { "id": "setup", "label": "Copy profile setup and overwrite matching settings", "type": "checkbox", "default": false },
+        { "id": "replace", "label": "Replace an existing login", "type": "checkbox", "default": false }
+      ],
+      "run": ["./login.ts", "import"]
+    },
+    {
+      "id": "github",
+      "label": "Import this machine's GitHub login",
+      "scope": "sandbox",
+      "description": "Reads gh auth token. The token lives inside the container; there is no secret proxy. For pasted tokens use login.ts github directly in a terminal.",
+      "fields": [
+        { "id": "account", "label": "Host gh account (blank uses active account)", "type": "text" },
+        { "id": "replace", "label": "Replace an existing GitHub login", "type": "checkbox", "default": false }
+      ],
+      "run": ["./login.ts", "github-host"]
+    },
+    { "id": "list", "label": "List logins and accounts", "scope": "sandbox", "run": ["./login.ts", "list"] },
+    {
+      "id": "logout",
+      "label": "Log out of this sandbox",
+      "scope": "sandbox",
+      "fields": [
+        { "id": "agent", "label": "Agent or all logins", "type": "select", "options": ["all", "claude", "codex", "github"], "default": "all" },
+        { "id": "profile", "label": "Guest profile (~ means canonical; ignored for all/GitHub)", "type": "text", "default": "default" }
+      ],
+      "run": ["./login.ts", "logout"]
+    },
+    {
+      "id": "profiles",
+      "label": "List host login profiles",
+      "scope": "global",
+      "fields": [{ "id": "agent", "label": "Agent", "type": "select", "options": ["claude", "codex"], "default": "claude" }],
+      "run": ["./login.ts", "profiles"]
+    }
+  ]
+}

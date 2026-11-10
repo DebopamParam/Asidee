@@ -89,6 +89,18 @@ names it, so run a create after editing it.
 After changing anything, run `paddock verify NAME` on a sandbox. If you changed Paddock's own source, run
 `bun evals/run.ts` from it: it measures the claims Paddock makes from outside and prints which ones no longer hold.
 
+## Import or remove logins
+
+Use the bundled [logins extension](../extensions/logins/README.md), which calls only `paddock exec` and needs Node in an
+already running sandbox. `bun extensions/logins/login.ts import NAME claude --profile work --setup` imports a selected
+profile and its allowlisted setup; omit `--setup` for login only. Existing logins require `--replace` explicitly.
+`login.ts github NAME --gh [--account ACCOUNT]` imports this machine's gh login. Without `--gh`, the direct terminal
+command reads a token from stdin or a hidden prompt. Never put a token in argv, `--set`, a manifest, or logs.
+There is no secret proxy in a gVisor container: the token lives inside it and code there can read and send it out.
+Use `login.ts list NAME` and `login.ts logout NAME all` (or an agent and `--profile PROFILE`); the machine stays logged in.
+Guest imported profiles use `CLAUDE_CONFIG_DIR="$HOME/.claude-PROFILE"` or `CODEX_HOME="$HOME/.codex-PROFILE"`.
+The extension is unit-tested with fake transport; live imports and sandbox evals remain unverified.
+
 ## What you cannot do, by design
 
 Mount a host folder, publish a port, pick a non-isolated runtime, add capabilities, or skip a check. If the user needs
