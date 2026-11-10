@@ -37,4 +37,9 @@ export function blockers(results: readonly CheckResult[]): CheckResult[] {
   })
 }
 
+// For a sandbox that is already running, where a check that could not be made this minute is no reason to stop it.
+export function failures(results: readonly CheckResult[]): CheckResult[] {
+  return results.filter((result) => result.status === "fail" && CHECKLIST.find((entry) => entry.id === result.id)?.blocking)
+}
+
 export const titleOf = (id: CheckId) => CHECKLIST.find((item) => item.id === id)?.title ?? id

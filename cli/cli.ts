@@ -43,18 +43,45 @@ async function request<T>(method: string, body: object = {}): Promise<T> {
   return reply.data
 }
 
-async function call<T>(method: string, body: object = {}): Promise<T> {
-  try { return await request<T>(method, body) } catch (error) {
-    if (error instanceof PaddockError) throw error
+// Waits for a stopping daemon to finish: it may still be stopping sandboxes, and a second daemon must not start beside it.
+async function daemonGone(): Promise<boolean> {
+  const answers = () => request("version").then(() => true, () => false)
+  for (let attempt = 0; attempt < 1200; attempt++) { if (!await answers()) return true; await Bun.sleep(100) }
+  return false
+}
+
+// Starts the daemon when none runs, and replaces one left over from another version of Paddock (its sandboxes keep
+// running through the switch).
+let daemonReady = false
+async function ensureDaemon(): Promise<void> {
+  if (daemonReady) return
+  const probe = () => request<{ version: string; stopping?: boolean }>("version").catch(() => undefined)
+  const version = () => probe().then((reply) => reply?.version)
+  let running = await probe()
+  if (running?.stopping) { await daemonGone(); running = undefined }
+  if (running?.version !== VERSION) {
+    if (running) {
+      await request("shutdown", { keepSandboxes: true }).catch(() => {})
+      await daemonGone()
+    }
+    mkdirSync(dirs.state, { recursive: true, mode: 0o700 })
+    const log = openSync(join(dirs.state, "daemon.log"), "a", 0o600)
+    spawn(self[0]!, [...self.slice(1), "daemon", "run"], { detached: true, stdio: ["ignore", log, log] }).unref()
+    for (let attempt = 0; attempt < 100 && await version() !== VERSION; attempt++) await Bun.sleep(100)
+    if (await version() !== VERSION) throw new PaddockError("runtime", `The daemon did not start. See ${join(dirs.state, "daemon.log")}.`)
   }
-  mkdirSync(dirs.state, { recursive: true, mode: 0o700 })
-  const log = openSync(join(dirs.state, "daemon.log"), "a", 0o600)
-  spawn(self[0]!, [...self.slice(1), "daemon", "run"], { detached: true, stdio: ["ignore", log, log] }).unref()
-  for (let attempt = 0; attempt < 50; attempt++) {
-    await Bun.sleep(100)
-    try { return await request<T>(method, body) } catch (error) { if (error instanceof PaddockError) throw error }
-  }
-  throw new PaddockError("runtime", `The daemon did not start. See ${join(dirs.state, "daemon.log")}.`)
+  daemonReady = true
+}
+
+// watch: a sandbox whose progress is printed (to stderr) while the call runs.
+async function call<T>(method: string, body: object = {}, watch?: string): Promise<T> {
+  await ensureDaemon()
+  let last = ""
+  const timer = watch === undefined ? undefined : setInterval(async () => {
+    const view = await request<SandboxView>("get", { name: watch }).catch(() => undefined)
+    if (view?.activity && view.activity !== last) { last = view.activity; console.error(`  … ${last}`) }
+  }, 400)
+  try { return await request<T>(method, body) } finally { clearInterval(timer) }
 }
 
 const MARK: Record<CheckResult["status"], string> = { pass: "✓", weak: "~", fail: "✗", unsupported: "–", unknown: "?", info: "i" }
@@ -81,6 +108,8 @@ async function main(argv: string[]): Promise<void> {
   const asJson = head.includes("--json")
   const [command, ...rest] = head.filter((arg) => arg !== "--json")
   const out = (data: unknown, human: () => void) => { if (asJson) console.log(JSON.stringify({ ok: true, data })); else human() }
+  // Progress lines only for a person: --json output stays one line.
+  const watching = (name: string) => asJson ? undefined : name
   const parse = (options: Record<string, { type: "string" | "boolean" }>, args = rest) => {
     try { return parseArgs({ args, options, allowPositionals: true }) as { values: Record<string, string | undefined>; positionals: string[] } }
     catch (error) { throw new PaddockError("usage", (error as Error).message) }
@@ -105,8 +134,9 @@ async function main(argv: string[]): Promise<void> {
       }
       case "create": {
         const { values, positionals } = parse({ image: { type: "string" }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" }, pids: { type: "string" }, engine: { type: "string" } })
+        const name = need(positionals[0], "a name")
         const made = await call<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }> }>("create",
-          { name: need(positionals[0], "a name"), image: values.image, cpus: values.cpus, memoryGb: values.memory, diskGb: values.disk, pids: values.pids, engine: values.engine })
+          { name, image: values.image, cpus: values.cpus, memoryGb: values.memory, diskGb: values.disk, pids: values.pids, engine: values.engine }, watching(name))
         return out(made, () => {
           printSandbox(made.sandbox); printChecks(made.checks)
           for (const hook of made.hooks) console.log(`\n  ${hook.extension} (after create): ${hook.exitCode === 0 ? "done" : `failed with exit ${hook.exitCode}`}${hook.output ? `\n${hook.output}` : ""}`)
@@ -123,11 +153,11 @@ async function main(argv: string[]): Promise<void> {
         })
       }
       case "start": case "stop": {
-        const view = await call<SandboxView>(command, { name: need(rest[0], "a name") })
+        const view = await call<SandboxView>(command, { name: need(rest[0], "a name") }, watching(rest[0]!))
         return out(view, () => printSandbox(view))
       }
       case "verify": {
-        const report = await call<{ sandbox: SandboxView; checks: CheckResult[]; ok: boolean }>("verify", { name: need(rest[0], "a name") })
+        const report = await call<{ sandbox: SandboxView; checks: CheckResult[]; ok: boolean }>("verify", { name: need(rest[0], "a name") }, watching(rest[0]!))
         out(report, () => { printSandbox(report.sandbox); printChecks(report.checks) })
         if (!report.ok) process.exit(EXIT["check-failed"])
         return
@@ -168,7 +198,7 @@ async function main(argv: string[]): Promise<void> {
         return printRun(output)
       }
       case "ui": {
-        await call("version")
+        await ensureDaemon()
         const daemon = await readDaemonFile(dirs)
         if (!daemon) throw new PaddockError("runtime", "The daemon is not running.")
         const url = `http://127.0.0.1:${daemon.port}/#token=${daemon.token}`
@@ -178,8 +208,10 @@ async function main(argv: string[]): Promise<void> {
       case "daemon": {
         if (rest[0] === "run") return await runDaemon(dirs, cliDir)
         if (rest[0] === "stop") {
-          const stopped = await request("shutdown").then(() => true, () => false)
-          return out({ stopped }, () => console.log(stopped ? "The daemon is stopping. Sandboxes keep running; their disk limits are not watched until it starts again." : "The daemon was not running."))
+          const asked = await request("shutdown").then(() => true, (error) => error instanceof PaddockError && error.code === "conflict")
+          const stopped = asked && await daemonGone()
+          return out({ stopped }, () => console.log(stopped ? "The daemon stopped, and with it every sandbox whose disk limit only the daemon enforces."
+            : asked ? "The daemon is still stopping its sandboxes." : "The daemon was not running."))
         }
         const version = await request<{ version: string }>("version").catch(() => undefined)
         const daemon = version ? await readDaemonFile(dirs) : undefined
@@ -191,7 +223,10 @@ async function main(argv: string[]): Promise<void> {
     const code: ErrorCode = error instanceof PaddockError ? error.code : "runtime"
     const message = (error as Error).message
     if (asJson) console.log(JSON.stringify({ ok: false, error: { code, message, details: error instanceof PaddockError ? error.details : undefined } }))
-    else console.error(`paddock: ${message}`)
+    else if (code === "check-failed" && error instanceof PaddockError && Array.isArray(error.details)) {
+      console.error(`paddock: ${message.split(": ")[0]}. These checks did not hold:`)
+      for (const check of error.details as CheckResult[]) console.error(`  ${MARK[check.status]} ${CHECKLIST.find((entry) => entry.id === check.id)?.title ?? check.id}\n      ${check.detail}`)
+    } else console.error(`paddock: ${message}`)
     process.exit(EXIT[code])
   }
 }

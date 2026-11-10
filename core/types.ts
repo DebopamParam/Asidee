@@ -77,6 +77,8 @@ export interface Provider {
   attachArgv(manifest: Manifest, argv: readonly string[]): string[]
   checks(manifest: Manifest, stage: Stage): Promise<CheckResult[]>
   diskUsedBytes(manifest: Manifest): Promise<number | undefined>
+  // Removes what an interrupted run of this provider may have left on an engine. Called when the daemon starts.
+  sweep(engine: Engine): Promise<void>
 }
 
 export type ErrorCode = "usage" | "not-found" | "conflict" | "dependency" | "check-failed" | "runtime"

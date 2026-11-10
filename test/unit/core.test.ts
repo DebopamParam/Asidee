@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { blockers, CHECKLIST, complete } from "../../core/checks"
 import { Core } from "../../core/core"
 import { fieldValues, loadExtensions, parseExtension } from "../../core/extensions"
-import { configChecks, network } from "../../core/providers/gvisor"
+import { configChecks, gvisorSetup, network, unsafeRuntimeArgs, type GuardState } from "../../core/providers/gvisor"
 import { validSpec } from "../../core/state"
 import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type Stage } from "../../core/types"
 
@@ -29,6 +29,7 @@ function fakeProvider(overrides: Partial<Record<Stage, CheckResult[]>> = {}) {
     attachArgv: () => [],
     checks: async (_manifest, stage) => state.overrides[stage] ?? allPass(stage),
     diskUsedBytes: async () => 0,
+    sweep: async () => {},
   }
   return { provider, state }
 }
@@ -62,7 +63,6 @@ test("a spec keeps only known fields and refuses option-like images", () => {
 })
 
 const manifest: Manifest = { version: 1, name: "demo", id: "abc", engine, spec: validSpec({ name: "demo" }), createdAt: "" }
-const GUARD = 'iifname != "pdk*" accept'
 function inspect(change: (value: any) => void = () => {}) {
   const value = {
     State: { Running: true }, Config: { Labels: {} }, Mounts: [],
@@ -72,13 +72,14 @@ function inspect(change: (value: any) => void = () => {}) {
   }
   change(value); return value
 }
-// guard null: the guard table is not loaded.
-const failing = (value: ReturnType<typeof inspect>, guard: string | null = GUARD, bridge = "pdk123") =>
-  configChecks(value, manifest, guard ?? undefined, bridge).filter((entry) => entry.status === "fail").map((entry) => entry.id)
+const failing = (value: ReturnType<typeof inspect>, guard: GuardState = "intact", bridge = "pdk123") =>
+  configChecks(value, manifest, guard, bridge).filter((entry) => entry.status === "fail").map((entry) => entry.id)
 
 test("a container made the way the provider makes it passes the configuration checks", () => {
   expect(failing(inspect())).toEqual([])
-  expect(configChecks(inspect(), manifest, GUARD, "pdk123").find((entry) => entry.id === "disk")!.status).toBe("weak")
+  expect(configChecks(inspect(), manifest, "intact", "pdk123").find((entry) => entry.id === "disk")!.status).toBe("weak")
+  const unmeasured = { ...manifest, engine: { ...engine, capabilities: { ...engine.capabilities!, diskLimit: "none" as const } } }
+  expect(configChecks(inspect(), unmeasured, "intact", "pdk123").find((entry) => entry.id === "disk")!.status).toBe("unsupported")
 })
 
 test("each way of loosening a container fails its check", () => {
@@ -89,8 +90,13 @@ test("each way of loosening a container fails its check", () => {
   expect(failing(inspect((value) => { value.Mounts = [{ Type: "volume", Source: "/var/lib/docker/volumes/x", Destination: "/data" }] }))).toEqual([])
   expect(failing(inspect((value) => { value.NetworkSettings.Networks.bridge = { IPAddress: "172.17.0.2" } }))).toEqual(["network-guard"])
   expect(failing(inspect((value) => { value.HostConfig.NetworkMode = "host" }))).toEqual(["network-guard"])
-  expect(failing(inspect(), null)).toEqual(["network-guard"])
-  expect(failing(inspect(), GUARD, "br-abc")).toEqual(["network-guard"])
+  expect(failing(inspect(), "missing")).toEqual(["network-guard"])
+  expect(failing(inspect(), "changed")).toEqual(["network-guard"])
+  expect(failing(inspect(), "intact", "br-abc")).toEqual(["network-guard"])
+  expect(failing(inspect((value) => { value.HostConfig.Runtime = "runc" }))).toEqual(["hardening"])
+  expect(failing(inspect((value) => { value.HostConfig.Annotations = { "dev.gvisor.flag.network": "host" } }))).toEqual(["hardening"])
+  expect(failing(inspect((value) => { value.HostConfig.Binds = ["/var/run/docker.sock:/var/run/docker.sock"] }))).toEqual(["mounts"])
+  expect(failing(inspect((value) => { value.HostConfig.DeviceRequests = [{}] }))).toEqual(["hardening"])
   expect(failing(inspect((value) => { value.HostConfig.PortBindings = { "22/tcp": [{}] } }))).toEqual(["inbound"])
   expect(failing(inspect((value) => { value.HostConfig.Memory = 0 }))).toEqual(["limits"])
   expect(failing(inspect((value) => { value.HostConfig.PidsLimit = null }))).toEqual(["limits"])
@@ -133,14 +139,62 @@ test("verify stops a running sandbox when a probe fails, and says why", async ()
   expect(report.sandbox.stopReason).toContain("Cannot reach the host")
 })
 
-test("the disk watch stops a sandbox that passed its limit", async () => {
-  const { provider } = fakeProvider(); const paddock = await core(provider)
-  await paddock.create({ name: "demo", diskGb: 1 })
+test("guard rules that could not be read block a start but do not stop a running sandbox", async () => {
+  const unreadable = configChecks(inspect(), manifest, "unknown", "pdk123")
+  expect(blockers(unreadable).map((entry) => entry.id)).toEqual(["network-guard"])
+  const { provider, state } = fakeProvider(); const paddock = await core(provider)
+  await paddock.create({ name: "demo" })
+  state.overrides.config = unreadable
+  await paddock.enforce()
+  expect((await paddock.get("demo")).status).toBe("running")
+})
+
+test("gVisor flags that open the host are recognized in every spelling", () => {
+  expect(unsafeRuntimeArgs(["--allow-suid", "--overlay2=none", "--net-raw", "--network=sandbox", "--host-uds=none", "--network-processors-per-channel=2", "--ignore-cgroups=false"])).toEqual([])
+  for (const args of [["--network=host"], ["-network=host"], ["--network", "host"], ["--network=none"], ["--host-uds=all"], ["--host-fifo=open"], ["--fsgofer-host-uds"], ["--TESTONLY-unsafe-nonroot"], ["--ignore-cgroups"], ["--allow-flag-override=true"]])
+    expect(unsafeRuntimeArgs(args).length).toBe(1)
+  expect(gvisorSetup("OrbStack", "aarch64")).toContain("~/.orbstack/config/docker.json")
+  expect(gvisorSetup("Ubuntu 24.04", "x86_64")).toContain("/etc/docker/daemon.json")
+})
+
+test("a start that fails halfway does not leave the sandbox running", async () => {
+  const { provider, state } = fakeProvider(); const paddock = await core(provider)
+  await paddock.create({ name: "demo" }); await paddock.stop("demo")
+  provider.start = async () => { state.running = true; throw new Error("DNS could not be set") }
+  await expect(paddock.start("demo")).rejects.toThrow("DNS could not be set")
+  expect(state.running).toBe(false)
+})
+
+test("verifying a stopped sandbox judges its configuration and does not call the rest a failure", async () => {
+  const { provider, state } = fakeProvider(); const paddock = await core(provider)
+  await paddock.create({ name: "demo" }); await paddock.stop("demo")
+  const report = await paddock.verify("demo")
+  expect(report.ok).toBe(true)
+  expect(report.checks.find((entry) => entry.id === "kernel")).toMatchObject({ status: "unknown", detail: "Not checked: the sandbox is not running." })
+  state.overrides.config = allPass("config").map((entry) => entry.id === "inbound" ? { ...entry, status: "fail" as const } : entry)
+  expect((await paddock.verify("demo")).ok).toBe(false)
+})
+
+test("the daemon's pass stops a running sandbox that fails a check or passed its disk limit", async () => {
+  const { provider, state } = fakeProvider(); const paddock = await core(provider)
+  await paddock.create({ name: "demo", diskGb: 1 }); await paddock.create({ name: "other", diskGb: 1 })
+  await paddock.enforce()
+  expect((await paddock.get("demo")).status).toBe("running")
   provider.diskUsedBytes = async () => 2 * 1024 ** 3
-  await paddock.watchDisks()
-  const view = await paddock.get("demo")
-  expect(view.status).toBe("stopped")
-  expect(view.stopReason).toContain("disk watch")
+  await paddock.enforce()
+  expect(await paddock.get("demo")).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("disk watch") })
+  provider.diskUsedBytes = async () => 0
+  await paddock.start("demo")
+  state.overrides.config = allPass("config").map((entry) => entry.id === "network-guard" ? { ...entry, status: "fail" as const, detail: "guard missing" } : entry)
+  await paddock.enforce()
+  expect(await paddock.get("demo")).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("guard missing") })
+})
+
+test("stopping the daemon stops the sandboxes whose disk limit only it enforces", async () => {
+  const { provider } = fakeProvider(); const paddock = await core(provider)
+  await paddock.create({ name: "demo" })
+  expect(await paddock.stopWatched()).toEqual(["demo"])
+  expect(await paddock.get("demo")).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("daemon") })
 })
 
 test("extensions are declarations: bad ones are reported, field values are checked", async () => {

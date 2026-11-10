@@ -28,6 +28,9 @@ Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing depende
 - A name is lowercase letters, digits and hyphens.
 - `exec` needs a running sandbox; it does not start one.
 - If a check fails, report the check's title and detail to the user as they are. Do not work around it.
+- A sandbox can be stopped without you asking: by a failed check, by the disk watch, or because the daemon stopped.
+  `paddock list` shows the reason. Report it; start the sandbox again only if the reason is gone.
+- Long operations print progress lines starting with `…` on stderr. Stdout stays the result.
 - A sandbox has no host folders. Send a text file in with `paddock exec NAME --stdin -- sh -c 'cat > FILE' < local-file`,
   and read one out with `paddock exec NAME -- cat FILE`. Binary files are not supported this way yet.
 

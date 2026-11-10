@@ -105,8 +105,12 @@ function actionForm(sandbox, extension, action) {
   return form
 }
 
-let sandboxes = [], engines = []
+let sandboxes = [], engines = [], drawn = ""
+// Rebuilds the page only when what it shows changed, so the 5-second refresh does not wipe a form someone is typing in.
 function render() {
+  const state = JSON.stringify([sandboxes, engines, extensions, [...open], [...busy], output])
+  if (state === drawn) return
+  drawn = state
   const list = document.getElementById("sandboxes"); list.replaceChildren()
   if (!sandboxes.length) list.append(el("div", { class: "panel muted" }, "No sandboxes yet. Create one below."))
   for (const sandbox of sandboxes) {
@@ -117,6 +121,7 @@ function render() {
       el("div", { class: "row" },
         el("div", { class: "grow" }, el("span", { class: "name" }, sandbox.name), " ", el("span", { class: `badge ${sandbox.status}` }, sandbox.status),
           el("div", { class: "muted" }, `${sandbox.spec.cpus} CPU · ${sandbox.spec.memoryGb} GB memory · ${sandbox.spec.diskGb} GB disk · ${sandbox.engine}`),
+          sandbox.activity ? el("div", { class: "muted" }, `${sandbox.activity}…`) : null,
           sandbox.stopReason ? el("div", { class: "muted" }, sandbox.stopReason) : null),
         sandbox.status === "running" ? button("Stop", "stop", () => api("stop", { name: sandbox.name })) : button("Start", "start", () => api("start", { name: sandbox.name })),
         button("Verify", "verify", async () => { open.add(sandbox.name); await api("verify", { name: sandbox.name }) }),
@@ -140,9 +145,10 @@ function render() {
     engine.capabilities ? el("div", { class: "muted" }, `Kernel isolation: ${engine.capabilities.kernelIsolation} · network guard: ${engine.capabilities.networkGuard ? "yes" : "no"} · disk limit: ${engine.capabilities.diskLimit}`) : null,
     ...engine.problems.map((problem) => el("div", { class: "muted" }, problem)), engine.fix ? el("div", { class: "muted" }, `Fix: ${engine.fix}`) : null))
   if (!engines.length) enginesNode.append(el("div", { class: "panel muted" }, "No engine found. Paddock needs Docker with a gVisor runtime."))
-  const select = document.getElementById("f-engine"); const chosen = select.value
-  select.replaceChildren(...engines.filter((engine) => engine.ready).map((engine) => el("option", { value: engine.id }, engine.label)))
-  if (chosen) select.value = chosen
+  const select = document.getElementById("f-engine"); const chosen = select.value; const ready = engines.filter((engine) => engine.ready)
+  select.replaceChildren(...ready.map((engine) => el("option", { value: engine.id }, engine.label)))
+  if (!ready.length) select.append(el("option", { value: "" }, "No engine is ready"))
+  select.value = ready.some((engine) => engine.id === chosen) ? chosen : ready[0]?.id ?? ""
 }
 
 async function refresh() {
@@ -165,7 +171,8 @@ document.getElementById("create").addEventListener("submit", async (event) => {
 
 ;(async () => {
   try { [checklist, engines, { extensions }] = await Promise.all([api("checklist"), api("engines"), api("extensions")]) } catch {}
-  await refresh(); setInterval(refresh, 5000)
+  await refresh(); setInterval(refresh, 3000)
+  window.paddockRefresh = refresh
 })()
 </script>
 </body>

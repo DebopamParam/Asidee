@@ -2,13 +2,14 @@
 
 Sandboxes for coding agents, on the engine you already have, that are checked instead of assumed.
 
-"Paddock" is a working name. This is an early alpha (0.1.0): the structure is in place and one engine works end to end.
+"Paddock" is a working name. This is an early alpha (0.2.0): the structure is in place and one engine works end to end.
 
 ## What it does
 
 `paddock create demo` makes a sandbox, starts it, and runs a fixed checklist against it: it runs on an isolated kernel,
 it has no host folders, it cannot reach the host, other sandboxes or the LAN, and so on. A sandbox that fails a blocking
-check does not run. `paddock verify demo` runs the checklist again at any time.
+check does not run. `paddock verify demo` runs the checklist again at any time, and the daemon repeats the cheap half of
+it every 30 seconds and stops a sandbox that stopped holding.
 
 Each check reports one of six results, and says whether it was probed (tried against the live sandbox) or inspected (read
 from the engine's configuration):
@@ -28,7 +29,10 @@ Works, and was run on OrbStack on an Apple Silicon Mac:
 
 - The gVisor provider: any local Docker engine with a gVisor runtime. Create, start, stop, remove, exec, shell.
 - The checklist, with live network probes that have controls, and a stop when a blocking check fails.
-- A disk limit that the daemon watches (it stops a sandbox that passed its limit; it is not a hard cap).
+- The firewall guard is compared rule for rule with the one Paddock ships, so an added or removed rule shows as changed.
+- A disk limit that the daemon watches (it stops a sandbox that passed its limit; it is not a hard cap). It needs a
+  gVisor runtime registered with `--overlay2=none`; without it the checklist says there is no disk limit.
+- A stopped sandbox says why it was stopped, in `paddock list` and the dashboard.
 - The daemon, the CLI with `--json`, a web dashboard, and extensions.
 
 Not built yet:
@@ -52,6 +56,9 @@ bin/paddock verify demo
 bin/paddock ui --open              # the dashboard
 bin/paddock remove demo --confirm demo
 ```
+
+Stopping the daemon (`paddock daemon stop`) stops the sandboxes whose disk limit it watches, because nothing would
+enforce the limit afterwards. Their contents stay; `paddock start` brings them back.
 
 `bun run build` makes a standalone `dist/paddock`. `bun test` runs the unit tests; `bun run test:live` creates a real
 sandbox and expects every blocking check to hold.

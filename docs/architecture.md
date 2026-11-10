@@ -24,17 +24,33 @@ out as "could not be checked", never as a pass.
 | Isolated kernel | yes | after start | The runtime is gVisor, and the kernel inside identifies as gVisor. |
 | No privileged mode, host namespaces, capabilities, devices | yes | before start | Engine configuration. |
 | No host folders | yes | before start | Engine configuration. |
-| Own network, guard loaded | yes | before start | Engine configuration and the loaded firewall rules. |
+| Own network, guard loaded | yes | before start | Engine configuration, and the loaded firewall rules compared rule for rule with the shipped ones. |
 | No open ports | yes | before start | Engine configuration. |
 | Memory, process, CPU limits | yes | before start | Engine configuration. |
-| Disk limit | no | before start | The engine's capability: hard, watched or none. |
+| Disk limit | no | before start | The engine's capability: hard, watched or none. Watched needs a runtime with `--overlay2=none`. |
 | Cannot reach the host | yes | verify | Live probe with controls. |
 | Cannot reach other sandboxes | yes | verify | Live probe with controls. |
 | Cannot reach LAN, tailnet, metadata, IPv6 | yes | verify | The loaded rules, plus one live attempt at the metadata address. |
 | Internet access | no | verify | Live attempt; a disclosure. |
 | Logins inside | no | verify | Looks for the usual credential files; a disclosure. |
 
-"Verify" runs after every create and on `paddock verify`. A start runs the first seven.
+"Verify" runs after every create and on `paddock verify`. A start runs the first seven. On a stopped sandbox, verify
+reports the configuration checks only and marks the rest as not checked.
+
+The isolated-kernel check also refuses a gVisor runtime registered with a flag that opens a path to the host or
+switches a limit off (`unsafeRuntimeArgs` in `core/providers/gvisor.ts`), and `paddock doctor` does not offer one.
+
+### Staying true after the start
+
+Every 30 seconds the daemon repeats the first seven checks and the disk measurement on each running sandbox, and stops
+one that fails, recording the reason. A check that could not be made in that pass does not stop a running sandbox; only
+a failure does. The probes are not repeated on the timer: they start containers, and `paddock verify` runs them.
+
+### How the guard is compared
+
+The helper loads the shipped rules into an empty network namespace of its own, lists them, and compares that listing
+byte for byte with the listing of the engine's tables. "Loaded" therefore means these rules and no others; a rule added
+in front of the drops shows as changed, and the sandbox is stopped.
 
 ### How the network probes work
 
@@ -53,14 +69,24 @@ sandbox's image, so a tampered image cannot fake a result or run as root on the 
 - **Extensions run commands on this machine.** Install one the way you would install any script.
 - **Egress is open.** A sandbox can reach the internet, so anything inside it, including logins you copy in, can be
   sent out. The checklist discloses both.
-- **The disk limit is watched, not capped,** on engines without a hard cap. A sandbox can overshoot before it is
-  stopped, and nothing watches while the daemon is not running.
+- **The disk limit is watched, not capped,** on engines without a hard cap. A sandbox can write for up to 30 seconds
+  past its limit before it is stopped. A clean daemon stop stops the watched sandboxes first; after a daemon crash
+  nothing watches until a daemon runs again (its first act is a pass over every sandbox). Volumes an image declares are
+  counted.
+- **Between two passes, up to 30 seconds, a weakened sandbox keeps running.** So does one whose guard was changed by
+  something with root on the engine's host.
 - **The LAN block is inspected, not probed.** There is no listener on your LAN to test against.
-- **gVisor's process limit is inspected only.** No fork-bomb test was run.
+- **The limits were measured once, on OrbStack, not on every engine.** There, passing the memory limit killed the
+  sandbox, and a process limit of 200 made forks inside fail. The checklist reads the configured limits; it does not
+  repeat the measurement.
+- **Only OrbStack on an Apple Silicon Mac was run.** Docker Desktop, Linux hosts and Windows are untested.
 
 ## The daemon
 
-One daemon per user owns all state and serializes operations per sandbox, so two clients cannot race. It listens on:
+One daemon per user owns all state and serializes operations per sandbox, so two clients cannot race. A CLI that finds
+a daemon of another version replaces it without stopping the sandboxes. At its start a daemon removes probe containers
+and networks an interrupted verify left behind. A daemon that is stopping refuses new work and a client waits for it to
+finish, so a second daemon never runs beside it. It listens on:
 
 - a Unix socket in the state folder (mode 0600), used by the CLI;
 - `127.0.0.1` on port 7717 (or a free port), used by the dashboard. Requests need the token from `paddock ui` and a
