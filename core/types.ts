@@ -9,6 +9,7 @@ export type SandboxSpec = {
   pids: number
   // The sandbox may use this much disk. How strictly that holds depends on the engine: see Capabilities.diskLimit.
   diskGb: number
+  docker: boolean
 }
 
 export type Capabilities = {
@@ -16,6 +17,7 @@ export type Capabilities = {
   // hard: writes fail at the limit. watched: the daemon stops the sandbox after it passes the limit. none: no limit.
   diskLimit: "hard" | "watched" | "none"
   networkGuard: boolean
+  docker: boolean
 }
 
 // One place sandboxes can run: a provider plus the engine it found (a Docker context, for example).
@@ -32,7 +34,7 @@ export type Engine = {
 }
 
 export type CheckId =
-  | "kernel" | "hardening" | "mounts" | "network-guard" | "inbound" | "limits" | "disk"
+  | "kernel" | "hardening" | "mounts" | "network-guard" | "inbound" | "limits" | "disk" | "docker"
   | "net-host" | "net-peers" | "net-private" | "egress" | "credentials"
 
 // pass: holds. weak: holds in a weaker form than the title says (the detail says how). fail: does not hold.

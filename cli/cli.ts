@@ -15,7 +15,7 @@ import { PaddockError, type CheckResult, type Engine, type ErrorCode, type RunRe
 const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, not assumed
 
   paddock doctor                         engines on this machine and what each one needs
-  paddock create NAME [--image IMAGE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]
+  paddock create NAME [--docker] [--image IMAGE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]
   paddock list
   paddock start NAME | stop NAME
   paddock verify NAME                    run every check against the sandbox
@@ -114,10 +114,10 @@ async function main(argv: string[]): Promise<void> {
   // Progress lines only for a person: --json output stays one line.
   const watching = (name: string) => asJson ? undefined : name
   const parse = (options: Record<string, { type: "string" | "boolean" }>, args = rest) => {
-    try { return parseArgs({ args, options, allowPositionals: true }) as { values: Record<string, string | undefined>; positionals: string[] } }
+    try { return parseArgs({ args, options, allowPositionals: true }) }
     catch (error) { throw new PaddockError("usage", (error as Error).message) }
   }
-  const need = (value: string | undefined, what: string) => { if (!value) throw new PaddockError("usage", `Missing ${what}. See \`paddock help\`.`); return value }
+  const need = (value: string | boolean | undefined, what: string) => { if (typeof value !== "string" || !value) throw new PaddockError("usage", `Missing ${what}. See \`paddock help\`.`); return value }
 
   try {
     switch (command) {
@@ -129,17 +129,17 @@ async function main(argv: string[]): Promise<void> {
           if (!engines.length) console.log("No engine found. Paddock needs Docker (OrbStack, a Linux host, Colima, …) with a gVisor runtime.")
           for (const engine of engines) {
             console.log(`${engine.ready ? "✓" : "✗"} ${engine.label}  [${engine.id}]`)
-            if (engine.capabilities) console.log(`    kernel isolation: ${engine.capabilities.kernelIsolation}; network guard: ${engine.capabilities.networkGuard ? "yes" : "no"}; disk limit: ${engine.capabilities.diskLimit}`)
+            if (engine.capabilities) console.log(`    kernel isolation: ${engine.capabilities.kernelIsolation}; network guard: ${engine.capabilities.networkGuard ? "yes" : "no"}; disk limit: ${engine.capabilities.diskLimit}; inner Docker: ${engine.capabilities.docker ? "yes" : "no"}`)
             for (const problem of engine.problems) console.log(`    ${problem}`)
             if (engine.fix) console.log(`    Fix: ${engine.fix}`)
           }
         })
       }
       case "create": {
-        const { values, positionals } = parse({ image: { type: "string" }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" }, pids: { type: "string" }, engine: { type: "string" } })
+        const { values, positionals } = parse({ docker: { type: "boolean" }, image: { type: "string" }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" }, pids: { type: "string" }, engine: { type: "string" } })
         const name = need(positionals[0], "a name")
         const made = await call<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }> }>("create",
-          { name, image: values.image, cpus: values.cpus, memoryGb: values.memory, diskGb: values.disk, pids: values.pids, engine: values.engine }, watching(name))
+          { name, docker: values.docker, image: values.image, cpus: values.cpus, memoryGb: values.memory, diskGb: values.disk, pids: values.pids, engine: values.engine }, watching(name))
         return out(made, () => {
           printSandbox(made.sandbox); printChecks(made.checks)
           for (const hook of made.hooks) console.log(`\n  ${hook.extension} (after create): ${hook.exitCode === 0 ? "done" : `failed with exit ${hook.exitCode}`}${hook.output ? `\n${hook.output}` : ""}`)

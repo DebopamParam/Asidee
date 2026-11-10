@@ -24,6 +24,8 @@ const args = process.argv.slice(2)
 const only = args.includes("--only") ? args[args.indexOf("--only") + 1]!.split(",") : undefined
 const PREFIX = `ev${Math.random().toString(36).slice(2, 6)}`
 const A = `${PREFIX}-a`; const B = `${PREFIX}-b`
+const INNER = `${PREFIX}-inner`
+const DOCKER_IMAGE = "docker/sandbox-templates:shell-docker"
 
 type Sh = { code: number; out: string; err: string }
 async function sh(argv: string[], options: { stdin?: string; env?: Record<string, string>; timeoutMs?: number; cwd?: string } = {}): Promise<Sh> {
@@ -325,6 +327,254 @@ ev("H14", "Two sandboxes verified at the same moment are both probed, not one of
     const weak = (verify.reply.data.checks as Array<{ id: string; evidence: string; status: string }>).filter((check) => check.id.startsWith("net-") && !(check.status === "pass" && check.evidence === "probed"))
     expect(weak.length === 0, `not probed: ${weak.map((check) => `${check.id} (${check.status}, ${check.evidence})`).join(", ")}`)
   }
+})
+
+// I: Docker inside gVisor. These commands go straight to the engine, outside Paddock.
+const innerDocker = (name: string, argv: string[], options: Parameters<typeof sh>[1] = {}) =>
+  docker(["exec", "-u", "0", containerOf(name), "docker", "--host", "unix:///var/run/docker.sock", ...argv], options)
+const innerRun = (name: string, argv: string[], options: Parameters<typeof sh>[1] = {}) => innerDocker(name, ["run", "--rm", "alpine:latest", ...argv], options)
+const innerReaches = async (name: string, ip: string, port: string) => {
+  const attempt = await innerRun(name, ["nc", "-w", "2", ip, port], { timeoutMs: 20_000 })
+  expect(attempt.code === 0 || attempt.code === 1, `the inner probe could not run (exit ${attempt.code}): ${attempt.err}`)
+  return answers(attempt)
+}
+async function ensureInner(): Promise<void> {
+  if (!await view(INNER)) {
+    const made = await pdkJson(["create", INNER, "--docker", "--cpus", "1", "--memory", "1", "--disk", "4", "--image", DOCKER_IMAGE])
+    expect(made.reply.ok, `Docker create failed: ${made.reply.error?.message}`)
+  } else await ensure(INNER)
+}
+const dockerVolumeName = async (name: string): Promise<string> => (await inspect(name)).Mounts.find((mount: { Destination: string }) => mount.Destination === "/var/lib/docker")?.Name
+const volumeBytes = async (volume: string) => {
+  const du = await docker(["run", "--rm", "--runtime", "runc", "--network", "none", "--mount", `type=volume,src=${volume},dst=/data,readonly,volume-nocopy`, HELPER_IMAGE, "du", "-sk", "/data"])
+  const bytes = Number(du.out.split(/\s/)[0]) * 1024
+  expect(du.code === 0 && Number.isFinite(bytes), `could not measure Docker's data externally: ${du.err}`)
+  return bytes
+}
+
+ev("I01", "NET_ADMIN and SYS_ADMIN are minimal additions: removing either breaks inner Docker", async () => {
+  const failures: string[] = []
+  for (const caps of [["SYS_ADMIN"], ["NET_ADMIN"], []]) {
+    const name = `${PREFIX}-caps`
+    try {
+      const created = await docker(["run", "-d", "--name", name, "--runtime", engine!.data.runtime, "--memory", "1g", "--memory-swap", "1g", "--cpus", "1", "--pids-limit", "4096",
+        ...caps.flatMap((cap) => ["--cap-add", cap]), "--mount", "type=volume,dst=/var/lib/docker,volume-nocopy", "-u", "0", "--entrypoint", "sh", DOCKER_IMAGE, "-c", "exec dockerd --iptables=false --ip6tables=false --storage-driver=vfs"])
+      expect(created.code === 0, `the capability experiment could not start: ${created.err}`)
+      let ready = false
+      for (let attempt = 0; attempt < 30; attempt++) {
+        if ((await docker(["exec", name, "docker", "info"])).code === 0) { ready = true; break }
+        if ((await docker(["inspect", "--format", "{{.State.Running}}", name])).out.trim() !== "true") break
+        await Bun.sleep(500)
+      }
+      const log = await docker(["logs", name])
+      if (!caps.includes("NET_ADMIN")) {
+        expect(!ready && /operation not permitted|permission denied/i.test(log.out + log.err), `missing NET_ADMIN did not produce a permission failure: ${log.out}${log.err}`)
+        failures.push(`${caps.join("+") || "none"}: dockerd cannot create its bridge`)
+      } else {
+        expect(ready, `NET_ADMIN-only daemon failed for an unrelated reason: ${log.out}${log.err}`)
+        const run = await docker(["exec", name, "docker", "run", "--rm", "alpine:latest", "echo", "inner-ok"])
+        expect(run.code !== 0 && /unshare: operation not permitted/i.test(run.err), `missing SYS_ADMIN failed differently: ${run.out}${run.err}`)
+        failures.push("NET_ADMIN: image extraction cannot unshare")
+      }
+    } finally { await docker(["rm", "-f", "-v", name]) }
+  }
+  await ensureInner()
+  const output = await innerRun(INNER, ["echo", "inner-ok"])
+  expect(output.code === 0 && output.out.trim() === "inner-ok", `both additions failed: ${output.out}${output.err}`)
+  const caps = (await inspect(INNER)).HostConfig.CapAdd.map((cap: string) => cap.replace(/^CAP_/, "")).sort()
+  expect(JSON.stringify(caps) === JSON.stringify(["NET_ADMIN", "SYS_ADMIN"]), `actual additions: ${caps}`)
+  return `${failures.join("; ")}; both additions: docker run prints inner-ok. Minimal relative to Docker's unchanged default capabilities, not a proof about alternate Docker implementations.`
+})
+
+ev("I02", "An inner container runs a small image and reaches the internet over HTTPS", async () => {
+  await ensureInner()
+  expect(/gvisor/i.test((await innerRun(INNER, ["cat", "/proc/version"])).out), "the inner container does not identify gVisor's kernel")
+  const output = await innerRun(INNER, ["sh", "-c", "echo inner-ok; wget -T 20 -qO- https://example.com"])
+  expect(output.code === 0 && output.out.startsWith("inner-ok\n") && output.out.includes("Example Domain"), `inner HTTPS failed: ${output.out}${output.err}`)
+})
+
+for (const kind of ["host", "peer", "private"] as const) ev({ host: "I03", peer: "I04", private: "I05" }[kind], `An inner container cannot reach the ${kind === "private" ? "stand-in LAN and tailnet addresses" : kind === "peer" ? "other sandbox" : "engine's host"}, with working controls`, async () => {
+  await ensureInner(); await hostHelper()
+  let listener: ReturnType<typeof Bun.spawn> | undefined
+  let targets: string[]; let port: string
+  if (kind === "peer") {
+    await ensure(B, { pids: 256 })
+    listener = Bun.spawn(["docker", "--context", context, "exec", containerOf(B), "nc", "-lk", "-p", "7777", "-e", "echo", REPLY], { stdout: "ignore", stderr: "ignore" })
+    targets = [await sandboxIp(B)]; port = "7777"
+  } else { targets = kind === "host" ? [await gatewayOf(INNER)] : farAddresses; port = kind === "host" ? HOST_PORT : FAR_PORT }
+  try {
+    expect(targets.length > 0, "no target was available")
+    for (const ip of targets) {
+      expect(await fromHost(ip, port), `the host could not reach the control at ${ip}:${port}`)
+      expect(!await innerReaches(INNER, ip, port), `an inner container reached ${ip}:${port}`)
+    }
+    // Keep the enforcement timer from racing the deliberately open control window.
+    expect((await socket("shutdown", { keepSandboxes: true })).reply.ok, "could not pause enforcement for the controls")
+    expect(await until(async () => !await Bun.file(join(env.PADDOCK_STATE_DIR, "daemon.sock")).exists(), 15), "the daemon did not exit")
+    await asRoot(guardTamper.remove)
+    for (const ip of targets) expect(await innerReaches(INNER, ip, port), `the same inner probe did not connect to ${ip} with the guard removed`)
+    return `${targets.join(", ")}; the host reached every listener, and the same inner probes connected with the guard removed`
+  } finally {
+    const guard = await docker(["run", "--rm", "-i", "--privileged", "--network", "host", "--runtime", "runc", HELPER_IMAGE, "nft", "-f", "-"], { stdin: await readFile(join(ROOT, "core/providers/guard.nft"), "utf8") })
+    expect(guard.code === 0, `could not restore the guard before restarting enforcement: ${guard.err}`)
+    const restored = await socket("start", { name: INNER })
+    expect(restored.reply.ok, `could not restore the guard: ${restored.reply.error?.message}`)
+    if (listener) { listener.kill(); await docker(["exec", containerOf(B), "pkill", "nc"]) }
+  }
+})
+
+ev("I06", "The checklist includes live network attempts from an inner container", async () => {
+  await ensureInner()
+  await docker(["rm", "-f", HOST])
+  expect(await until(async () => !(await asRoot("ip -br link")).out.includes(`${PREFIX}a`), 15), "the eval listeners did not go away")
+  const verify = await pdkJson(["verify", INNER])
+  expect(verify.reply.ok && verify.reply.data.ok, `verify failed: ${verify.out}${verify.err}`)
+  for (const id of ["net-host", "net-peers", "net-private"]) {
+    const check = verify.reply.data.checks.find((entry: { id: string }) => entry.id === id)
+    expect(check.status === "pass" && check.evidence === "probed" && /inner Docker container/.test(check.detail), `no inner evidence for ${id}: ${JSON.stringify(check)}`)
+  }
+})
+
+ev("I07", "Inner Docker survives stop/start, a daemon enforce pass, and a daemon restart; its death stops the sandbox", async () => {
+  await ensureInner()
+  expect((await innerDocker(INNER, ["create", "--name", "persisted", "alpine:latest", "echo", "persisted-ok"])).code === 0, "could not create a persistent inner container")
+  try {
+    expect((await pdk(["stop", INNER])).code === 0 && (await pdk(["start", INNER])).code === 0, "stop/start failed")
+    const persisted = await innerDocker(INNER, ["start", "-a", "persisted"])
+    expect(persisted.code === 0 && persisted.out.trim() === "persisted-ok", `Docker data did not survive: ${persisted.out}${persisted.err}`)
+    await Bun.sleep(32_000)
+    expect((await innerRun(INNER, ["echo", "after-enforce"])).out.trim() === "after-enforce", "inner Docker did not survive the enforce pass")
+    const daemon = await daemonFile(); process.kill(daemon.pid, "SIGKILL")
+    expect((await pdk(["list"])).code === 0 && (await innerDocker(INNER, ["info"])).code === 0, "Docker did not survive daemon recovery")
+    expect((await innerRun(INNER, ["wget", "-T", "20", "-qO-", "https://example.com"])).code === 0, "HTTPS failed after the restart")
+  } finally { await innerDocker(INNER, ["rm", "-f", "persisted"]) }
+  const kill = await docker(["exec", "-u", "0", containerOf(INNER), "sh", "-c", "kill -KILL 1"])
+  expect(await until(async () => !await running(INNER), 15), `the sandbox stayed up after killing dockerd (exec exit ${kill.code}: ${kill.err})`)
+  const dead = await inspect(INNER)
+  expect(dead.State.ExitCode === 137 && !dead.State.OOMKilled, `dockerd did not exit from the requested kill: ${JSON.stringify(dead.State)}`)
+  expect(/Docker.*ended/.test((await view(INNER))?.stopReason ?? ""), "the stop reason does not name Docker")
+  expect((await pdk(["start", INNER])).code === 0 && (await innerRun(INNER, ["echo", "recovered"])).out.trim() === "recovered", "start did not recover Docker")
+})
+
+ev("I08", "An inner container cannot exceed the sandbox's memory limit, even with its own privileged mode", async () => {
+  const name = `${PREFIX}-imem`
+  await ensure(name, { image: DOCKER_IMAGE, docker: true, memoryGb: 1, diskGb: 2 })
+  try {
+    const control = await innerRun(name, ["sh", "-c", "head -c 16777216 /dev/zero | wc -c"])
+    expect(control.code === 0 && control.out.trim() === "16777216", "the bounded memory control did not run")
+    const hog = await innerDocker(name, ["run", "--rm", "--privileged", "--memory", "2g", "alpine:latest", "tail", "/dev/zero"], { timeoutMs: 120_000 })
+    expect(hog.code !== 0 && hog.code !== 124, `the memory hog ended ${hog.code}: ${hog.err}`)
+    const after = await inspect(name)
+    expect(!after.State.Running && after.State.OOMKilled, `the outer memory limit did not kill the sandbox: ${JSON.stringify(after.State)}`)
+    expect((await docker(["info", "--format", "{{.ServerVersion}}"])).code === 0, "the engine was harmed")
+    return `bounded 16 MiB control passed; hog exit ${hog.code}; outer OOMKilled=true under 1 GiB despite an inner 2 GiB limit`
+  } finally { await pdk(["remove", name, "--confirm", name]) }
+})
+
+ev("I09", "Inner image pulls and writes are measured outside the sandbox, and the disk watch stops excess use", async () => {
+  const name = `${PREFIX}-idisk`
+  await ensure(name, { image: DOCKER_IMAGE, docker: true, diskGb: 1 })
+  const volume = await dockerVolumeName(name)
+  try {
+    const before = await volumeBytes(volume)
+    expect((await innerDocker(name, ["pull", "busybox:stable"])).code === 0, "the inner image pull failed")
+    const pulled = await volumeBytes(volume)
+    expect(pulled > before + 1024 ** 2, `the image pull added only ${pulled - before} measured bytes`)
+    const write = await innerDocker(name, ["run", "--name", "fill", "alpine:latest", "dd", "if=/dev/zero", "of=/big", "bs=1M", "count=1300"], { timeoutMs: 120_000 })
+    const written = await volumeBytes(volume)
+    const layer = Number((await docker(["inspect", "--size", "--format", "{{.SizeRw}}", containerOf(name)])).out.trim())
+    expect(written > pulled + 512 * 1024 ** 2 && written + layer > 1024 ** 3, `the inner write is missing from the external measurement (${written - pulled} bytes, exit ${write.code})`)
+    expect(await until(async () => !await running(name), 75), "the sandbox ran 75 s past its disk limit")
+    expect(await until(async () => /disk watch/i.test((await view(name))?.stopReason ?? ""), 5), "it stopped for a reason other than the watched measurement")
+    return `image pull +${pulled - before} B; inner write +${written - pulled} B; daemon stopped the 1 GiB sandbox for disk use`
+  } finally { await pdk(["remove", name, "--confirm", name]) }
+})
+
+ev("I10", "A Docker sandbox with an extra capability or privileged mode is refused at start and stopped if running", async () => {
+  for (const tamper of [["--cap-add", "SYS_PTRACE"], ["--privileged"]]) {
+    const name = `${PREFIX}-itamper`
+    await ensure(name, { image: DOCKER_IMAGE, docker: true, diskGb: 2 })
+    const original = await inspect(name)
+    const volume = await dockerVolumeName(name)
+    await docker(["rm", "-f", "-v", containerOf(name)])
+    try {
+      const made = await docker(["create", "--name", containerOf(name), "--label", `dev.paddock.name=${name}`, "--label", `dev.paddock.id=${original.Config.Labels["dev.paddock.id"]}`,
+        "--runtime", engine!.data.runtime, "--network", `paddock-net-${name}`, "--memory", "1g", "--memory-swap", "1g", "--cpus", "1", "--pids-limit", "4096",
+        "--cap-add", "NET_ADMIN", "--cap-add", "SYS_ADMIN", ...tamper, "--mount", `type=volume,src=${volume},dst=/var/lib/docker`, "--entrypoint", "sleep", DOCKER_IMAGE, "infinity"])
+      expect(made.code === 0, `the tamper container could not be made: ${made.err}`)
+      const refused = await pdkJson(["start", name])
+      expect(refused.code === 6 && /capabilities|privileged/.test(refused.reply.error?.message ?? "") && !await running(name), `start failed to catch tamper: ${refused.out}${refused.err}`)
+      expect((await docker(["start", containerOf(name)])).code === 0, "could not start the tamper container behind Paddock's back")
+      expect(await until(async () => !await running(name), 60), "the daemon did not stop the tamper container")
+      expect(await until(async () => /undeclared capabilities/.test((await view(name))?.stopReason ?? ""), 5), "the daemon did not record the hardening failure")
+    } finally { await pdk(["remove", name, "--confirm", name]) }
+  }
+})
+
+ev("I11", "Without --docker, no capabilities are added and even root cannot start the inner daemon", async () => {
+  const name = `${PREFIX}-ino`
+  await ensure(name, { image: DOCKER_IMAGE, docker: false, diskGb: 2 })
+  try {
+    const data = await inspect(name)
+    expect(!data.HostConfig.Privileged && !(data.HostConfig.CapAdd ?? []).length, "a default sandbox gained extra capabilities")
+    const daemon = await docker(["exec", "-u", "0", containerOf(name), "dockerd", "--iptables=false", "--ip6tables=false", "--storage-driver=vfs"], { timeoutMs: 20_000 })
+    expect(daemon.code !== 0 && daemon.code !== 124 && /operation not permitted|permission denied/i.test(daemon.out + daemon.err), `dockerd was not denied: ${daemon.code} ${daemon.out}${daemon.err}`)
+    expect((await innerDocker(name, ["info"])).code !== 0, "an inner daemon answered without the option")
+    return "no CapAdd; dockerd fails with a permission error even as root"
+  } finally { await pdk(["remove", name, "--confirm", name]) }
+})
+
+ev("I12", "The docker default is a strict boolean and cannot smuggle engine flags", async () => {
+  const config = join(env.PADDOCK_CONFIG_DIR, "config.json"); const good = await readFile(config, "utf8"); const name = `${PREFIX}-idefault`
+  try {
+    for (const docker of ["true", "false", 1, 0, null, {}, [true]]) {
+      expect((await socket("create", { name, docker })).status === 400, `docker=${JSON.stringify(docker)} was accepted`)
+      await writeFile(config, JSON.stringify({ defaults: { docker } }))
+      expect((await pdkJson(["create", name])).code === 2, `invalid docker default ${JSON.stringify(docker)} was accepted`)
+      await writeFile(config, good)
+    }
+    await writeFile(config, JSON.stringify({ defaults: { image: DOCKER_IMAGE, docker: true, diskGb: 2, memoryGb: 1 } }))
+    const made = await pdkJson(["create", name])
+    expect(made.reply.ok && made.reply.data.sandbox.spec.docker === true && (await innerDocker(name, ["info"])).code === 0, `docker default was not used: ${made.out}${made.err}`)
+  } finally { await writeFile(config, good); await pdk(["remove", name, "--confirm", name]) }
+})
+
+ev("I13", "Removing a Docker sandbox removes its container, network, inner images and private volume", async () => {
+  await ensureInner()
+  const data = await inspect(INNER); const volume = await dockerVolumeName(INNER)
+  expect(volume && data.Mounts.every((mount: { Type: string }) => mount.Type === "volume"), "Docker data is not a private engine volume")
+  expect(!(data.HostConfig.Binds ?? []).length, "a host folder is mounted")
+  expect((await innerDocker(INNER, ["image", "ls", "-q"])).out.trim(), "no inner image exists to remove")
+  expect((await pdk(["remove", INNER, "--confirm", INNER])).code === 0, "remove failed")
+  expect(!await inspect(INNER), "the container was left behind")
+  expect((await docker(["network", "inspect", `paddock-net-${INNER}`])).code !== 0, "the network was left behind")
+  expect((await docker(["volume", "inspect", volume])).code !== 0, "the Docker data volume was left behind")
+  const missing = `${PREFIX}-imissing`
+  await ensure(missing, { image: DOCKER_IMAGE, docker: true, diskGb: 2 })
+  const orphan = await dockerVolumeName(missing)
+  expect((await docker(["rm", "-f", "-v", containerOf(missing)])).code === 0, "could not remove the container behind Paddock's back")
+  expect((await pdk(["remove", missing, "--confirm", missing])).code === 0, "remove failed with a missing container")
+  expect((await docker(["volume", "inspect", orphan])).code !== 0, "a missing container left its Docker volume behind")
+})
+
+ev("I14", "An engine volume backed by a host folder is refused before a Docker sandbox starts", async () => {
+  const name = `${PREFIX}-ibind`
+  await ensure(name, { image: DOCKER_IMAGE, docker: true, diskGb: 2 })
+  const data = await inspect(name); const volume = await dockerVolumeName(name)
+  try {
+    expect((await pdk(["stop", name])).code === 0, "could not stop the volume test sandbox")
+    expect((await docker(["rm", "-v", containerOf(name)])).code === 0, "could not remove its container")
+    expect((await docker(["volume", "rm", volume])).code === 0, "could not replace its data volume")
+    const made = await docker(["volume", "create", "--label", `dev.paddock.id=${data.Config.Labels["dev.paddock.id"]}`, "--label", `dev.paddock.name=${name}`, "--opt", "type=none", "--opt", "o=bind", "--opt", "device=/tmp", volume])
+    expect(made.code === 0, `could not create the bind-backed control volume: ${made.err}`)
+    const created = await docker(["create", "--name", containerOf(name), "--label", `dev.paddock.id=${data.Config.Labels["dev.paddock.id"]}`, "--label", `dev.paddock.name=${name}`,
+      "--runtime", engine!.data.runtime, "--network", `paddock-net-${name}`, "--memory", "1g", "--memory-swap", "1g", "--cpus", "1", "--pids-limit", "4096", "--cap-add", "NET_ADMIN", "--cap-add", "SYS_ADMIN",
+      "--mount", `type=volume,src=${volume},dst=/var/lib/docker,volume-nocopy`, "--entrypoint", "sleep", DOCKER_IMAGE, "infinity"])
+    expect(created.code === 0 && (await inspect(name)).Mounts[0].Type === "volume", "the control does not look like an engine volume")
+    const refused = await pdkJson(["start", name])
+    expect(refused.code === 6 && /host-folder binds/.test(refused.reply.error?.message ?? "") && !await running(name), `the disguised host folder was not refused: ${refused.out}${refused.err}`)
+    return "the engine reports Type=volume; volume inspect exposes device=/tmp,o=bind; start refuses it without running the container"
+  } finally { await pdk(["remove", name, "--confirm", name]) }
 })
 
 // T: a sandbox that stops holding is caught.
@@ -637,7 +887,7 @@ ev("F06", "Every command prints one line of JSON with --json, for results and fo
   return `${commands.length} commands`
 })
 
-ev("F07", "The skill tells an agent only true things: its commands exist, and it lists exactly the API's methods", async () => {
+ev("F07", "The skill's Paddock commands and flags exist, and it lists exactly the API's methods", async () => {
   const skill = await readFile(join(ROOT, "skill/SKILL.md"), "utf8")
   const commands = new Set([...skill.matchAll(/`?paddock ([a-z]+)(?: (list|run|status|stop))?/g)].map((match) => match[1]!))
   for (const command of commands) {
@@ -654,7 +904,11 @@ ev("F07", "The skill tells an agent only true things: its commands exist, and it
   const offered = [...source.matchAll(/^\s{4}([a-z]+): \{ run:(.*)$/gm)].filter((match) => !match[2]!.includes("socketOnly")).map((match) => match[1]!)
   const unlisted = offered.filter((method) => !listed.includes(method) && method !== "version")
   expect(unlisted.length === 0, `the skill does not mention ${unlisted.join(", ")}`)
-  for (const flag of [...skill.matchAll(/\[(--[a-z]+)/g)].map((match) => match[1]!)) expect((await pdk(["help"])).out.includes(flag), `the skill uses ${flag}, which help does not list`)
+  const help = (await pdk(["help"])).out
+  // Extension commands have their own flags; arguments after exec's -- belong to the command inside the sandbox.
+  const commandsWithFlags = [...skill.matchAll(/\bpaddock ([^`\n]+)/g)].map((match) => match[1]!.split(" -- ")[0]!)
+  for (const flag of new Set(commandsWithFlags.flatMap((command) => [...command.matchAll(/--[a-z][a-z-]*/g)].map((match) => match[0]))))
+    expect(help.includes(flag), `the skill uses the Paddock flag ${flag}, which help does not list`)
   const codes = /Exit codes: ([^\n]+)/.exec(skill)?.[1]; expect(codes && (await pdk(["help"])).out.includes(codes), "the skill's exit codes differ from the CLI's")
 })
 
@@ -810,7 +1064,7 @@ ev("U11", "The default image (no --image) makes a sandbox that passes every bloc
   const made = await socket("create", { name, image, cpus: 1, memoryGb: 2, diskGb: 20 })
   try {
     expect(made.reply.ok, `create failed: ${made.reply.error?.message}`)
-    const bad = (made.reply.data.checks as Array<{ id: string; status: string }>).filter((check) => CHECKLIST.find((item) => item.id === check.id)!.blocking && check.status !== "pass")
+    const bad = (made.reply.data.checks as Array<{ id: string; status: string }>).filter((check) => CHECKLIST.find((item) => item.id === check.id)!.blocking && check.status !== "pass" && !(check.id === "docker" && check.status === "info" && !made.reply.data.sandbox.spec.docker))
     expect(bad.length === 0, `not passing: ${bad.map((check) => `${check.id} ${check.status}`).join(", ")}`)
     expect((await pdk(["exec", name, "--user", "agent", "--", "sh", "-c", "id -un && command -v git node"])).code === 0, "the image's agent user, git or node is missing")
   } finally { await socket("remove", { name, confirm: name }) }
@@ -940,7 +1194,7 @@ ev("P02", "The Linux binary, run on Linux, creates a sandbox that passes every b
     const made = await inside(["--json", "create", name, "--image", "alpine:latest", "--cpus", "1", "--memory", "1", "--disk", "1"])
     const reply = JSON.parse(made.out || "{}")
     expect(reply.ok, `create on Linux failed: ${reply.error?.message ?? made.err}`)
-    const bad = reply.data.checks.filter((check: { id: string; status: string }) => CHECKLIST.find((item) => item.id === check.id)!.blocking && check.status !== "pass")
+    const bad = reply.data.checks.filter((check: { id: string; status: string }) => CHECKLIST.find((item) => item.id === check.id)!.blocking && check.status !== "pass" && !(check.id === "docker" && check.status === "info" && !reply.data.sandbox.spec.docker))
     expect(bad.length === 0, `not passing: ${bad.map((check: { id: string; status: string }) => `${check.id} ${check.status}`).join(", ")}`)
     expect(/gvisor/i.test((await inside(["exec", name, "--", "cat", "/proc/version"])).out), "exec on Linux did not reach the sandbox")
     expect((await inside(["verify", name])).code === 0 && (await inside(["stop", name])).code === 0 && (await inside(["start", name])).code === 0, "verify, stop or start failed on Linux")
@@ -988,7 +1242,7 @@ async function teardown(): Promise<void> {
   for (const sandbox of ((await pdkJson(["list"]).catch(() => undefined))?.reply.data ?? []) as Array<{ name: string }>) await pdk(["remove", sandbox.name, "--confirm", sandbox.name])
   await pdk(["daemon", "stop"])
   await docker(["rm", "-f", HOST])
-  for (const line of (await docker(["ps", "-a", "--format", "{{.Names}}"])).out.split("\n").filter((name) => name.includes(PREFIX))) await docker(["rm", "-f", line])
+  for (const line of (await docker(["ps", "-a", "--format", "{{.Names}}"])).out.split("\n").filter((name) => name.includes(PREFIX))) await docker(["rm", "-f", "-v", line])
   for (const line of (await docker(["network", "ls", "--format", "{{.Name}}"])).out.split("\n").filter((name) => name.includes(PREFIX))) await docker(["network", "rm", line])
 }
 

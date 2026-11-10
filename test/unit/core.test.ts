@@ -5,11 +5,11 @@ import { join } from "node:path"
 import { blockers, CHECKLIST, complete } from "../../core/checks"
 import { Core, UNCHECKED_PASSES } from "../../core/core"
 import { fieldValues, loadExtensions, parseExtension } from "../../core/extensions"
-import { configChecks, gvisorSetup, network, unsafeRuntimeArgs, type GuardState } from "../../core/providers/gvisor"
+import { configChecks, DOCKER_CAPABILITIES, dockerVolume, gvisorSetup, network, unsafeRuntimeArgs, type GuardState } from "../../core/providers/gvisor"
 import { readConfig, validSpec } from "../../core/state"
 import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type Stage } from "../../core/types"
 
-const engine: Engine = { id: "fake:1", provider: "fake", label: "Fake engine", ready: true, problems: [], data: { context: "fake", runtime: "runsc" }, capabilities: { kernelIsolation: "gvisor", diskLimit: "watched", networkGuard: true } }
+const engine: Engine = { id: "fake:1", provider: "fake", label: "Fake engine", ready: true, problems: [], data: { context: "fake", runtime: "runsc" }, capabilities: { kernelIsolation: "gvisor", diskLimit: "watched", networkGuard: true, docker: true } }
 const pass = (id: CheckResult["id"]): CheckResult => ({ id, status: "pass", evidence: "inspected", detail: "ok" })
 const allPass = (stage: Stage) => CHECKLIST.filter((item) => item.stage === stage).map((item) => pass(item.id))
 
@@ -57,10 +57,27 @@ test("a failed blocking check blocks; an unknown probe and a weak disk limit do 
 
 test("a spec keeps only known fields and refuses option-like images", () => {
   const spec = validSpec({ name: "demo", cpus: "3", privileged: true, mounts: ["/:/host"], runtime: "runc" })
-  expect(spec).toEqual({ name: "demo", image: "docker/sandbox-templates:shell-docker", cpus: 3, memoryGb: 4, pids: 4096, diskGb: 20 })
+  expect(spec).toEqual({ name: "demo", image: "docker/sandbox-templates:shell-docker", cpus: 3, memoryGb: 4, pids: 4096, diskGb: 20, docker: false })
   expect(() => validSpec({ name: "demo", image: "--privileged" })).toThrow(PaddockError)
   expect(() => validSpec({ name: "../x" })).toThrow(PaddockError)
   expect(() => validSpec({ name: "demo", memoryGb: 0 })).toThrow(PaddockError)
+})
+
+test("docker is a strict boolean, defaults off, and can be set or overridden in defaults", () => {
+  expect(validSpec({ name: "demo" }).docker).toBe(false)
+  expect(validSpec({ name: "demo", docker: true }).docker).toBe(true)
+  expect(validSpec({ name: "demo" }, { docker: true }).docker).toBe(true)
+  expect(validSpec({ name: "demo", docker: false }, { docker: true }).docker).toBe(false)
+  for (const docker of ["true", "false", 0, 1, null, [], {}]) expect(() => validSpec({ name: "demo", docker })).toThrow("docker must be a boolean")
+})
+
+test("an engine without inner Docker refuses the option before making a sandbox", async () => {
+  const { provider, state } = fakeProvider()
+  provider.detect = async () => [{ ...engine, capabilities: { ...engine.capabilities!, docker: false } }]
+  const paddock = await core(provider)
+  await expect(paddock.create({ name: "demo", docker: true })).rejects.toMatchObject({ code: "dependency" })
+  expect(state.exists).toBe(false)
+  expect(await paddock.list()).toEqual([])
 })
 
 const manifest: Manifest = { version: 1, name: "demo", id: "abc", engine, spec: validSpec({ name: "demo" }), createdAt: "" }
@@ -101,6 +118,41 @@ test("each way of loosening a container fails its check", () => {
   expect(failing(inspect((value) => { value.HostConfig.PortBindings = { "22/tcp": [{}] } }))).toEqual(["inbound"])
   expect(failing(inspect((value) => { value.HostConfig.Memory = 0 }))).toEqual(["limits"])
   expect(failing(inspect((value) => { value.HostConfig.PidsLimit = null }))).toEqual(["limits"])
+})
+
+test("Docker hardening accepts exactly its declared additions inside gVisor", () => {
+  const enabled = { ...manifest, spec: { ...manifest.spec, docker: true } }
+  const checked = (caps: string[], change: (value: any) => void = () => {}) => configChecks(inspect((value) => {
+    value.HostConfig.CapAdd = caps
+    value.Mounts = [{ Type: "volume", Name: dockerVolume(enabled), Source: "/engine/volume", Destination: "/var/lib/docker", RW: true }]
+    change(value)
+  }), enabled, "intact", "pdk123", [{ Name: dockerVolume(enabled), Driver: "local", Options: null, Labels: { "dev.paddock.id": enabled.id, "dev.paddock.name": enabled.name } }])
+  const hardening = (caps: string[], change?: (value: any) => void) => checked(caps, change).find((entry) => entry.id === "hardening")!
+  expect(hardening([...DOCKER_CAPABILITIES])).toMatchObject({ status: "pass", evidence: "inspected" })
+  expect(hardening(["CAP_SYS_ADMIN", "cap_net_admin"]).status).toBe("pass")
+  for (const word of [...DOCKER_CAPABILITIES, "inside gVisor"]) expect(hardening([...DOCKER_CAPABILITIES]).detail).toContain(word)
+  for (const caps of [[], ["NET_ADMIN"], ["SYS_ADMIN"], ["ALL"], [...DOCKER_CAPABILITIES, "SYS_PTRACE"]]) expect(hardening(caps).status).toBe("fail")
+  for (const change of [
+    (value: any) => { value.HostConfig.Privileged = true },
+    (value: any) => { value.HostConfig.PidMode = "host" },
+    (value: any) => { value.HostConfig.Devices = [{}] },
+    (value: any) => { value.HostConfig.CapDrop = ["ALL"] },
+    (value: any) => { value.HostConfig.Runtime = "runc" },
+  ]) expect(hardening([...DOCKER_CAPABILITIES], change).status).toBe("fail")
+  expect(checked([...DOCKER_CAPABILITIES], (value) => { value.Mounts[0].Name = "someone-elses-volume" }).find((entry) => entry.id === "mounts")!.status).toBe("fail")
+})
+
+test("Docker volumes cannot disguise host folders or another sandbox's data", () => {
+  const enabled = { ...manifest, spec: { ...manifest.spec, docker: true } }
+  const value = inspect((value) => { value.Mounts = [{ Type: "volume", Name: dockerVolume(enabled), Destination: "/var/lib/docker", Source: "/engine/volume", RW: true }] })
+  const volume = { Name: dockerVolume(enabled), Driver: "local", Options: null, Labels: { "dev.paddock.id": enabled.id, "dev.paddock.name": enabled.name } }
+  const mounts = (volumes?: Parameters<typeof configChecks>[4]) => configChecks(value, enabled, "intact", "pdk123", volumes).find((entry) => entry.id === "mounts")!
+  expect(mounts([volume]).status).toBe("pass")
+  expect(mounts().status).toBe("unknown")
+  expect(mounts([]).status).toBe("unknown")
+  expect(mounts([{ ...volume, Options: { type: "none", device: "/tmp", o: "bind" } }]).status).toBe("fail")
+  expect(mounts([{ ...volume, Driver: "nfs" }]).status).toBe("fail")
+  expect(mounts([{ ...volume, Labels: {} }]).status).toBe("fail")
 })
 
 test("create starts a sandbox whose checks hold, and remove needs its name repeated", async () => {

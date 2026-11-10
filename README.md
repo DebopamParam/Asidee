@@ -28,6 +28,8 @@ from the engine's configuration):
 Works, and was run on OrbStack on an Apple Silicon Mac:
 
 - The gVisor provider: any local Docker engine with a gVisor runtime. Create, start, stop, remove, exec, shell.
+- Optional inner Docker, tested on OrbStack. `paddock create demo --docker` starts a private daemon; its containers
+  reach HTTPS through the sandbox's guarded network. It adds exactly `NET_ADMIN` and `SYS_ADMIN` inside gVisor.
 - The checklist, with live network probes that have controls, and a stop when a blocking check fails. The probes
   cover the host, other sandboxes, and stand-in addresses in each private (LAN) range and the tailnet range.
 - The firewall guard is compared rule for rule with the one Paddock ships, so an added or removed rule shows as changed.
@@ -41,7 +43,7 @@ Works, and was run on OrbStack on an Apple Silicon Mac:
 Not built yet:
 
 - Docker Sandboxes (microVM) support. It is detected and reported as not supported.
-- Port forwarding, SSH access for editors, Docker inside a sandbox, importing agent logins, templates.
+- Port forwarding, SSH access for editors, importing agent logins, templates.
 - A hard disk cap, Linux and Windows hosts (nothing was run there), remote engines, a desktop app, installers.
 - A license. Nothing here is published.
 
@@ -60,6 +62,18 @@ bin/paddock ui --open              # the dashboard
 bin/paddock remove demo --confirm demo
 ```
 
+To run Docker inside, use the default image, which includes `docker`, `dockerd` and `iptables-legacy`:
+
+```sh
+bin/paddock create builder --docker
+bin/paddock exec builder -- docker run --rm alpine:latest echo inner-ok
+bin/paddock remove builder --confirm builder
+```
+
+`docker` defaults to `false`. Config defaults can set `"docker": true` as a JSON boolean. The engine needs gVisor
+registered with `--net-raw` and `--overlay2=none`; Paddock reports whether it has the `docker` capability and refuses
+the option when it does not. Inner images, containers and volumes count toward the same watched disk limit.
+
 Stopping the daemon (`paddock daemon stop`) stops the sandboxes whose disk limit it watches, because nothing would
 enforce the limit afterwards. Their contents stay; `paddock start` brings them back.
 
@@ -68,7 +82,7 @@ sandbox and expects every blocking check to hold.
 
 ## How it is measured
 
-`bun evals/run.ts` runs the eval set: about sixty claims this README and the checklist make, each tried from outside
+`bun evals/run.ts` runs the eval set: the claims this README and the checklist make, each tried from outside
 Paddock with plain engine commands (a connection from inside a sandbox, a fork bomb, a rule slipped into the firewall,
 a container swapped for a privileged one, the dashboard in a real browser). A blocked attempt counts only beside a
 control that shows the same attempt connects when nothing blocks it. [evals/SCORECARD.md](evals/SCORECARD.md) is the
@@ -95,7 +109,7 @@ dashboard and add extensions freely, and none of that can change what a sandbox 
 - **Extensions** add actions and hooks. An extension is a folder in `~/.config/paddock/extensions/` with an
   `extension.json`; see [extensions/examples/agent-tools](extensions/examples/agent-tools).
 - **The dashboard** is replaced by putting your own `index.html` in `~/.config/paddock/ui/`.
-- **Defaults** (image, sizes, engine) go in `~/.config/paddock/config.json`.
+- **Defaults** (image, sizes, Docker, engine) go in `~/.config/paddock/config.json`.
 
 [skill/SKILL.md](skill/SKILL.md) tells an AI agent how to do each of these.
 

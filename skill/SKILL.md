@@ -15,7 +15,7 @@ Add `--json` to any command for `{"ok":true,"data":…}` or `{"ok":false,"error"
 
 ```sh
 paddock doctor                              # engines and what each needs
-paddock create NAME [--image IMAGE] [--cpus N] [--memory GB] [--disk GB]
+paddock create NAME [--docker] [--image IMAGE] [--cpus N] [--memory GB] [--disk GB]
 paddock list
 paddock exec NAME [--stdin] -- COMMAND ARG… # exit code, stdout and stderr are the command's
 paddock start NAME | paddock stop NAME
@@ -34,6 +34,12 @@ Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing depende
 - Long operations print progress lines starting with `…` on stderr. Stdout stays the result.
 - A sandbox has no host folders. Send a text file in with `paddock exec NAME --stdin -- sh -c 'cat > FILE' < local-file`,
   and read one out with `paddock exec NAME -- cat FILE`. Binary files are not supported this way yet.
+- To run containers inside, create with `--docker` and the default image. Then use
+  `paddock exec NAME -- docker run --rm alpine:latest echo inner-ok`. This private daemon adds exactly `NET_ADMIN`
+  and `SYS_ADMIN` inside gVisor. Its containers use the sandbox's guarded network and share its outer limits.
+  Images, containers and inner volumes count toward the watched disk limit and are deleted with the sandbox.
+  Dockerd is the sandbox's main process. If it dies the sandbox stops; `paddock start NAME` starts it again.
+  `paddock doctor` reports whether the engine supports inner Docker. An engine lacking the capability refuses it.
 
 ## Customizing Paddock
 
@@ -80,9 +86,11 @@ Keep showing each check's status and detail as the API returns them.
 
 ### Change defaults
 
-`~/.config/paddock/config.json`: `{ "defaults": { "image": "ubuntu:24.04", "cpus": 2, "memoryGb": 4, "diskGb": 20 }, "engine": "gvisor:orbstack" }`.
+`~/.config/paddock/config.json`: `{ "defaults": { "image": "docker/sandbox-templates:shell-docker", "cpus": 2, "memoryGb": 4, "diskGb": 20, "docker": false }, "engine": "gvisor:orbstack" }`.
 The defaults obey the same limits as the flags. A mistake in this file makes `paddock create` fail with a message that
 names it, so run a create after editing it.
+`docker` accepts only JSON `true` or `false`; it defaults to `false`. With `true`, the image must include `docker`,
+`dockerd` and `iptables-legacy`.
 
 ### Check your changes
 
@@ -103,5 +111,5 @@ The extension is unit-tested with fake transport; live imports and sandbox evals
 
 ## What you cannot do, by design
 
-Mount a host folder, publish a port, pick a non-isolated runtime, add capabilities, or skip a check. If the user needs
+Mount a host folder, publish a port, pick a non-isolated runtime, choose capabilities, or skip a check. If the user needs
 one of these, say that Paddock does not offer it yet instead of reaching around Paddock.

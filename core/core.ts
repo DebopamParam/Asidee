@@ -54,7 +54,7 @@ export class Core {
   async list(): Promise<SandboxView[]> {
     const { manifests, damaged } = await scanManifests(this.dirs)
     return [...await Promise.all(manifests.map((manifest) => this.view(manifest))),
-      ...damaged.map((entry): SandboxView => ({ name: entry.name, status: "damaged", engine: "", spec: { name: entry.name, image: "", cpus: 0, memoryGb: 0, pids: 0, diskGb: 0 }, createdAt: "",
+      ...damaged.map((entry): SandboxView => ({ name: entry.name, status: "damaged", engine: "", spec: { name: entry.name, image: "", cpus: 0, memoryGb: 0, pids: 0, diskGb: 0, docker: false }, createdAt: "",
         stopReason: `Its state file ${entry.file} cannot be read (${entry.problem}). Paddock does nothing with it; fix the file or delete it.` }))]
   }
   async get(name: string): Promise<SandboxView> { return this.view(await readManifest(this.dirs, name)) }
@@ -119,6 +119,7 @@ export class Core {
       const engine = wanted ? engines.find((entry) => entry.id === wanted) : engines.find((entry) => entry.ready)
       if (!engine) throw new PaddockError("dependency", wanted ? `There is no engine ${wanted}. Run \`paddock doctor\`.` : "No engine is ready for sandboxes. Run `paddock doctor` to see what each one needs.")
       if (!engine.ready) throw new PaddockError("dependency", `${engine.label} is not ready: ${engine.problems.join(" ")} ${engine.fix ?? ""}`.trim())
+      if (spec.docker && !engine.capabilities?.docker) throw new PaddockError("dependency", `${engine.label} cannot run Docker inside a sandbox. Choose an engine with the docker capability (gVisor needs --net-raw and --overlay2=none).`)
       // Written before the engine is touched, so a half-made sandbox can always be removed.
       const manifest: Manifest = { version: 1, name: spec.name, id: randomBytes(16).toString("hex"), engine, spec, createdAt: new Date().toISOString() }
       await writeManifest(this.dirs, manifest)

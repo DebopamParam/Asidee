@@ -3,7 +3,7 @@
 The eval set is the list of things Paddock says about itself, each measured from outside it.
 
 ```sh
-bun evals/run.ts                 # every eval, about ten minutes
+bun evals/run.ts                 # every eval
 bun evals/run.ts --only H,T03    # groups or single ids
 bun evals/run.ts --write         # also rewrite SCORECARD.md
 ```
@@ -27,6 +27,7 @@ for a few evals `python3` and a Chromium-based browser; an eval that lacks what 
 | Group | Question |
 |---|---|
 | H | Is what the checklist says true when tried from inside a sandbox? |
+| I | Does inner Docker run with minimal added capabilities, guarded networking, shared limits and clean removal? |
 | T | Is a sandbox that stops holding caught and stopped? |
 | R | Can any client ask the core for an unsafe sandbox? |
 | F | Can everything outside the core be changed without touching it? |

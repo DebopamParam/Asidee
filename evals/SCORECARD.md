@@ -2,10 +2,10 @@
 
 Written by `bun evals/run.ts --write`. Do not edit by hand.
 
-- Paddock 0.3.0 at `2fa843a` plus uncommitted changes
+- Paddock 0.3.0 at `7e182ff` plus uncommitted changes
 - Engine: OrbStack 29.8.2 (context orbstack), runtime `runsc-sandbox`, disk limit watched
 - Run from darwin arm64 on 2026-11-10
-- **62 of 66 hold, 0 do not, 4 could not be measured here.**
+- **76 of 80 hold, 0 do not, 4 could not be measured here.**
 
 | | Id | Claim | Note |
 |---|---|---|---|
@@ -18,13 +18,27 @@ Written by `bun evals/run.ts --write`. Do not edit by hand.
 | ✓ | H06 | From inside a sandbox, cloud metadata and IPv6 do not answer | no control: nothing listens at these addresses on this machine |
 | ✓ | H07 | The engine object has no host folder, published port, privilege or host namespace |  |
 | ✓ | H08 | The process limit holds: a fork bomb ends at the limit, in failed forks or a killed sandbox, and the engine is unharmed | the sandbox was killed at its limit, and the list says so |
-| ✓ | H09 | The memory limit holds: a process that passes it is killed, not the engine | exit 128; the sandbox is stopped (Killed by the engine at 2026-11-10 14:20 UTC: it passed its memory limit of 1 GB.) |
+| ✓ | H09 | The memory limit holds: a process that passes it is killed, not the engine | exit 128; the sandbox is stopped (Killed by the engine at 2026-11-10 22:06 UTC: it passed its memory limit of 1 GB.) |
 | ✓ | H10 | A sandbox killed by its memory limit says so in the list |  |
 | ✓ | H11 | The disk limit is what the checklist says: a sandbox past it is stopped within a minute | watched: stopped 2 s after the write ended |
 | ✓ | H12 | The disclosures are true: internet access and the logins found inside |  |
 | ✓ | H14 | Two sandboxes verified at the same moment are both probed, not one of them waved through |  |
+| ✓ | I01 | NET_ADMIN and SYS_ADMIN are minimal additions: removing either breaks inner Docker | SYS_ADMIN: dockerd cannot create its bridge; NET_ADMIN: image extraction cannot unshare; none: dockerd cannot create its bridge; both additions: docker run prints inner-ok. Minimal relative to Docker's unchanged default capabilities, not a proof about alternate Docker implementations. |
+| ✓ | I02 | An inner container runs a small image and reaches the internet over HTTPS |  |
+| ✓ | I03 | An inner container cannot reach the engine's host, with working controls | 192.168.148.1; the host reached every listener, and the same inner probes connected with the guard removed |
+| ✓ | I04 | An inner container cannot reach the other sandbox, with working controls | 192.168.147.2; the host reached every listener, and the same inner probes connected with the guard removed |
+| ✓ | I05 | An inner container cannot reach the stand-in LAN and tailnet addresses, with working controls | 10.255.255.254, 172.31.255.254, 192.168.255.254, 100.127.255.254; the host reached every listener, and the same inner probes connected with the guard removed |
+| ✓ | I06 | The checklist includes live network attempts from an inner container |  |
+| ✓ | I07 | Inner Docker survives stop/start, a daemon enforce pass, and a daemon restart; its death stops the sandbox |  |
+| ✓ | I08 | An inner container cannot exceed the sandbox's memory limit, even with its own privileged mode | bounded 16 MiB control passed; hog exit 128; outer OOMKilled=true under 1 GiB despite an inner 2 GiB limit |
+| ✓ | I09 | Inner image pulls and writes are measured outside the sandbox, and the disk watch stops excess use | image pull +4214784 B; inner write +1394118656 B; daemon stopped the 1 GiB sandbox for disk use |
+| ✓ | I10 | A Docker sandbox with an extra capability or privileged mode is refused at start and stopped if running |  |
+| ✓ | I11 | Without --docker, no capabilities are added and even root cannot start the inner daemon | no CapAdd; dockerd fails with a permission error even as root |
+| ✓ | I12 | The docker default is a strict boolean and cannot smuggle engine flags |  |
+| ✓ | I13 | Removing a Docker sandbox removes its container, network, inner images and private volume |  |
+| ✓ | I14 | An engine volume backed by a host folder is refused before a Docker sandbox starts | the engine reports Type=volume; volume inspect exposes device=/tmp,o=bind; start refuses it without running the container |
 | ✓ | T01 | The evals can see an open path: with the guard removed, the same attempts connect |  |
-| ✓ | T02 | A removed guard is noticed without anyone asking: the daemon stops the sandbox within a minute | stopped after 4 s |
+| ✓ | T02 | A removed guard is noticed without anyone asking: the daemon stops the sandbox within a minute | stopped after 5 s |
 | ✓ | T03 | Starting a sandbox puts the guard back, and the paths are closed again |  |
 | ✓ | T04 | A rule slipped in front of the guard's drops fails verify, with exit code 6, and stops the sandbox |  |
 | ✓ | T05 | A sandbox attached to a second network behind Paddock's back is stopped |  |
@@ -46,13 +60,13 @@ Written by `bun evals/run.ts --write`. Do not edit by hand.
 | ✓ | F05 | A broken extension is reported and the others still load |  |
 | ✓ | F09 | An extension's action shows up in the dashboard as a form, and its output appears there |  |
 | ✓ | F06 | Every command prints one line of JSON with --json, for results and for errors | 19 commands |
-| ✓ | F07 | The skill tells an agent only true things: its commands exist, and it lists exactly the API's methods |  |
+| ✓ | F07 | The skill's Paddock commands and flags exist, and it lists exactly the API's methods |  |
 | ✓ | F08 | The README and architecture notes name only commands, files and checks that exist |  |
 | ✓ | U01 | Exit codes tell the kinds of failure apart, as the help says |  |
 | ✓ | U02 | Help lists every command, and errors say what to do next |  |
 | ✓ | U03 | The dashboard, in a real browser, shows each sandbox with the same check results the API gives |  |
 | ✓ | U04 | In a real browser, the dashboard creates a sandbox, refuses a mistyped removal, and removes it |  |
-| ✓ | U05 | It is quick enough to use: list under a second, verify under 30 s, create under 60 s | list 0.03 s, verify 8.9 s, create 10.2 s |
+| ✓ | U05 | It is quick enough to use: list under a second, verify under 30 s, create under 60 s | list 0.03 s, verify 8.6 s, create 9.5 s |
 | ✓ | U06 | `paddock shell` gives a working terminal session |  |
 | ✓ | U07 | Progress goes to stderr and results to stdout, so output can be piped |  |
 | ✓ | U08 | A state folder whose path is too long for a socket is refused with a message that says so |  |

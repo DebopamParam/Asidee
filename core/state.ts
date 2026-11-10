@@ -17,7 +17,7 @@ export function checkSocketPath(dirs: Dirs): void {
 }
 export const daemonFile = (dirs: Dirs) => join(dirs.state, "daemon.json")
 
-export const DEFAULT_SPEC = { image: "docker/sandbox-templates:shell-docker", cpus: 2, memoryGb: 4, pids: 4096, diskGb: 20 }
+export const DEFAULT_SPEC = { image: "docker/sandbox-templates:shell-docker", cpus: 2, memoryGb: 4, pids: 4096, diskGb: 20, docker: false }
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,30}$/
 export function validName(name: unknown): string {
@@ -37,8 +37,10 @@ export function validSpec(input: Record<string, unknown>, defaults: Partial<type
   const base = { ...DEFAULT_SPEC, ...defaults }
   const image = input.image === undefined || input.image === "" ? base.image : input.image
   if (typeof image !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$/.test(image)) throw new PaddockError("usage", "The image must be an image reference such as ubuntu:24.04.")
+  const docker = input.docker === undefined ? base.docker : input.docker
+  if (typeof docker !== "boolean") throw new PaddockError("usage", "docker must be a boolean (true or false).")
   return {
-    name: validName(input.name), image,
+    name: validName(input.name), image, docker,
     cpus: number(input.cpus, "CPUs", 0.25, 64, base.cpus),
     memoryGb: number(input.memoryGb, "Memory (GB)", 0.25, 256, base.memoryGb),
     pids: Math.round(number(input.pids, "The process limit", 64, 65_536, base.pids)),
