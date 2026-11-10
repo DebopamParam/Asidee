@@ -1,0 +1,8 @@
+{
+  "name": "T3 Code",
+  "description": "Install this machine's exact T3 runtime and sync guest login providers. SSH access requires core support.",
+  "actions": [
+    { "id": "setup", "label": "Set up T3 Code", "scope": "sandbox", "run": ["./t3.ts", "setup"] },
+    { "id": "sync", "label": "Refresh T3 login providers", "scope": "sandbox", "run": ["./t3.ts", "sync"] }
+  ]
+}

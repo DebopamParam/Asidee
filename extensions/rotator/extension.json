@@ -1,0 +1,7 @@
+{
+  "name": "T3 account rotator",
+  "description": "Run the bundled account rotator inside an already running sandbox.",
+  "actions": [{ "id": "mode", "label": "Account rotator", "scope": "sandbox", "fields": [
+    { "id": "mode", "label": "Mode", "type": "select", "options": ["status", "claude", "codex", "claude,codex", "off"], "default": "status" }
+  ], "run": ["./rotator.ts"] }]
+}

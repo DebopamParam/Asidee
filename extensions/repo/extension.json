@@ -1,0 +1,15 @@
+{
+  "name": "Repository clone and save",
+  "description": "Clone with the guest's GitHub login; save one committed branch without host mounts.",
+  "actions": [
+    { "id": "clone", "label": "Clone GitHub repository", "scope": "sandbox", "fields": [
+      { "id": "repository", "label": "OWNER/REPO", "type": "text", "required": true },
+      { "id": "workspace", "label": "New guest checkout path", "type": "text", "default": "workspace" }
+    ], "run": ["./repo.ts", "clone"] },
+    { "id": "save", "label": "Save committed branch", "scope": "sandbox", "fields": [
+      { "id": "workspace", "label": "Guest checkout path", "type": "text", "default": "workspace" },
+      { "id": "target", "label": "Absolute host clone path (blank uses private bare clone)", "type": "text" },
+      { "id": "branch", "label": "Source branch (blank uses current branch)", "type": "text" }
+    ], "run": ["./repo.ts", "save"] }
+  ]
+}

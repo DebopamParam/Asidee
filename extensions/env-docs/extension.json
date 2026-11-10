@@ -1,0 +1,7 @@
+{
+  "name": "Environment documentation",
+  "description": "Write the sandbox spec and reported checklist into env_docs/SANDBOX.md.",
+  "actions": [{ "id": "write", "label": "Refresh environment docs", "scope": "sandbox", "fields": [
+    { "id": "workspace", "label": "Guest workspace (absolute or relative to guest home)", "type": "text", "default": "workspace" }
+  ], "run": ["./env-docs.ts"] }]
+}
