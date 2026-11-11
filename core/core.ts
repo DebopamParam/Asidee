@@ -310,10 +310,10 @@ export class Core {
     })
   }
 
-  verify(name: string): Promise<{ sandbox: SandboxView; checks: CheckResult[]; ok: boolean }> {
+  verify(name: string): Promise<{ sandbox: SandboxView; checks: CheckResult[]; ok: boolean; diskUsedBytes?: number }> {
     return this.exclusive(validName(name), async () => {
       const manifest = await readManifest(this.dirs, name); const { checks, failed } = await this.verifyNow(manifest)
-      return { sandbox: await this.view(manifest), checks, ok: failed.length === 0 }
+      return { sandbox: await this.view(manifest), checks, ok: failed.length === 0, diskUsedBytes: await this.provider(manifest).diskUsedBytes(manifest) }
     })
   }
 

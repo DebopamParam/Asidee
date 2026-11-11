@@ -56,6 +56,14 @@ type SessionRequest =
   | ({ kind: "lease" } & RelayRequest)
   | ({ kind: "dial" } & RelayRequest)
 export type OpenRequest = SessionRequest & { host?: string; machineId?: string; bootId?: string; protocol?: number; version?: string; build?: string; sandboxId?: string; generation?: string }
+export type EnrollmentRequest = { kind: "enroll"; hash: string; accepted: true; host?: string }
+
+export function enrollmentHash(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null || !("kind" in value) || value.kind !== "enroll") return undefined
+  if (!("hash" in value) || typeof value.hash !== "string" || !/^[a-f0-9]{64}$/.test(value.hash) || !("accepted" in value) || value.accepted !== true || "host" in value && value.host !== undefined && value.host !== "local")
+    throw new PaddockError("usage", "Enrollment needs accepted:true and a reviewed plan hash on the primary socket.")
+  return value.hash
+}
 
 const USER = /^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}$/
 const size = (value: unknown, what: string) => {
@@ -105,7 +113,7 @@ export function parseSize(payload: Uint8Array): { cols: number; rows: number } {
 
 // Relays one client connection to the session it asks for. Each direction waits for the other side to take what it
 // was given (pause, then resume on drain), so the daemon holds at most a socket buffer and one frame per direction.
-export function serveStream(socket: Socket, open: (request: OpenRequest) => Promise<Session>): void {
+export function serveStream(socket: Socket, open: (request: OpenRequest) => Promise<Session>, enroll?: (hash: string) => Promise<Session>): void {
   const reader = new FrameReader()
   let session: Session | undefined; let opening = false; let done = false
   let inputWaits = false; let outputWaits = false
@@ -126,9 +134,13 @@ export function serveStream(socket: Socket, open: (request: OpenRequest) => Prom
       if (!session) {
         if (opening || kind !== "open") return fail(opening ? "Wait for ready before sending." : "The first frame must open a session.", "usage")
         opening = true; clearTimeout(timer); socket.pause()
-        let request: OpenRequest
-        try { request = parseOpen(JSON.parse(payload.toString("utf8"))) } catch (error) { return fail(error instanceof SyntaxError ? "The session request is not JSON." : (error as Error).message, "usage") }
-        open(request).then((opened) => {
+        let requested: Promise<Session>
+        try {
+          const input: unknown = JSON.parse(payload.toString("utf8")); const hash = enrollmentHash(input)
+          if (hash && !enroll) throw new PaddockError("usage", "Enrollment is unavailable on this stream endpoint.")
+          requested = hash ? enroll!(hash) : open(parseOpen(input))
+        } catch (error) { return fail(error instanceof SyntaxError ? "The session request is not JSON." : (error as Error).message, "usage") }
+        requested.then((opened) => {
           if (done) return opened.close()
           session = opened
           opened.on("output", (stream, bytes) => {

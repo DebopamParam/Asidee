@@ -7,6 +7,7 @@ import { join, normalize } from "node:path"
 import { CHECKLIST } from "./checks"
 import { Core } from "./core"
 import { CATALOG, isMethod, machineIdentity, Machines, type Hello } from "./machines"
+import { Hosts } from "./hosts"
 import { PROTOCOL } from "./transport"
 import { DockerSandboxesProvider } from "./providers/docker-sandboxes"
 import { GvisorProvider } from "./providers/gvisor"
@@ -35,7 +36,7 @@ type Method = { run: (body: Body) => Promise<unknown>; socketOnly?: boolean }
 
 // The whole API. The CLI, the UI and extensions all come through this table, so each has exactly these abilities.
 // keepSandboxes: the daemon is being replaced (an upgrade), not stopped, so the sandboxes it watches keep running.
-export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, stopping: () => boolean = () => false, machines?: Machines): Record<string, Method> {
+export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, stopping: () => boolean = () => false, machines?: Machines, hosts = machines ? new Hosts(machines) : undefined): Record<string, Method> {
   return {
     version: { run: async () => ({ version: VERSION, build: BUILD, stopping: stopping() }) },
     hello: { run: async () => machines?.hello, socketOnly: true },
@@ -43,6 +44,8 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     hostList: { run: async () => machines?.list() },
     fleet: { run: async (body) => machines?.fleet(body.refresh) },
     hostAttach: { run: async (body) => machines?.attach(body), socketOnly: true },
+    hostPlan: { run: async (body) => hosts?.plan(body), socketOnly: true },
+    hostApply: { run: async (body) => hosts?.apply(body), socketOnly: true },
     hostRemove: { run: async (body) => machines?.remove(body), socketOnly: true },
     sessionTarget: { run: (body) => core.sessionTarget(body.name), socketOnly: true },
     sshPrepare: { run: (body) => core.sshSetup(String(body.name), false, typeof body.publicKey === "string" ? body.publicKey : ""), socketOnly: true },
@@ -142,12 +145,13 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   const hello: Hello = { machineId: identity, bootId: randomBytes(16).toString("hex"), version: VERSION, buildDigest: digest.digest("hex"), sourceDigest: SOURCE, protocols: [PROTOCOL], methods: Object.keys(CATALOG),
     features: ["machines", "remote-streams", "remote-forwards", "ssh", "lease-renewal"], listener: process.env.PADDOCK_SOCKET_ONLY === "1" ? "socket-only" : "dashboard", service: process.env.INVOCATION_ID ? "systemd" : "none" }
   const machines = new Machines(dirs, hello, async () => ({ hello, sandboxes: await core.list(), checkedAt: new Date().toISOString() }))
+  const hosts = new Hosts(machines)
   const token = randomBytes(24).toString("hex")
   let stop: (keepSandboxes: boolean) => void = () => {}
   // A daemon that is stopping still answers `version`, so a client waits for it instead of starting a second one, and
   // takes no new work: a sandbox started now would be stopped, or left unwatched, a moment later.
   let stopping = false
-  const answer = createHandler(methods(core, (keep) => stop(keep), () => stopping, machines), token, dirs.config, machines)
+  const answer = createHandler(methods(core, (keep) => stop(keep), () => stopping, machines, hosts), token, dirs.config, machines)
   const handle = (request: Request, viaSocket: boolean, port: number): Promise<Response> =>
     stopping && new URL(request.url).pathname !== "/api/version"
       ? Promise.resolve(json(STATUS.conflict, { ok: false, error: { code: "conflict", message: "The daemon is stopping. Try again in a moment." } }))
@@ -162,7 +166,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   // down: each side pauses until the other has taken what it was given.
   const streams = createServer({ allowHalfOpen: true }, (connection) => {
     if (stopping) return connection.destroy()
-    serveStream(connection, (request) => machines.openSession(request, (request) => core.openSession(request)))
+    serveStream(connection, (request) => machines.openSession(request, (request) => core.openSession(request)), (hash) => hosts.session(hash))
   })
   await new Promise<void>((resolve, reject) => { streams.once("error", reject); streams.listen(streamSocketPath(dirs), () => resolve()) })
   await chmod(streamSocketPath(dirs), 0o600)
@@ -187,6 +191,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   })
   stopping = true
   clearInterval(timer)
+  hosts.close()
   core.closeSessions()
   // Bounded (Machines.close), and never a reason to skip the next line.
   await machines.close().catch(() => {})

@@ -18,7 +18,7 @@ export const CATALOG = {
   exec: ["dashboard", "write"], extensions: ["dashboard", "read"], action: ["dashboard", "write"],
   forwardAdd: ["dashboard", "primary"], forwardList: ["dashboard", "primary"], forwardRemove: ["dashboard", "primary"],
   sshAccess: ["dashboard", "primary"], sshSetup: ["socket", "primary"], shutdown: ["socket", "write"],
-  hostList: ["dashboard", "primary"], fleet: ["dashboard", "primary"], hostAttach: ["socket", "primary"], hostRemove: ["socket", "primary"],
+  hostList: ["dashboard", "primary"], fleet: ["dashboard", "primary"], hostAttach: ["socket", "primary"], hostPlan: ["socket", "primary"], hostApply: ["socket", "primary"], hostRemove: ["socket", "primary"],
   sessionTarget: ["socket", "read"],
   sshPrepare: ["socket", "write"],
 } as const
@@ -31,7 +31,7 @@ export const mutates = (method: MethodName) => CATALOG[method][1] === "write"
 export type Hello = { machineId: string; bootId: string; version: string; buildDigest: string; sourceDigest: string; protocols: number[]; methods: string[]; features: string[]
   listener?: "socket-only" | "dashboard"; service?: "systemd" | "none" }
 // sshUser and hostKey: the account and outer host-key fingerprint SSH used when the host was attached.
-export type HostRecord = Endpoint & { name: string; machineId: string; addedAt: string; diskPolicy: "watched"; service: "prepared"; sshUser?: string; hostKey?: string }
+export type HostRecord = Endpoint & { name: string; machineId: string; addedAt: string; diskPolicy: "watched"; service: "prepared" | "systemd"; sshUser?: string; hostKey?: string }
 // A record this Paddock cannot use: written by a newer one, or damaged. It is shown, and only it is refused.
 export type UnknownHost = { name: string; error: string; ssh?: string; machineId?: string }
 export type HostView = { host: HostRecord; state: "connecting" | "online" | "offline" | "incompatible" | "identity-changed"; receivedAt?: string; hello?: Hello; error?: string }
@@ -101,11 +101,11 @@ export function parseHosts(value: unknown): Registry {
     try {
       if (!object(entry)) throw new PaddockError("usage", "it is not an object")
       if (names.has(hostName(entry.name)) || identities.has(String(entry.machineId))) throw new PaddockError("usage", "it repeats another record's alias or machine identity")
-      if (entry.diskPolicy !== "watched" || entry.service !== "prepared") throw new PaddockError("incompatible", `it is a host with service ${JSON.stringify(entry.service)} and disk policy ${JSON.stringify(entry.diskPolicy)}, which this Paddock does not know; use the Paddock that wrote it`)
+      if (entry.diskPolicy !== "watched" || (entry.service !== "prepared" && entry.service !== "systemd")) throw new PaddockError("incompatible", `it is a host with service ${JSON.stringify(entry.service)} and disk policy ${JSON.stringify(entry.diskPolicy)}, which this Paddock does not know; use the Paddock that wrote it`)
       if (!id(entry.machineId) || typeof entry.addedAt !== "string" || !Number.isFinite(Date.parse(entry.addedAt))) throw new PaddockError("usage", "its machine identity or date is invalid")
       if (entry.sshUser !== undefined && (typeof entry.sshUser !== "string" || !/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/.test(entry.sshUser))) throw new PaddockError("usage", "its SSH user is invalid")
       if (entry.hostKey !== undefined && (typeof entry.hostKey !== "string" || !/^SHA256:[A-Za-z0-9+/]{43}$/.test(entry.hostKey))) throw new PaddockError("usage", "its host-key fingerprint is invalid")
-      registry.hosts.push({ name: hostName(entry.name), ssh: sshDestination(entry.ssh), binary: absolutePath(entry.binary), stateDir: absolutePath(entry.stateDir), machineId: entry.machineId, addedAt: entry.addedAt, diskPolicy: "watched", service: "prepared",
+      registry.hosts.push({ name: hostName(entry.name), ssh: sshDestination(entry.ssh), binary: absolutePath(entry.binary), stateDir: absolutePath(entry.stateDir), machineId: entry.machineId, addedAt: entry.addedAt, diskPolicy: "watched", service: entry.service,
         ...(entry.sshUser ? { sshUser: entry.sshUser as string } : {}), ...(entry.hostKey ? { hostKey: entry.hostKey as string } : {}) })
     } catch (error) {
       registry.unknown.push({ name, error: `hosts.json record ${index + 1} cannot be used: ${(error as Error).message.replace(/\.$/, "")}. Other hosts are unaffected; \`paddock host remove ${name} --confirm ${name}\` forgets it.`,
@@ -409,7 +409,7 @@ export class Machines {
   private edit<T>(task: () => Promise<T>): Promise<T> {
     const next = this.registryWrite.then(task, task); this.registryWrite = next.catch(() => {}); return next
   }
-  attach(body: Record<string, unknown>): Promise<HostRecord> {
+  attach(body: Record<string, unknown>, beforeWrite?: () => void): Promise<HostRecord> {
     return this.edit(async () => {
       const name = hostName(body.name); const registry = await readHosts(this.dirs)
       if ([...registry.hosts, ...registry.unknown].some((host) => host.name === name)) throw new PaddockError("conflict", `${name} is already registered. Remove it explicitly before enrolling another machine.`)
@@ -417,7 +417,8 @@ export class Machines {
       const hello = await this.peer(endpoint, async (_peer, hello) => hello)
       if (hello.machineId === this.hello.machineId || [...registry.hosts, ...registry.unknown].some((host) => host.machineId === hello.machineId)) throw new PaddockError("conflict", "This machine identity is already registered.")
       const ssh = await this.io.sshIdentity(endpoint)
-      const host: HostRecord = { name, ...endpoint, machineId: hello.machineId, addedAt: new Date().toISOString(), diskPolicy: "watched", service: "prepared", sshUser: ssh.user, hostKey: ssh.hostKey }
+      const host: HostRecord = { name, ...endpoint, machineId: hello.machineId, addedAt: new Date().toISOString(), diskPolicy: "watched", service: body.service === "systemd" ? "systemd" : "prepared", sshUser: ssh.user, hostKey: ssh.hostKey }
+      beforeWrite?.()
       await writeHosts(this.dirs, [...registry.entries, host]); return host
     })
   }

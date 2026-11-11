@@ -2,18 +2,20 @@
 import { spawn } from "node:child_process"
 import { mkdirSync, openSync } from "node:fs"
 import { connect } from "node:net"
-import { dirname, join } from "node:path"
+import { resolve, dirname, join } from "node:path"
+import { createInterface } from "node:readline/promises"
 import { parseArgs } from "node:util"
 import { CHECKLIST } from "../core/checks"
 import type { ResizeChange, SandboxView } from "../core/core"
 import { BUILD, readDaemonFile, runDaemon, VERSION } from "../core/daemon"
 import type { Extension } from "../core/extensions"
 import type { ForwardView } from "../core/forwards"
+import type { HostPlan } from "../core/hosts"
 import { hostOption, type FleetView, type HostView } from "../core/machines"
 import { bounded, PROTOCOL, transportStdio } from "../core/transport"
 import type { SshAccess } from "../core/ssh"
 import { checkSocketPath, defaultDirs, socketPath, streamSocketPath } from "../core/state"
-import { dataFrames, frame, FrameReader, type OpenRequest } from "../core/stream"
+import { dataFrames, frame, FrameReader, type OpenRequest, type EnrollmentRequest } from "../core/stream"
 import { PaddockError, type CheckResult, type Engine, type ErrorCode, type RunResult, type Template } from "../core/types"
 
 // A thin client: every command is one call to the daemon, which is started on first use.
@@ -25,6 +27,7 @@ const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, 
   paddock list
   paddock list --all                      machines, including unavailable ones and unknown cached sandboxes
   paddock host list                       registered SSH daemons and their connection state
+  paddock host add NAME --ssh DEST --artifact PATH --sha256 HASH [--sudo ask|never] [--disk-policy watched] [--accept-plan HASH]
   paddock host attach NAME --ssh DEST --binary PATH --state-dir PATH   attach an already prepared daemon
   paddock host remove NAME --confirm NAME  forget a prepared host; remote files and service stay
   paddock resize NAME [--cpus N] [--memory GB] [--pids N] [--disk GB]   says which limits apply now and which at the next start
@@ -114,11 +117,11 @@ async function call<T>(method: string, body: object = {}, watch?: string): Promi
 // A session on the daemon's stream socket (core/stream.ts). This process only moves bytes between its own stdio and the
 // socket, and waits whenever the other side has not taken what it was given. On a terminal the session gets one too:
 // keystrokes, Ctrl-C included, go to the sandbox, and the terminal's settings are put back however the session ends.
-async function session(request: OpenRequest): Promise<never> {
+async function session(request: OpenRequest | EnrollmentRequest): Promise<never> {
   request = { ...request, host: selectedHost }
   await ensureDaemon()
   const socket = connect(streamSocketPath(dirs))
-  const raw = request.kind === "exec" && request.tty && process.stdin.isTTY
+  const raw = process.stdin.isTTY && (request.kind === "enroll" || request.kind === "exec" && request.tty)
   let restored = !raw
   const restore = () => { if (!restored) { restored = true; try { process.stdin.setRawMode(false) } catch {} } }
   process.on("exit", restore)
@@ -404,7 +407,26 @@ async function main(argv: string[]): Promise<void> {
       }
       case "host": {
         if (selectedHost && selectedHost !== "local") throw new PaddockError("usage", "The host registry belongs to the primary machine.")
-        const { values, positionals } = parse({ ssh: { type: "string" }, binary: { type: "string" }, "state-dir": { type: "string" }, confirm: { type: "string" } }, rest.slice(1))
+        const { values, positionals } = parse({ ssh: { type: "string" }, binary: { type: "string" }, "state-dir": { type: "string" }, confirm: { type: "string" }, artifact: { type: "string" }, sha256: { type: "string" }, sudo: { type: "string" }, "disk-policy": { type: "string" }, "accept-plan": { type: "string" } }, rest.slice(1))
+        if (rest[0] === "add") {
+          const plan = await call<HostPlan>("hostPlan", { name: need(positionals[0], "a host name"), ssh: need(values.ssh, "--ssh DEST"), artifact: { path: resolve(need(values.artifact, "--artifact PATH")), sha256: need(values.sha256, "--sha256 HASH") }, sudo: values.sudo, diskPolicy: values["disk-policy"] })
+          if (asJson) return out(plan, () => {})
+          console.log(JSON.stringify(plan, null, 2))
+          if (values["accept-plan"] !== undefined) {
+            if (values["accept-plan"] !== plan.hash) throw new PaddockError("conflict", "Consent is stale. Review the revised plan above and accept its hash. Nothing was installed.", { plan })
+          }
+          if (plan.blockers.length) throw new PaddockError("dependency", `Enrollment refused before installation: ${plan.blockers.join(" ")}`)
+          if (values["accept-plan"] === undefined) {
+            if (!process.stdin.isTTY) throw new PaddockError("usage", "Review --json and use --accept-plan HASH, or run from a terminal and enter yes. Nothing was installed.")
+            const terminal = createInterface({ input: process.stdin, output: process.stdout })
+            let answer: string
+            try { answer = await terminal.question("Apply this exact plan? Enter yes: ") } finally { terminal.close() }
+            if (answer !== "yes") throw new PaddockError("conflict", "Enrollment declined. Nothing was installed or registered.")
+            return await session({ kind: "enroll", hash: plan.hash, accepted: true })
+          }
+          const host = await call("hostApply", { hash: plan.hash, accepted: true })
+          return out(host, () => console.log(`Enrolled ${plan.options.name}. Disk limit is watched. Verification passed; reboot persistence is not measured.`))
+        }
         if (rest[0] === "list" || rest[0] === undefined) {
           const hosts = await call<HostView[]>("hostList")
           return out(hosts, () => {
@@ -413,7 +435,7 @@ async function main(argv: string[]): Promise<void> {
               if (view.state === "unknown-record") { console.log(`${shown(view.host.name)}: unknown record${view.host.ssh ? ` (${shown(view.host.ssh)})` : ""}\n  ${shown(view.error)}`); continue }
               const { host, state, receivedAt, hello, error } = view
               const runs = hello ? `${hello.listener === "socket-only" ? "socket-only" : hello.listener === "dashboard" ? "dashboard listener open on its loopback" : "listener unknown"}, ${hello.service === "systemd" ? "a systemd service" : hello.service === "none" ? "not a service" : "service unknown"}` : "listener and service unknown"
-              console.log(`${shown(host.name)}: ${shown(state)} (${shown(host.ssh)} as ${shown(host.sshUser ?? "an unrecorded user")}, host key ${shown(host.hostKey ?? "not recorded")}), machine ${shown(host.machineId)}, ${shown(hello?.version ?? "version unknown")}, ${runs}, prepared, disk ${shown(host.diskPolicy)}${receivedAt ? `, last contact ${shown(receivedAt)}` : ""}${error ? `\n  ${shown(error)}` : ""}`)
+              console.log(`${shown(host.name)}: ${shown(state)} (${shown(host.ssh)} as ${shown(host.sshUser ?? "an unrecorded user")}, host key ${shown(host.hostKey ?? "not recorded")}), machine ${shown(host.machineId)}, ${shown(hello?.version ?? "version unknown")}, ${runs}, ${host.service}, disk ${shown(host.diskPolicy)}${receivedAt ? `, last contact ${shown(receivedAt)}` : ""}${error ? `\n  ${shown(error)}` : ""}`)
             }
           })
         }
@@ -425,7 +447,7 @@ async function main(argv: string[]): Promise<void> {
           const removed = await call<{ removed: string }>("hostRemove", { name: need(positionals[0], "a host name"), confirm: values.confirm })
           return out(removed, () => console.log(`Forgot ${removed.removed}. Its prepared remote daemon, service, sandboxes, images, runtime, packages and logs were retained.`))
         }
-        throw new PaddockError("usage", "Use `paddock host list`, `paddock host attach` or `paddock host remove NAME --confirm NAME`.")
+        throw new PaddockError("usage", "Use `paddock host add`, `paddock host list`, `paddock host attach` or `paddock host remove NAME --confirm NAME`.")
       }
       case "transport": {
         const { values } = parse({ protocol: { type: "string" }, stream: { type: "boolean" } }, rest.slice(1))
@@ -443,6 +465,7 @@ async function main(argv: string[]): Promise<void> {
     const code: ErrorCode = error instanceof PaddockError ? error.code : "runtime"
     const message = (error as Error).message
     if (asJson) console.log(JSON.stringify({ ok: false, error: { code, message, details: error instanceof PaddockError ? error.details : undefined } }))
+    else if (command === "host" && rest[0] === "add" && error instanceof PaddockError && error.details !== undefined) { console.error(`paddock: ${shown(message)}`); console.error(JSON.stringify(error.details, null, 2)) }
     else if (code === "check-failed" && error instanceof PaddockError && Array.isArray(error.details)) {
       console.error(`paddock: ${shown(message.split(": ")[0])}. These checks did not hold:`)
       for (const check of error.details as CheckResult[]) console.error(`  ${MARK[check.status] ?? "?"} ${CHECKLIST.find((entry) => entry.id === check.id)?.title ?? shown(check.id)}\n      ${shown(check.detail)}`)
