@@ -10,7 +10,7 @@ import { BUILD, readDaemonFile, runDaemon, VERSION } from "../core/daemon"
 import type { Extension } from "../core/extensions"
 import type { ForwardView } from "../core/forwards"
 import { hostOption, type FleetView, type HostView } from "../core/machines"
-import { PROTOCOL, transportStdio } from "../core/transport"
+import { bounded, PROTOCOL, transportStdio } from "../core/transport"
 import type { SshAccess } from "../core/ssh"
 import { checkSocketPath, defaultDirs, socketPath, streamSocketPath } from "../core/state"
 import { dataFrames, frame, FrameReader, type OpenRequest } from "../core/stream"
@@ -431,9 +431,10 @@ async function main(argv: string[]): Promise<void> {
         const { values } = parse({ protocol: { type: "string" }, stream: { type: "boolean" } }, rest.slice(1))
         if (selectedHost || asJson || rest[0] !== "stdio" || values.protocol !== String(PROTOCOL)) throw new PaddockError("incompatible", "Use `paddock transport stdio --protocol 1` on the target machine.")
         await transportStdio(values.stream ? streamSocketPath(dirs) : socketPath(dirs))
-        // Exits as soon as the daemon's side is closed (a lease ended, say), after the last bytes are handed to SSH,
-        // rather than waiting for SSH to close stdin, which a partitioned link may never do.
-        await new Promise((resolve) => process.stdout.write("", resolve))
+        // Exits as soon as the daemon's side is closed (a lease ended, say), rather than waiting for SSH to close stdin,
+        // which a partitioned link may never do. Ending stdout first flushes Bun's own pipe buffer, which a pending write
+        // callback does not wait for (the tail of an 8 MiB stream was lost); a reader that never reads gets five seconds.
+        await bounded(new Promise<void>((resolve) => process.stdout.end(() => resolve())), 5000)
         process.exit(0)
       }
       default: throw new PaddockError("usage", `Unknown command ${command}. See \`paddock help\`.`)

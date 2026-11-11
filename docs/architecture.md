@@ -382,7 +382,10 @@ the remote daemon. The dashboard UI has not been changed to group remote machine
 
 The gateway executes the registered absolute binary's fixed `transport stdio --protocol 1` command, with the state
 directory set explicitly. That command only relays bytes to an existing daemon socket; it cannot install, start or
-replace a daemon. `PADDOCK_SOCKET_ONLY=1` when starting the remote daemon disables its dashboard TCP listener. No
+replace a daemon. When the daemon's side closes, it ends its stdout (up to five seconds for SSH to take the last
+bytes) and exits without waiting for SSH to close stdin. On the primary, a stream's frames already received, its exit
+status among them, are delivered after its ssh exits, and a request over an SSH link that has already ended fails at
+once as offline. `PADDOCK_SOCKET_ONLY=1` when starting the remote daemon disables its dashboard TCP listener. No
 remote Docker context is introduced. Only the target daemon's core operates its engine or supplies checks.
 
 Each operation gets its own system SSH connection, reading the user's SSH config for ports and jump hosts. BatchMode

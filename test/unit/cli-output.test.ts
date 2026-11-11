@@ -1,10 +1,11 @@
 import { afterEach, expect, test } from "bun:test"
 import { statSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
+import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { VERSION } from "../../core/daemon"
-import { socketPath } from "../../core/state"
+import { socketPath, streamSocketPath } from "../../core/state"
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanups.splice(0)) await close() })
@@ -46,3 +47,21 @@ test("text from a daemon reaches the terminal without control characters", async
   expect(code).toBe(1)
   expect(err.trim().split("\n")).toHaveLength(1)
 }, 20_000)
+
+test("transport stdio hands SSH every byte the daemon sent before it exits, even to a slow reader", async () => {
+  const state = await mkdtemp(join(tmpdir(), "pdk-relay-")); const piece = Buffer.alloc(65536, 7); const pieces = 128
+  // Ends its side as a stream does after the exit frame, while the reader is still behind.
+  const server = createServer(async (socket) => {
+    for (let at = 0; at < pieces; at++) if (!socket.write(piece)) await new Promise((resolve) => socket.once("drain", resolve))
+    socket.end()
+  })
+  await new Promise<void>((resolve) => server.listen(streamSocketPath({ state, config: state }), resolve))
+  cleanups.push(async () => { await new Promise((resolve) => server.close(resolve)); await rm(state, { recursive: true, force: true }) })
+  // stdin stays open, as SSH keeps it, so only the daemon's side ending makes the relay exit.
+  const run = Bun.spawn([process.execPath, CLI, "transport", "stdio", "--protocol", "1", "--stream"], { env: { ...process.env, PADDOCK_STATE_DIR: state, PADDOCK_CONFIG_DIR: state }, stdin: "pipe", stdout: "pipe", stderr: "pipe" })
+  let received = 0
+  for await (const chunk of run.stdout) { received += chunk.length; await Bun.sleep(2) }
+  expect(await run.exited).toBe(0)
+  expect(received).toBe(piece.length * pieces)
+  run.stdin.end()
+}, 30_000)
