@@ -3,6 +3,9 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { probeCleanupScript, WAIT_FOR_PROBE_ROUTES } from "../../core/providers/probe"
+import { GvisorProvider, LABEL_ID } from "../../core/providers/gvisor"
+import { validSpec } from "../../core/state"
+import type { Manifest, Runner } from "../../core/types"
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))) })
@@ -36,4 +39,22 @@ esac
 exit 0`, probeCleanupScript("1234abcd"))
   expect(result.code).toBe(0); expect(Number((await readFile(join(result.root, "count"), "utf8")).trim())).toBeGreaterThan(6)
   expect((await readFile(join(result.root, "deleted"), "utf8")).trim()).toBe("pv1234abcda")
+})
+
+for (const leftover of ["previous", "current"] as const) test(`a ${leftover} probe that misses teardown's deadline fails instead of returning weaker evidence`, async () => {
+  const manifest: Manifest = { version: 1, name: "demo", id: "owned", createdAt: "", spec: validSpec({ name: "demo" }),
+    engine: { id: "fake", provider: "gvisor", label: "fake", ready: true, problems: [], data: { context: "fake", runtime: "runsc" } } }
+  const runner: Runner = async (argv) => {
+    let stdout = "", exitCode = 0, stderr = ""
+    if (argv[3] === "inspect" && argv[4] === "paddock-demo") stdout = JSON.stringify([{ State: { Running: true }, Config: { Labels: { [LABEL_ID]: "owned" } } }])
+    else if (argv[3] === "logs") stdout = `ready\n${leftover === "previous" ? "teardown-timeout 10.255.255.254\n" : ""}`
+    else if (argv[3] === "inspect" || argv[3] === "network") stdout = "172.20.0.1"
+    else if (argv.some((part) => part.includes("Paddock probe teardown timed out:"))) {
+      if (leftover === "current") { exitCode = 1; stderr = "Paddock probe teardown timed out" }
+    } else if (argv[3] === "exec" && argv.includes("nc")) {
+      if (argv[4]?.endsWith("-host")) stdout = "paddock-probe"; else exitCode = 1
+    } else if (argv.includes("--entrypoint")) stdout = "intact"
+    return { stdout, stderr, exitCode }
+  }
+  await expect(new GvisorProvider(runner).checks(manifest, "probe")).rejects.toThrow(/teardown|tearing down/)
 })

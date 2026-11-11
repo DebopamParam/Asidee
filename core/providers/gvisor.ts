@@ -548,6 +548,7 @@ export class GvisorProvider implements Provider {
     const out: CheckResult[] = []
     const innerDocker = (args: string[], stdin?: Uint8Array) => this.docker(engine, ["exec", ...(stdin ? ["-i"] : []), "-u", "0", container(name), "docker", "--host", "unix:///var/run/docker.sock", ...args], { timeoutMs: 120_000, stdin })
     let removeProbeImage = false
+    let teardownFailure: string | undefined
     try {
       await this.ensureHelper(engine)
       if (manifest.spec.docker) {
@@ -585,7 +586,10 @@ export class GvisorProvider implements Provider {
       const hostLog = async () => (await this.docker(engine, ["logs", hostC])).stdout
       if (!await retry(async () => (await hostLog()).includes("ready"), 40)) throw new Error("The host listener did not get ready.")
       const log = await hostLog()
-      if (log.includes("teardown-timeout")) throw new Error("A previous Paddock probe has not finished tearing down its routes; no weaker evidence was substituted.")
+      if (log.includes("teardown-timeout")) {
+        teardownFailure = "A previous Paddock probe has not finished tearing down its routes; no weaker evidence was substituted."
+        throw new Error(teardownFailure)
+      }
       const far = log.split("\n").filter((line) => line.startsWith("far ")).map((line) => line.slice(4).trim())
 
       const probeAlive = await retry(() => reaches(hostC, probeIp, PROBE_PORT))
@@ -635,11 +639,7 @@ export class GvisorProvider implements Provider {
       await this.docker(engine, ["network", "rm", peerNet])
       const cleaned = await this.docker(engine, ["run", "--rm", "--runtime", "runc", "--privileged", "--network", "host", HELPER_IMAGE, "sh", "-c", probeCleanupScript(tag)], { timeoutMs: 30_000 })
       if (cleaned.exitCode !== 0) {
-        const detail = `The probe's links and routes did not finish tearing down: ${cleaned.stderr.trim()}`
-        for (const check of out) {
-          if (check.status === "fail") check.detail += ` ${detail}`
-          else Object.assign(check, { status: "unknown", evidence: "none", detail })
-        }
+        teardownFailure = `The probe's links and routes did not finish tearing down: ${cleaned.stderr.trim()}`
       }
       if (removeProbeImage) {
         const removed = await innerDocker(["image", "rm", HELPER_IMAGE])
@@ -652,6 +652,8 @@ export class GvisorProvider implements Provider {
         }
       }
     }
+
+    if (teardownFailure) throw new PaddockError("runtime", teardownFailure)
 
     const script = `for home in /root /home/*; do for file in ${CREDENTIAL_FILES.map((file) => `"$home"/${file}`).join(" ")}; do [ -e "$file" ] && echo "$file"; done; done; true`
     const found = await this.docker(engine, ["exec", "-u", "0", container(name), "sh", "-c", script])

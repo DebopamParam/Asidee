@@ -68,7 +68,7 @@ tailnet range (100.64/10) to a listener inside it, and removes it all afterwards
 where a device on your LAN would: beyond the host, at a private address. A range whose stand-in address the host
 already routes somewhere is skipped and named in the result. Routes through a previous Paddock probe are awaited
 with a bounded deadline instead of being counted as occupied addresses. A probe returns only after its own veth,
-bridge and routes disappear. A teardown timeout makes the evidence unknown. A listener that was created but whose
+bridge and routes disappear. A teardown timeout fails the request instead of returning weaker evidence. A listener that was created but whose
 host control failed is reported separately from an occupied address. One probe runs per engine at a time.
 
 The helper runs from an image built from `core/providers/helper.Dockerfile` (Alpine pinned by digest), never from the
