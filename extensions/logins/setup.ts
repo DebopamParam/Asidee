@@ -48,10 +48,13 @@ export function referencedHomePaths(commands: string[], home: string): string[] 
 }
 
 // Re-serialize parsed TOML instead of deleting lines: MCP tables can use dotted, quoted or inline keys.
+// Settings `env` blocks and provider tables often hold API keys; only the selected login is meant to reach the guest.
+const INTEGRATION = /^(mcp_?servers|mcp|plugins|enabledPlugins|extraKnownMarketplaces|marketplaces)$/i
+const SECRET = /api_?key$|access_?key|private_?key|token$|secret|passw|credential|bearer|cookie|^authorization$|headers$/i
 function withoutIntegrations(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(withoutIntegrations)
   if (!object(value) || value instanceof Date) return value
-  return Object.fromEntries(Object.entries(value).filter(([key]) => !/^(mcp_?servers|mcp|plugins|enabledPlugins|extraKnownMarketplaces|marketplaces)$/i.test(key)).map(([key, child]) => [key, withoutIntegrations(child)]))
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !INTEGRATION.test(key) && !SECRET.test(key)).map(([key, child]) => [key, withoutIntegrations(child)]))
 }
 
 function tomlValue(value: unknown): string {

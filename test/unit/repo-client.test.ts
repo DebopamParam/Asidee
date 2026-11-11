@@ -96,3 +96,24 @@ test("clone uses only a guest gh helper, leaves a clean credential-free remote, 
   expect(config).not.toContain("token")
   await expect(clone(transport.runner, "demo", "owner/repo", "workspace")).rejects.toThrow("failed")
 })
+
+test("save cannot prune existing host tags or run hooks under aggressive host fetch settings", async () => {
+  const guest = await repositoryFixture(), host = await repositoryFixture(), transport = fakeExec(guest.home)
+  await host.git(["tag", "host-keep"])
+  await host.git(["config", "fetch.prune", "true"]); await host.git(["config", "fetch.pruneTags", "true"])
+  await put(host.home, "workspace/.git/hooks/reference-transaction", '#!/bin/sh\nprintf ran > "$HOME/hook-ran"\n')
+  await chmod(join(host.work, ".git/hooks/reference-transaction"), 0o700)
+  await save(transport.runner, { name: "demo", workspace: guest.work, target: host.work })
+  expect(await host.git(["rev-parse", "refs/tags/host-keep"])).toBe(host.tip)
+  expect(await Bun.file(join(guest.home, "hook-ran")).exists()).toBe(false)
+})
+
+test("a highly compressed large object is rejected before host Git or target creation", async () => {
+  const guest = await repositoryFixture(), transport = fakeExec(guest.home), target = join(guest.home, "never.git")
+  await put(guest.home, "workspace/expanded", Buffer.alloc(33 * 1024 * 1024, 65))
+  await guest.git(["add", "expanded"]); await guest.git(["commit", "-qm", "Compressed large object"])
+  const calls: string[][] = []
+  await expect(save(async (argv, stdin) => { calls.push(argv); return transport.runner(argv, stdin) }, { name: "demo", workspace: guest.work, target })).rejects.toThrow("expanded")
+  expect(calls.some(argv => argv[0] === "git")).toBe(false)
+  expect(await Bun.file(join(target, "HEAD")).exists()).toBe(false)
+})

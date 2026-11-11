@@ -55,7 +55,9 @@ function account(a, p) {
 }
 const ghFile = path.resolve(process.env.GH_CONFIG_DIR || path.join(process.env.XDG_CONFIG_HOME || path.join(home, ".config"), "gh"), "hosts.yml")
 function githubSection(text) {
-  const lines = (text || "").split(/\r?\n/), start = lines.findIndex((line) => /^(?:github\.com|"github\.com"|'github\.com'):\s*$/.test(line))
+  const lines = (text || "").split(/\r?\n/), headings = lines.map((line, index) => /^(?:github\.com|"github\.com"|'github\.com'):\s*$/.test(line) ? index : -1).filter(index => index >= 0)
+  if (headings.length > 1) fail(66)
+  const start = headings[0] ?? -1
   if (start < 0) {
     if (lines.some((line) => /^\S/.test(line) && !/^#|^[^:]+:\s*$/.test(line))) fail(66)
     return { rest: text || "", section: "" }
@@ -156,12 +158,12 @@ function logout(login) {
     return { ...login, removed: true, stopped: 0 }
   }
   const a = login.agent, p = login.profile, f = path.join(dir(a, p), files[a])
+  const file = a === "claude" ? accountFile(a, p) : undefined, state = file ? json(file) : undefined
   safe(f); fs.unlinkSync(f)
-  if (a === "claude") {
-    const file = accountFile(a, p), state = json(file)
-    if (state.oauthAccount) { delete state.oauthAccount; atomic(file, JSON.stringify(state, null, 2) + "\n") }
-  }
-  return { ...login, removed: true, stopped: stopSessions(a, p) }
+  let stopped
+  try { if (state?.oauthAccount) { delete state.oauthAccount; atomic(file, JSON.stringify(state, null, 2) + "\n") } }
+  finally { stopped = stopSessions(a, p) }
+  return { ...login, removed: true, stopped }
 }
 function githubAccount(token) {
   return new Promise((resolve, reject) => {
@@ -189,12 +191,21 @@ async function main() {
     if (info(dest) && choice !== "replace") fail(67)
     if (!object(payload) || typeof payload.credential !== "string" || Buffer.byteLength(payload.credential) > 1024 * 1024 || !object(JSON.parse(payload.credential))) fail(66)
     const setup = payload.setup ? installSetup(agent, profile, payload.setup) : undefined
+    const settingsPath = path.join(root, "settings.json")
+    // Claude prefers an API key over the imported subscription, including one copied in setup.
+    if (agent === "claude") { const current = json(settingsPath); if (current.env !== undefined && !object(current.env)) fail(66) }
     let state, statePath
     if (agent === "claude" && object(payload.account)) { statePath = path.join(root, ".claude.json"); state = json(statePath); state.oauthAccount = payload.account }
     mkdir(root); fs.chmodSync(root, 0o700)
     atomic(dest, payload.credential, 0o600, choice === "replace")
     if (statePath) atomic(statePath, JSON.stringify(state, null, 2) + "\n")
     const result = setup ? setup() : { files: 0, missingCommands: [] }
+    if (agent === "claude") {
+      const settings = json(settingsPath)
+      if (settings.env !== undefined && !object(settings.env)) fail(66)
+      settings.env = { ...settings.env, ANTHROPIC_API_KEY: "" }
+      atomic(settingsPath, JSON.stringify(settings, null, 2) + "\n")
+    }
     return emit({ agent, profile, ...result })
   }
   if (mode === "github") {

@@ -36,6 +36,9 @@ Imported logins live in the guest's `~/.claude-PROFILE` or `~/.codex-PROFILE`, i
 different `--target`. Inside a guest shell, select a profile with `CLAUDE_CONFIG_DIR="$HOME/.claude-work" claude` or
 `CODEX_HOME="$HOME/.codex-personal" codex`. Configure an editor's agent home the same way. Plain `claude` and `codex`
 continue to use their canonical directories. This extension does not change T3 Code settings or install profile launchers.
+Every Claude import sets `env.ANTHROPIC_API_KEY` to an empty string in that profile's `settings.json`, as the
+sandbox-manager reference did, so an API key in the guest environment does not take precedence over the imported
+subscription login. Other `env` entries are kept.
 
 An existing credential requires `--replace` or the action's **Replace an existing login** checkbox. Credentials travel
 only on stdin to `paddock exec NAME --stdin -- …`. Guest writes use private temporary files and atomic publication with
@@ -53,8 +56,13 @@ Setup copying is opt-in with `--setup` and overwrites matching guest setup files
 
 Top-level setup symlinks, including a linked profile directory, are followed. Below those directories, file symlinks are
 followed and directory symlinks are skipped. Plugins, history, transcripts, caches, and MCP definition files are excluded.
-MCP server and plugin configuration keys are removed from parsed settings and TOML. TOML is re-serialized, so its comments
-and formatting are not preserved. Setup is limited to 16 MiB and 2000 files. UTF-8 setup files have literal host-home paths
+MCP server and plugin configuration keys are removed from parsed settings and TOML. So is every key, at any depth, whose
+name looks like a secret (ending in `API_KEY` or `TOKEN`, or containing `SECRET`, `PASSWORD`, `CREDENTIAL`,
+`ACCESS_KEY`, `PRIVATE_KEY`, `BEARER` or `COOKIE`, or named `Authorization` or `*headers`), such as
+`env.ANTHROPIC_API_KEY` in Claude settings or a Codex provider's bearer token; the selected login is the only credential
+meant to reach the guest. This is a name filter: a secret under another name, inside a hook command, a skill, a
+Markdown file or a referenced home script is copied as is, so review those before using `--setup`. The sandbox-manager
+reference copied these keys. TOML is re-serialized, so its comments and formatting are not preserved. Setup is limited to 16 MiB and 2000 files. UTF-8 setup files have literal host-home paths
 rewritten to the guest home. Existing guest setup files absent from the bundle stay in place.
 
 Missing hook or status-line executables and interpreter script paths are reported without executing the commands.

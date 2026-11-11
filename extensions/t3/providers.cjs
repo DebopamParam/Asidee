@@ -11,15 +11,24 @@ function safe(p, directory = false) {
   }
 }
 function read(p) { safe(p); return exists(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : {} }
-function atomic(file, value) {
+function atomic(file, value, expected) {
   safe(file)
   const tmp = file + "." + crypto.randomBytes(12).toString("hex")
-  try { fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600, flag: "wx" }); fs.renameSync(tmp, file) }
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600, flag: "wx" })
+    if (expected) {
+      safe(file)
+      const current = exists(file) ? fs.readFileSync(file) : undefined
+      if (current === undefined ? expected.bytes !== undefined : expected.bytes === undefined || !current.equals(expected.bytes)) throw new Error()
+    }
+    fs.renameSync(tmp, file)
+  }
   finally { if (exists(tmp)) fs.unlinkSync(tmp) }
 }
 function main() {
   safe(target)
-  const settings = read(target)
+  const original = { bytes: exists(target) ? fs.readFileSync(target) : undefined }
+  const settings = original.bytes ? JSON.parse(original.bytes.toString("utf8")) : {}
   if (!object(settings) || (settings.providerInstances !== undefined && !object(settings.providerInstances))) throw new Error()
   const instances = settings.providerInstances || {}, ownership = read(ownershipFile), records = ownership.instances || []
   if (!object(ownership) || !Array.isArray(records) || !records.every(item => object(item) && typeof item.id === "string" && ["claudeAgent", "codex"].includes(item.driver) && typeof item.homePath === "string")) throw new Error()
@@ -52,7 +61,7 @@ function main() {
   safe(path.dirname(target), true); fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 })
   // Keep both generations until publication, so an interrupted two-file update retains ownership on retry.
   atomic(ownershipFile, { instances: [...records, ...nextRecords].filter((item, index, all) => all.findIndex(other => other.id === item.id && other.driver === item.driver && other.homePath === item.homePath) === index) })
-  atomic(target, settings)
+  atomic(target, settings, original)
   atomic(ownershipFile, { instances: nextRecords })
   process.stdout.write(JSON.stringify(counts) + "\n")
 }

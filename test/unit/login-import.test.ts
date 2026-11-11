@@ -306,3 +306,53 @@ test("GitHub rejects an invalid account token without storing it or returning re
   expect(existsSync(join(g, ".config/gh/hosts.yml"))).toBe(false)
   expect(existsSync(join(g, ".paddock-logins.lock"))).toBe(false)
 })
+
+test("successful guest login responses cannot return arbitrary account text or missing-command secrets", async () => {
+  const h = await home()
+  await put(h, ".codex-work/auth.json", credential)
+  const response = (value: unknown): Runner => async () => ({ exitCode: 0, stdout: JSON.stringify(value), stderr: secret })
+  await expect(listLogins(response([{ agent: "codex", profile: "work", account: secret }]), "demo")).rejects.toThrow("withheld")
+  // A C1 control (single-byte CSI) in a label could rewrite the terminal that prints it.
+  await expect(listLogins(response([{ agent: "claude", profile: "work", account: "agent@ex\u009b2Jample.com" }]), "demo")).rejects.toThrow("withheld")
+  for (const missingCommands of [["\u001b]0;spoof\u0007"], [1], 0]) {
+    await expect(importLogin(host(h, response({ files: 0, missingCommands })), { name: "demo", agent: "codex", profile: "work", replace: false, setup: false })).rejects.toThrow("withheld")
+  }
+  // Without a copied setup there is no command for the guest to report.
+  await expect(importLogin(host(h, response({ files: 0, missingCommands: ["claude-statusline"] })), { name: "demo", agent: "codex", profile: "work", replace: false, setup: false })).rejects.toThrow("withheld")
+})
+
+test("copied setup drops secret-named settings and TOML keys but keeps the rest", async () => {
+  const h = await home()
+  await put(h, ".claude-work/.credentials.json", credential)
+  await put(h, ".claude-work/settings.json", JSON.stringify({ model: "opus", apiKeyHelper: "~/bin/key.sh", includeCoAuthoredBy: false, env: { OTHER: "keep", ANTHROPIC_API_KEY: secret, ANTHROPIC_AUTH_TOKEN: secret, AWS_SECRET_ACCESS_KEY: secret, DB_PASSWORD: secret } }))
+  const claude = await collectSetup("claude", "work", h)
+  expect(claude.files.map((file) => Buffer.from(file.data, "base64").toString("utf8")).join("\n")).not.toContain(secret)
+  expect(JSON.parse(Buffer.from(claude.files.find((file) => file.path === "settings.json")!.data, "base64").toString("utf8"))).toEqual({ model: "opus", apiKeyHelper: "~/bin/key.sh", includeCoAuthoredBy: false, env: { OTHER: "keep" } })
+  const toml = `model = "gpt"\nmodel_max_output_tokens = 10\n[model_providers.corp]\nenv_key = "CORP_KEY"\nexperimental_bearer_token = "${secret}"\nhttp_headers = { Authorization = "${secret}" }\n[shell_environment_policy.set]\nGITHUB_TOKEN = "${secret}"\n`
+  expect(cleanConfig("codex", toml)).not.toContain(secret)
+  expect(Bun.TOML.parse(cleanConfig("codex", toml))).toEqual({ model: "gpt", model_max_output_tokens: 10, model_providers: { corp: { env_key: "CORP_KEY" } }, shell_environment_policy: { set: {} } })
+})
+
+test("Claude subscription imports clear a competing API key even without copying setup", async () => {
+  const h = await home(), g = await home(), transport = guestRunner(g)
+  await put(h, ".claude-work/.credentials.json", credential)
+  await put(g, ".claude-work/settings.json", JSON.stringify({ model: "keep", env: { OTHER: "keep", ANTHROPIC_API_KEY: secret } }))
+  await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "work", replace: false, setup: false })
+  expect(await json(join(g, ".claude-work/settings.json"))).toEqual({ model: "keep", env: { OTHER: "keep", ANTHROPIC_API_KEY: "" } })
+})
+
+test("ambiguous duplicate GitHub YAML sections are refused before logout or replacement", async () => {
+  const g = await home(), transport = guestRunner(g, githubFixture)
+  const text = `github.com:\n    oauth_token: first\ngithub.com:\n    oauth_token: ${secret}\n`
+  await put(g, ".config/gh/hosts.yml", text)
+  await expect(logout(transport.runner, "demo", { agent: "github", profile: "~" })).rejects.toThrow("failed")
+  expect(await readFile(join(g, ".config/gh/hosts.yml"), "utf8")).toBe(text)
+})
+
+test("invalid Claude logout metadata fails before deleting its credential", async () => {
+  const g = await home(), transport = guestRunner(g)
+  await put(g, ".claude-work/.credentials.json", credential)
+  await put(g, ".claude-work/.claude.json", "invalid")
+  await expect(logout(transport.runner, "demo", { agent: "claude", profile: "work" })).rejects.toThrow("failed")
+  expect(await readFile(join(g, ".claude-work/.credentials.json"), "utf8")).toBe(credential)
+})

@@ -89,3 +89,52 @@ test("invalid or symlinked settings are not replaced and credential symlinks are
   await symlink(join(home, "outside.json"), join(home, ".codex-work/auth.json"))
   expect(await syncProviders(transport.runner, "demo")).toEqual({ claude: 0, codex: 0 })
 })
+
+test("provider publication refuses to overwrite a T3 settings edit made during sync", async () => {
+  const home = await fixture(), execute = local(home)
+  await put(home, ".codex/auth.json", "credential")
+  await put(home, ".t3/userdata/settings.json", '{"theme":"before"}')
+  const prefix = `const f = require('fs'), originalWrite = f.writeFileSync; let edited = false;
+    f.writeFileSync = (file, ...args) => {
+      if (!edited && String(file).includes('paddock-providers.json.')) {
+        edited = true; originalWrite(require('path').join(require('os').homedir(), '.t3/userdata/settings.json'), '{"theme":"concurrent"}');
+      }
+      return originalWrite(file, ...args);
+    };`
+  const script = await Bun.file(join(import.meta.dir, "../../extensions/t3/providers.cjs")).text()
+  expect((await execute(["node", "-e", prefix + script])).exitCode).not.toBe(0)
+  expect(JSON.parse(await readFile(join(home, ".t3/userdata/settings.json"), "utf8"))).toEqual({ theme: "concurrent" })
+  expect(await syncProviders(fakeExec(home).runner, "demo")).toEqual({ claude: 0, codex: 1 })
+})
+
+test("the installer uses the verified archive bytes when its download path changes after hashing", async () => {
+  const root = await fixture(), home = await fixture(), execute = local(root), name = `t3-${version}-linux-${arch() === "arm64" ? "arm64" : "x64"}.tar.gz`
+  for (const label of ["verified", "substituted"]) {
+    await put(root, `${label}/release/t3`, `#!/bin/sh\nprintf '${label}' > "$HOME/executed"\nprintf 't3 v${version}\\n'\n`)
+    await chmod(join(root, label, "release/t3"), 0o700)
+    await must(execute, ["tar", "-czf", join(root, label + ".tar.gz"), "-C", join(root, label), "release"])
+  }
+  const archive = await readFile(join(root, "verified.tar.gz")), hash = createHash("sha256").update(archive).digest("hex")
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    return new URL(request.url).pathname.endsWith("SHA256SUMS") ? new Response(`${hash}  ${name}\n`) : new Response(archive)
+  } })
+  const prefix = `const c = require('crypto'), originalHash = c.createHash;
+    c.createHash = (...args) => {
+      const hash = originalHash(...args), originalDigest = hash.digest.bind(hash);
+      hash.digest = (...args) => {
+        const result = originalDigest(...args), f = require('fs'), p = require('path');
+        const root = p.join(require('os').homedir(), '.t3/runtime/versions');
+        for (const name of f.readdirSync(root).filter(n => n.startsWith('.staging-'))) {
+          const dir = p.join(root, name);
+          for (const file of f.readdirSync(dir).filter(n => n.endsWith('.tar.gz'))) f.copyFileSync(${JSON.stringify(join(root, "substituted.tar.gz"))}, p.join(dir, file));
+        }
+        return result;
+      };
+      return hash;
+    };`
+  try {
+    const script = await Bun.file(join(import.meta.dir, "../../extensions/t3/install.cjs")).text()
+    expect(await must(local(home), ["node", "-e", prefix + script, version, server.url.href.replace(/\/$/, "")])).toBe("installed")
+    expect(await readFile(join(home, "executed"), "utf8")).toBe("verified")
+  } finally { server.stop(true) }
+})

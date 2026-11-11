@@ -31,8 +31,11 @@ stdout. Base64 is necessary because the current API decodes stdin/stdout as text
 The client rejects noncanonical base64, size/checksum mismatches and unexpected advertised refs, runs Git bundle
 verification and object checks, and fetches into a unique `saved/NAME/UUID` branch. It never checks out guest files,
 updates existing branches, changes a host worktree, or executes repository hooks. Committed history remains untrusted
-input to host Git, so use a maintained Git installation before reviewing it. The compressed bundle limit does not
-bound expanded object sizes or total host Git resource consumption.
+input to host Git, so use a maintained Git installation before reviewing it. Before host Git reads anything, the client
+parses the bundle itself: one advertised ref and no prerequisites, a pack whose trailer checksum matches, at most 10000
+objects, each object at most 32 MiB inflated and all of them at most 128 MiB inflated (delta results counted). Git then
+indexes the pack with `--strict` in a private temporary repository before the fetch. These bound what Git inflates,
+not Git's CPU time.
 
 The default destination is a bare repository at `$XDG_STATE_HOME/paddock-repo/NAME.git`, or
 `~/.local/state/paddock-repo/NAME.git`. An explicit `--target` can be an existing bare or working clone; a missing target

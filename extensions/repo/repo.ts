@@ -5,6 +5,7 @@ import { homedir, tmpdir } from "node:os"
 import { isAbsolute, join, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { checked, exec, json, object, run, sandboxName, type Runner } from "./client"
+import { inspectBundle } from "./bundle"
 
 export const MAX_BUNDLE_BYTES = 8 * 1024 * 1024
 export function repository(value: string): string {
@@ -43,25 +44,30 @@ export async function save(runner: Runner, options: { name: string; workspace: s
   if (!isAbsolute(options.target) || /[\0\r\n]/.test(options.target)) throw new Error("Give an absolute host export target.")
   if (options.branch !== undefined && (!options.branch || /[\0\r\n]/.test(options.branch))) throw new Error("Invalid source branch.")
   const bundle = parseBundle(await guest(runner, options.name, { action: "save", workspace: options.workspace, branch: options.branch }))
-  const git = (args: string[]) => checked(runner, ["git", "-c", "core.hooksPath=/dev/null", "-c", "transfer.fsckObjects=true", "-c", "fetch.fsckObjects=true", "-c", "fetch.recurseSubmodules=false", "-c", "maintenance.auto=false", "-c", "gc.auto=0", ...args])
+  const inspected = inspectBundle(bundle.data, bundle.tip, bundle.ref)
+  const git = (args: string[]) => checked(runner, ["git", "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "transfer.fsckObjects=true", "-c", "fetch.fsckObjects=true", "-c", "fetch.recurseSubmodules=false", "-c", "maintenance.auto=false", "-c", "gc.auto=0", "-c", "pack.threads=1", ...args])
   await git(["check-ref-format", "refs/heads/" + bundle.branch])
-  await safeTarget(options.target)
-  if (!await lstat(options.target).catch(() => undefined)) {
-    await mkdir(options.target, { recursive: true, mode: 0o700 })
-    await git(["init", "--bare", "--", options.target])
-  }
-  // Explicit destinations may be existing user clones. Fetch writes a new branch, never a worktree or existing branch.
-  const bare = (await git(["-C", options.target, "rev-parse", "--is-bare-repository"])).trim()
-  const root = (await git(["-C", options.target, "rev-parse", bare === "true" ? "--absolute-git-dir" : "--show-toplevel"])).trim()
-  if (await realpath(root) !== await realpath(options.target)) throw new Error("Export target must be a repository root, not a subfolder of another repository.")
   const temporary = await mkdtemp(join(await realpath(tmpdir()), "paddock-save-")), file = join(temporary, "history.bundle")
   const targetBranch = "saved/" + options.name + "/" + randomUUID()
   try {
     await writeFile(file, bundle.data, { mode: 0o600, flag: "wx" })
+    const quarantine = join(temporary, "verify.git"), pack = join(temporary, "history.pack")
+    await writeFile(pack, inspected.pack, { mode: 0o600, flag: "wx" })
+    await git(["init", "--bare", "--template=", "--object-format=" + inspected.format, "--", quarantine])
+    await git(["-C", quarantine, "index-pack", "--strict", pack])
+    await safeTarget(options.target)
+    if (!await lstat(options.target).catch(() => undefined)) {
+      await mkdir(options.target, { recursive: true, mode: 0o700 })
+      await git(["init", "--bare", "--template=", "--object-format=" + inspected.format, "--", options.target])
+    }
+    // Explicit destinations may be existing user clones. Fetch writes a new branch, never a worktree or existing branch.
+    const bare = (await git(["-C", options.target, "rev-parse", "--is-bare-repository"])).trim()
+    const root = (await git(["-C", options.target, "rev-parse", bare === "true" ? "--absolute-git-dir" : "--show-toplevel"])).trim()
+    if (await realpath(root) !== await realpath(options.target)) throw new Error("Export target must be a repository root, not a subfolder of another repository.")
     await git(["-C", options.target, "bundle", "verify", file])
     const heads = (await git(["bundle", "list-heads", file])).trim().split("\n")
     if (heads.length !== 1 || heads[0] !== bundle.tip + " " + bundle.ref) throw new Error("Bundle advertised unexpected history; contents withheld.")
-    await git(["-C", options.target, "-c", "protocol.file.allow=always", "fetch", "--no-tags", "--no-write-fetch-head", file, bundle.ref + ":refs/heads/" + targetBranch])
+    await git(["-C", options.target, "-c", "protocol.file.allow=always", "fetch", "--no-tags", "--no-prune", "--no-prune-tags", "--no-write-fetch-head", file, bundle.ref + ":refs/heads/" + targetBranch])
     const commit = (await git(["-C", options.target, "rev-parse", "--verify", "refs/heads/" + targetBranch + "^{commit}"])).trim()
     if (commit !== bundle.tip) throw new Error("Export tip mismatch. The saved branch is retained for inspection.")
     return { branch: targetBranch, commit, target: options.target }
