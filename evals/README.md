@@ -42,22 +42,38 @@ when it is not. M03 builds two more gateways here: one with another version and 
 version. M08 stops this run's primary daemon with SIGSTOP for up to thirty seconds to measure the remote lease expiry,
 and M11 stops one of its SSH processes the same way before `daemon stop`; both resume or kill what they stopped.
 
-Group N covers host enrollment. N01 uses `PADDOCK_EVAL_HOST` only for a read-only probe and a plan, with before/after
-file hashes, ownership, modes, mtimes and links. The installer evals require `PADDOCK_EVAL_ENROLL_HOST=pdk-enroll-NAME@orb`,
-a disposable Ubuntu machine with Docker, readable Docker access, `alpine:latest`, systemd, Python 3 and passwordless
-sudo. Start with no current Paddock service, no sandboxes and a readable `/etc/docker/daemon.json` containing unrelated
-settings. N02 through N07 measure plans, stale inventory/config consent, refusals, a partial installation failure, full
-installation, a real Docker-restart interruption, smoke isolation/disk checks, removal and sudo-never reuse.
+Group N covers host enrollment. N01 uses `PADDOCK_EVAL_HOST` only for a read-only probe and a plan, as JSON and as
+text. It starts nothing on that machine, and compares before and after: file hashes, ownership, modes, mtimes and
+links, Docker's own process and images, and the start time of every container that was running. The installer evals
+require `PADDOCK_EVAL_ENROLL_HOST=pdk-enroll-NAME@orb`, a disposable Ubuntu machine with Docker, readable Docker access,
+`alpine:latest`, systemd, Python 3, passwordless sudo and outbound HTTPS. Start with no Paddock files, no sandboxes and
+a readable `/etc/docker/daemon.json` containing unrelated settings. These evals run in the order of the file, and each
+starts from the state the one before it left, so run the group whole.
+
+N02 through N04 measure the plan, stale inventory and configuration consent, and refusals; one of them is a private
+`ssh` wrapper that withholds the host key SSH verified. N11 corrupts one uploaded binary byte through such a wrapper
+and N05 forces a failure halfway: each requires the report of what was and was not changed. N06 installs, with a real
+Docker-restart interruption, the installed digests, smoke isolation and disk checks. N07 removes the host and reuses
+its service with `--sudo never`.
 
 N08 additionally needs `PADDOCK_EVAL_ENROLL_PACKAGES_HOST=pdk-enroll-OTHER@orb`, another fresh Ubuntu machine without
 Docker, with usable signed apt metadata already populated. It measures the complete pinned distro package transaction
 and confirms no login-group edit. N09 drives an actual terminal to decline. N10 requires OrbStack root control of the
 first fixture; it temporarily sets that disposable account's password and an isolated sudoers override to require a
-password with tty-scoped timestamps, then removes the override. No real user's password is used. N13 sends Ctrl-C after interactive approval, requires exit 130 and restored terminal flags, and checks no host was
-registered, beside successful interactive controls. N11 corrupts one uploaded binary byte using a private SSH wrapper, beside the valid installation controls. N12 follows the manual
-uninstall path on the first fixture, retaining distro packages and unrelated Docker settings. Delete both machines
-after the run. These evals reject destinations outside the explicit disposable naming pattern and never install on
-`PADDOCK_EVAL_HOST` or change the Mac's Docker configuration. A missing fixture is not measured. Example:
+password with tty-scoped timestamps, then removes the override. No real user's password is used.
+
+N15 enables the service only until the next boot. N16 registers a second gVisor runtime that sorts first. N14 alters
+the smoke sandbox's final verify reply three ways through an `ssh` wrapper, beside an unaltered control. N13 sends
+Ctrl-C after interactive approval and requires exit 130 and restored terminal flags. N18 puts a sandbox with the smoke
+name on the fixture and runs the removal command the refusal prints. N17 installs another build of the same source,
+with a wrapper that turns the installer's exit status into 77. N19 enrolls with `--docker` and runs a container inside
+a sandbox made through this primary; the fixture pulls the pinned `docker` image and, from inner Docker, `alpine:3.24`.
+N12 follows the manual uninstall of `docs/host-enrollment.md` on the first fixture, retaining distro packages, pulled
+images and unrelated Docker settings. N20 needs no fixture: it runs the installer script on this machine against
+archives it makes, with one unprivileged step, and writes only inside the run's temporary folder.
+
+Delete both machines after the run. These evals reject destinations outside the explicit disposable naming pattern and
+never install on `PADDOCK_EVAL_HOST` or change the Mac's Docker configuration. A missing fixture is not measured. Example:
 
 ```sh
 PADDOCK_EVAL_HOST=home-linux \
@@ -70,7 +86,9 @@ bun evals/run.ts --write
 (`alpine:latest`; the attempt without `SYS_ADMIN` fails only after fetching), I09 once (`busybox:stable`) and I15
 twice (`busybox:stable`, then by digest). Verify's probe and the other evals use images loaded from the engine, and I24
 blocks the registry on purpose. The engine pulls `alpine:latest`, `docker:cli` (P02) and
-`docker/sandbox-templates:shell-docker` only when they are missing. Docker Hub's anonymous quota read from this
+`docker/sandbox-templates:shell-docker` only when they are missing. The enrollment fixtures pull on their own engines:
+the pinned smoke image once on each, and for N19 the pinned `docker` image and one `alpine:3.24` from inner Docker.
+Docker Hub's anonymous quota read from this
 machine's address showed 100 of 100 left both before and after the full run on 2026-11-11, so the five could not be
 confirmed against the quota from here.
 
