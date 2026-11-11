@@ -56,7 +56,7 @@ test("imports one profile via stdin, writes 0600 atomically, requires replacemen
   await put(h, ".codex-work/auth.json", credential); await put(h, ".codex-other/auth.json", '{"secret":"not-selected"}')
   expect(await discoverProfiles("codex", host(h, transport.runner))).toEqual(["other", "work"])
   const options = { name: "demo", agent: "codex", profile: "work", replace: false, setup: false } satisfies Parameters<typeof importLogin>[1]
-  expect(await importLogin(host(h, transport.runner), options)).toEqual({ agent: "codex", profile: "work", files: 0, missingCommands: 0 })
+  expect(await importLogin(host(h, transport.runner), options)).toEqual({ agent: "codex", profile: "work", files: 0, missingCommands: 0, missingCommandNames: [] })
   const dest = join(g, ".codex-work/auth.json")
   expect(await readFile(dest, "utf8")).toBe(credential)
   expect((await stat(dest)).mode & 0o777).toBe(0o600)
@@ -144,6 +144,7 @@ test("copies only allowlisted symlinked Claude setup, scripts and state, rewrite
   expect(JSON.stringify(bundle)).not.toContain(secret)
   const result = await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "work", replace: false, setup: true })
   expect(result.files).toBe(7); expect(result.missingCommands).toBe(1)
+  expect(result.missingCommandNames).toEqual(["paddock-missing-unit-hook"])
   expect(await readFile(join(g, ".config/ai/status.sh"), "utf8")).toContain(`${g}/project`)
   expect(await readFile(join(g, ".claude-work/skills/demo/SKILL.md"), "utf8")).toBe(`read ${g}/project`)
   expect((await stat(join(g, ".claude-work/hooks/ok.sh"))).mode & 0o777).toBe(0o700)
@@ -364,6 +365,19 @@ test("a secret used as a missing hook name is withheld even in a successful setu
   const imported = await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "work", replace: false, setup: true })
   expect(imported.missingCommands).toBe(1)
   expect(JSON.stringify(imported)).not.toContain(secret)
+})
+
+test("missing command diagnostics accept only bounded printable names from the settings actually sent", async () => {
+  const h = await home(), g = await home(), transport = guestRunner(g)
+  await put(h, ".claude-work/.credentials.json", credential)
+  await put(g, ".claude-work/settings.json", JSON.stringify({ statusLine: { command: "old-missing-hook" } }))
+  const options = { name: "demo", agent: "claude", profile: "work", replace: false, setup: true } as const
+  expect((await importLogin(host(h, transport.runner), options)).missingCommands).toBe(0)
+  await put(h, ".claude-work/settings.json", JSON.stringify({ statusLine: { command: "new-missing-hook" } }))
+  for (const names of [[secret], ["not-sent"], ["bad\u001b"], ["a".repeat(161)], Array(65).fill("new-missing-hook")]) {
+    const runner: Runner = async () => ({ exitCode: 0, stdout: JSON.stringify({ files: 1, missingCommands: 65, missingCommandNames: names }), stderr: "" })
+    await expect(importLogin(host(h, runner), options)).rejects.toThrow("withheld")
+  }
 })
 
 test("JSON and TOML home rewrites escape guest path characters", async () => {

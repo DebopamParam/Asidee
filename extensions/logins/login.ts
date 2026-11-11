@@ -77,7 +77,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
     const agent = agentName(directAgent ?? field("agent") ?? "")
     const result = await importLogin(host, { name, agent, profile, target: values.target ?? field("target"), replace, setup: values.setup ?? field("setup") === "true" })
     console.log(`Imported ${agent}/${result.profile}. Select it inside the sandbox with ${agent === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"}="$HOME/.${agent}-${result.profile}" ${agent}.`)
-    console.log(`Copied ${result.files} setup files.${result.missingCommands ? ` Missing hook/status-line commands or scripts: ${result.missingCommands} (names withheld).` : ""}`)
+    console.log(`Copied ${result.files} setup files.${result.missingCommands ? ` Missing hook/status-line commands or scripts: ${result.missingCommandNames.join(", ") || "names withheld"}${result.missingCommands > result.missingCommandNames.length ? ` (${result.missingCommands - result.missingCommandNames.length} names withheld)` : ""}.` : ""}`)
   } else if (action === "github" || action === "github-host") {
     const fromHost = action === "github-host" || values.gh
     const result = await importGithub(run, name, fromHost ? { kind: "host", account: values.account ?? field("account") } : { kind: "token", value: await readToken() }, replace)

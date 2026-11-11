@@ -139,7 +139,8 @@ function installSetup(a, p, bundle) {
       for (const key of ["hasCompletedOnboarding", "lastOnboardingVersion", "oauthAccount", "theme", "editorMode"]) if (Object.hasOwn(bundle.state, key)) state[key] = bundle.state[key]
       atomic(stateFile, JSON.stringify(state, null, 2) + "\n")
     }
-    return { files: pending.length, missingCommands: a === "claude" ? missingCommands(json(path.join(root, "settings.json"))).length : 0 }
+    const missing = a === "claude" && bundle.files.some((file) => file.path === "settings.json") ? missingCommands(json(path.join(root, "settings.json"))) : []
+    return { files: pending.length, missingCommands: missing.length, missingCommandNames: missing.map((name) => name.split(home + "/").join("~/")) }
   }
 }
 function stopSessions(a, p) {
@@ -205,7 +206,8 @@ async function main() {
     mkdir(root); fs.chmodSync(root, 0o700)
     atomic(dest, payload.credential, 0o600, choice === "replace")
     if (statePath) atomic(statePath, JSON.stringify(state, null, 2) + "\n")
-    const result = setup ? setup() : { files: 0, missingCommands: 0 }
+    const result = setup ? setup() : { files: 0, missingCommands: 0, missingCommandNames: [] }
+    result.missingCommandNames = result.missingCommandNames.filter((name) => /^[\x20-\x7e]{1,160}$/.test(name) && Array.isArray(payload.commandNames) && payload.commandNames.includes(name)).slice(0, 64)
     if (agent === "claude") {
       const settings = json(settingsPath)
       if (settings.env !== undefined && !object(settings.env)) fail(66)

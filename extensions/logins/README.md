@@ -66,8 +66,9 @@ reference copied these keys. TOML is re-serialized, so its comments and formatti
 rewritten to the guest home. Existing guest setup files absent from the bundle stay in place.
 
 Missing hook or status-line executables and interpreter script paths are counted without executing the commands.
-Only the count crosses back to the host. Names can contain secrets or guest-controlled text and are withheld from
-action output. JSON and the re-serialized TOML escape the rewritten home path, including quotes and backslashes.
+The output names missing commands from the settings actually sent, up to 64 names of 160 printable ASCII characters
+each. Names containing a credential value are withheld, as are names outside that sent allowlist. The total count
+includes withheld names. JSON and the re-serialized TOML escape the rewritten home path, including quotes and backslashes.
 This is a static check of simple shell commands. Dynamic shell expressions, dependencies inside scripts, and commands
 fetched at runtime are not verified. Setup writes are atomic per file, not one transaction. An I/O failure can leave a
 partially copied setup or an imported login; list logins after a failure before retrying with `--replace`.
