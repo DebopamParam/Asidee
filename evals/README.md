@@ -53,8 +53,8 @@ N08 additionally needs `PADDOCK_EVAL_ENROLL_PACKAGES_HOST=pdk-enroll-OTHER@orb`,
 Docker, with usable signed apt metadata already populated. It measures the complete pinned distro package transaction
 and confirms no login-group edit. N09 drives an actual terminal to decline. N10 requires OrbStack root control of the
 first fixture; it temporarily sets that disposable account's password and an isolated sudoers override to require a
-password with tty-scoped timestamps, then removes the override. No real user's password is used. N11 corrupts one
-uploaded binary byte using a private SSH wrapper, beside the valid installation controls. N12 follows the manual
+password with tty-scoped timestamps, then removes the override. No real user's password is used. N13 sends Ctrl-C after interactive approval, requires exit 130 and restored terminal flags, and checks no host was
+registered, beside successful interactive controls. N11 corrupts one uploaded binary byte using a private SSH wrapper, beside the valid installation controls. N12 follows the manual
 uninstall path on the first fixture, retaining distro packages and unrelated Docker settings. Delete both machines
 after the run. These evals reject destinations outside the explicit disposable naming pattern and never install on
 `PADDOCK_EVAL_HOST` or change the Mac's Docker configuration. A missing fixture is not measured. Example:

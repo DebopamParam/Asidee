@@ -83,3 +83,22 @@ test("the enrollment terminal accepts consent only on the primary and never as a
   for (const change of [{ accepted: false }, { hash: "bad" }, { host: "build" }]) expect(() => enrollmentHash({ ...input, ...change })).toThrow()
   expect(() => parseOpen({ ...input, name: "enrollment" })).toThrow()
 })
+
+
+test("Ctrl-C cancels enrollment only while it has no SSH terminal child", async () => {
+  const { enrollmentInterrupt } = await import("../../core/hosts")
+  expect(enrollmentInterrupt(Uint8Array.of(3), false)).toBe(true)
+  expect(enrollmentInterrupt(Uint8Array.of(3), true)).toBe(false)
+  expect(enrollmentInterrupt(Uint8Array.of(121, 101, 115), false)).toBe(false)
+  expect(enrollmentInterrupt(Uint8Array.of(65, 3, 66), false)).toBe(true)
+})
+
+test("a prepared state identity is shown and damaged or indirect identities block enrollment", () => {
+  for (const identity of [
+    { kind: "link", target: "/etc/machine-id", uid: 1000, mode: 0o777 },
+    { kind: "file", text: "damaged\n", sha256: "a".repeat(64), sha512: "b".repeat(128), uid: 1000, mode: 0o600 },
+  ] as const) {
+    const probe=evidence(); probe.files["/var/lib/paddock/1000/machine-id"]=identity
+    expect(installationPlan(options,probe,client).blockers.join(" ")).toContain("machine identity")
+  }
+})

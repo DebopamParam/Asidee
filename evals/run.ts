@@ -2767,8 +2767,8 @@ ev("M03", "A changed machine identity, daemon version or source build is refused
 ev("M04", "Routing preserves the dashboard boundary, the remote daemon validates sandbox options itself, and it opens no TCP listener", async () => {
   await remoteSandbox()
   expect((await tcp("/api/list", { body: JSON.stringify({ host: MH }) })).status === 200, "control: routed dashboard list failed")
-  for (const method of ["hello", "shutdown", "sshSetup", "sshPrepare", "sessionTarget", "hostAttach", "hostRemove"]) expect((await tcp(`/api/${method}`, { body: JSON.stringify({ host: MH }) })).status === 403, `dashboard gained ${method} through SSH`)
-  for (const method of ["attach", "session", "hostApply", "constructor", "__proto__"]) expect((await tcp(`/api/${method}`, { body: JSON.stringify({ host: MH }) })).status === 404, `arbitrary routed method ${method} was accepted`)
+  for (const method of ["hello", "shutdown", "sshSetup", "sshPrepare", "sessionTarget", "hostAttach", "hostRemove", "hostPlan", "hostApply"]) expect((await tcp(`/api/${method}`, { body: JSON.stringify({ host: MH }) })).status === 403, `dashboard gained ${method} through SSH`)
+  for (const method of ["attach", "session", "constructor", "__proto__"]) expect((await tcp(`/api/${method}`, { body: JSON.stringify({ host: MH }) })).status === 404, `arbitrary routed method ${method} was accepted`)
   // A tee in front of the remote transport records what the primary forwarded, so the refusal is shown to be the remote's.
   const log = `${remoteDir}/forwarded.log`; const tee = `${remoteDir}/tee-transport`
   await remoteWrite(tee, `#!/bin/sh\ncase "$*" in *--stream*) exec ${word(`${remoteDir}/paddock`)} "$@";; esac\ntee -a ${word(log)} | ${word(`${remoteDir}/paddock`)} "$@"\n`)
@@ -3145,6 +3145,7 @@ ev("N03", "Changed Docker configuration and container inventory invalidate conse
   const started=await enrollRemote(["sudo","-n","docker","run","-d","--name",control,"alpine:latest","sleep","600"]);expect(started.code===0,started.err)
   try {
     const stale=await pdk(enrollArgs(["--accept-plan",old.hash]));expect(stale.code===4 && stale.err.includes("stale"),"stale inventory consent was accepted")
+    const apiStale=await socket("hostApply",{hash:old.hash,accepted:true});expect(apiStale.status===409 && !apiStale.reply.ok && apiStale.reply.error?.message.includes("stale"),"daemon accepted stale inventory consent")
     const revised=await planned();expect(revised.hash!==old.hash && revised.restart.containers.some((v: string)=>v.startsWith(control+" (")),"revised plan omitted interruption victim")
     expect(before===await enrollSnapshot(),"stale inventory consent wrote installation files");await unregistered()
   } finally { await enrollRemote(["sudo","-n","docker","rm","-f",control]) }
@@ -3155,6 +3156,7 @@ ev("N03", "Changed Docker configuration and container inventory invalidate conse
     const next={...JSON.parse(beforeConfig.out),labels:[`paddock-enrollment-stale=${PREFIX}`]}
     const write=await enrollRemote(["sudo","-n","tee","/etc/docker/daemon.json"],{stdin:JSON.stringify(next)+"\n"});expect(write.code===0,write.err)
     const baseline=await enrollSnapshot();const stale=await pdk(enrollArgs(["--accept-plan",oldConfig.hash]));expect(stale.code===4,"stale config consent accepted")
+    const apiStale=await socket("hostApply",{hash:oldConfig.hash,accepted:true});expect(apiStale.status===409 && !apiStale.reply.ok && apiStale.reply.error?.message.includes("stale"),"daemon accepted stale config consent")
     expect(baseline===await enrollSnapshot(),"stale config plan changed files");await unregistered()
   } finally { await enrollRemote(["sudo","-n","tee","/etc/docker/daemon.json"],{stdin:beforeConfig.out+"\n"}) }
 })
@@ -3220,6 +3222,9 @@ ev("N07", "Removing an enrolled host retains the service, and sudo never can re-
   if (!hosts.some((v: HostView)=>v.host.name===NH)) skip("successful N06 enrollment is required")
   const removed=await pdk(["host","remove",NH,"--confirm",NH]);expect(removed.code===0,removed.err);await unregistered()
   const plan=await planned(["--sudo","never"]);expect(plan.blockers.length===0 && plan.mode==="reuse" && plan.steps.length===0 && !plan.restart.required,`reuse refused: ${plan.blockers.join(" ")}`)
+  const identity=plan.destination.files[`${plan.stateDir}/machine-id`]
+  const previous=hosts.find((h: HostView)=>h.host.name===NH)
+  expect(identity?.kind==="file" && identity.text?.trim()===previous?.host.machineId,"prepared plan omitted its daemon machine identity")
   const beforeUnit=await enrollRemote(["systemctl","show",plan.service,"--property=MainPID,ExecMainStartTimestamp"])
   const beforeConfig=await enrollRemote(["cat","/etc/docker/daemon.json"])
   const readded=await pdk(enrollArgs(["--sudo","never","--accept-plan",plan.hash]),{timeoutMs:300_000});expect(readded.code===0,readded.err)
@@ -3252,11 +3257,12 @@ ev("N08", "A fresh Ubuntu machine receives exactly the checksum-verified distro 
   } finally { await pdk(["host","remove",name,"--confirm",name]) }
 })
 
-const enrollmentTerminalScript = `import os,sys,pty,select,time,json
+const enrollmentTerminalScript = `import os,sys,pty,select,time,json,termios
 argv=json.loads(sys.argv[1]); answer=sys.argv[2]; password=sys.argv[3] if len(sys.argv)>3 else None
 pid,fd=pty.fork()
 if pid==0: os.execv(argv[0],argv)
-output=b''; consent=False; secret=False; status=None
+output=b''; consent=False; secret=False; status=None; interrupted=False; interrupt_at=None
+interrupt=len(sys.argv)>4 and sys.argv[4]=='interrupt'
 try:
  end=time.time()+300
  while time.time()<end:
@@ -3267,15 +3273,19 @@ try:
    if not data: break
    output+=data
    if not consent and b'Enter yes:' in output:
-    os.write(fd,(answer+'\\n').encode());consent=True
+    os.write(fd,(answer+'\\n').encode());consent=True;interrupt_at=time.time()+2
    if password and consent and not secret and b'[sudo] password for' in output:
     os.write(fd,(password+'\\n').encode());secret=True
+  if interrupt and consent and not interrupted and time.time()>=interrupt_at:
+   os.write(fd,b'\\x03');interrupted=True
   done,value=os.waitpid(pid,os.WNOHANG)
   if done: status=value;break
  else: os.kill(pid,15);raise RuntimeError('interactive enrollment timed out')
- if status is None or not os.WIFEXITED(status): _,status=os.waitpid(pid,0)
+ if status is None: _,status=os.waitpid(pid,0)
+ attributes=termios.tcgetattr(fd)
+ restored=bool(attributes[3]&termios.ICANON and attributes[3]&termios.ISIG and attributes[3]&termios.ECHO)
  sys.stdout.buffer.write(output)
- print('\\nTERMINAL-RESULT '+json.dumps(dict(code=os.waitstatus_to_exitcode(status),consent=consent,passwordPrompt=secret)))
+ print('\\nTERMINAL-RESULT '+json.dumps(dict(code=os.waitstatus_to_exitcode(status),consent=consent,passwordPrompt=secret,interrupted=interrupted,terminalRestored=restored)))
 finally: os.close(fd)`
 ev("N09", "Interactive enrollment requires the literal word yes; a different terminal response declines without installation or registration", async () => {
   await enrollmentFixture();const before=await enrollSnapshot()
@@ -3304,6 +3314,19 @@ ev("N10", "Interactive sudo authentication and installation share one SSH termin
     expect((await enrollRemote(["test","-e",plan.requestPath])).code!==0,"interactive request file remained")
     return "sudo -n control was refused; interactive yes and the disposable password installed and verified successfully with timestamp_type=tty"
   } finally { await root(["rm","-f",rule]);await pdk(["host","remove",NH,"--confirm",NH]) }
+})
+
+ev("N13", "Ctrl-C during enrollment verification cancels with exit 130, restores the terminal and leaves no host registered, beside successful yes controls", async () => {
+  await enrollmentFixture()
+  await pdk(["host","remove",NH,"--confirm",NH])
+  const plan=await planned(["--sudo","never"]);expect(plan.mode==="reuse" && plan.blockers.length===0,"N06 or N10 must leave the verified service prepared")
+  try {
+    const terminal=await sh(["python3","-c",enrollmentTerminalScript,JSON.stringify([BIN,...enrollArgs(["--sudo","never"])]),"yes","","interrupt"],{env,timeoutMs:300_000})
+    const result=JSON.parse(terminal.out.split("TERMINAL-RESULT ").at(-1)!)
+    expect(terminal.code===0 && result.consent && result.interrupted && result.code===130 && result.terminalRestored,`Ctrl-C was ignored outside SSH: ${terminal.out.slice(-1800)} ${terminal.err}`)
+    await unregistered()
+    return "literal yes began verification; Ctrl-C cancelled and the service was retained without registration"
+  } finally { await pdk(["host","remove",NH,"--confirm",NH]) }
 })
 
 ev("N11", "Corrupting one uploaded binary byte is refused by the destination checksum before installation, beside the valid enrollment controls", async () => {

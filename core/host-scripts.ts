@@ -20,7 +20,7 @@ def file(path):
                 if not data: break
                 h.update(data); h512.update(data)
         text=None
-        if path.endswith(('.json','.service')):
+        if path.endswith(('.json','.service','/machine-id')):
             if s.st_size>8*1024*1024: raise ValueError('text file exceeds 8 MiB')
             text=open(path).read()
         return dict(kind='file', sha256=h.hexdigest(), sha512=h512.hexdigest(), text=text, uid=s.st_uid, mode=stat.S_IMODE(s.st_mode))

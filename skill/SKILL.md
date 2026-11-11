@@ -51,7 +51,8 @@ checksum, service, watched disk choice and Docker restart victim. `--json` never
 the word `yes`; automation needs `--accept-plan HASH`. A revised plan requires new consent. Interactive sudo uses the
 primary's private terminal stream; never put a password in an API body, plan or log. Automation needs noninteractive
 sudo. Registration follows verified artifacts, enabled user service inspection, isolation/disk smoke checks and cleanup.
-The installed runtime has watched disks and no inner-Docker capability. Hard disk helpers and disk tools are not installed.
+Ctrl-C during verification requests cancellation; wait for cleanup and exit 130. Completed installation changes remain,
+and no host is registered (N13). The installed runtime has watched disks and no inner-Docker capability. Hard disk helpers and disk tools are not installed.
 `--sudo never` can reuse a verified enabled system service in the enrolled layout, and otherwise refuses unattended
 installation. Do not install a user unit or infer reboot behavior from lingering. See [Enroll a Linux host](../docs/host-enrollment.md)
 for build commands, preparation, failure journals and manual uninstall. A refusal or failure must leave this enrollment

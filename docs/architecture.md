@@ -472,8 +472,8 @@ The daemon re-probes before delivery. The destination probes again after deliver
 before installation. Changed inputs return a revised plan and invalidate consent. Interactive enrollment opens a
 bootstrap session only on the primary's private stream socket. Password input travels to `sudo -v` on the same forced
 SSH terminal used by subsequent sudo commands; neither the HTTP API, plan nor journal contains it. This also works
-with tty-scoped sudo timestamps. Automation uses `sudo -n` and needs noninteractive permission. A disconnected terminal
-cannot commit a host registration; an interrupted install can have an unknown outcome and names its journal.
+with tty-scoped sudo timestamps. Automation uses `sudo -n` and needs noninteractive permission. Ctrl-C between SSH phases cancels verification, waits for smoke cleanup and returns exit 130 with the terminal
+restored and no registration (N13). A disconnected terminal cannot commit a host registration; an interrupted install can have an unknown outcome and names its journal.
 
 The system unit runs as the SSH user with `SupplementaryGroups=docker`, a fixed PATH, socket-only access and
 `Restart=on-failure`, after Docker. State/configuration live under `/var/lib/paddock/UID`. Login groups and sudoers are
@@ -487,7 +487,7 @@ all applicable blocking smoke checks, a real disk write and host-side byte measu
 returns `diskUsedBytes` when measurable and omits it otherwise. Disk enforcement remains watched. The installed runtime
 omits `--net-raw`, so it does not advertise inner Docker. No hard disk helper, disk tools or sudoers entry is installed.
 No reboot recovery is claimed. [Enrollment instructions](host-enrollment.md) include manual uninstall and explain which
-remote objects `host remove` retains. N01 through N12 provide the outside controls; unavailable fixtures are not measured.
+remote objects `host remove` retains. N01 through N13 provide the outside controls; unavailable fixtures are not measured.
 
 Hosted streams use the existing second Unix socket and frame protocol over their own SSH process. The gateway first
 retrieves the current sandbox identity and run; the stream opens with that identity plus the expected daemon boot,

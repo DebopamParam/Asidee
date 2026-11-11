@@ -239,7 +239,7 @@ It does not revoke the SSH user's access. Remote uninstall is a separate future 
 
 ### Enrollment implementation record
 
-`host add`, `hostPlan` and `hostApply` now implement the system-service path. N01 through N12 are the outside
+`host add`, `hostPlan` and `hostApply` now implement the system-service path. N01 through N13 are the outside
 measurements; see the scorecard for the source revision and actual results. The changes below override the proposal
 where they differ. [Enrollment instructions](../host-enrollment.md) contain the commands and manual uninstall steps.
 
@@ -254,6 +254,7 @@ where they differ. [Enrollment instructions](../host-enrollment.md) contain the 
 | Debian/Ubuntu recipe also accepts Linux Mint based on Ubuntu noble | The owner's routing machine is Mint 22.3, an Ubuntu-noble derivative. Its read-only plan is measured; privileged Mint installation is not. Other distributions refuse automatic installation. |
 | System unit as SSH user; `--sudo never` only reuses a verified enabled system service | User-unit lingering and logout/reboot behavior remain unmeasured. No unattended service is installed from that assumption. A prepared service in another layout can use `host attach`. N04 refuses installation; N07 proves prepared reuse without sudo or restart. |
 | One primary socket terminal session carries interactive sudo and installation over the same SSH PTY | A separate `ssh sudo -v` cannot authorize another session with tty-scoped sudo timestamps. N10 first refuses a noninteractive sudo control, then supplies a disposable password through the terminal and completes enrollment with `timestamp_type=tty`. Passwords are absent from plan and journal. |
+| Cancel raw terminal input between SSH phases | A Ctrl-C previously had no SSH child to receive it during verification, so it was dropped. N13 first reproduced enrollment despite that Ctrl-C, then requires exit 130, restored terminal flags, smoke cleanup and no registration. Completed install changes remain for inspection. |
 | Hash stable installation inputs instead of Docker's full human/status output | Docker info has a current-time field; container listings have changing uptime text. These are excluded. Engine identity/version/runtime configuration and the exact running container IDs/names remain bound. N03 changes real inventory and configuration; N06 keeps a control running during delivery and observes its interruption by the approved restart. |
 | Re-probe after delivery and authentication, before root installation | Downloads and password entry can take time. Changed inputs return a revised plan. N03 supplies stale consent beside accepted-plan controls. |
 | Retry an approved install or reuse its verified service; do not roll back shared resources | The journal names completed and interrupted steps plus prior file hashes. N05 forces Docker validation failure, observes partial root changes, unchanged Docker configuration and no registry entry. A half-installed machine without readable Docker access may require owner preparation before another complete plan is possible. |

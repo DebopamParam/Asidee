@@ -24,7 +24,9 @@ helper, disk tools or sudoers rule is installed. The named runtime has `--allow-
 
 For interactive enrollment, run the same command without `--json` and enter the literal word `yes`. If installation
 needs sudo, its password prompt travels over the private daemon stream to the same SSH terminal used by the installer.
-The password is not part of the JSON API body, plan or journal. Automation uses the reviewed hash:
+The password is not part of the JSON API body, plan or journal. Ctrl-C during verification cancels enrollment, waits
+for smoke cleanup and returns 130 with the terminal restored. Completed installation changes stay for inspection;
+no host is registered. Automation uses the reviewed hash:
 
 ```sh
 dist/paddock host add build --ssh alice@linux --artifact "$PWD/dist/paddock-linux" --sha256 HASH --accept-plan PLAN_HASH

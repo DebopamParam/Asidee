@@ -34,6 +34,7 @@ function canonical(value: unknown): string {
   if (object(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`
   return JSON.stringify(value)
 }
+export const enrollmentInterrupt = (bytes: Uint8Array, attached: boolean) => !attached && bytes.includes(3)
 export const planHash = (value: unknown) => sha256(canonical(value))
 
 export async function verifyArtifact(artifact: EnrollmentOptions["artifact"], arch: string): Promise<Uint8Array> {
@@ -101,6 +102,8 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
     const expected = path.match(/\.paddock-([a-f0-9]{64})$/)?.[1]
     if (expected && value.kind !== "absent" && !(value.kind === "file" && value.uid === 0 && value.sha256 === expected)) blockers.push(`Backup ${path} already exists with unsafe ownership, type or other bytes.`)
   }
+  const stateIdentity = destination.files[`${stateDir}/machine-id`]
+  if (stateIdentity && stateIdentity.kind !== "absent" && !(stateIdentity.kind === "file" && /^[a-f0-9]{32}$/.test(stateIdentity.text?.trim() ?? ""))) blockers.push("The existing Paddock machine identity is damaged or indirect. Restore it before enrollment.")
   const link = destination.files["/usr/local/bin/paddock"]
   if (link?.kind !== "absent" && !(link?.kind === "link" && /^\/opt\/paddock\/releases\/[a-f0-9]{64}\/paddock$/.test(link.target) && link.uid === 0)) blockers.push("/usr/local/bin/paddock is unrelated or not root-owned; it will not be replaced.")
   const unitPath = `/etc/systemd/system/${service}`; const previousUnit = text(unitPath)
@@ -205,7 +208,8 @@ export class Hosts {
       }
       if (terminal?.closed) throw new PaddockError("outcome-unknown", "Enrollment terminal disconnected. Installation may be partial; nothing was registered. Inspect the journal before retrying.")
       const endpoint: Endpoint = { ssh: current.options.ssh, binary: current.binary, stateDir: current.stateDir }
-      await this.verify(endpoint, current)
+      terminal?.output(Buffer.from("\r\nVerifying the installed service and smoke sandbox.\r\n"))
+      await this.verify(endpoint, current, () => terminal?.closed ?? false)
       if (terminal?.closed) throw new PaddockError("outcome-unknown", "Enrollment terminal disconnected during verification. Nothing was registered.")
       return await this.machines.attach({ name: current.options.name, ...endpoint, service: "systemd" }, () => { if (terminal?.closed) throw new PaddockError("outcome-unknown", "The terminal disconnected before registration. Nothing was registered.") })
     } catch (error) {
@@ -215,22 +219,31 @@ export class Hosts {
   }
   async session(hash: string): Promise<Session> {
     if (!this.plans.has(hash)) throw new PaddockError("conflict", "Unknown or expired enrollment plan. Request and review a new one.")
-    const events = new EventEmitter()
+    const events = new EventEmitter(); let cancelled = false
     const terminal: Terminal = { closed: false, paused: false, output: (bytes) => events.emit("output", "stdout", bytes), drain: () => events.emit("drain") }
     const close = () => {
       terminal.closed = true; this.terminals.delete(session)
       terminal.child?.kill()
       const timer = setTimeout(() => terminal.child?.kill("SIGKILL"), 1500); timer.unref()
     }
-    const session: Session = Object.assign(events, { tty: true, write: (bytes: Uint8Array) => terminal.child?.stdin.write(bytes) ?? true,
+    const session: Session = Object.assign(events, { tty: true, write: (bytes: Uint8Array) => {
+      if (enrollmentInterrupt(bytes, Boolean(terminal.child))) {
+        if (!cancelled) { cancelled = true; close(); terminal.output(Buffer.from("\r\nCancelling enrollment; waiting for verification cleanup.\r\n")) }
+        return true
+      }
+      return terminal.child?.stdin.write(bytes) ?? true
+    },
       end: () => terminal.child?.stdin.end(), resize: async () => {}, pause: () => { terminal.paused = true; terminal.child?.stdout.pause(); terminal.child?.stderr.pause() },
       resume: () => { terminal.paused = false; terminal.child?.stdout.resume(); terminal.child?.stderr.resume() }, close })
     this.terminals.add(session)
     setTimeout(() => {
       void this.apply({ hash, accepted: true }, terminal).then((host) => {
-        if (!terminal.closed) { terminal.output(Buffer.from(`\r\nEnrolled ${host.name}. Disk limit is watched. Verification passed; reboot persistence is not measured.\r\n`)); events.emit("end", { code: 0 }) }
+        if (!terminal.closed || cancelled) { terminal.output(Buffer.from(`\r\nEnrolled ${host.name}. Disk limit is watched. Verification passed; reboot persistence is not measured.\r\n`)); events.emit("end", { code: 0 }) }
       }, (error) => {
-        if (!terminal.closed) {
+        if (cancelled) {
+          if (error instanceof PaddockError && error.details !== undefined) terminal.output(Buffer.from(`${JSON.stringify(error.details, null, 2)}\r\n`))
+          terminal.output(Buffer.from("Enrollment cancelled; no host was registered.\r\n")); events.emit("end", { code: 130 })
+        } else if (!terminal.closed) {
           if (error instanceof PaddockError && error.details !== undefined) terminal.output(Buffer.from(`${JSON.stringify(error.details, null, 2)}\r\n`))
           events.emit("end", { error: (error as Error).message })
         }
@@ -258,19 +271,24 @@ export class Hosts {
     const marker = output.lastIndexOf("PADDOCK-RESULT ")
     return { exitCode: code ?? 1, stdout: marker < 0 ? "" : output.slice(marker + 15).split(/\r?\n/)[0]!, stderr: "" }
   }
-  private async verify(endpoint: Endpoint, plan: HostPlan): Promise<void> {
+  private async verify(endpoint: Endpoint, plan: HostPlan, cancelled: () => boolean = () => false): Promise<void> {
     const peer = new HttpPeer(endpoint)
     const spec = plan.verification; let created = false
-    const call = (method: string, body: object = {}) => peer.call(method, body, { mutation: ["create", "remove", "exec", "verify"].includes(method), timeoutMs: 300_000 })
+    const call = (method: string, body: object = {}) => {
+      if (cancelled() && method !== "remove") throw new PaddockError("conflict", "Enrollment verification was cancelled.")
+      return peer.call(method, body, { mutation: ["create", "remove", "exec", "verify"].includes(method), timeoutMs: 300_000 })
+    }
     try {
       // systemctl start can return before the service has opened its socket.
       let hello: Hello | undefined
       for (let at = 0; at < 30; at++) {
+        if (cancelled()) throw new PaddockError("conflict", "Enrollment verification was cancelled.")
         const check = new HttpPeer(endpoint)
         try { hello = parseHello(await check.call("hello", {}, { timeoutMs: 5000 })); break } catch { await new Promise((resolve) => setTimeout(resolve, 500)) } finally { await check.close() }
       }
       if (!hello) throw new PaddockError("dependency", "The installed daemon did not answer within the startup budget.")
-      compatible(hello, this.machines.hello)
+      const identity = plan.destination.files[`${plan.stateDir}/machine-id`]
+      compatible(hello, this.machines.hello, identity?.kind === "file" ? identity.text?.trim() : undefined)
       if (hello.buildDigest !== plan.options.artifact.sha256 || hello.service !== "systemd" || hello.listener !== "socket-only") throw new PaddockError("incompatible", "Service artifact digest, supervisor or socket-only listener does not match the approved installation.")
       const unit = must(await systemRunner(sshArgv(endpoint.ssh, ["systemctl", "show", plan.service, "--property=ActiveState,UnitFileState,User,SupplementaryGroups,ExecStart"])), "Inspecting the boot service")
       for (const expected of ["ActiveState=active", "UnitFileState=enabled", `User=${plan.destination.user}`, "SupplementaryGroups=docker", plan.binary]) if (!unit.stdout.includes(expected)) throw new PaddockError("dependency", `Boot-service inspection did not show ${expected}.`)
