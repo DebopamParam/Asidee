@@ -16,6 +16,8 @@ import { networkInterfaces, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { CHECKLIST } from "../core/checks"
 import { DOCKER_CAPABILITIES, DOCKER_DRIVER, DOCKER_START, HELPER_IMAGE } from "../core/providers/gvisor"
+import type { HostPlan } from "../core/hosts"
+import type { HostView } from "../core/machines"
 import { OUTPUT_LIMIT } from "../core/run"
 import { FrameReader, frame } from "../core/stream"
 import { WAIT_FOR_PROBE_ROUTES } from "../core/providers/probe"
@@ -3064,6 +3066,300 @@ ev("M11", "Stopping the primary while one of its SSH links is stopped (SIGSTOP) 
   return `the primary stopped in ${seconds.toFixed(1)} s and killed the stopped ssh; ${watched ? "the local watched sandbox was stopped" : "this engine's disk limit is not watched, so no local sandbox had to stop"}; no relay was left on the fixture`
 })
 const noRelaysLeft = async () => expect(await until(async () => await remoteRelays() === 0, 10), "a transport stdio relay stayed on the fixture")
+
+// N: root installation is allowed only on an explicitly disposable OrbStack machine, never the M fixture.
+const ENROLL_HOST = process.env.PADDOCK_EVAL_ENROLL_HOST
+const NH = `${PREFIX}-enroll`
+let enrollmentArtifact = ""; let enrollmentDigest = ""; let enrollmentPlan: HostPlan | undefined
+const enrollRemote = (argv: string[], options: Parameters<typeof sh>[1] = {}) => {
+  if (!ENROLL_HOST || !/^pdk-enroll-[a-z0-9-]+@orb$/.test(ENROLL_HOST)) skip("PADDOCK_EVAL_ENROLL_HOST must explicitly name a disposable pdk-enroll-*@orb machine; home-linux is never an installer fixture")
+  return sh(["ssh", "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes", ENROLL_HOST!, argv.map(word).join(" ")], options)
+}
+const enrollmentSnapshotScript = `import os,json,hashlib,stat
+paths=['/etc/docker/daemon.json','/usr/local/bin/paddock','/etc/systemd/system','/opt/paddock','/var/lib/paddock',os.path.expanduser('~/.docker'),os.path.expanduser('~/.config/paddock'),os.path.expanduser('~/.local/state/paddock')]
+result={}
+for root in paths:
+ for path in ([root] if not os.path.isdir(root) else [root]+[os.path.join(d,f) for d,ds,fs in os.walk(root) for f in sorted(fs)]):
+  try:
+   s=os.lstat(path)
+   h=None
+   if stat.S_ISLNK(s.st_mode): h=os.readlink(path)
+   elif stat.S_ISREG(s.st_mode):
+    hasher=hashlib.sha256()
+    with open(path,'rb') as f:
+     for chunk in iter(lambda:f.read(1048576),b''): hasher.update(chunk)
+    h=hasher.hexdigest()
+   result[path]=[s.st_uid,s.st_gid,s.st_mode,s.st_mtime_ns,h]
+  except FileNotFoundError: result[path]=None
+print(json.dumps(result,sort_keys=True))`
+const enrollSnapshot = async () => { const r=await enrollRemote(["python3","-c",enrollmentSnapshotScript]); expect(r.code===0, r.err); return r.out }
+const enrollArgs = (extra: string[] = []) => ["host","add",NH,"--ssh",ENROLL_HOST!,"--artifact",enrollmentArtifact,"--sha256",enrollmentDigest,...extra]
+async function enrollmentFixture() {
+  if (enrollmentArtifact) return
+  const arch=await enrollRemote(["uname","-m"]); expect(arch.code===0,arch.err)
+  expect(["aarch64","x86_64"].includes(arch.out.trim()), "unsupported enrollment fixture architecture")
+  enrollmentArtifact=join(tmp,"enrollment-paddock")
+  const build=await sh([BUN,"build","--compile","--minify",`--target=bun-linux-${arch.out.trim()==="aarch64"?"arm64":"x64"}`,"--outfile",enrollmentArtifact,"cli/cli.ts"],{cwd:ROOT})
+  expect(build.code===0,build.err)
+  enrollmentDigest=new Bun.CryptoHasher("sha256").update(await Bun.file(enrollmentArtifact).arrayBuffer()).digest("hex")
+}
+const planned = async (extra: string[] = []): Promise<HostPlan> => {
+  const r=await pdkJson(enrollArgs(extra)); expect(r.code===0 && r.reply.ok,`plan failed: ${r.out} ${r.err}`); return r.reply.data
+}
+const unregistered = async () => expect(!(await pdkJson(["host","list"])).reply.data.some((v: HostView) => v.host.name===NH), "a refused/failed enrollment registered its host")
+
+ev("N01", "A read-only host plan against the routing fixture preserves system files, services and installation paths and reports actual Docker restart victims", async () => {
+  if (!TEST_HOST) skip("no PADDOCK_EVAL_HOST supplied for read-only planning")
+  await machineFixture()
+  const arch=(await remote(["uname","-m"])).out.trim(); const artifact=join(tmp,"read-only-enrollment-paddock")
+  const build=await sh([BUN,"build","--compile","--minify",`--target=bun-linux-${arch==="aarch64"?"arm64":"x64"}`,"--outfile",artifact,"cli/cli.ts"],{cwd:ROOT});expect(build.code===0,build.err)
+  const digest=new Bun.CryptoHasher("sha256").update(await Bun.file(artifact).arrayBuffer()).digest("hex")
+  const before=await remote(["python3","-c",enrollmentSnapshotScript]); expect(before.code===0,before.err)
+  const containers=await remoteDocker(["ps","--no-trunc","--format","{{json .}}"]); expect(containers.code===0,containers.err)
+  const result=await pdkJson(["host","add",`${PREFIX}-readonly`,"--ssh",TEST_HOST!,"--artifact",artifact,"--sha256",digest,"--json","--accept-plan","0".repeat(64)])
+  expect(result.code===0 && result.reply.ok,"--json with acceptance did not remain plan-only")
+  const plan: HostPlan=result.reply.data
+  for (const c of containers.out.split("\n").filter(Boolean).map((v: string) => JSON.parse(v))) expect(plan.restart.containers.includes(`${c.Names} (${c.ID})`), `plan omitted ${c.Names}`)
+  const after=await remote(["python3","-c",enrollmentSnapshotScript]); expect(after.code===0 && before.out===after.out,"plan-only changed system files, service definitions or installation paths")
+  expect(!(await pdkJson(["host","list"])).reply.data.some((v: HostView) => v.host.name===`${PREFIX}-readonly`),"JSON plan registered the host")
+  return `${TEST_HOST}: unchanged hashes, ownership, modes, mtimes and links; restart victims ${plan.restart.containers.join(", ") || "none at probe time"}; blockers ${plan.blockers.join("; ") || "none"}`
+})
+ev("N02", "The enrollment plan names all sudo argv, file bytes and hashes, pinned downloads, watched policy and restart victims, beside a non-mutating JSON control", async () => {
+  await enrollmentFixture(); const before=await enrollSnapshot(); enrollmentPlan=await planned()
+  expect(enrollmentPlan.blockers.length===0,`fixture blocked: ${enrollmentPlan.blockers.join(" ")}`)
+  expect(enrollmentPlan.mode==="install","fixture must start without the current enabled Paddock service")
+  expect(enrollmentPlan.steps.length>5 && enrollmentPlan.steps.every((s)=>s.argv[0]==="sudo" && s.argv[1]==="-n"),"sudo vectors missing")
+  for (const c of enrollmentPlan.changes) {
+    expect(new Bun.CryptoHasher("sha256").update(c.after!).digest("hex")===c.sha256,`bad file hash ${c.path}`)
+    expect(enrollmentPlan.steps.some((s)=>s.argv.includes(c.path) && s.argv.includes(`${enrollmentPlan!.stageDir}/${c.staged}`)),`undeclared file install ${c.path}`)
+  }
+  expect(enrollmentPlan.uploads.some((u)=>u.kind==="artifact" && u.checksum===enrollmentDigest),"artifact missing")
+  expect(enrollmentPlan.uploads.some((u)=>u.kind==="download" && u.name==="runsc" && /^[a-f0-9]{128}$/.test(u.checksum) && !u.url.includes("latest")),"unpinned gVisor")
+  expect(enrollmentPlan.options.diskPolicy==="watched" && !JSON.stringify(enrollmentPlan.steps).includes("paddock-disk"),"hard-disk installation leaked in")
+  expect(before===await enrollSnapshot(),"JSON planning made installation changes"); await unregistered()
+  return `${enrollmentPlan.steps.length} exact sudo vectors, ${enrollmentPlan.changes.length} content changes, ${enrollmentPlan.uploads.length} verified artifacts; no writes`
+})
+ev("N03", "Changed Docker configuration and container inventory invalidate consent before writes, and the revised plan lists the newly running container", async () => {
+  await enrollmentFixture(); const control=`${PREFIX}-enroll-impact`
+  const old=await planned(); const before=await enrollSnapshot()
+  const started=await enrollRemote(["sudo","-n","docker","run","-d","--name",control,"alpine:latest","sleep","600"]);expect(started.code===0,started.err)
+  try {
+    const stale=await pdk(enrollArgs(["--accept-plan",old.hash]));expect(stale.code===4 && stale.err.includes("stale"),"stale inventory consent was accepted")
+    const revised=await planned();expect(revised.hash!==old.hash && revised.restart.containers.some((v: string)=>v.startsWith(control+" (")),"revised plan omitted interruption victim")
+    expect(before===await enrollSnapshot(),"stale inventory consent wrote installation files");await unregistered()
+  } finally { await enrollRemote(["sudo","-n","docker","rm","-f",control]) }
+  const beforeConfig=await enrollRemote(["cat","/etc/docker/daemon.json"])
+  expect(beforeConfig.code===0,"fixture requires a prepared Docker config for the change control")
+  const oldConfig=await planned()
+  try {
+    const next={...JSON.parse(beforeConfig.out),labels:[`paddock-enrollment-stale=${PREFIX}`]}
+    const write=await enrollRemote(["sudo","-n","tee","/etc/docker/daemon.json"],{stdin:JSON.stringify(next)+"\n"});expect(write.code===0,write.err)
+    const baseline=await enrollSnapshot();const stale=await pdk(enrollArgs(["--accept-plan",oldConfig.hash]));expect(stale.code===4,"stale config consent accepted")
+    expect(baseline===await enrollSnapshot(),"stale config plan changed files");await unregistered()
+  } finally { await enrollRemote(["sudo","-n","tee","/etc/docker/daemon.json"],{stdin:beforeConfig.out+"\n"}) }
+})
+ev("N04", "Artifact checksum mismatch, absent consent, sudo-never without a prepared service and dashboard installation requests are refused without registration or remote writes", async () => {
+  await enrollmentFixture();const before=await enrollSnapshot()
+  const bad=await pdk(["host","add",NH,"--ssh",ENROLL_HOST!,"--artifact",enrollmentArtifact,"--sha256","0".repeat(64),"--json"])
+  expect(bad.code===2 && bad.out.includes("checksum"),"checksum mismatch accepted")
+  const no=await pdk(enrollArgs(),{stdin:"yes\n"});expect(no.code===2 && no.err.includes("terminal"),"piped yes gained interactive consent")
+  const never=await planned(["--sudo","never"]);expect(never.steps.length===0 && never.uploads.length===0 && never.blockers.length>0,"sudo never planned installation")
+  for (const method of ["hostPlan","hostApply"]) {
+    const denied=await tcp(`/api/${method}`,{method:"POST",body:JSON.stringify({hash:enrollmentPlan!.hash,accepted:true})});expect(denied.status===403,`dashboard gained ${method}`)
+  }
+  const denied=await socket("hostApply",{hash:enrollmentPlan!.hash,accepted:false});expect(!denied.reply.ok,"API applied without accepted:true")
+  expect(before===await enrollSnapshot(),"refusal changed remote files");await unregistered()
+})
+ev("N05", "A failed approved installation leaves no registry entry and reports completed and interrupted steps in the destination journal", async () => {
+  await enrollmentFixture();const config=await enrollRemote(["cat","/etc/docker/daemon.json"]);expect(config.code===0,config.err)
+  try {
+    const invalid={...JSON.parse(config.out),debug:"invalid-boolean"}
+    delete invalid.runtimes?.["paddock-runsc"]
+    expect((await enrollRemote(["sudo","-n","tee","/etc/docker/daemon.json"],{stdin:JSON.stringify(invalid)+"\n"})).code===0,"could not set validation control")
+    const plan=await planned();const failed=await pdk(enrollArgs(["--accept-plan",plan.hash]));expect(failed.code!==0 && failed.err.includes("unregistered") && failed.err.includes("retained"),"invalid Docker configuration did not report partial installation")
+    const journal=await enrollRemote(["cat",`${plan.stateDir}/enrollment.json`]);expect(journal.code===0,journal.err)
+    const j=JSON.parse(journal.out);expect(j.completed.includes("Install verified Paddock binary") && j.started==="Validate merged Docker configuration","journal omitted partial installation")
+    expect((await enrollRemote(["cat","/etc/docker/daemon.json"])).out.trim()===JSON.stringify(invalid),"failed validation replaced Docker configuration");await unregistered()
+  } finally { await enrollRemote(["sudo","-n","tee","/etc/docker/daemon.json"],{stdin:config.out+"\n"}) }
+})
+ev("N06", "Accepted enrollment installs the declared digests and enabled user service, preserves unrelated Docker settings, passes sandbox blocking checks and measures watched disk use", async () => {
+  await enrollmentFixture()
+  const config=await enrollRemote(["cat","/etc/docker/daemon.json"]);expect(config.code===0,config.err)
+  const unrelated={...JSON.parse(config.out),labels:["paddock-enrollment-eval=preserve"]}
+  delete unrelated.runtimes?.["paddock-runsc"]
+  expect((await enrollRemote(["sudo","-n","tee","/etc/docker/daemon.json"],{stdin:JSON.stringify(unrelated)+"\n"})).code===0,"could not prepare unrelated config")
+  const victim=`${PREFIX}-restart-victim`
+  expect((await enrollRemote(["sudo","-n","docker","run","-d","--name",victim,"alpine:latest","sleep","600"])).code===0,"restart control did not start")
+  const plan=await planned();expect(plan.blockers.length===0,plan.blockers.join(" "))
+  if (!(plan.restart.required && plan.restart.containers.some((c)=>c.startsWith(victim+" (")))) { await enrollRemote(["sudo","-n","docker","rm","-f",victim]);throw new Error("restart plan omitted its running control") }
+  const applied=await pdk(enrollArgs(["--accept-plan",plan.hash]),{timeoutMs:360_000});if (applied.code!==0) await enrollRemote(["sudo","-n","docker","rm","-f",victim]);expect(applied.code===0,`${applied.err} ${applied.out.slice(-300)}`)
+  const interrupted=await enrollRemote(["sudo","-n","docker","inspect","--format","{{.State.Running}}",victim]);expect(interrupted.code===0 && interrupted.out.trim()==="false","Docker restart did not interrupt the running control on this fixture")
+  await enrollRemote(["sudo","-n","docker","rm","-f",victim])
+  const runtime=plan.uploads.find((u)=>u.name==="runsc");expect(runtime && (await enrollRemote(["sha512sum","/opt/paddock/gvisor/20251110.0/runsc"])).out.startsWith(runtime.checksum),"installed runtime checksum differs")
+  const recorded: HostView | undefined=(await pdkJson(["host","list"])).reply.data.find((v: HostView)=>v.host.name===NH)
+  expect(recorded?.state==="online" && recorded.host.service==="systemd" && recorded.hello?.buildDigest===enrollmentDigest,"registration does not name the verified service")
+  const installed=await enrollRemote(["sha256sum",plan.binary]);expect(installed.out.startsWith(enrollmentDigest),"installed artifact checksum differs")
+  const unit=await enrollRemote(["systemctl","show",plan.service,"--property=User,ActiveState,UnitFileState,SupplementaryGroups"])
+  for (const wanted of [`User=${plan.destination.user}`,"ActiveState=active","UnitFileState=enabled","SupplementaryGroups=docker"]) expect(unit.out.includes(wanted),`unit missing ${wanted}`)
+  for (const change of plan.changes) expect((await enrollRemote(["sha256sum",change.path])).out.startsWith(change.sha256!),`installed file ${change.path} differs from approved bytes`)
+  const doctors=await pdkJson(["--host",NH,"doctor"]);expect(doctors.code===0 && doctors.reply.data.some((e: {id:string;capabilities?:{docker:boolean}})=>e.id==="gvisor:default" && e.capabilities?.docker===false),"installed runtime advertised unselected inner Docker")
+  const unsupported=await pdk(["--host",NH,"create",`${PREFIX}-no-inner`,"--docker","--image","alpine:latest"]);expect(unsupported.code===5,"unavailable inner Docker request was accepted")
+  const after=JSON.parse((await enrollRemote(["cat","/etc/docker/daemon.json"])).out);expect(JSON.stringify(after.labels)===JSON.stringify(unrelated.labels),"unrelated Docker settings lost")
+  const name=`${PREFIX}-enrolled`
+  try {
+    const made=await pdkJson(["--host",NH,"create",name,"--image","alpine:latest","--cpus","0.5","--memory","0.5","--disk","1"]);expect(made.code===0,made.out+made.err)
+    for (const check of CHECKLIST.filter((c)=>c.blocking && c.id!=="docker")) expect(made.reply.data.checks.some((c: {id:string;status:string})=>c.id===check.id && c.status==="pass"),`enrolled sandbox ${check.id} did not pass`)
+    const write=await pdk(["--host",NH,"exec",name,"--","dd","if=/dev/zero","of=/eval-disk","bs=1048576","count=2"]);expect(write.code===0,write.err)
+    const verified=await pdkJson(["--host",NH,"verify",name]);expect(verified.code===0 && verified.reply.data.ok && verified.reply.data.diskUsedBytes>=2097152,"watcher did not measure actual written bytes")
+  } finally { await pdk(["--host",NH,"remove",name,"--confirm",name]) }
+  enrollmentPlan=plan
+  return `${ENROLL_HOST}, ${plan.destination.os.PRETTY_NAME}, ${plan.destination.arch}, systemd as ${plan.destination.user}; every applicable blocking check passed; reboot not measured`
+})
+ev("N07", "Removing an enrolled host retains the service, and sudo never can re-enroll it without installation or Docker restart", async () => {
+  await enrollmentFixture();const hosts=(await pdkJson(["host","list"])).reply.data
+  if (!hosts.some((v: HostView)=>v.host.name===NH)) skip("successful N06 enrollment is required")
+  const removed=await pdk(["host","remove",NH,"--confirm",NH]);expect(removed.code===0,removed.err);await unregistered()
+  const plan=await planned(["--sudo","never"]);expect(plan.blockers.length===0 && plan.mode==="reuse" && plan.steps.length===0 && !plan.restart.required,`reuse refused: ${plan.blockers.join(" ")}`)
+  const beforeUnit=await enrollRemote(["systemctl","show",plan.service,"--property=MainPID,ExecMainStartTimestamp"])
+  const beforeConfig=await enrollRemote(["cat","/etc/docker/daemon.json"])
+  const readded=await pdk(enrollArgs(["--sudo","never","--accept-plan",plan.hash]),{timeoutMs:300_000});expect(readded.code===0,readded.err)
+  expect(beforeUnit.out===(await enrollRemote(["systemctl","show",plan.service,"--property=MainPID,ExecMainStartTimestamp"])).out && beforeConfig.out===(await enrollRemote(["cat","/etc/docker/daemon.json"])).out,"reuse restarted service or changed Docker config")
+  await pdk(["host","remove",NH,"--confirm",NH]);await unregistered()
+})
+
+ev("N08", "A fresh Ubuntu machine receives exactly the checksum-verified distro Docker package transaction, then enrolls with a working user service and no login group edits", async () => {
+  const destination=process.env.PADDOCK_EVAL_ENROLL_PACKAGES_HOST
+  if (!destination || !/^pdk-enroll-[a-z0-9-]+@orb$/.test(destination)) skip("PADDOCK_EVAL_ENROLL_PACKAGES_HOST must name another disposable pdk-enroll-*@orb machine with apt metadata and no Docker")
+  const run=(argv: string[], options: Parameters<typeof sh>[1]={})=>sh(["ssh","-T","-o","BatchMode=yes","-o","StrictHostKeyChecking=yes","-o","UpdateHostKeys=no","-o","ForwardAgent=no","-o","ClearAllForwardings=yes",destination!,argv.map(word).join(" ")],options)
+  const absent=await run(["which","docker"]);expect(absent.code!==0,"the package fixture must start without Docker")
+  const groups=await run(["id","-Gn"]);expect(groups.code===0,groups.err)
+  const arch=(await run(["uname","-m"])).out.trim();expect(["aarch64","x86_64"].includes(arch),"unsupported fixture architecture")
+  const artifact=join(tmp,"package-enrollment-paddock")
+  const build=await sh([BUN,"build","--compile","--minify",`--target=bun-linux-${arch==="aarch64"?"arm64":"x64"}`,"--outfile",artifact,"cli/cli.ts"],{cwd:ROOT});expect(build.code===0,build.err)
+  const digest=new Bun.CryptoHasher("sha256").update(await Bun.file(artifact).arrayBuffer()).digest("hex")
+  const name=`${PREFIX}-packages`; const argv=["host","add",name,"--ssh",destination!,"--artifact",artifact,"--sha256",digest]
+  const planned=await pdkJson(argv);expect(planned.code===0,planned.out+planned.err);const plan: HostPlan=planned.reply.data
+  expect(plan.blockers.length===0,plan.blockers.join(" "));expect(plan.packageRecipe.downloads.some((d)=>d.package==="docker.io") && plan.packageRecipe.downloads.every((d)=>/^[a-f0-9]{64}$/.test(d.sha256)),"missing pinned Docker dependency transaction")
+  const applied=await pdk([...argv,"--accept-plan",plan.hash],{timeoutMs:360_000});expect(applied.code===0,applied.err+applied.out.slice(-500))
+  try {
+    for (const pkg of plan.packageRecipe.downloads) {
+      const installed=await run(["dpkg-query","-W","-f=${Version}",pkg.package]);expect(installed.code===0 && installed.out===pkg.version,`installed ${pkg.package} differs from plan`)
+    }
+    expect(groups.out===(await run(["id","-Gn"])).out,"installer edited login group membership")
+    const hosts=(await pdkJson(["host","list"])).reply.data as HostView[]
+    expect(hosts.some((h)=>h.host.name===name && h.state==="online"),"new Docker installation did not enroll")
+    return `${destination}, ${plan.packageRecipe.downloads.length} checksum-verified .deb files; systemd service, isolation and disk smoke verification passed`
+  } finally { await pdk(["host","remove",name,"--confirm",name]) }
+})
+
+const enrollmentTerminalScript = `import os,sys,pty,select,time,json
+argv=json.loads(sys.argv[1]); answer=sys.argv[2]; password=sys.argv[3] if len(sys.argv)>3 else None
+pid,fd=pty.fork()
+if pid==0: os.execv(argv[0],argv)
+output=b''; consent=False; secret=False; status=None
+try:
+ end=time.time()+300
+ while time.time()<end:
+  ready,_,_=select.select([fd],[],[],0.1)
+  if ready:
+   try: data=os.read(fd,65536)
+   except OSError: break
+   if not data: break
+   output+=data
+   if not consent and b'Enter yes:' in output:
+    os.write(fd,(answer+'\\n').encode());consent=True
+   if password and consent and not secret and b'[sudo] password for' in output:
+    os.write(fd,(password+'\\n').encode());secret=True
+  done,value=os.waitpid(pid,os.WNOHANG)
+  if done: status=value;break
+ else: os.kill(pid,15);raise RuntimeError('interactive enrollment timed out')
+ if status is None or not os.WIFEXITED(status): _,status=os.waitpid(pid,0)
+ sys.stdout.buffer.write(output)
+ print('\\nTERMINAL-RESULT '+json.dumps(dict(code=os.waitstatus_to_exitcode(status),consent=consent,passwordPrompt=secret)))
+finally: os.close(fd)`
+ev("N09", "Interactive enrollment requires the literal word yes; a different terminal response declines without installation or registration", async () => {
+  await enrollmentFixture();const before=await enrollSnapshot()
+  const terminal=await sh(["python3","-c",enrollmentTerminalScript,JSON.stringify([BIN,...enrollArgs()]),"y"],{env,timeoutMs:90_000})
+  const result=JSON.parse(terminal.out.split("TERMINAL-RESULT ").at(-1)!)
+  expect(terminal.code===0 && result.code===4 && result.consent && terminal.out.includes("declined"),"interactive y was accepted or the terminal control did not reach consent")
+  expect(before===await enrollSnapshot(),"decline changed installation files");await unregistered()
+})
+ev("N10", "Interactive sudo authentication and installation share one SSH terminal, work with tty-scoped sudo credentials and keep the password out of plans and journals", async () => {
+  await enrollmentFixture();const fixture=ENROLL_HOST!.slice(0,-4);const user=(await enrollRemote(["id","-un"])).out.trim();const uid=(await enrollRemote(["id","-u"])).out.trim()
+  expect((await sh(["orb","run","-m",fixture,"-u","root","true"])).code===0,"OrbStack root fixture control unavailable")
+  const root=(argv: string[], stdin?: string)=>sh(["orb","run","-m",fixture,"-u","root",...argv],{stdin})
+  const password=`paddock-disposable-${PREFIX}`;const rule="/etc/sudoers.d/zz-paddock-enrollment-eval"
+  await root(["systemctl","disable","--now",`paddock@${uid}.service`]);await root(["rm","-f",`/etc/systemd/system/paddock@${uid}.service`]);await root(["systemctl","daemon-reload"])
+  expect((await root(["chpasswd"],`${user}:${password}\n`)).code===0,"could not set disposable fixture password")
+  const setup=await root(["python3","-c","import os,sys; p=sys.argv[1]; f=open(p,'w'); f.write(sys.argv[2]); f.close(); os.chmod(p,0o440)",rule,`Defaults timestamp_type=tty\n${user} ALL=(ALL:ALL) PASSWD: ALL\n`]);expect(setup.code===0,setup.err)
+  try {
+    expect((await root(["visudo","-c"])).code===0,"fixture sudoers rule is invalid")
+    await enrollRemote(["sudo","-k"])
+    expect((await enrollRemote(["sudo","-n","true"])).code!==0,"passwordless control still worked; password path was not exercised")
+    const plan=await planned();expect(plan.blockers.length===0 && plan.mode==="install",plan.blockers.join(" "));expect(!JSON.stringify(plan).includes(password),"password appeared in the plan")
+    const terminal=await sh(["python3","-c",enrollmentTerminalScript,JSON.stringify([BIN,...enrollArgs()]),"yes",password],{env,timeoutMs:360_000})
+    const result=JSON.parse(terminal.out.split("TERMINAL-RESULT ").at(-1)!)
+    expect(terminal.code===0 && result.code===0 && result.passwordPrompt && terminal.out.includes(`Enrolled ${NH}.`) && !terminal.out.includes(password),`TTY sudo enrollment failed: ${terminal.out.slice(-2500)} ${terminal.err}`)
+    const journal=await enrollRemote(["cat",`${plan.stateDir}/enrollment.json`]);expect(journal.code===0 && !journal.out.includes(password),"password appeared in journal or journal was unreadable")
+    expect((await enrollRemote(["test","-e",plan.requestPath])).code!==0,"interactive request file remained")
+    return "sudo -n control was refused; interactive yes and the disposable password installed and verified successfully with timestamp_type=tty"
+  } finally { await root(["rm","-f",rule]);await pdk(["host","remove",NH,"--confirm",NH]) }
+})
+
+ev("N11", "Corrupting one uploaded binary byte is refused by the destination checksum before installation, beside the valid enrollment controls", async () => {
+  await enrollmentFixture();const uid=(await enrollRemote(["id","-u"])).out.trim()
+  await enrollRemote(["sudo","-n","systemctl","disable","--now",`paddock@${uid}.service`]);await enrollRemote(["sudo","-n","rm","-f",`/etc/systemd/system/paddock@${uid}.service`]);await enrollRemote(["sudo","-n","systemctl","daemon-reload"])
+  const wrappers=join(tmp,"corrupt-upload");await mkdir(wrappers)
+  const real=(await sh(["which","ssh"])).out.trim();expect(real.startsWith("/"),"ssh executable is not absolute")
+  await writeFile(join(wrappers,"ssh"),`#!/usr/bin/env python3
+import os,sys,json,base64,subprocess
+real=${JSON.stringify(real)}
+if 'base64.b64decode' not in sys.argv[-1]: os.execv(real,[real]+sys.argv[1:])
+p=json.load(sys.stdin); b=bytearray(base64.b64decode(p['artifactBytes'])); b[0]^=1; p['artifactBytes']=base64.b64encode(b).decode()
+r=subprocess.run([real]+sys.argv[1:],input=json.dumps(p).encode(),capture_output=True)
+sys.stdout.buffer.write(r.stdout);sys.stderr.buffer.write(r.stderr);sys.exit(r.returncode)
+`,{mode:0o700})
+  await pdk(["daemon","stop"])
+  const before=await enrollSnapshot();const brokenEnv={PATH:`${wrappers}:${process.env.PATH}`}
+  try {
+    const plan=await pdkJson(enrollArgs(),{env:brokenEnv});expect(plan.code===0 && plan.reply.data.mode==="install",plan.out)
+    const failed=await pdk(enrollArgs(["--accept-plan",plan.reply.data.hash]),{env:brokenEnv});expect(failed.code!==0 && failed.err.includes("checksum mismatch"),"destination accepted a byte changed after primary verification")
+    expect(before===await enrollSnapshot(),"checksum failure wrote installation files or the journal");await unregistered()
+  } finally { await pdk(["daemon","stop"]);await pdk(["list"]) }
+})
+ev("N12", "The documented manual uninstall removes the disposable fixture's Paddock service, runtime and files while preserving unrelated Docker settings and a working engine", async () => {
+  await enrollmentFixture();const uid=(await enrollRemote(["id","-u"])).out.trim();const service=`paddock@${uid}.service`
+  const before=await enrollRemote(["cat","/etc/docker/daemon.json"]);expect(before.code===0,before.err)
+  const config=JSON.parse(before.out);expect(config.runtimes?.["paddock-runsc"],"positive control did not find the installed runtime")
+  const running=await enrollRemote(["sudo","-n","docker","ps","--format","{{.Names}}"]);expect(running.code===0 && !running.out.trim(),"uninstall fixture still has running containers")
+  const owned=await enrollRemote(["sudo","-n","docker","ps","-a","--filter","label=dev.paddock.name","--format","{{.Names}}"]);expect(owned.code===0 && !owned.out.trim(),"uninstall fixture still has sandbox data")
+  await enrollRemote(["sudo","-n","systemctl","disable","--now",service])
+  for (const family of ["inet","bridge"]) {
+    const removed=await enrollRemote(["sudo","-n","docker","run","--rm","--privileged","--network","host","--runtime","runc",HELPER_IMAGE,"nft","delete","table",family,"paddock_guard"]);expect(removed.code===0 || removed.err.includes("No such file"),removed.err)
+  }
+  delete config.runtimes["paddock-runsc"];if (!Object.keys(config.runtimes).length) delete config.runtimes
+  const candidate=`/tmp/${PREFIX}-uninstall.json`
+  expect((await enrollRemote(["tee",candidate],{stdin:JSON.stringify(config)+"\n"})).code===0,"cannot stage uninstall config")
+  expect((await enrollRemote(["sudo","-n","dockerd","--validate","--config-file",candidate])).code===0,"uninstall config is invalid")
+  expect((await enrollRemote(["sudo","-n","install","-m","0644",candidate,"/etc/docker/daemon.json"])).code===0,"cannot restore remaining Docker config")
+  await enrollRemote(["rm","-f",candidate])
+  const cleanup=await enrollRemote(["sudo","-n","python3","-c",`import os,glob,shutil,sys
+uid=sys.argv[1]
+for p in ['/usr/local/bin/paddock','/etc/systemd/system/paddock@'+uid+'.service']+glob.glob('/etc/systemd/system/paddock@'+uid+'.service.paddock-*')+glob.glob('/etc/docker/daemon.json.paddock-*'):
+ if os.path.lexists(p): os.unlink(p)
+for p in ['/opt/paddock','/var/lib/paddock/'+uid]:
+ if os.path.isdir(p): shutil.rmtree(p)
+`,uid]);expect(cleanup.code===0,cleanup.err)
+  expect((await enrollRemote(["sudo","-n","systemctl","daemon-reload"])).code===0,"daemon-reload failed")
+  expect((await enrollRemote(["sudo","-n","systemctl","restart","docker"])).code===0,"Docker did not restart after uninstall")
+  const images=await enrollRemote(["sudo","-n","docker","images","--filter","reference=paddock-helper:*","-q"])
+  if (images.out.trim()) expect((await enrollRemote(["sudo","-n","docker","rmi",...images.out.trim().split("\n")])).code===0,"helper image remained in use")
+  const left=await enrollRemote(["python3","-c",`import os,json,glob
+print(json.dumps([p for p in ['/opt/paddock','/var/lib/paddock/${uid}','/usr/local/bin/paddock','/etc/systemd/system/${service}']+glob.glob('/etc/docker/daemon.json.paddock-*') if os.path.lexists(p)]))`]);expect(left.code===0 && left.out.trim()==="[]",`uninstall left ${left.out}`)
+  const after=JSON.parse((await enrollRemote(["cat","/etc/docker/daemon.json"])).out);expect(JSON.stringify(after)===JSON.stringify(config),"uninstall changed unrelated Docker settings")
+  expect((await enrollRemote(["sudo","-n","docker","info"])).code===0,"engine was broken by uninstall")
+  return `${ENROLL_HOST}: unit, release, runtime, state, backups, guard and helper image removed; distro Docker packages retained; fixture can be deleted`
+})
 
 ev("Z01", "Nothing is left on the engine or this machine when the run ends", async () => {
   // Control: the scan sees this run's daemon while it runs, so an empty scan after teardown means none is left.

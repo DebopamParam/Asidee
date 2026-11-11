@@ -2,7 +2,8 @@
 
 Design proposal for stage 4 and the remote parts of stages 1b, 1d, and 2.
 The goal is to keep checks beside the engine when the laptop sleeps, with access through existing SSH credentials.
-Nothing described as proposed below is implemented or measured by this document.
+Sections still marked proposed describe later work. The enrollment implementation record below and
+[architecture](../architecture.md#reviewed-host-enrollment) describe the current code and its measured limits.
 
 ## Rulings on this proposal (binding where they differ from the text below)
 
@@ -28,7 +29,8 @@ Nothing described as proposed below is implemented or measured by this document.
 Paddock source was read at commit `c8bc74d764c8446f83957e415fdd81b436a43774` using `git show HEAD:path`.
 This avoids depending on another agent's concurrent Docker-inside edits.
 The reference files were read from the working tree. Their historical measurements are reference reports, not Paddock results.
-No engine commands, evals, remote connections, builds, or installation steps were run.
+No engine commands, evals, remote connections, builds, or installation steps were run during that original review.
+The enrollment implementation record below adds later measurements.
 All external behavior not established by those sources is marked **unverified**, with assumptions collected below.
 
 | Source | Observed constraint |
@@ -177,8 +179,8 @@ Architecture, libc, package, and systemd compatibility are **unverified U4**.
 | gVisor | Install pinned checksum-verified `runsc` under `/opt/paddock/gvisor/<release>/runsc` with `sudo install`. |
 | Runtime registration | Back up and merge one named `runtimes.paddock-runsc` entry in `/etc/docker/daemon.json` with sudo. Preserve unrelated settings. |
 | Docker restart | If registration changes, include `sudo systemctl restart docker` and the names of every running container it can interrupt. |
-| Hard disk helper | Install root-owned `/usr/local/libexec/paddock-disk` and a narrowly scoped sudoers file. Only for the hard-disk choice. |
-| Disk tools | Show installation of `e2fsprogs`, `util-linux`, and mount support, with each sudo package operation listed. |
+| Hard disk helper (stage 1d, excluded from host add) | Later: install root-owned `/usr/local/libexec/paddock-disk` and a narrowly scoped sudoers file. Only for the hard-disk choice. |
+| Disk tools (stage 1d, excluded from host add) | Later: show installation of `e2fsprogs`, `util-linux`, and mount support, with each sudo package operation listed. |
 | State | `sudo install -d` creates `/var/lib/paddock/<uid>` owned by the service user, mode 0700. Config lives in its `config/`. |
 | Service | Install `/etc/systemd/system/paddock@<uid>.service`, run sudo daemon-reload and enable/start. Log to the journal. |
 | Verification | Show the temporary sandbox, image digest, size, network probes, disk probe, cleanup, and expected duration as unknown. |
@@ -234,6 +236,44 @@ Restore prior config or service links only if their hashes still match this inst
 Remove leaves remote Paddock, its service, checks, sandboxes, images, disks, runtime registration, packages, and logs intact.
 It also leaves ordinary SSH config and known-host trust intact. Explain these leftovers before confirmation.
 It does not revoke the SSH user's access. Remote uninstall is a separate future operation, not a surprise flag on remove.
+
+### Enrollment implementation record
+
+`host add`, `hostPlan` and `hostApply` now implement the system-service path. N01 through N12 are the outside
+measurements; see the scorecard for the source revision and actual results. The changes below override the proposal
+where they differ. [Enrollment instructions](../host-enrollment.md) contain the commands and manual uninstall steps.
+
+| Choice or deviation | Reason and evidence |
+|---|---|
+| Explicit native Linux ELF and SHA-256 only; no implicit build or release channel | U6 remains conservative. Both endpoints check the artifact; N04 refuses a wrong primary checksum and N11 changes one uploaded byte to prove destination refusal. N06 checks the installed artifact digest and daemon source. |
+| gVisor `20251110.0`, with pinned SHA-512 per architecture | This point release is a single-file runtime. Newer gVisor distributions require sidecar delivery, which is not assumed here. The actual arm64 binary and embedded helper run in the disposable fixture. Release signing and a modern multi-file delivery channel remain unverified U6. |
+| Watched disk policy only; no disk helper, disk packages or sudoers entry | Stage 1d is separate. N02 inspects the plan and N06 writes bytes, obtains an engine-side measurement and requires applicable blocking checks. |
+| Runtime has `--allow-suid` and `--overlay2=none`, without `--net-raw` | Enrollment selects an ordinary sandbox capability. Inner Docker is unavailable on this runtime rather than claiming an unmeasured capability. No default-runtime change is made. |
+| Existing Python 3 and usable signed apt cache are prerequisites | The probe must not install tools or refresh indexes before consent. An empty or unreadable recipe refuses before installation. Existing Docker access must be readable to enumerate restart impact. |
+| Show existing repository contents and hash sources, keys and indexes; download the exact resolved .deb set and use `dpkg --install` | `apt-get --no-download` did not consume the staged local archives on the fixture. Direct installation avoids another dependency resolution or undeclared download after consent. N08 checks every installed version and unchanged login groups. No repository or key is added. |
+| Debian/Ubuntu recipe also accepts Linux Mint based on Ubuntu noble | The owner's routing machine is Mint 22.3, an Ubuntu-noble derivative. Its read-only plan is measured; privileged Mint installation is not. Other distributions refuse automatic installation. |
+| System unit as SSH user; `--sudo never` only reuses a verified enabled system service | User-unit lingering and logout/reboot behavior remain unmeasured. No unattended service is installed from that assumption. A prepared service in another layout can use `host attach`. N04 refuses installation; N07 proves prepared reuse without sudo or restart. |
+| One primary socket terminal session carries interactive sudo and installation over the same SSH PTY | A separate `ssh sudo -v` cannot authorize another session with tty-scoped sudo timestamps. N10 first refuses a noninteractive sudo control, then supplies a disposable password through the terminal and completes enrollment with `timestamp_type=tty`. Passwords are absent from plan and journal. |
+| Hash stable installation inputs instead of Docker's full human/status output | Docker info has a current-time field; container listings have changing uptime text. These are excluded. Engine identity/version/runtime configuration and the exact running container IDs/names remain bound. N03 changes real inventory and configuration; N06 keeps a control running during delivery and observes its interruption by the approved restart. |
+| Re-probe after delivery and authentication, before root installation | Downloads and password entry can take time. Changed inputs return a revised plan. N03 supplies stale consent beside accepted-plan controls. |
+| Retry an approved install or reuse its verified service; do not roll back shared resources | The journal names completed and interrupted steps plus prior file hashes. N05 forces Docker validation failure, observes partial root changes, unchanged Docker configuration and no registry entry. A half-installed machine without readable Docker access may require owner preparation before another complete plan is possible. |
+| Keep a failed create for diagnosis when no successful create reply proves ownership | A create error or lost reply cannot justify deleting a pre-existing sandbox of the same name. Successful smoke creates are always removed before registration. The error reports the diagnostic name and possibly retained shared helper/guard objects. |
+| Manual remote uninstall, separate from host remove | N07 proves remove retains the service. N12 removes the disposable fixture's unit, runtime, artifacts, state, backups, guard and helper image while preserving unrelated Docker configuration and usable Docker. Shared distro packages stay. |
+
+**U4 is partially measured.** Ubuntu 24.04 arm64 on an OrbStack Linux machine supports the systemd account setup,
+boot-accessible state path, distro Docker package transaction and native compiled artifact. The host daemon's user,
+enabled unit, socket-only listener, checksum, sandbox checks and disk measurement are inspected. Linux Mint 22.3
+x86_64 is probed read-only. Privileged x86_64, Debian, logout and reboot installation behavior remain unmeasured.
+
+**U5 uses the conservative choice.** A runtime configuration change always plans a Docker restart, even with live
+restore. Docker 29.1.3 on the disposable Ubuntu fixture validates the merged file, preserves unrelated settings and
+interrupts the named running control in N06. Reload-only registration and other Docker versions remain unverified.
+When the runtime entry is unchanged, no Docker restart is planned.
+
+**U6 is partially measured.** Explicit per-architecture compilation, native ELF rejection, both checksum boundaries,
+installed digest/source matching and embedded helper delivery are measured on the arm64 fixture. There is no signed
+manifest, release infrastructure, implicit compiler or claim about a modern multi-file gVisor delivery pipeline.
+The pinned checksums are explicit project trust anchors, not independently authenticated releases.
 
 ## 3. A hard cap must cover persistent sandbox writes
 
@@ -506,9 +546,9 @@ Sequence work into verifiable units. Each unit must pass its relevant outside me
 - **U1, unverified.** Installed OpenSSH options, config precedence, key availability, jump-host behavior, and isolated connection behavior fit the transport design.
 - **U2, unverified.** Target service boot behavior and engine exit metadata distinguish recoverable reboot intent from safety/OOM/task stops reliably.
 - **U3, unverified.** The selected Bun version and local engine support Unix HTTP upgrade, binary duplex flow control, TTY exec, demultiplexing, and resize as required.
-- **U4, unverified.** Chosen Linux architectures, libc versions, package recipes, systemd account setup, and boot-accessible state paths support the installation layout.
-- **U5, unverified.** Runtime configuration validation/restart behavior and interruption impact match the conservative installation plan on each supported Docker version.
-- **U6, unverified.** A signed artifact channel, cross-architecture compiled binaries, embedded helper delivery, and trusted release metadata can be produced and operated.
+- **U4, partially measured.** See the enrollment implementation record. Ubuntu arm64 installation and the Mint x86_64 read-only probe are measured; other install combinations and reboot behavior remain unverified.
+- **U5, conservative restart with one measured Docker version.** See the enrollment implementation record. Reload alternatives and other versions remain unverified.
+- **U6, partially measured.** Explicit native artifacts, checksums and embedded helper delivery are measured on the arm64 fixture. Signed releases and modern multi-file runtime delivery remain unverified.
 - **U7, unverified.** Bounded-v1 preserves supported image layouts, package installs, generated files, nested Docker data, and snapshots without a persistent-write bypass.
 - **U8, unverified.** Candidate quota/storage backends and their limitations apply to any new Linux fixture; reference measurements establish no Paddock result there.
 - **U9, unverified.** Scoped sudo helper, ext4 exhaustion/growth, mount identity/propagation, mount units, and interrupted cleanup satisfy the proposed safety properties.

@@ -68,11 +68,20 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   `SANDBOX.HOST.paddock`. A forward ends with its sandbox run, either daemon or its SSH control stream; fifteen
   seconds without a heartbeat from the other side ends it on either machine. Add a new forward after link loss.
   See [Machines](docs/architecture.md#machines) for the current limits and opt-in measurements.
+- `paddock host add NAME --ssh DEST --artifact PATH --sha256 HASH` enrolls a Linux systemd host after a read-only probe
+  and review of a hash-bound plan. `--json` applies nothing; interactive consent requires `yes`, and automation uses
+  `--accept-plan HASH`. The installer verifies artifacts, preserves unrelated Docker configuration, names every running
+  container a planned restart may interrupt, installs a service as the SSH user and registers only after sandbox smoke
+  verification. Disk limits are watched; this runtime does not offer inner Docker. `--sudo never` only reuses a verified
+  prepared system service. The disposable-fixture N evals cover approval, stale plans, both checksum checks, partial
+  failure, installation and manual uninstall. Read [Enroll a Linux host](docs/host-enrollment.md) for prerequisites,
+  explicit build commands, sudo behavior and retained remote objects. Reboot persistence remains unmeasured.
+
 
 Not built yet:
 
 - Docker Sandboxes (microVM) support. It is detected and reported as not supported.
-- A hard disk cap, Windows execution, reviewed host installation, a desktop app, and installers. The remote dashboard
+- A hard disk cap, Windows execution, a desktop app, and a signed release installer. The remote dashboard
   is later.
 - Docker Desktop and Colima measurements. Native Linux Docker and OrbStack have separate scorecards.
 - A license. Nothing here is published.

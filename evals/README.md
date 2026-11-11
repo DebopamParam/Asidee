@@ -42,6 +42,30 @@ when it is not. M03 builds two more gateways here: one with another version and 
 version. M08 stops this run's primary daemon with SIGSTOP for up to thirty seconds to measure the remote lease expiry,
 and M11 stops one of its SSH processes the same way before `daemon stop`; both resume or kill what they stopped.
 
+Group N covers host enrollment. N01 uses `PADDOCK_EVAL_HOST` only for a read-only probe and a plan, with before/after
+file hashes, ownership, modes, mtimes and links. The installer evals require `PADDOCK_EVAL_ENROLL_HOST=pdk-enroll-NAME@orb`,
+a disposable Ubuntu machine with Docker, readable Docker access, `alpine:latest`, systemd, Python 3 and passwordless
+sudo. Start with no current Paddock service, no sandboxes and a readable `/etc/docker/daemon.json` containing unrelated
+settings. N02 through N07 measure plans, stale inventory/config consent, refusals, a partial installation failure, full
+installation, a real Docker-restart interruption, smoke isolation/disk checks, removal and sudo-never reuse.
+
+N08 additionally needs `PADDOCK_EVAL_ENROLL_PACKAGES_HOST=pdk-enroll-OTHER@orb`, another fresh Ubuntu machine without
+Docker, with usable signed apt metadata already populated. It measures the complete pinned distro package transaction
+and confirms no login-group edit. N09 drives an actual terminal to decline. N10 requires OrbStack root control of the
+first fixture; it temporarily sets that disposable account's password and an isolated sudoers override to require a
+password with tty-scoped timestamps, then removes the override. No real user's password is used. N11 corrupts one
+uploaded binary byte using a private SSH wrapper, beside the valid installation controls. N12 follows the manual
+uninstall path on the first fixture, retaining distro packages and unrelated Docker settings. Delete both machines
+after the run. These evals reject destinations outside the explicit disposable naming pattern and never install on
+`PADDOCK_EVAL_HOST` or change the Mac's Docker configuration. A missing fixture is not measured. Example:
+
+```sh
+PADDOCK_EVAL_HOST=home-linux \
+PADDOCK_EVAL_ENROLL_HOST=pdk-enroll-test@orb \
+PADDOCK_EVAL_ENROLL_PACKAGES_HOST=pdk-enroll-packages@orb \
+bun evals/run.ts --write
+```
+
 **Docker Hub pulls.** A full run pulls from Docker Hub at most five times, all from inner Docker: I01 twice
 (`alpine:latest`; the attempt without `SYS_ADMIN` fails only after fetching), I09 once (`busybox:stable`) and I15
 twice (`busybox:stable`, then by digest). Verify's probe and the other evals use images loaded from the engine, and I24
@@ -75,6 +99,7 @@ confirmed against the quota from here.
 | L | Do resized limits hold on the engine's host when resize says they do, and are unsafe resizes refused? |
 | C | Does a template carry the sandbox's files, leave out the login files, and stay Paddock's own? |
 | M | Does one selected machine's own daemon perform operations and checks over SSH, preserving identity, availability and socket authority? |
+| N | Does reviewed Linux enrollment bind consent, verify provenance, install exactly the plan, refuse safely and leave a usable host? |
 | D | Does the daemon keep its promises through crashes, races and upgrades? |
 | P | Does it build and run on other platforms, as far as this machine can show? |
 | E | What has nobody measured? |

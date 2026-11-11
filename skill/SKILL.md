@@ -45,8 +45,21 @@ Remote aliases are `SANDBOX.HOST.paddock`; their private editor key stays on the
 on the primary's 127.0.0.1 and closes when its sandbox run, either daemon or the SSH control stream ends. Each side
 ends it after fifteen seconds without the other's heartbeat; it never reconnects or recreates itself. Its evidence is
 `paddock --host NAME forward list` on the primary, not a check. Add a new forward explicitly after link loss.
-Reviewed installation is not built yet. `paddock host remove NAME --confirm NAME` forgets a prepared daemon and leaves all remote
-files and services intact. Group M is unmeasured without `PADDOCK_EVAL_HOST`; read the scorecards for measured results.
+`paddock host add NAME --ssh DEST --artifact PATH --sha256 HASH --json` produces a read-only installation plan. Build the
+Linux artifact explicitly from the same source as the primary. Review every sudo vector, file diff, artifact and package
+checksum, service, watched disk choice and Docker restart victim. `--json` never applies. Interactive enrollment needs
+the word `yes`; automation needs `--accept-plan HASH`. A revised plan requires new consent. Interactive sudo uses the
+primary's private terminal stream; never put a password in an API body, plan or log. Automation needs noninteractive
+sudo. Registration follows verified artifacts, enabled user service inspection, isolation/disk smoke checks and cleanup.
+The installed runtime has watched disks and no inner-Docker capability. Hard disk helpers and disk tools are not installed.
+`--sudo never` can reuse a verified enabled system service in the enrolled layout, and otherwise refuses unattended
+installation. Do not install a user unit or infer reboot behavior from lingering. See [Enroll a Linux host](../docs/host-enrollment.md)
+for build commands, preparation, failure journals and manual uninstall. A refusal or failure must leave this enrollment
+unregistered and report any completed changes. Do not roll back shared packages or overwrite newer unrelated config.
+`paddock host remove NAME --confirm NAME` forgets primary resources and leaves remote files and services intact. Group M
+needs `PADDOCK_EVAL_HOST`; installation evals additionally require explicit disposable `pdk-enroll-*@orb` fixtures. Never
+run installer, restart or privileged evals on an owner's engine. Read the scorecards for measured results. Reboot
+persistence and automatic sandbox recovery are not measured.
 
 - A name is lowercase letters, digits and hyphens.
 - `exec` needs a running sandbox; it does not start one.
@@ -174,7 +187,8 @@ actual guest programs against temporary homes; core evals do not cover extension
 only for settings sent, with bounded printable names and credential values withheld.
 
 The engine measurements are in `evals/SCORECARD.md` and `evals/SCORECARD.linux.md`. Docker Desktop, Colima, Windows
-execution, a hard disk cap, remote installation and service recovery remain unmeasured or unbuilt as those files state.
+execution, a hard disk cap and reboot recovery remain unmeasured or unbuilt as those files state. Enrollment is measured
+only on the disposable Linux combinations named by the N evals.
 
 ## What you cannot do, by design
 

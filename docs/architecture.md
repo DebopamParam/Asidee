@@ -364,11 +364,11 @@ daemon keeps a random persistent `STATE/machine-id`; each daemon process has a s
 cannot be rebound implicitly. Attach records the account and the outer host-key fingerprint (`SHA256:…`) that SSH used,
 from `ssh -G` and the verbose handshake; `host list` shows them, with whether the remote daemon has its dashboard
 listener and whether it runs under systemd. Removing a prepared host forgets its entry and cache and ends its open
-sessions and forwards; its remote installation and data are retained. Reviewed installation and its removal are not
-implemented yet.
+sessions and forwards; its remote installation and data are retained. `host add` installs a reviewed Linux system
+service as described below; remote uninstall remains an explicit manual operation.
 
 `hosts.json` must be `{version: 1, hosts: [...]}`; each record in it is then read on its own. A record this Paddock does
-not know (another service kind or disk policy, as a later `host add` may write) or a damaged one is listed by `host
+not know (a future service kind or disk policy) or a damaged one is listed by `host
 list` and `list --all` as `unknown-record` with the reason, and routing to it is refused; the other hosts keep working.
 `host remove NAME --confirm NAME` forgets such a record, and attaching another host writes it back unchanged.
 
@@ -442,8 +442,52 @@ The M eval group needs `PADDOCK_EVAL_HOST` naming an authorized Linux SSH fixtur
 here, checks its checksum after copying, starts a socket-only daemon in a private temporary home directory, attaches
 it, and removes it at teardown. It never installs packages, uses sudo, restarts Docker or edits system/SSH files.
 Reboot persistence and automatic recovery are unmeasured; the fixture daemon runs only until stopped, killed or reboot.
-The scorecards record the actual M results. Root installation and Linux user-service installation have not been built
-or measured in this unit.
+The scorecards record the actual M results. Group N separately measures reviewed root installation on explicitly
+provisioned disposable OrbStack machines. The routing fixture is used only for N01's read-only plan and the M evals.
+
+### Reviewed host enrollment
+
+`core/hosts.ts` owns `hostPlan` and `hostApply`. Both are socket-only primary methods; neither can be routed or called
+with a dashboard token. The CLI prints the complete plan before consent. `--json` returns it without applying, even
+when an acceptance hash is present. Interactive consent is exactly `yes`; automation supplies `--accept-plan HASH`.
+The hash covers the primary's source/version, destination SSH host key, account, OS/machine/boot identities, relevant
+file bytes and ownership, container inventory, artifacts, package transaction, paths, service, sudo vectors and watched
+disk choice. Docker's current-time field is excluded; installation-relevant engine fields are retained.
+
+The Python bootstrap probe performs no sudo or destination writes. It needs existing Python 3, glibc and systemd,
+readable system files, established SSH trust and readable Docker inventory when changing an existing engine. Apt
+sources, keys and package indexes are hashed; source contents and the exact dependency URLs, versions and SHA-256
+checksums appear when Docker is absent. Apply downloads and verifies that resolved transaction and uses `dpkg --install`
+on those files. It does not add repositories, refresh apt metadata or resolve more dependencies after consent.
+
+The primary verifies an explicitly supplied Linux ELF artifact before SSH and again before delivery. The destination
+checks its SHA-256 before installation, and checks the pinned gVisor point release's SHA-512. There is no signed release
+channel or implicit compilation. Root-owned immutable paths select the artifact; an unrelated command or service is
+refused. Root paths through symlinks or directories writable by another account are refused. A backup with the wrong
+bytes is refused. Exactly one named Docker runtime is merged, with full before/after contents and diffs. A changed
+runtime plans validation, backup, configuration installation and Docker restart. Every running container is listed,
+even with live restore. An unchanged runtime plans no Docker restart.
+
+The daemon re-probes before delivery. The destination probes again after delivery and optional sudo authentication,
+before installation. Changed inputs return a revised plan and invalidate consent. Interactive enrollment opens a
+bootstrap session only on the primary's private stream socket. Password input travels to `sudo -v` on the same forced
+SSH terminal used by subsequent sudo commands; neither the HTTP API, plan nor journal contains it. This also works
+with tty-scoped sudo timestamps. Automation uses `sudo -n` and needs noninteractive permission. A disconnected terminal
+cannot commit a host registration; an interrupted install can have an unknown outcome and names its journal.
+
+The system unit runs as the SSH user with `SupplementaryGroups=docker`, a fixed PATH, socket-only access and
+`Restart=on-failure`, after Docker. State/configuration live under `/var/lib/paddock/UID`. Login groups and sudoers are
+not changed. Docker authority is effectively root. Installation progress and the interrupted step are journaled there,
+separately from sandbox manifests. Failure reports completed steps and retained paths, without shared-package rollback.
+`--sudo never` reuses a verified enabled system service in this layout; user-unit installation is conservatively refused
+because its boot behavior is unmeasured. Another prepared layout can still use `host attach`.
+
+Registration follows the artifact/source/protocol handshake, active/enabled service inspection, local engine readiness,
+all applicable blocking smoke checks, a real disk write and host-side byte measurement, and smoke cleanup. `verify`
+returns `diskUsedBytes` when measurable and omits it otherwise. Disk enforcement remains watched. The installed runtime
+omits `--net-raw`, so it does not advertise inner Docker. No hard disk helper, disk tools or sudoers entry is installed.
+No reboot recovery is claimed. [Enrollment instructions](host-enrollment.md) include manual uninstall and explain which
+remote objects `host remove` retains. N01 through N12 provide the outside controls; unavailable fixtures are not measured.
 
 Hosted streams use the existing second Unix socket and frame protocol over their own SSH process. The gateway first
 retrieves the current sandbox identity and run; the stream opens with that identity plus the expected daemon boot,
@@ -491,5 +535,5 @@ credentials live inside the sandbox. See `extensions/logins/README.md` for the s
 Missing setup commands are named only from settings actually sent, with bounded printable names and credential
 values withheld. The CLI also provides streamed exec, port forwards, and SSH access. Inner Docker is a checked core
 option, and the core resizes sandboxes and saves them as templates. Buffered operations can select a prepared remote
-daemon; streams, forwards and editor aliases use the same route. Reviewed host installation and a hard disk cap are
-not built.
+daemon; streams, forwards and editor aliases use the same route. Reviewed system-service enrollment is available
+with explicit artifacts. A hard disk cap, user-service installation and automatic reboot recovery are not built.
