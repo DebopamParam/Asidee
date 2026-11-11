@@ -11,8 +11,8 @@
 //   bun evals/run.ts --write         also rewrite evals/SCORECARD.md
 
 import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
-import { connect } from "node:net"
-import { tmpdir } from "node:os"
+import { connect, createServer, type AddressInfo } from "node:net"
+import { networkInterfaces, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { CHECKLIST } from "../core/checks"
 import { DOCKER_CAPABILITIES, DOCKER_DRIVER, DOCKER_START, HELPER_IMAGE } from "../core/providers/gvisor"
@@ -1203,14 +1203,14 @@ ev("F07", "The skill's Paddock commands and flags exist, and it lists exactly th
     const run = await pdk([command, ...(command === "ext" ? ["list"] : command === "daemon" ? ["status"] : [])], { timeoutMs: 30_000 })
     expect(!(run.code === 2 && run.err.includes("Unknown command")), `the skill names \`paddock ${command}\`, which does not exist`)
   }
-  const listed = /Methods:\s*([^.]+)\./.exec(skill)?.[1]?.match(/`([a-z]+)`/g)?.map((word) => word.slice(1, -1)) ?? []
+  const listed = /Methods:\s*([^.]+)\./.exec(skill)?.[1]?.match(/`([a-zA-Z]+)`/g)?.map((word) => word.slice(1, -1)) ?? []
   expect(listed.length > 0, "the skill does not list the API's methods")
   for (const method of listed) {
     const reply = await tcp(`/api/${method}`)
     expect(reply.status !== 403 && !(await reply.text()).includes("No such method"), `the skill lists ${method}, which the dashboard's port does not offer`)
   }
   const source = await readFile(join(ROOT, "core/daemon.ts"), "utf8")
-  const offered = [...source.matchAll(/^\s{4}([a-z]+): \{ run:(.*)$/gm)].filter((match) => !match[2]!.includes("socketOnly")).map((match) => match[1]!)
+  const offered = [...source.matchAll(/^\s{4}([a-zA-Z]+): \{ run:(.*)$/gm)].filter((match) => !match[2]!.includes("socketOnly")).map((match) => match[1]!)
   const unlisted = offered.filter((method) => !listed.includes(method) && method !== "version")
   expect(unlisted.length === 0, `the skill does not mention ${unlisted.join(", ")}`)
   const help = (await pdk(["help"])).out
@@ -1548,6 +1548,190 @@ ev("S06", "A reader that stops reading holds the command in the sandbox back, no
   expect(slow.code === 0 && slow.out.trim() === String(size), `after the stall ${slow.out.trim()} bytes came back (exit ${slow.code})`)
   expect(peak - before < 64 * 1048576, `the daemon grew from ${mib(before)} to ${mib(peak)}`)
   return `1 GiB read at once in ${fastSeconds.toFixed(1)} s; with the reader asleep ${stallSeconds} s the command was still running ${stallSeconds - 3} s in, and all 1 GiB came after; daemon ${mib(before)} before, ${mib(peak)} at most`
+})
+
+// W: forwards. A service on a sandbox's own loopback, reached from this machine's loopback and from nowhere else.
+const NONCE_PORT = 3000; const ECHO_PORT = 3100
+// A one-line answer on the sandbox's loopback, from the image's own nc, for one connection at a time. Each eval gives
+// its own port, since a service an earlier eval started keeps its port.
+const nonceService = (name: string, nonce: string, port = NONCE_PORT) => pdk(["exec", name, "--", "sh", "-c", `(nc -lk -s 127.0.0.1 -p ${port} -e echo ${nonce} </dev/null >/dev/null 2>&1 &)`])
+// What one TCP connection from this machine gets back before the other side closes; empty when nothing answers.
+const tcpRead = (host: string, port: number, send: Uint8Array | string = "", seconds = 5) => new Promise<Buffer>((resolve) => {
+  const chunks: Buffer[] = []; const client = connect(port, host, () => client.end(send))
+  const timer = setTimeout(() => client.destroy(), seconds * 1000)
+  client.on("data", (chunk: Buffer) => chunks.push(chunk)); client.on("error", () => {}); client.on("close", () => { clearTimeout(timer); resolve(Buffer.concat(chunks)) })
+})
+const refused = (port: number) => new Promise<boolean>((resolve) => {
+  const client = connect(port, "127.0.0.1", () => { client.destroy(); resolve(false) }); client.on("error", () => resolve(true))
+})
+const forwardAdd = async (name: string, port: number, localPort?: number) => {
+  const made = await pdkJson(["forward", "add", name, "--port", String(port), ...(localPort ? ["--local-port", String(localPort)] : [])])
+  expect(made.reply.ok, `forward add failed: ${made.reply.error?.message}`)
+  return made.reply.data as { id: string; localPort: number; sandboxId: string; generation: string }
+}
+const forwardsOf = async (name?: string) => (await pdkJson(["forward", "list", ...(name ? [name] : [])])).reply.data as Array<{ id: string; localPort: number; connections: number }>
+// A listener of this run, on the given address of this machine, that answers REPLY: what a forward is compared with.
+async function controlListener(host: string): Promise<{ port: number; close: () => void }> {
+  const server = createServer((socket) => socket.end(`${REPLY}\n`))
+  await new Promise<void>((resolve) => server.listen(0, host, resolve))
+  return { port: (server.address() as AddressInfo).port, close: () => server.close() }
+}
+// What the engine host gets from an address and port, through the host helper's nc.
+const hostReads = async (ip: string, port: number) => (await docker(["exec", HOST, "nc", "-w", "2", ip, String(port)], { timeoutMs: 20_000 })).out
+
+ev("W01", "A forward reaches a service on the sandbox's own loopback from this machine's loopback, the engine publishes nothing, its host gets no new listener, and verify shows the forward", async () => {
+  await ensure(A)
+  const nonce = `${PREFIX}-w01-nonce`
+  await nonceService(A, nonce)
+  expect((await pdk(["exec", A, "--", "nc", "-w", "2", "127.0.0.1", String(NONCE_PORT)])).out.includes(nonce), "control: the service does not answer inside the sandbox")
+  // Every listening socket on the engine's host, before and after.
+  const listening = async () => new Set((await asRoot("ss -ltnH")).out.split("\n").map((line) => line.trim().split(/\s+/)[3]).filter(Boolean))
+  const before = await listening()
+  const forward = await forwardAdd(A, NONCE_PORT)
+  try {
+    expect((await tcpRead("127.0.0.1", forward.localPort)).toString().includes(nonce), `127.0.0.1:${forward.localPort} did not return the sandbox's nonce`)
+    const added = [...await listening()].filter((address) => !before.has(address))
+    expect(added.length === 0, `new listeners on the engine's host: ${added.join(", ")}`)
+    const engine = await inspect(A)
+    const bound = Object.values(engine.NetworkSettings.Ports ?? {}).filter(Boolean)
+    expect(!engine.HostConfig.PublishAllPorts && Object.keys(engine.HostConfig.PortBindings ?? {}).length === 0 && bound.length === 0, `the engine publishes ${JSON.stringify(engine.HostConfig.PortBindings)} ${JSON.stringify(bound)}`)
+    const daemon = (await daemonFile()).pid
+    const own = (await sh(["lsof", "-nP", "-a", "-p", String(daemon), "-iTCP", "-sTCP:LISTEN", "-Fn"])).out.split("\n").filter((line) => line.endsWith(`:${forward.localPort}`))
+    expect(own.length === 1 && own[0] === `n127.0.0.1:${forward.localPort}`, `the daemon listens for the forward on ${own.join(", ") || "nothing lsof can see"}`)
+    const shown = ((await pdkJson(["verify", A])).reply.data?.checks as Array<{ id: string; status: string; detail: string }> | undefined)?.find((check) => check.id === "forwards")
+    expect(shown?.status === "info" && shown.detail.includes(`127.0.0.1:${forward.localPort} to port ${NONCE_PORT} (${forward.id})`), `verify did not disclose the forward: ${shown?.detail}`)
+    return `the nonce came back on 127.0.0.1:${forward.localPort}, the daemon's only socket for it; no port bindings; ${before.size} listeners on the engine's host before and after; verify lists it`
+  } finally { await pdk(["forward", "remove", forward.id]) }
+})
+
+ev("W02", "A forward answers on no other address: not this machine's others, not the engine host's, where a control listener does", async () => {
+  await ensure(A); await hostHelper()
+  const nonce = `${PREFIX}-w02-nonce`
+  await nonceService(A, nonce, NONCE_PORT + 2)
+  const forward = await forwardAdd(A, NONCE_PORT + 2); const control = await controlListener("0.0.0.0")
+  try {
+    expect((await tcpRead("127.0.0.1", forward.localPort)).toString().includes(nonce), "the forward does not work on loopback")
+    const others = Object.values(networkInterfaces()).flat().filter((entry) => entry && entry.family === "IPv4" && !entry.internal).map((entry) => entry!.address)
+    if (!others.length) skip("this machine has no address besides loopback")
+    // An address this machine cannot reach itself at (such as a network address ending in .0) proves nothing either way.
+    const tried: string[] = []
+    for (const address of others) {
+      if (!(await tcpRead(address, control.port, "", 2)).toString().includes(REPLY)) continue
+      expect(!(await tcpRead(address, forward.localPort)).toString().includes(nonce), `${address}:${forward.localPort} returned the nonce`)
+      tried.push(address)
+    }
+    expect(tried.length > 0, `control: no other address of this machine (${others.join(", ")}) answered`)
+    const vm = await hostAddresses()
+    expect(vm.length > 0, "the engine's host has no address to try")
+    for (const ip of vm) {
+      expect((await hostReads(ip, Number(HOST_PORT))).includes(REPLY), `control: the engine host's ${ip}:${HOST_PORT} did not answer`)
+      expect(!(await hostReads(ip, forward.localPort)).includes(nonce), `the engine host's ${ip}:${forward.localPort} returned the nonce`)
+    }
+    return `refused at ${tried.join(", ")} on this machine (of ${others.length}) and ${vm.join(", ")} on the engine's host, where the control listeners answered`
+  } finally { control.close(); await pdk(["forward", "remove", forward.id]) }
+})
+
+ev("W03", "Like any loopback service here, a forward is reachable from the engine's host through the engine's relay to this machine (OrbStack's host.docker.internal), and not from another sandbox", async () => {
+  await ensure(A); await ensure(B); await hostHelper()
+  const relay = (await docker(["exec", HOST, "getent", "hosts", "host.docker.internal"])).out.trim().split(/\s+/)[0]
+  if (!relay) skip("the engine's host has no host.docker.internal")
+  // Control: a listener of this run on 127.0.0.1 only, not a forward.
+  const control = await controlListener("127.0.0.1")
+  const nonce = `${PREFIX}-w03-nonce`
+  await nonceService(A, nonce, NONCE_PORT + 3)
+  const forward = await forwardAdd(A, NONCE_PORT + 3)
+  try {
+    if (!(await hostReads(relay!, control.port)).includes(REPLY)) skip(`this engine does not relay ${relay} to this machine's loopback`)
+    expect((await hostReads(relay!, forward.localPort)).includes(nonce), `the engine's host did not reach the forward through ${relay}, though it reached a loopback listener`)
+    // An ordinary container of the same engine, outside Paddock.
+    const plain = await docker(["run", "--rm", "--runtime", "runc", "--name", `${PREFIX}-plain`, HELPER_IMAGE, "nc", "-w", "2", "host.docker.internal", String(forward.localPort)], { timeoutMs: 60_000 })
+    const inside = await pdk(["exec", B, "--", "nc", "-w", "2", relay!, String(forward.localPort)], { timeoutMs: 20_000 })
+    expect(!inside.out.includes(nonce) && !(await pdk(["exec", B, "--", "nc", "-w", "2", relay!, String(control.port)], { timeoutMs: 20_000 })).out.includes(REPLY), "another sandbox reached this machine's loopback")
+    return `from the engine's host, ${relay} reached a loopback-only listener and the forward alike; a plain container ${plain.out.includes(nonce) ? "reached the forward too" : "did not reach it"}; another sandbox reached neither`
+  } finally { control.close(); await pdk(["forward", "remove", forward.id]) }
+})
+
+ev("W04", "A forward ends when it is removed, when its sandbox stops or is restarted behind Paddock's back, and when the daemon exits", async () => {
+  await ensure(A)
+  const ends = async (what: string, act: (id: string) => Promise<unknown>) => {
+    await ensure(A)
+    const forward = await forwardAdd(A, NONCE_PORT)
+    expect(!(await refused(forward.localPort)), `control: the forward for "${what}" did not listen`)
+    await act(forward.id)
+    expect(await until(async () => await refused(forward.localPort), 10), `127.0.0.1:${forward.localPort} still listens after ${what}`)
+    expect(!(await forwardsOf()).some((entry) => entry.id === forward.id), `forward list still shows it after ${what}`)
+  }
+  await ends("forward remove", (id) => pdk(["forward", "remove", id]))
+  await ends("paddock stop", () => pdk(["stop", A]))
+  await ends("an engine restart of the container", () => docker(["restart", "-t", "1", containerOf(A)]))
+  await ends("paddock daemon stop", () => pdk(["daemon", "stop"]))
+  await ensure(A)
+  return "each listener was gone within 10 s and left forward list"
+})
+
+ev("W05", "A sandbox recreated under the same name does not inherit its forward", async () => {
+  const name = `${PREFIX}-w`
+  await ensure(name)
+  try {
+    await nonceService(name, `${PREFIX}-old`)
+    const first = await forwardAdd(name, NONCE_PORT)
+    expect((await tcpRead("127.0.0.1", first.localPort)).toString().includes(`${PREFIX}-old`), "control: the first forward did not work")
+    expect((await pdk(["remove", name, "--confirm", name])).code === 0, "remove failed")
+    await ensure(name); await nonceService(name, `${PREFIX}-new`)
+    expect(await refused(first.localPort) && (await forwardsOf(name)).length === 0, "the recreated sandbox has the old forward")
+    const second = await forwardAdd(name, NONCE_PORT)
+    expect(second.sandboxId !== first.sandboxId && (await tcpRead("127.0.0.1", second.localPort)).toString().includes(`${PREFIX}-new`), "a new forward did not reach the new sandbox")
+    return `the old port refused and the list was empty after recreating; a new forward has a new sandbox id`
+  } finally { await pdk(["remove", name, "--confirm", name]) }
+})
+
+ev("W06", "An explicit local port that is in use is refused and nothing is recorded; once free, the same request binds it", async () => {
+  await ensure(A)
+  const holder = await controlListener("127.0.0.1")
+  const taken = await pdkJson(["forward", "add", A, "--port", String(NONCE_PORT), "--local-port", String(holder.port)])
+  holder.close(); await Bun.sleep(200)
+  expect(taken.code === 4 && /in use/.test(taken.reply.error?.message ?? ""), `an occupied port: exit ${taken.code}, ${taken.reply.error?.message}`)
+  expect(!(await forwardsOf(A)).some((entry) => entry.localPort === holder.port), "a refused forward was recorded")
+  const freed = await forwardAdd(A, NONCE_PORT, holder.port)
+  await pdk(["forward", "remove", freed.id])
+  expect(freed.localPort === holder.port, `the freed port was not used: ${freed.localPort}`)
+  return `127.0.0.1:${holder.port} in use: exit 4, "${taken.reply.error?.message}"; free: bound`
+})
+
+ev("W07", "A forward carries 64 MiB of random bytes each way unchanged, and passes on end of input", async () => {
+  await ensure(A)
+  // One connection, echoed back by the image's own nc and cat.
+  await pdk(["exec", A, "--", "sh", "-c", `(nc -l -s 127.0.0.1 -p ${ECHO_PORT} -e cat </dev/null >/dev/null 2>&1 &)`])
+  const forward = await forwardAdd(A, ECHO_PORT)
+  try {
+    const data = new Uint8Array(64 * 1048576); for (let at = 0; at < data.length; at += 65536) crypto.getRandomValues(data.subarray(at, at + 65536))
+    const want = new Bun.CryptoHasher("sha256").update(data).digest("hex")
+    const { value: back, before, peak } = await daemonMemory(tcpRead("127.0.0.1", forward.localPort, data, 120))
+    const got = new Bun.CryptoHasher("sha256").update(back).digest("hex")
+    expect(back.length === data.length && got === want, `${back.length} bytes came back, ${got === want ? "same" : "different"} hash`)
+    return `64 MiB in and back with the same hash, the echo ending only after end of input; daemon ${mib(before)} before, ${mib(peak)} at most`
+  } finally { await pdk(["forward", "remove", forward.id]) }
+})
+
+ev("W08", "A forward relays 50 connections at once, each with its own bytes, and leaves no relay running", async () => {
+  await ensure(A)
+  // The image's nc serves one connection at a time, so a concurrent echo server comes from the image's packages.
+  const installed = await pdk(["exec", A, "--", "sh", "-c", "command -v socat || apk add --no-cache -q socat"], { timeoutMs: 120_000 })
+  if (installed.code !== 0) skip("socat could not be installed in the sandbox (offline?)")
+  await pdk(["exec", A, "--", "sh", "-c", `(socat TCP-LISTEN:${ECHO_PORT + 1},bind=127.0.0.1,fork,reuseaddr EXEC:cat </dev/null >/dev/null 2>&1 &)`])
+  const forward = await forwardAdd(A, ECHO_PORT + 1)
+  try {
+    const one = async (index: number) => {
+      const data = new Uint8Array(256 * 1024); crypto.getRandomValues(data.subarray(0, 65536)); data.fill(index, 65536)
+      const back = await tcpRead("127.0.0.1", forward.localPort, data, 60)
+      return Buffer.compare(back, Buffer.from(data)) === 0
+    }
+    const start = Date.now(); const results = await Promise.all(Array.from({ length: 50 }, (_, index) => one(index)))
+    const seconds = (Date.now() - start) / 1000
+    expect(results.every(Boolean), `${results.filter((ok) => !ok).length} of 50 connections came back wrong`)
+    expect(await until(async () => (await forwardsOf(A)).find((entry) => entry.id === forward.id)?.connections === 0 && (await guestProcesses(A, "/.paddock/busybox nc")).length === 0, 15), "relays are still running after every connection closed")
+    return `50 × 256 KiB echoed exactly in ${seconds.toFixed(1)} s; afterwards no open connection and no relay process`
+  } finally { await pdk(["forward", "remove", forward.id]) }
 })
 
 // D: the daemon keeps its promises through crashes, races and upgrades.

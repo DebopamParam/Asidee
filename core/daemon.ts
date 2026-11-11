@@ -45,6 +45,9 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     exec: { run: (body) => core.exec(String(body.name), body.argv, { user: typeof body.user === "string" ? body.user : undefined, stdin: typeof body.stdin === "string" ? body.stdin : undefined }) },
     extensions: { run: () => core.extensions() },
     action: { run: (body) => core.runAction(body.extension, body.action, body.sandbox, body.values) },
+    forwardAdd: { run: (body) => core.forwardAdd(String(body.name), body.port, body.localPort) },
+    forwardList: { run: async (body) => core.forwardList(body.name) },
+    forwardRemove: { run: async (body) => core.forwardRemove(body.id) },
     shutdown: { run: async (body) => { setTimeout(() => shutdown(body.keepSandboxes === true), 50); return { stopping: true } }, socketOnly: true },
   }
 }

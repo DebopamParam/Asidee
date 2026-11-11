@@ -20,6 +20,8 @@ paddock list
 paddock exec NAME [--stdin] -- COMMAND ARG… # exit code, stdout and stderr are the command's
 paddock exec NAME --stream -- COMMAND ARG…  # raw bytes in and out, no size limit
 paddock start NAME | paddock stop NAME
+paddock forward add NAME --port P [--local-port L]  # 127.0.0.1:L here to 127.0.0.1:P in the sandbox
+paddock forward list [NAME] | paddock forward remove ID
 paddock verify NAME                         # exit 6 if a blocking check failed
 paddock remove NAME --confirm NAME          # deletes everything in it; ask the user first
 ```
@@ -50,6 +52,11 @@ Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing depende
   process prints) is outside the watched limit and rotates at 10 MiB with two files, checked by the core.
   Dockerd is the sandbox's main process. If it dies the sandbox stops; `paddock start NAME` starts it again.
   `paddock doctor` reports whether the engine supports inner Docker. An engine lacking the capability refuses it.
+- To open a service that listens inside the sandbox, add a forward and use the `localPort` it reports; leave out
+  `--local-port` to get a free one. It listens on this machine's 127.0.0.1 only, carries any bytes, and ends when it
+  is removed, when the sandbox stops, restarts or is removed, and when the daemon stops; add it again after a restart.
+  Any process on this machine can connect to it, and on OrbStack so can the engine's host and its other containers.
+  Remove a forward when you are done with it.
 
 ## Customizing Paddock
 
@@ -90,7 +97,8 @@ Create `~/.config/paddock/extensions/ID/extension.json`:
 Copy the built-in page (`ui/index.html` in the Paddock source) to `~/.config/paddock/ui/index.html` and edit the copy.
 Other files in that folder are served next to it. The page calls `POST /api/METHOD` with a JSON body and the header
 `Authorization: Bearer TOKEN`; it reads the token from the `#token=` part of the link `paddock ui` prints. Methods:
-`checklist`, `engines`, `list`, `get`, `create`, `start`, `stop`, `remove`, `verify`, `exec`, `extensions`, `action`.
+`checklist`, `engines`, `list`, `get`, `create`, `start`, `stop`, `remove`, `verify`, `exec`, `forwardAdd`, `forwardList`,
+`forwardRemove`, `extensions`, `action`.
 
 Keep showing each check's status and detail as the API returns them.
 

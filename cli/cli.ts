@@ -8,6 +8,7 @@ import { CHECKLIST } from "../core/checks"
 import type { SandboxView } from "../core/core"
 import { BUILD, readDaemonFile, runDaemon, VERSION } from "../core/daemon"
 import type { Extension } from "../core/extensions"
+import type { ForwardView } from "../core/forwards"
 import { checkSocketPath, defaultDirs, socketPath, streamSocketPath } from "../core/state"
 import { dataFrames, frame, FrameReader, type OpenRequest } from "../core/stream"
 import { PaddockError, type CheckResult, type Engine, type ErrorCode, type RunResult } from "../core/types"
@@ -24,6 +25,8 @@ const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, 
   paddock exec NAME [--user USER] [--stdin] -- COMMAND…   --stdin sends this command's input (text)
   paddock exec NAME --stream [--user USER] -- COMMAND…    bytes in and out as they come, any size
   paddock shell NAME [-- COMMAND…]
+  paddock forward add NAME --port PORT [--local-port PORT]   127.0.0.1 here to PORT on the sandbox's loopback
+  paddock forward list [NAME] | forward remove ID            a forward ends when its sandbox stops
   paddock remove NAME --confirm NAME
   paddock ext list
   paddock ext run EXTENSION ACTION [SANDBOX] [--set FIELD=VALUE]…
@@ -239,6 +242,25 @@ async function main(argv: string[]): Promise<void> {
         const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY)
         return await session({ kind: "exec", name: need(rest[0], "a name"), argv: tail.length ? tail : ["sh", "-c", "command -v bash >/dev/null && exec bash -l || exec sh -l"], tty,
           ...(tty && process.stdout.columns > 0 && process.stdout.rows > 0 ? { cols: process.stdout.columns, rows: process.stdout.rows } : {}) })
+      }
+      case "forward": {
+        const { values, positionals } = parse({ port: { type: "string" }, "local-port": { type: "string" } }, rest.slice(1))
+        if (rest[0] === "add") {
+          const made = await call<ForwardView>("forwardAdd", { name: need(positionals[0], "a name"), port: need(values.port, "--port"), localPort: values["local-port"] })
+          return out(made, () => console.log(`Forwarding 127.0.0.1:${made.localPort} to port ${made.port} in ${made.name} (forward ${made.id}). It ends when ${made.name} stops or restarts, or the daemon stops; then add it again.`))
+        }
+        if (rest[0] === "list" || rest[0] === undefined) {
+          const list = await call<ForwardView[]>("forwardList", { name: positionals[0] })
+          return out(list, () => {
+            if (!list.length) console.log("No forwards. Add one with `paddock forward add NAME --port PORT`.")
+            for (const forward of list) console.log(`${forward.id}  127.0.0.1:${forward.localPort} -> ${forward.name}:${forward.port}  ${forward.connections} open, since ${forward.createdAt.slice(0, 16).replace("T", " ")} UTC`)
+          })
+        }
+        if (rest[0] === "remove" || rest[0] === "rm") {
+          const closed = await call<{ closed: string }>("forwardRemove", { id: need(positionals[0], "a forward id") })
+          return out(closed, () => console.log(`Closed forward ${closed.closed}.`))
+        }
+        throw new PaddockError("usage", "Use `paddock forward add NAME --port PORT`, `paddock forward list [NAME]` or `paddock forward remove ID`.")
       }
       case "ext": {
         if (rest[0] === "list" || rest[0] === undefined) {

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
+import { connect } from "node:net"
 import { join } from "node:path"
 import { blockers, CHECKLIST, complete } from "../../core/checks"
 import { Core, UNCHECKED_PASSES } from "../../core/core"
@@ -10,7 +11,7 @@ import { OUTPUT_LIMIT, systemRunner } from "../../core/run"
 import { readConfig, validSpec } from "../../core/state"
 import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type Stage } from "../../core/types"
 
-const engine: Engine = { id: "fake:1", provider: "fake", label: "Fake engine", ready: true, problems: [], data: { context: "fake", runtime: "runsc" }, capabilities: { kernelIsolation: "gvisor", diskLimit: "watched", networkGuard: true, docker: true, execStream: true } }
+const engine: Engine = { id: "fake:1", provider: "fake", label: "Fake engine", ready: true, problems: [], data: { context: "fake", runtime: "runsc" }, capabilities: { kernelIsolation: "gvisor", diskLimit: "watched", networkGuard: true, docker: true, execStream: true, loopbackRelay: true } }
 const pass = (id: CheckResult["id"]): CheckResult => ({ id, status: "pass", evidence: "inspected", detail: "ok" })
 const allPass = (stage: Stage) => CHECKLIST.filter((item) => item.stage === stage).map((item) => pass(item.id))
 
@@ -28,6 +29,9 @@ function fakeProvider(overrides: Partial<Record<Stage, CheckResult[]>> = {}) {
     status: async () => !state.exists ? "missing" : state.running ? "running" : "stopped",
     exec: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
     openExec: async () => { throw new PaddockError("dependency", "no sessions in the fake") },
+    generation: async () => state.running ? `run-${state.starts}` : undefined,
+    prepareLoopback: async () => {},
+    dialLoopback: async () => { throw new PaddockError("dependency", "no sessions in the fake") },
     checks: async (_manifest, stage) => state.overrides[stage] ?? allPass(stage),
     diskUsedBytes: async () => 0,
     stoppedWhy: async () => undefined,
@@ -43,7 +47,7 @@ async function core(provider: Provider) {
 
 test("a check the provider does not report is unknown, never a pass", () => {
   const results = complete([pass("hardening")], ["config"])
-  expect(results.map((entry) => entry.id)).toEqual(["hardening", "mounts", "network-guard", "inbound", "limits", "disk"])
+  expect(results.map((entry) => entry.id)).toEqual(["hardening", "mounts", "network-guard", "inbound", "forwards", "limits", "disk"])
   expect(results.find((entry) => entry.id === "mounts")!.status).toBe("unknown")
   expect(blockers(results).map((entry) => entry.id)).toEqual(["mounts", "network-guard", "inbound", "limits"])
 })
@@ -375,4 +379,33 @@ test("a session is refused on a stopped sandbox without starting it, and ends wh
   await paddock.start("demo"); await paddock.openSession({ kind: "exec", name: "demo", argv: ["sh"], tty: false })
   await paddock.remove("demo", "demo")
   expect(closed[1]).toBe("The session ended: demo was removed.")
+})
+
+test("a forward listens on loopback for one run of its sandbox and ends with it", async () => {
+  const { provider, state } = fakeProvider()
+  const paddock = await core(provider)
+  await paddock.create({ name: "demo" })
+  const reachable = (port: number) => new Promise<boolean>((resolve) => { const socket = connect(port, "127.0.0.1", () => { socket.destroy(); resolve(true) }); socket.on("error", () => resolve(false)) })
+  const made = await paddock.forwardAdd("demo", "8080")
+  expect(made).toMatchObject({ name: "demo", port: 8080, localAddress: "127.0.0.1", generation: "run-1" })
+  expect(await reachable(made.localPort)).toBe(true)
+  const disclosed = (await paddock.verify("demo")).checks.find((check) => check.id === "forwards")!
+  expect(disclosed.status).toBe("info"); expect(disclosed.detail).toContain(`127.0.0.1:${made.localPort} to port 8080 (${made.id})`)
+  await expect(paddock.forwardAdd("demo", 8080, made.localPort)).rejects.toMatchObject({ code: "conflict" })
+  await paddock.stop("demo")
+  expect(paddock.forwardList()).toEqual([]); expect(await reachable(made.localPort)).toBe(false)
+  await expect(paddock.forwardAdd("demo", 8080)).rejects.toMatchObject({ code: "conflict" })
+  // A run the forward was not made for (the engine restarted it) ends the forward at the next connection.
+  await paddock.start("demo")
+  const again = await paddock.forwardAdd("demo", 8080)
+  state.starts++
+  await reachable(again.localPort); await Bun.sleep(50)
+  expect(paddock.forwardList("demo")).toEqual([])
+  const removed = await paddock.forwardAdd("demo", 9000)
+  expect(paddock.forwardRemove(removed.id)).toEqual({ closed: removed.id })
+  expect(() => paddock.forwardRemove(removed.id)).toThrow(PaddockError)
+  const last = await paddock.forwardAdd("demo", 9000)
+  await paddock.remove("demo", "demo")
+  expect(await reachable(last.localPort)).toBe(false)
+  for (const bad of [0, 70_000, "x"]) await expect(paddock.forwardAdd("demo", bad)).rejects.toMatchObject({ code: "usage" })
 })

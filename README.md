@@ -40,12 +40,15 @@ Works, and was run on OrbStack on an Apple Silicon Mac:
 - A stopped sandbox says why, in `paddock list` and the dashboard: a failed check, the disk watch, the daemon
   stopping, or the engine killing it at its memory or task limit.
 - A mistake in `config.json` or a damaged state file is reported by name instead of being ignored.
+- Port forwards: `paddock forward add demo --port 3000` listens on this machine's 127.0.0.1 and relays each connection
+  to port 3000 on the sandbox's own loopback through a daemon session, so the engine publishes no port. A forward
+  belongs to one run of one sandbox and ends when it stops, restarts or is removed, or when the daemon stops.
 - The daemon, the CLI with `--json`, a web dashboard, and extensions.
 
 Not built yet:
 
 - Docker Sandboxes (microVM) support. It is detected and reported as not supported.
-- Port forwarding, SSH access for editors, importing agent logins, templates.
+- SSH access for editors, importing agent logins, templates.
 - A hard disk cap, Linux and Windows hosts (nothing was run there), remote engines, a desktop app, installers.
 - A license. Nothing here is published.
 

@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto"
+import type { Server } from "node:net"
 import { blockers, complete, failures, titleOf } from "./checks"
 import { fieldValues, loadExtensions, runCommand } from "./extensions"
+import { boundPort, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
 import { OUTPUT_LIMIT } from "./run"
 import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSpec, writeManifest, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
@@ -8,6 +10,8 @@ import { PaddockError, type CheckResult, type Engine, type Manifest, type Provid
 
 // A running sandbox is stopped when a blocking check could not be made this many timer passes in a row.
 export const UNCHECKED_PASSES = 4
+// Checks the core answers from what it holds itself; a provider's answer for them is ignored.
+const CORE_CHECKS = new Set<CheckResult["id"]>(["forwards"])
 
 export type SandboxView = {
   // damaged: its state file cannot be read; stopReason says what is wrong with it.
@@ -26,6 +30,9 @@ export class Core {
   private readonly unchecked = new Map<string, number>()
   // Open sessions per sandbox name, closed when it stops or is removed.
   private readonly sessions = new Map<string, Set<Session>>()
+  // Forwards by id. They live in this daemon only: a stop, restart or removal of their sandbox, or the daemon's exit,
+  // ends them, and nothing brings one back.
+  private readonly forwards = new Map<string, { view: Omit<ForwardView, "connections">; server: Server; connections: Set<Session>; watch: ReturnType<typeof setInterval> }>()
   constructor(private readonly providers: readonly Provider[], readonly dirs: Dirs, private readonly run: Runner, private readonly cliDir: string) {}
 
   // One operation per sandbox at a time.
@@ -67,8 +74,9 @@ export class Core {
     const provider = this.provider(manifest); const results: CheckResult[] = []
     for (const stage of stages) {
       if (stage !== "config" && !running) continue
-      results.push(...await provider.checks(manifest, stage))
+      results.push(...(await provider.checks(manifest, stage)).filter((result) => !CORE_CHECKS.has(result.id)))
     }
+    if (stages.includes("config")) results.push(this.forwardCheck(manifest))
     return complete(results, stages, running ? undefined : "Not checked: the sandbox is not running.")
   }
 
@@ -80,6 +88,7 @@ export class Core {
   private endSessions(name: string, reason: string): void {
     for (const session of this.sessions.get(name) ?? []) session.close(reason)
     this.sessions.delete(name)
+    for (const forward of [...this.forwards.values()]) if (forward.view.name === name) this.endForward(forward.view.id, reason)
   }
 
   private async stopBecause(manifest: Manifest, reason: string): Promise<void> {
@@ -207,7 +216,73 @@ export class Core {
     return session
   }
 
-  closeSessions(): void { for (const name of [...this.sessions.keys()]) this.endSessions(name, "The session ended: the Paddock daemon stopped.") }
+  closeSessions(): void {
+    for (const name of new Set([...this.sessions.keys(), ...[...this.forwards.values()].map((forward) => forward.view.name)])) this.endSessions(name, "The session ended: the Paddock daemon stopped.")
+  }
+
+  // A listener on 127.0.0.1 only, bound once, for this run of the sandbox. Each connection is relayed to the same port on
+  // the sandbox's own loopback, after checking that the run it was made for is still the one running.
+  async forwardAdd(name: string, port: unknown, localPort?: unknown): Promise<ForwardView> {
+    const target = validPort(port, "The port"); const local = localPort === undefined || localPort === null || localPort === "" ? undefined : validPort(localPort, "The local port")
+    return this.exclusive(validName(name), async () => {
+      const manifest = await readManifest(this.dirs, name); const provider = this.provider(manifest)
+      if (manifest.engine.capabilities?.loopbackRelay === false) throw new PaddockError("dependency", `${manifest.engine.label} cannot relay a connection into a sandbox.`)
+      const generation = await provider.generation(manifest)
+      if (!generation) throw new PaddockError("conflict", `${name} is not running. Start it with \`paddock start ${name}\`, then add the forward.`)
+      await provider.prepareLoopback(manifest)
+      const server = await listenLoopback(local)
+      const id = randomBytes(4).toString("hex")
+      const forward = { view: { id, name, sandboxId: manifest.id, generation, localAddress: "127.0.0.1" as const, localPort: boundPort(server), port: target, createdAt: new Date().toISOString() },
+        server, connections: new Set<Session>(), watch: setInterval(() => void this.forwardCurrent(id, manifest), 2000) }
+      forward.watch.unref?.()
+      this.forwards.set(id, forward)
+      server.on("connection", async (socket) => {
+        socket.on("error", () => {})
+        if (!await this.forwardCurrent(id, manifest)) return socket.destroy()
+        const session = await provider.dialLoopback(manifest, target).catch(() => undefined)
+        if (!session || !this.forwards.has(id)) { session?.close(); return socket.destroy() }
+        forward.connections.add(session); session.on("end", () => forward.connections.delete(session))
+        relay(socket, session)
+      })
+      return { ...forward.view, connections: 0 }
+    })
+  }
+
+  // Whether a forward's sandbox is still in the run the forward was made for. When it is not, the forward ends.
+  private async forwardCurrent(id: string, manifest: Manifest): Promise<boolean> {
+    const forward = this.forwards.get(id)
+    if (!forward) return false
+    const now = await this.provider(manifest).generation(manifest).catch(() => undefined)
+    if (now === forward.view.generation) return true
+    this.endForward(id, `The forward ended: ${manifest.name} ${now ? "was restarted" : "is no longer running"}.`)
+    return false
+  }
+
+  private endForward(id: string, reason: string): void {
+    const forward = this.forwards.get(id)
+    if (!forward) return
+    this.forwards.delete(id); clearInterval(forward.watch); forward.server.close()
+    for (const session of forward.connections) session.close(reason)
+  }
+
+  forwardList(name?: unknown): ForwardView[] {
+    const only = name === undefined || name === null || name === "" ? undefined : validName(name)
+    return [...this.forwards.values()].filter((forward) => !only || forward.view.name === only).map((forward) => ({ ...forward.view, connections: forward.connections.size }))
+  }
+
+  forwardRemove(id: unknown): { closed: string } {
+    if (typeof id !== "string" || !this.forwards.has(id)) throw new PaddockError("not-found", `There is no forward ${String(id)}. See \`paddock forward list\`.`)
+    this.endForward(id, "The forward was removed.")
+    return { closed: id }
+  }
+
+  // A disclosure, from the listeners themselves: any process on this machine can connect to a loopback port.
+  private forwardCheck(manifest: Manifest): CheckResult {
+    const mine = [...this.forwards.values()].filter((forward) => forward.view.sandboxId === manifest.id)
+    if (!mine.length) return { id: "forwards", status: "info", evidence: "inspected", detail: "None. A forward added with `paddock forward add` listens on 127.0.0.1 only and ends when the sandbox stops." }
+    const listed = mine.map((forward) => { const address = forward.server.address(); return `${typeof address === "object" && address ? `${address.address}:${address.port}` : "not listening"} to port ${forward.view.port} (${forward.view.id})` })
+    return { id: "forwards", status: "info", evidence: "inspected", detail: `${listed.join(", ")}. Any process on this machine can connect to these, and so can whatever the engine relays to its loopback: on OrbStack, the engine's host and its other containers, through host.docker.internal.` }
+  }
 
   extensions() { return loadExtensions(this.dirs) }
 

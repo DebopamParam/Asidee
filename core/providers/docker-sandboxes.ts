@@ -24,6 +24,9 @@ export class DockerSandboxesProvider implements Provider {
   status() { return this.unsupported() }
   exec() { return this.unsupported() }
   openExec() { return this.unsupported() }
+  generation() { return this.unsupported() }
+  prepareLoopback() { return this.unsupported() }
+  dialLoopback() { return this.unsupported() }
   checks() { return this.unsupported() }
   diskUsedBytes() { return this.unsupported() }
   stoppedWhy() { return this.unsupported() }

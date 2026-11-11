@@ -27,7 +27,8 @@ out as "could not be checked", never as a pass.
 | No privileged mode, host namespaces, undeclared capabilities or devices | yes | before start | Engine configuration. With Docker, exactly NET_ADMIN and SYS_ADMIN added inside gVisor; otherwise no additions. |
 | No host folders | yes | before start | Engine configuration; with Docker, volume driver options and ownership too. |
 | Own network, guard loaded | yes | before start | Engine configuration, and the loaded firewall rules compared rule for rule with the shipped ones. |
-| No open ports | yes | before start | Engine configuration. |
+| No engine-published ports; requested forwards are loopback-only | yes | before start | Engine configuration. Forwards are the daemon's, not the engine's. |
+| Forwards to this machine's loopback | no | before start | Checked by the core: each active forward's address, its port inside, and its id; a disclosure. |
 | Memory, process, CPU limits | yes | before start | Engine configuration, including json-file host log rotation (10 MiB, two files) for every sandbox. |
 | Disk limit | no | before start | The engine's capability: hard, watched or none. Watched needs a runtime with `--overlay2=none`. |
 | Cannot reach the host | yes | verify | Live probe with controls. |
@@ -168,7 +169,31 @@ S03: a shell saw this terminal's size and a resize, Ctrl-C ended a `sleep` insid
 a session ended within a second of `paddock stop`. S06: a reader asleep for longer than the whole transfer takes held
 the command in the sandbox back.
 
+### Forwards
+
+`paddock forward add NAME --port P` makes the daemon listen on 127.0.0.1, once, at `--local-port` or a port the
+system picks (no port is probed and assumed free; one in use is refused). Each connection it accepts opens a session
+that runs a relay on the sandbox's own loopback: `nc 127.0.0.1 P` from a static BusyBox the core copies into the
+sandbox at `/.paddock/busybox` through the engine's archive API, because the image may have no `nc`, `socat` or
+interpreter of its own. The relay gets the port as a number and nothing else. The engine publishes nothing and gets no
+listener on its host. Each direction waits for the other side, and end of input passes on as a half-close. A forward
+belongs to one run of one sandbox (its id and the engine's start time): it ends on `forward remove`, when the sandbox
+stops or is removed through Paddock, within two seconds when the engine restarts or stops it behind Paddock's back
+(and any connection after that is refused), and when the daemon stops. A sandbox recreated under the same name starts
+with none. The core, not the provider, reports the forwards disclosure. W01: a nonce on the sandbox's loopback came back
+on 127.0.0.1 at the reported port, the daemon's only socket for it; the engine reported no port bindings and its host
+had the same listeners before and after; verify listed the forward. W02: the forward did not answer at this machine's
+other addresses or the engine host's, where control listeners did. W04: the listener was gone within 10 s of each
+ending condition, an engine restart included. W05: a recreated name had no forward. W06: an occupied explicit port
+was refused with exit 4 and nothing recorded. W07: 64 MiB of random bytes each way came back with the same hash. W08:
+50 connections at once each got their own 256 KiB back, and no relay process was left.
+
 ## Where the guarantee ends
+
+- **A forward is open to this machine.** It listens on loopback, which every process of every user here can connect
+  to, as can anything the engine relays to this machine's loopback. On OrbStack, `host.docker.internal` from the
+  engine's host and from ordinary containers arrives at this machine's 127.0.0.1, so they reach a forward as they
+  reach any loopback service (W03). Sandboxes do not: their guard blocks that address.
 
 - **Something with your rights on this machine can change Paddock itself.** An agent running outside a sandbox, or an
   extension's command, runs as you. It could edit the core or call the engine directly. The checks catch a
@@ -204,6 +229,7 @@ finish, so a second daemon never runs beside it. It listens on:
 
 - a Unix socket in the state folder (mode 0600), used by the CLI;
 - a second one, `stream.sock` (mode 0600), for sessions only;
+- `127.0.0.1` at each forward's port, relayed to the sandbox and nothing else;
 - `127.0.0.1` on port 7717 (or a free port), used by the dashboard. Requests need the token from `paddock ui` and a
   `Host` header naming this server. `shutdown` and sessions are not available here.
 

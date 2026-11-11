@@ -20,6 +20,8 @@ export type Capabilities = {
   docker: boolean
   // The daemon can relay a command's bytes as they come (shell, exec --stream).
   execStream: boolean
+  // A connection can be relayed to a port on the sandbox's own loopback (forwards).
+  loopbackRelay: boolean
 }
 
 // One place sandboxes can run: a provider plus the engine it found (a Docker context, for example).
@@ -36,7 +38,7 @@ export type Engine = {
 }
 
 export type CheckId =
-  | "kernel" | "hardening" | "mounts" | "network-guard" | "inbound" | "limits" | "disk" | "docker"
+  | "kernel" | "hardening" | "mounts" | "network-guard" | "inbound" | "forwards" | "limits" | "disk" | "docker"
   | "net-host" | "net-peers" | "net-private" | "egress" | "credentials"
 
 // pass: holds. weak: holds in a weaker form than the title says (the detail says how). fail: does not hold.
@@ -100,6 +102,11 @@ export interface Provider {
   exec(manifest: Manifest, argv: readonly string[], options?: { user?: string; stdin?: string }): Promise<RunResult>
   // A command whose bytes are relayed as they come, for shells, binary exec and anything long-lived.
   openExec(manifest: Manifest, argv: readonly string[], options: { user?: string; tty: boolean; cols?: number; rows?: number }): Promise<Session>
+  // Which run of the sandbox is running now, or undefined when it is not. A restart or a recreated container differs.
+  generation(manifest: Manifest): Promise<string | undefined>
+  // Puts the loopback relay in place in this run of the sandbox, then connects one session to 127.0.0.1:port inside it.
+  prepareLoopback(manifest: Manifest): Promise<void>
+  dialLoopback(manifest: Manifest, port: number): Promise<Session>
   checks(manifest: Manifest, stage: Stage): Promise<CheckResult[]>
   diskUsedBytes(manifest: Manifest): Promise<number | undefined>
   // Why the engine stopped a sandbox that nobody asked to stop (it ran out of memory, for example), if it knows.

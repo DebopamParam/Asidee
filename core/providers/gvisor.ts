@@ -14,6 +14,8 @@ import HELPER_DOCKERFILE from "./helper.Dockerfile" with { type: "text" }
 
 export const LABEL_NAME = "dev.paddock.name"
 export const LABEL_ID = "dev.paddock.id"
+// Where the loopback relay is copied in each sandbox.
+export const RELAY = "/.paddock/busybox"
 export const container = (name: string) => `paddock-${name}`
 export const network = (name: string) => `paddock-net-${name}`
 export const dockerVolume = (manifest: Manifest) => `paddock-docker-${manifest.id}`
@@ -97,7 +99,7 @@ const CREDENTIAL_FILES = [".claude*/.credentials.json", ".codex*/auth.json", ".c
 
 type Inspect = {
   Id?: string
-  State: { Running: boolean; OOMKilled?: boolean; ExitCode?: number; FinishedAt?: string }
+  State: { Running: boolean; OOMKilled?: boolean; ExitCode?: number; StartedAt?: string; FinishedAt?: string }
   Config: { Labels: Record<string, string> | null }
   HostConfig: {
     Runtime: string; Privileged: boolean; CapAdd: string[] | null; CapDrop?: string[] | null; Devices: unknown[] | null; PidMode: string; IpcMode: string
@@ -230,7 +232,7 @@ export class GvisorProvider implements Provider {
       const measurable = seesWrites(chosen[1].runtimeArgs)
       engines.push({ ...base, label, ready: true, data: { context: context.Name, runtime: chosen[0] },
         problems: measurable ? [] : [`Sandboxes here have no disk limit: the runtime ${chosen[0]} lacks --overlay2=none, without which Paddock cannot measure what a sandbox writes.`],
-        capabilities: { kernelIsolation: "gvisor", diskLimit: measurable ? "watched" : "none", networkGuard: true, docker: measurable && hasRawNetwork(chosen[1].runtimeArgs), execStream: true } })
+        capabilities: { kernelIsolation: "gvisor", diskLimit: measurable ? "watched" : "none", networkGuard: true, docker: measurable && hasRawNetwork(chosen[1].runtimeArgs), execStream: true, loopbackRelay: true } })
     }
     return engines
   }
@@ -400,6 +402,44 @@ export class GvisorProvider implements Provider {
     await session.started
     if (options.tty && options.cols && options.rows) await session.resize(options.cols, options.rows).catch(() => {})
     return session
+  }
+
+  // From the engine's API, not its CLI: a forward asks before every connection it relays.
+  async generation(manifest: Manifest): Promise<string | undefined> {
+    const reply = await engineApi(await this.endpoint(manifest.engine), "GET", `/containers/${container(manifest.name)}/json`)
+    if (reply.status === 404) return undefined
+    const body = reply.body as Inspect | undefined
+    if (reply.status !== 200 || !body) throw new PaddockError("runtime", `The engine did not describe ${manifest.name}: HTTP ${reply.status}`)
+    if (body.Config.Labels?.[LABEL_ID] !== manifest.id) throw new PaddockError("conflict", `The container ${container(manifest.name)} was not created by this Paddock sandbox (its id label differs). Nothing was done to it.`)
+    return body.State.Running && body.Id ? `${body.Id.slice(0, 12)}@${body.State.StartedAt}` : undefined
+  }
+
+  // The relay is the static busybox from Paddock's helper image (one file, no libraries), copied into each run of the
+  // sandbox through the engine's archive API, so it needs no tool from the sandbox's image and works with any of them.
+  // It is given only a number: `busybox nc 127.0.0.1 PORT`. The guest can replace the file, which changes nothing it
+  // could not already do with its own loopback.
+  private readonly relays = new Map<string, Promise<Uint8Array>>()
+  async prepareLoopback(manifest: Manifest): Promise<void> {
+    const inspect = await this.inspect(manifest)
+    if (!inspect?.State.Running || !inspect.Id) throw new PaddockError("conflict", `${manifest.name} is not running. Start it first.`)
+    let relay = this.relays.get(manifest.engine.id)
+    if (!relay) {
+      relay = (async () => {
+        await this.ensureHelper(manifest.engine)
+        const output = await this.docker(manifest.engine, ["run", "--rm", "--network", "none", "--runtime", "runc", "--entrypoint", "cat", HELPER_IMAGE, "/bin/busybox.static"], { binary: true, timeoutMs: 60_000 })
+        if (output.exitCode !== 0 || !output.raw?.length) throw new PaddockError("runtime", `Could not read the relay from the helper image: ${output.stderr.trim()}`)
+        return output.raw
+      })()
+      relay.catch(() => this.relays.delete(manifest.engine.id))
+      this.relays.set(manifest.engine.id, relay)
+    }
+    const response = await fetch(`http://engine/containers/${inspect.Id}/archive?path=/`, { unix: await this.endpoint(manifest.engine), method: "PUT", headers: { "content-type": "application/x-tar" }, body: tar([{ path: ".paddock/", mode: 0o755 }, { path: RELAY.slice(1), mode: 0o755, data: await relay }]) } as RequestInit)
+    if (response.status !== 200) throw new PaddockError("runtime", `The engine did not copy the relay into ${manifest.name}: ${(await response.text()).trim().slice(0, 300) || `HTTP ${response.status}`}`)
+  }
+
+  dialLoopback(manifest: Manifest, port: number): Promise<Session> {
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new PaddockError("usage", "A port is a whole number from 1 to 65535.")
+    return this.openExec(manifest, [RELAY, "nc", "127.0.0.1", String(port)], { tty: false })
   }
 
   async diskUsedBytes(manifest: Manifest): Promise<number | undefined> {
@@ -607,6 +647,25 @@ export class GvisorProvider implements Provider {
       : result("credentials", "info", "probed", "None of the usual login files (Claude, Codex, GitHub, git, SSH keys, AWS, netrc) are present."))
     return out
   }
+}
+
+// A tar archive of directories and files, for the engine's archive API. Only what Paddock writes, so only ustar basics.
+export function tar(entries: ReadonlyArray<{ path: string; mode: number; data?: Uint8Array }>): Uint8Array {
+  const blocks: Uint8Array[] = []
+  for (const entry of entries) {
+    const header = Buffer.alloc(512); const size = entry.data?.length ?? 0
+    const field = (offset: number, length: number, value: string) => header.write(value, offset, length, "latin1")
+    const octal = (offset: number, length: number, value: number) => field(offset, length, value.toString(8).padStart(length - 1, "0"))
+    if (Buffer.byteLength(entry.path) > 99) throw new Error(`${entry.path} is too long for a tar header.`)
+    field(0, 100, entry.path); octal(100, 8, entry.mode); octal(108, 8, 0); octal(116, 8, 0); octal(124, 12, size); octal(136, 12, 0)
+    field(156, 1, entry.data ? "0" : "5"); field(257, 6, "ustar\0"); field(263, 2, "00")
+    field(148, 8, " ".repeat(8))
+    octal(148, 7, header.reduce((sum, byte) => sum + byte, 0))
+    blocks.push(header)
+    if (entry.data) { blocks.push(entry.data); if (size % 512) blocks.push(new Uint8Array(512 - (size % 512))) }
+  }
+  blocks.push(new Uint8Array(1024))
+  return Buffer.concat(blocks)
 }
 
 // One request to the engine's API on its Unix socket.
