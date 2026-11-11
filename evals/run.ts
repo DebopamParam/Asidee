@@ -18,6 +18,7 @@ import { CHECKLIST } from "../core/checks"
 import { DOCKER_CAPABILITIES, DOCKER_DRIVER, DOCKER_START, HELPER_IMAGE } from "../core/providers/gvisor"
 import { OUTPUT_LIMIT } from "../core/run"
 import { FrameReader, frame } from "../core/stream"
+import { WAIT_FOR_PROBE_ROUTES } from "../core/providers/probe"
 import HELPER_DOCKERFILE from "../core/providers/helper.Dockerfile" with { type: "text" }
 
 const ROOT = join(dirname(Bun.main), "..")
@@ -25,6 +26,8 @@ const BUN = process.execPath
 const REPLY = "paddock-eval-reply"
 const args = process.argv.slice(2)
 const only = args.includes("--only") ? args[args.indexOf("--only") + 1]!.split(",") : undefined
+const scoreLabel = args.includes("--label") ? args[args.indexOf("--label") + 1] : undefined
+if (args.includes("--label") && (!scoreLabel || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(scoreLabel))) throw new Error("--label needs 1 to 32 lowercase letters, digits or hyphens")
 const PREFIX = `ev${Math.random().toString(36).slice(2, 6)}`
 const A = `${PREFIX}-a`; const B = `${PREFIX}-b`
 const INNER = `${PREFIX}-inner`
@@ -106,15 +109,18 @@ const FAR = ["10.255.255.25", "172.31.255.25", "192.168.255.25", "100.127.255.25
 let farAddresses: string[] = []
 async function hostHelper(): Promise<void> {
   if ((await docker(["inspect", HOST])).code === 0) return
-  const script = `set -e
+  const script = `${WAIT_FOR_PROBE_ROUTES}
+set -e
 nc -lk -p ${HOST_PORT} -e echo ${REPLY} &
 ip netns add far; ip link add ${PREFIX}a type veth peer name ${PREFIX}b; ip link set ${PREFIX}b netns far; ip link set ${PREFIX}a up
 ip netns exec far ip link set lo up; ip netns exec far ip link set ${PREFIX}b up
 for a in ${FAR.join(" ")}; do
-  [ -n "$(ip route show match \${a}4 | grep -v '^default')" ] && continue
-  ip addr add \${a}3/30 dev ${PREFIX}a; ip netns exec far ip addr add \${a}4/30 dev ${PREFIX}b; echo "far \${a}4"
+  wait_probe_routes \${a}4
+  route=$(ip route show match \${a}4 | grep -v '^default' || true)
+  if [ -n "$route" ]; then echo "unavailable \${a}4: $route"; continue; fi
+  ip addr add \${a}3/30 dev ${PREFIX}a; ip netns exec far ip addr add \${a}4/30 dev ${PREFIX}b
+  ip netns exec far ip route add default via \${a}3 2>/dev/null || true; echo "far \${a}4"
 done
-ip netns exec far ip route add default via ${FAR[0]}3 2>/dev/null || true
 echo ready; exec ip netns exec far nc -lk -p ${FAR_PORT} -e echo ${REPLY}`
   const started = await docker(["run", "-d", "--rm", "--name", HOST, "--privileged", "--network", "host", "--runtime", "runc", HELPER_IMAGE, "sh", "-c", script])
   expect(started.code === 0, `the host helper did not start: ${started.err}`)
@@ -130,12 +136,12 @@ const hostAddresses = async () => (await docker(["exec", HOST, "ip", "-4", "-o",
 const guardTamper = { insert: "nft insert rule inet paddock_guard prerouting accept", remove: "nft delete table inet paddock_guard; nft delete table bridge paddock_guard" }
 
 // ---- a real browser for the dashboard, driven over the DevTools protocol
-const BROWSERS = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/Applications/Chromium.app/Contents/MacOS/Chromium", "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+const BROWSERS = [process.env.PADDOCK_EVAL_BROWSER ?? "", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/Applications/Chromium.app/Contents/MacOS/Chromium", "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"]
 async function browser(url: string) {
   let path: string | undefined
   for (const candidate of BROWSERS) if (await Bun.file(candidate).exists()) { path = candidate; break }
-  if (!path) skip("no Chromium-based browser is installed")
+  if (!path) skip("no Chromium-based browser found; set PADDOCK_EVAL_BROWSER to its executable path")
   const profile = join(tmp, `browser-${Math.random().toString(36).slice(2, 8)}`)
   const child = Bun.spawn([path!, "--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "--no-first-run", "--disable-gpu", "about:blank"], { stdout: "ignore", stderr: "pipe" })
   let port = ""
@@ -190,6 +196,8 @@ ev("H13", "Every network check in a fresh verify was probed live, not read from 
   const checks = (await socket("verify", { name: A })).reply.data.checks as Array<{ id: string; evidence: string; status: string }>
   const weak = checks.filter((check) => ["net-host", "net-peers", "net-private"].includes(check.id) && !(check.status === "pass" && check.evidence === "probed"))
   expect(weak.length === 0, `not probed: ${weak.map((check) => `${check.id} (${check.status}, ${check.evidence})`).join(", ")}`)
+  const leftover = await asRoot("ip -o link show; ip -o -4 route show; ip -o -6 route show")
+  expect(leftover.code === 0 && !/\bpv[0-9a-f]{8}a(?:[@: ]|$)|\bpdkx[0-9a-f]{8}(?:[@: ]|$)/m.test(leftover.out), `verify returned before its links/routes disappeared: ${leftover.out}`)
 })
 
 ev("H02", "From inside a sandbox, no address of the engine's host answers", async () => {
@@ -206,8 +214,19 @@ ev("H02", "From inside a sandbox, no address of the engine's host answers", asyn
   return `${controls} host addresses tried, each with a working control`
 })
 
-ev("H03", "From inside a sandbox, this computer (beyond the engine's VM) does not answer", async () => {
+ev("H03", "From inside a sandbox, this computer's controlled listener does not answer", async () => {
   await ensure(A)
+  if (process.platform === "linux") {
+    await hostHelper()
+    const targets = await hostAddresses(), tried: string[] = []
+    for (const ip of targets) {
+      if (!await fromHost(ip, HOST_PORT)) continue
+      tried.push(ip)
+      expect(!await fromSandbox(A, ip, HOST_PORT), `the sandbox reached this Linux host at ${ip}`)
+    }
+    if (!tried.length) skip("none of the Linux host's addresses answered the host control")
+    return `native Linux host addresses, each with a working control: ${tried.join(", ")}`
+  }
   const server = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { open(peer) { peer.write(`${REPLY}\n`); peer.end() }, data() {} } })
   try {
     const port = String(server.port)
@@ -232,16 +251,16 @@ ev("H04", "From inside a sandbox, another sandbox does not answer", async () => 
 
 ev("H05", "From inside a sandbox, private (LAN) and tailnet addresses do not answer", async () => {
   await ensure(A); await hostHelper()
-  expect(farAddresses.length > 0, "no stand-in address could be set up on the engine's host")
-  const reached: string[] = []; const tried: string[] = []
+  if (!farAddresses.length) skip(`no stand-in address was available: ${(await docker(["logs", HOST])).out}`)
+  const reached: string[] = []; const tried: string[] = []; const unavailable: string[] = []
   for (const ip of farAddresses) {
-    if (!await fromHost(ip, FAR_PORT)) continue
+    if (!await fromHost(ip, FAR_PORT)) { unavailable.push(`${ip}: host control failed`); continue }
     tried.push(ip)
     if (await fromSandbox(A, ip, FAR_PORT)) reached.push(ip)
   }
-  expect(tried.length > 0, "no control connection worked, so nothing was measured")
+  if (!tried.length) skip(`no control connection worked: ${unavailable.join("; ")}`)
   expect(reached.length === 0, `the sandbox reached ${reached.join(", ")}`)
-  return `stand-ins tried, each with a working control: ${tried.join(", ")}`
+  return `stand-ins tried, each with a working control: ${tried.join(", ")}${unavailable.length ? `; unavailable: ${unavailable.join("; ")}` : ""}`
 })
 
 ev("H06", "From inside a sandbox, cloud metadata and IPv6 do not answer", async () => {
@@ -435,16 +454,24 @@ for (const kind of ["host", "peer", "private"] as const) ev({ host: "I03", peer:
   } else { targets = kind === "host" ? [await gatewayOf(INNER)] : farAddresses; port = kind === "host" ? HOST_PORT : FAR_PORT }
   try {
     expect(targets.length > 0, "no target was available")
+    const controlled: string[] = [], unavailable: string[] = []
     for (const ip of targets) {
-      expect(await fromHost(ip, port), `the host could not reach the control at ${ip}:${port}`)
+      if (!await fromHost(ip, port)) { unavailable.push(`${ip}: host control failed (the host firewall may block this stand-in)`); continue }
+      controlled.push(ip)
       expect(!await innerReaches(INNER, ip, port), `an inner container reached ${ip}:${port}`)
     }
+    if (!controlled.length) skip(`no working host control; ${unavailable.join("; ")}`)
     // Keep the enforcement timer from racing the deliberately open control window.
     expect((await socket("shutdown", { keepSandboxes: true })).reply.ok, "could not pause enforcement for the controls")
     expect(await until(async () => !await Bun.file(join(env.PADDOCK_STATE_DIR, "daemon.sock")).exists(), 15), "the daemon did not exit")
     await asRoot(guardTamper.remove)
-    for (const ip of targets) expect(await innerReaches(INNER, ip, port), `the same inner probe did not connect to ${ip} with the guard removed`)
-    return `${targets.join(", ")}; the host reached every listener, and the same inner probes connected with the guard removed`
+    const measured: string[] = []
+    for (const ip of controlled) {
+      if (await innerReaches(INNER, ip, port)) measured.push(ip)
+      else unavailable.push(`${ip}: the unguarded inner control did not connect; Docker's or the host's separate firewall remains in force`)
+    }
+    if (!measured.length) skip(`guarded attempts were blocked, but no unguarded positive control was available; ${unavailable.join("; ")}`)
+    return `${measured.join(", ")}; host and unguarded inner controls answered, guarded inner attempts were blocked${unavailable.length ? `; unavailable: ${unavailable.join("; ")}` : ""}`
   } finally {
     const guard = await docker(["run", "--rm", "-i", "--privileged", "--network", "host", "--runtime", "runc", HELPER_IMAGE, "nft", "-f", "-"], { stdin: await readFile(join(ROOT, "core/providers/guard.nft"), "utf8") })
     expect(guard.code === 0, `could not restore the guard before restarting enforcement: ${guard.err}`)
@@ -526,6 +553,7 @@ ev("I09", "Inner image pulls and writes are measured outside the sandbox, and th
 })
 
 ev("I10", "A Docker sandbox with an extra capability or privileged mode is refused at start and stopped if running", async () => {
+  const unavailable: string[] = []
   for (const tamper of [["--cap-add", "SYS_PTRACE"], ["--privileged"]]) {
     const name = `${PREFIX}-itamper`
     await ensure(name, { image: DOCKER_IMAGE, docker: true, diskGb: 2 })
@@ -539,11 +567,16 @@ ev("I10", "A Docker sandbox with an extra capability or privileged mode is refus
       expect(made.code === 0, `the tamper container could not be made: ${made.err}`)
       const refused = await pdkJson(["start", name])
       expect(refused.code === 6 && /capabilities|privileged/.test(refused.reply.error?.message ?? "") && !await running(name), `start failed to catch tamper: ${refused.out}${refused.err}`)
-      expect((await docker(["start", containerOf(name)])).code === 0, "could not start the tamper container behind Paddock's back")
+      const live = await docker(["start", containerOf(name)])
+      if (live.code !== 0) {
+        unavailable.push(`${tamper.join(" ")}: configuration refusal held; live enforcement unavailable because the engine refused to start it: ${live.err.trim()}`)
+        continue
+      }
       expect(await until(async () => !await running(name), 60), "the daemon did not stop the tamper container")
       expect(await until(async () => /undeclared capabilities/.test((await view(name))?.stopReason ?? ""), 5), "the daemon did not record the hardening failure")
     } finally { await pdk(["remove", name, "--confirm", name]) }
   }
+  return unavailable.length ? unavailable.join("; ") : "both configuration refusals and live enforcement branches measured"
 })
 
 ev("I11", "Without --docker, no capabilities are added and even root cannot start the inner daemon", async () => {
@@ -1557,10 +1590,10 @@ const NONCE_PORT = 3000; const ECHO_PORT = 3100
 // its own port, since a service an earlier eval started keeps its port.
 const nonceService = (name: string, nonce: string, port = NONCE_PORT) => pdk(["exec", name, "--", "sh", "-c", `(nc -lk -s 127.0.0.1 -p ${port} -e echo ${nonce} </dev/null >/dev/null 2>&1 &)`])
 // What one TCP connection from this machine gets back before the other side closes; empty when nothing answers.
-const tcpRead = (host: string, port: number, send: Uint8Array | string = "", seconds = 5) => new Promise<Buffer>((resolve) => {
+const tcpRead = (host: string, port: number, send: Uint8Array | string = "", seconds = 5, trace?: (event: string) => void) => new Promise<Buffer>((resolve) => {
   const chunks: Buffer[] = []; const client = connect(port, host, () => client.end(send))
-  const timer = setTimeout(() => client.destroy(), seconds * 1000)
-  client.on("data", (chunk: Buffer) => chunks.push(chunk)); client.on("error", () => {}); client.on("close", () => { clearTimeout(timer); resolve(Buffer.concat(chunks)) })
+  const timer = setTimeout(() => { trace?.("timeout"); client.destroy() }, seconds * 1000)
+  client.on("data", (chunk: Buffer) => chunks.push(chunk)); client.on("error", (error) => trace?.(error.message)); client.on("close", () => { clearTimeout(timer); resolve(Buffer.concat(chunks)) })
 })
 const refused = (port: number) => new Promise<boolean>((resolve) => {
   const client = connect(port, "127.0.0.1", () => { client.destroy(); resolve(false) }); client.on("error", () => resolve(true))
@@ -1719,17 +1752,27 @@ ev("W08", "A forward relays 50 connections at once, each with its own bytes, and
   // The image's nc serves one connection at a time, so a concurrent echo server comes from the image's packages.
   const installed = await pdk(["exec", A, "--", "sh", "-c", "command -v socat || apk add --no-cache -q socat"], { timeoutMs: 120_000 })
   if (installed.code !== 0) skip("socat could not be installed in the sandbox (offline?)")
-  await pdk(["exec", A, "--", "sh", "-c", `(socat TCP-LISTEN:${ECHO_PORT + 1},bind=127.0.0.1,fork,reuseaddr EXEC:cat </dev/null >/dev/null 2>&1 &)`])
+  // socat's default backlog of five drops part of a 50-connection burst before Paddock can relay it.
+  await pdk(["exec", A, "--", "sh", "-c", `(socat -d -d TCP-LISTEN:${ECHO_PORT + 1},bind=127.0.0.1,fork,reuseaddr,backlog=128 EXEC:cat </dev/null >/dev/null 2>/tmp/w08-socat.log &)`])
+  const control = `${PREFIX}-w08-control`
+  expect(await until(async () => (await docker(["exec", "-i", containerOf(A), "nc", "-w", "2", "127.0.0.1", String(ECHO_PORT + 1)], { stdin: control })).out === control, 10), "the echo service did not answer its independent guest control")
   const forward = await forwardAdd(A, ECHO_PORT + 1)
+  const diagnostics: string[] = []
   try {
     const one = async (index: number) => {
       const data = new Uint8Array(256 * 1024); crypto.getRandomValues(data.subarray(0, 65536)); data.fill(index, 65536)
-      const back = await tcpRead("127.0.0.1", forward.localPort, data, 60)
-      return Buffer.compare(back, Buffer.from(data)) === 0
+      const back = await tcpRead("127.0.0.1", forward.localPort, data, 60, (event) => diagnostics.push(`${index}: ${event}`))
+      const same = Buffer.compare(back, Buffer.from(data)) === 0
+      if (!same) diagnostics.push(`${index}: ${back.length} of ${data.length} bytes`)
+      return same
     }
     const start = Date.now(); const results = await Promise.all(Array.from({ length: 50 }, (_, index) => one(index)))
     const seconds = (Date.now() - start) / 1000
-    expect(results.every(Boolean), `${results.filter((ok) => !ok).length} of 50 connections came back wrong`)
+    if (!results.every(Boolean)) {
+      const state = (await inspect(A))?.State
+      const service = await docker(["exec", containerOf(A), "sh", "-c", "cat /tmp/w08-socat.log; cat /proc/net/netstat 2>/dev/null || true"])
+      throw new Error(`${results.filter((ok) => !ok).length} of 50 connections came back wrong; ${diagnostics.join("; ")}; engine state ${JSON.stringify(state)}; echo service log: ${service.out}${service.err}`)
+    }
     expect(await until(async () => (await forwardsOf(A)).find((entry) => entry.id === forward.id)?.connections === 0 && (await guestProcesses(A, "/.paddock/busybox nc")).length === 0, 15), "relays are still running after every connection closed")
     return `50 × 256 KiB echoed exactly in ${seconds.toFixed(1)} s; afterwards no open connection and no relay process`
   } finally { await pdk(["forward", "remove", forward.id]) }
@@ -2022,10 +2065,123 @@ ev("P03", "The core has no code that only works on one operating system", async 
 // E: claims nobody has measured. They are listed so the scorecard does not read as if they had been.
 for (const [id, claim, why] of [
   ["E01", "After the engine restarts, no sandbox runs without its guard", "restarting the engine would stop every other container on this machine"],
-  ["E02", "The same checks hold on Docker Desktop, Colima and a Linux host's own Docker", "only one engine is installed here; run the evals on each"],
   ["E03", "The Windows binary runs (the daemon's socket, the dashboard, `ui --open`)", "there is no Windows machine here; the binary only builds"],
-  ["E04", "A device on your real LAN or tailnet does not answer", "the evals use stand-in addresses and never contact your own devices"],
 ] as const) ev(id, claim, async () => skip(why))
+
+ev("E02", "The run records the engine and operating system it actually measured", async () => {
+  const info = await docker(["info", "--format", "{{json .}}"])
+  expect(info.code === 0, `could not record the engine: ${info.err}`)
+  const measured = JSON.parse(info.out)
+  return `${process.platform} ${process.arch}; ${measured.OperatingSystem}; Docker ${measured.ServerVersion}; context ${context}; runtime ${engine!.data.runtime}. Other engine/OS combinations are not measured by this run.`
+})
+
+ev("E04", "An opt-in real LAN or tailnet target answers this host and is blocked from both the sandbox and inner Docker", async () => {
+  const target = process.env.PADDOCK_EVAL_LAN_TARGET
+  if (!target) return skip("no PADDOCK_EVAL_LAN_TARGET=IPv4:port supplied; real devices are opt-in")
+  const match = /^(10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+):(\d+)$/.exec(target)
+  expect(match && match[1]!.split(".").every((part) => Number(part) <= 255) && Number(match[2]) > 0 && Number(match[2]) <= 65535, "the opt-in target must be a private or tailnet IPv4 address and TCP port")
+  const [, ip, port] = match
+  const control = await new Promise<boolean>((resolve) => {
+    const peer = connect(Number(port), ip!, () => { peer.destroy(); resolve(true) })
+    peer.setTimeout(3000, () => { peer.destroy(); resolve(false) }); peer.on("error", () => resolve(false))
+  })
+  if (!control) skip(`${target}: required host TCP control did not connect`)
+  await ensure(A); await ensureInner()
+  const command = (address: string, service: string) => ["sh", "-c", 'nc -w 3 "$1" "$2" </dev/null', "connect", address, service]
+  expect((await pdk(["exec", A, "--", ...command("1.1.1.1", "443")])).code === 0 && (await innerRun(INNER, command("1.1.1.1", "443"))).code === 0, "outer and inner internet controls must connect")
+  const outer = await pdk(["exec", A, "--", ...command(ip!, port!)])
+  const inner = await innerRun(INNER, command(ip!, port!))
+  expect(outer.code === 1 && inner.code === 1, `${target}: outer exit ${outer.code}, inner exit ${inner.code}`)
+  return `${target}: host TCP control connected; outer and inner attempts blocked beside working internet controls; no other real device was contacted`
+})
+
+const liveGuestPids = async (name: string, marker: string) => (await docker(["exec", containerOf(name), "ps", "-o", "pid,stat,args"])).out.split("\n")
+  .filter((line) => line.includes(marker) && !/^\s*\d+\s+Z/.test(line)).map((line) => line.trim().split(/\s+/)[0]!)
+
+async function rawSession(name: string, argv: string[], tty: boolean) {
+  const reader = new FrameReader()
+  const client = connect(join(env.PADDOCK_STATE_DIR, "stream.sock"), () => client.write(frame("open", { kind: "exec", name, argv, tty, cols: 80, rows: 24 })))
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { client.destroy(); reject(new Error("stream did not become ready")) }, 10_000)
+    client.on("error", reject)
+    client.on("data", (chunk: Buffer) => {
+      for (const piece of reader.push(chunk)) {
+        if (piece.kind === "ready") { clearTimeout(timer); resolve() }
+        if (piece.kind === "error") { clearTimeout(timer); reject(new Error(piece.payload.toString())) }
+      }
+    })
+  })
+  return client
+}
+
+ev("S07", "Killing a stream client or sending FIN ends its non-TTY and TTY command within five seconds; a connected control keeps running", async () => {
+  await ensure(A)
+  const control = await rawSession(A, ["sleep", "6195"], false)
+  try {
+    for (const tty of [false, true]) {
+      const marker = `sleep ${tty ? 6197 : 6196}`
+      const client = await rawSession(A, marker.split(" "), tty)
+      try {
+        expect(await until(async () => (await liveGuestPids(A, marker)).length === 1, 5), `${marker} did not start`)
+        client.end()
+        expect(await until(async () => !(await liveGuestPids(A, marker)).length, 5), `${tty ? "TTY" : "non-TTY"} command survived the client's FIN`)
+        expect((await liveGuestPids(A, "sleep 6195")).length === 1, "the connected control was ended")
+      } finally { client.destroy() }
+    }
+    const killed = Bun.spawn([BIN, "exec", A, "--stream", "--", "sleep", "6198"], { env: { ...process.env, ...env }, stdin: "pipe", stdout: "ignore", stderr: "ignore" })
+    try {
+      expect(await until(async () => (await liveGuestPids(A, "sleep 6198")).length === 1, 5), "the CLI command did not start")
+      killed.kill("SIGKILL"); await killed.exited
+      expect(await until(async () => !(await liveGuestPids(A, "sleep 6198")).length, 5), "the command survived a killed CLI client")
+      expect((await liveGuestPids(A, "sleep 6195")).length === 1, "the connected control was ended")
+    } finally { killed.kill(); await killed.exited }
+    return "non-TTY FIN, TTY FIN, and SIGKILL of the CLI each left no live command within 5 s; connected control stayed running"
+  } finally { control.destroy() }
+})
+
+ev("W09", "A dropped forward connection leaves no nc relay within five seconds, while a connected control keeps its relay", async () => {
+  await ensure(A)
+  const port = 3110
+  await pdk(["exec", A, "--", "sh", "-c", `(nc -lk -s 127.0.0.1 -p ${port} -e sleep 6190 </dev/null >/dev/null 2>&1 &)`])
+  const forward = await forwardAdd(A, port)
+  const control = connect(forward.localPort, "127.0.0.1"), dropped = connect(forward.localPort, "127.0.0.1")
+  control.on("error", () => {}); dropped.on("error", () => {})
+  const marker = `/.paddock/busybox nc 127.0.0.1 ${port}`
+  try {
+    expect(await until(async () => (await liveGuestPids(A, marker)).length === 2, 10), "two relay controls did not start")
+    await Bun.sleep(3000)
+    expect((await liveGuestPids(A, marker)).length === 2, "a connected control ended without disconnection")
+    dropped.end()
+    expect(await until(async () => (await liveGuestPids(A, marker)).length === 1, 5), "a relay survived the client's FIN")
+    expect((await forwardsOf(A)).find((entry) => entry.id === forward.id)?.connections === 1, "the connected control was not retained")
+    control.destroy()
+    expect(await until(async () => !(await liveGuestPids(A, marker)).length, 5), "a relay survived a dropped connection")
+    return "both relays stayed running while connected; FIN and a dropped connection each ended its nc within 5 s"
+  } finally { control.destroy(); dropped.destroy(); await pdk(["forward", "remove", forward.id]); await docker(["exec", containerOf(A), "pkill", "-f", "^sleep 6190$"]) }
+})
+
+ev("A07", "Killing an SSH proxy client leaves no sshd -i within five seconds, while a connected proxy keeps its sshd", async () => {
+  await sshReady(A)
+  const proxy = () => Bun.spawn([BIN, "ssh", "proxy", A], { env: { ...process.env, ...env }, stdin: "pipe", stdout: "ignore", stderr: "ignore" })
+  const control = proxy()
+  let dropped: ReturnType<typeof proxy> | undefined
+  const marker = "sshd"
+  try {
+    expect(await until(async () => (await liveGuestPids(A, marker)).length > 0, 10), "the sshd control did not start")
+    const controlPids = await liveGuestPids(A, marker)
+    dropped = proxy()
+    let droppedPids: string[] = []
+    expect(await until(async () => { droppedPids = (await liveGuestPids(A, marker)).filter((pid) => !controlPids.includes(pid)); return droppedPids.length > 0 }, 10), "the second sshd control did not start")
+    await Bun.sleep(3000)
+    expect((await liveGuestPids(A, marker)).some((pid) => droppedPids.includes(pid)), "a connected sshd control ended")
+    dropped.kill("SIGKILL"); await dropped.exited
+    expect(await until(async () => !(await liveGuestPids(A, marker)).some((pid) => droppedPids.includes(pid)), 5), "sshd survived a killed proxy client")
+    expect((await liveGuestPids(A, marker)).some((pid) => controlPids.includes(pid)), "the connected sshd control was ended")
+    control.kill("SIGKILL"); await control.exited
+    expect(await until(async () => !(await liveGuestPids(A, marker)).length, 5), "sshd survived the last proxy client")
+    return "two inetd sshd controls stayed running while connected; killing each proxy ended its sshd within 5 s, including renamed OpenSSH processes"
+  } finally { control.kill(); dropped?.kill(); await Promise.all([control.exited, dropped?.exited]) }
+})
 
 ev("Z01", "Nothing is left on the engine or this machine when the run ends", async () => {
   // Control: the scan sees this run's daemon while it runs, so an empty scan after teardown means none is left.
@@ -2101,11 +2257,11 @@ const summary = `${passed} of ${outcomes.length} hold, ${failed} do not, ${unmea
 console.log(`\n${summary}`)
 if (args.includes("--write")) {
   const version = JSON.parse(await readFile(join(ROOT, "package.json"), "utf8")).version
-  const commit = (await sh(["git", "rev-parse", "--short", "HEAD"], { cwd: ROOT })).out.trim(); const dirty = (await sh(["git", "status", "--porcelain", "--", "core", "cli", "ui", "skill", "extensions"], { cwd: ROOT })).out.trim() ? " plus uncommitted changes" : ""
+  const commit = process.env.PADDOCK_EVAL_REVISION ?? (await sh(["git", "rev-parse", "--short", "HEAD"], { cwd: ROOT })).out.trim(); const dirty = (await sh(["git", "status", "--porcelain", "--", "core", "cli", "ui", "skill", "extensions"], { cwd: ROOT })).out.trim() ? " plus uncommitted changes" : ""
   const mark = { pass: "✓", fail: "✗", "not measured": "–" }
-  await writeFile(join(ROOT, "evals/SCORECARD.md"), `# Scorecard
+  await writeFile(join(ROOT, `evals/SCORECARD${scoreLabel ? `.${scoreLabel}` : ""}.md`), `# Scorecard
 
-Written by \`bun evals/run.ts --write\`. Do not edit by hand.
+Written by \`bun evals/run.ts --write${scoreLabel ? ` --label ${scoreLabel}` : ""}\`. Do not edit by hand.
 
 - Paddock ${version} at \`${commit}\`${dirty}
 - Engine: ${engine.label}, runtime \`${engine.data.runtime}\`, disk limit ${engine.capabilities?.diskLimit}

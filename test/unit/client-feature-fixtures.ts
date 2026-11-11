@@ -10,6 +10,8 @@ afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { rec
 export async function fixture(): Promise<string> {
   const root = await mkdtemp(join(await realpath(tmpdir()), "paddock-client-unit-")); roots.push(root)
   await mkdir(join(root, ".config"))
+  // TMPDIR may be inside this ESM repository; fixture executables use Node's CommonJS API.
+  await writeFile(join(root, "package.json"), '{"type":"commonjs"}\n')
   return root
 }
 export const ok = (stdout = ""): Result => ({ exitCode: 0, stdout, stderr: "" })

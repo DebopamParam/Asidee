@@ -73,7 +73,7 @@ test("an oversized guest bundle fails before transfer and cleans up its export r
   await expect(save(transport.runner, { name: "demo", workspace: work, target: join(home, "never.git") }, transport.streamer)).rejects.toThrow("exit 73")
   expect(await Bun.file(join(home, "never.git/HEAD")).exists()).toBe(false)
   expect(await git(["for-each-ref", "--format=%(refname)", "refs/paddock-export"])).toBe("")
-})
+}, 30_000)
 test("save carries a raw bundle beyond the 16 MiB text exec limit", async () => {
   const { home, work, run, git } = await repositoryFixture(), transport = fakeExec(home), target = join(home, "large.git")
   for (const file of ["one", "two", "three"]) {

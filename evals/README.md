@@ -6,12 +6,23 @@ The eval set is the list of things Paddock says about itself, each measured from
 bun evals/run.ts                 # every eval
 bun evals/run.ts --only H,T03    # groups or single ids
 bun evals/run.ts --write         # also rewrite SCORECARD.md
+bun evals/run.ts --write --label linux  # write SCORECARD.linux.md instead
 ```
 
 It builds `dist/paddock` and runs it with a state and config folder of its own, on the first engine `paddock doctor`
 calls ready. Sandboxes it makes are named `evXXXX-…` and removed at the end. It refuses to start while other Paddock
 sandboxes run on the engine, because the tamper evals change the firewall guard they share. It needs Docker, Bun, and
 for a few evals `python3` and a Chromium-based browser; an eval that lacks what it needs is reported as not measured.
+
+Each scorecard records its engine, runtime, OS, architecture, and source revision. When running a source archive
+without Git metadata, set `PADDOCK_EVAL_REVISION` to its revision and archive checksum. Separate labels retain results
+from multiple machines. A run establishes claims only on the engine and OS it names.
+
+Set `PADDOCK_EVAL_BROWSER` to a Chromium-based browser's executable path when discovery cannot find it. No browser
+is installed by the evals. Set `PADDOCK_EVAL_LAN_TARGET=IPv4:port` to opt into E04 for one real private or tailnet
+device. E04 requires that this host can open that TCP target before trying it from both the sandbox and inner Docker,
+beside working internet controls. Without the input or host control it reports why it could not measure the target.
+No port scan is performed.
 
 **Docker Hub pulls.** A full run pulls from Docker Hub at most five times, all from inner Docker: I01 twice
 (`alpine:latest`; the attempt without `SYS_ADMIN` fails only after fetching), I09 once (`busybox:stable`) and I15

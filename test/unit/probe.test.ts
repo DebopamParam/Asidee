@@ -29,9 +29,11 @@ test("an owned route that never disappears fails at its deadline instead of redu
 test("probe cleanup waits for its own lingering link and route, leaving foreign links untouched", async () => {
   const result = await fixture(`n=$(cat count 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > count
 case "$*" in
+  'link del dev pv1234abcda') echo pv1234abcda > deleted ;;
   '-o link show') echo '4: owner0: <UP>'; [ "$n" -gt 3 ] || echo '5: pv1234abcda@if6: <UP>' ;;
   '-o -4 route show') [ "$n" -gt 6 ] || echo '10.255.255.252/30 dev pv1234abcda' ;;
 esac
 exit 0`, probeCleanupScript("1234abcd"))
   expect(result.code).toBe(0); expect(Number((await readFile(join(result.root, "count"), "utf8")).trim())).toBeGreaterThan(6)
+  expect((await readFile(join(result.root, "deleted"), "utf8")).trim()).toBe("pv1234abcda")
 })
