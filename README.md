@@ -25,10 +25,10 @@ from the engine's configuration):
 
 ## Status
 
-Works, and was run on OrbStack on an Apple Silicon Mac:
+Built features (engine measurements are recorded in [the Mac scorecard](evals/SCORECARD.md) and [the Linux scorecard](evals/SCORECARD.linux.md)):
 
 - The gVisor provider: any local Docker engine with a gVisor runtime. Create, start, stop, remove, exec, shell.
-- Optional inner Docker, tested on OrbStack. `paddock create demo --docker` starts a private daemon; its containers
+- Optional inner Docker. `paddock create demo --docker` starts a private daemon; its containers
   reach HTTPS through the sandbox's guarded network. It uses copy-on-write `overlayfs` storage (two containers from one
   image share its layers) and adds exactly `NET_ADMIN` and `SYS_ADMIN` inside gVisor, each shown necessary for pull,
   run, HTTPS and build. A one-RUN `docker build` and a one-service `docker compose up` were run.
@@ -43,6 +43,8 @@ Works, and was run on OrbStack on an Apple Silicon Mac:
 - Port forwards: `paddock forward add demo --port 3000` listens on this machine's 127.0.0.1 and relays each connection
   to port 3000 on the sandbox's own loopback through a daemon session, so the engine publishes no port. A forward
   belongs to one run of one sandbox and ends when it stops, restarts or is removed, or when the daemon stops.
+  **On OrbStack, `host.docker.internal` exposes this machine's loopback to the engine host and ordinary containers,
+  including Paddock forwards.** Guarded sandboxes cannot reach that address.
 - SSH for editors: `paddock ssh setup demo` prepares sshd inside and an alias, `demo.paddock`, whose ProxyCommand
   runs sshd in inetd mode through a daemon session, so no port is opened anywhere. It trusts only a key made for this
   machine's editors and the host key made inside that sandbox; scp, SFTP and `ssh -L` to the sandbox's loopback work.
@@ -52,8 +54,9 @@ Works, and was run on OrbStack on an Apple Silicon Mac:
 Not built yet:
 
 - Docker Sandboxes (microVM) support. It is detected and reported as not supported.
-- Importing agent logins in the core, templates.
-- A hard disk cap, Linux and Windows hosts (nothing was run there), remote engines, a desktop app, installers.
+- Templates. Agent and GitHub login import exists in the bundled extension below.
+- A hard disk cap, Windows execution, remote-engine management, a desktop app, and installers.
+- Docker Desktop and Colima measurements. Native Linux Docker and OrbStack have separate scorecards.
 - A license. Nothing here is published.
 
 ## Try it

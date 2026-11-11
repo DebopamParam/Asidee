@@ -66,7 +66,10 @@ For the LAN and the tailnet there is nothing of yours to aim at safely, so the h
 scratch network namespace, routes one unused address from each private range (10/8, 172.16/12, 192.168/16) and from the
 tailnet range (100.64/10) to a listener inside it, and removes it all afterwards. From the sandbox's side these sit
 where a device on your LAN would: beyond the host, at a private address. A range whose stand-in address the host
-already routes somewhere is skipped and named in the result. One probe runs per engine at a time.
+already routes somewhere is skipped and named in the result. Routes through a previous Paddock probe are awaited
+with a bounded deadline instead of being counted as occupied addresses. A probe returns only after its own veth,
+bridge and routes disappear. A teardown timeout makes the evidence unknown. A listener that was created but whose
+host control failed is reported separately from an occupied address. One probe runs per engine at a time.
 
 The helper runs from an image built from `core/providers/helper.Dockerfile` (Alpine pinned by digest), never from the
 sandbox's image, so a tampered image cannot fake a result or run as root on the engine's host.
@@ -161,7 +164,8 @@ token (S05). The protocol, paddock-stream/1 in `core/stream.ts`, is frames of a 
 most 64 KiB of payload. The client sends `open` and waits for `ready`; then it sends input, end of input and terminal
 sizes, and the daemon sends stdout and stderr apart and last the exit code or an error. The provider runs the command
 through the engine's API (an exec whose start is upgraded to a raw stream on the engine's Unix socket), not through the
-engine's CLI, and a closed session's processes are ended by their `PADDOCK_EXEC` tag as above. Each direction waits
+engine's CLI, and a closed session's processes are ended by their `PADDOCK_EXEC` tag as above. A transport FIN cancels a stream
+session, including a terminal or SSH proxy. Input EOF is a protocol frame and does not disconnect the client. Each direction waits
 for the other side to take what it was given, so nothing is buffered beyond a socket buffer and a frame. A session
 ends with an error when its sandbox is stopped or removed or the daemon stops, and a stopped sandbox is refused, never
 started. Buffered `exec` keeps its 16 MiB limit. S01: 256 MiB of random bytes went in and came back with the same
@@ -177,7 +181,9 @@ system picks (no port is probed and assumed free; one in use is refused). Each c
 that runs a relay on the sandbox's own loopback: `nc 127.0.0.1 P` from a static BusyBox the core copies into the
 sandbox at `/.paddock/busybox` through the engine's archive API, because the image may have no `nc`, `socat` or
 interpreter of its own. The relay gets the port as a number and nothing else. The engine publishes nothing and gets no
-listener on its host. Each direction waits for the other side, and end of input passes on as a half-close. A forward
+listener on its host. Each direction waits for the other side. End of input passes on as a half-close, with up to two
+seconds for the response to drain before the connection and guest relay are closed. W09 keeps a control connected
+while dropping another connection and checks that its `nc` process ends within five seconds. A forward
 belongs to one run of one sandbox (its id and the engine's start time): it ends on `forward remove`, when the sandbox
 stops or is removed through Paddock, within two seconds when the engine restarts or stops it behind Paddock's back
 (and any connection after that is refused), and when the daemon stops. A sandbox recreated under the same name starts
@@ -249,7 +255,10 @@ key verification after it; the new files logged in. A06: SSH to a stopped sandbo
   limit of 256 held about a hundred processes. `paddock list` says which of the two happened.
 - **Two Paddocks on one engine share the guard.** Each sweeps only its own probe helpers, but a guard changed for one
   is changed for both.
-- **Only OrbStack on an Apple Silicon Mac was run.** Docker Desktop, Linux hosts and Windows are untested.
+- **Measurements belong to an engine and OS.** See `evals/SCORECARD.md` for OrbStack on Apple Silicon and
+  `evals/SCORECARD.linux.md` for native Linux Docker. Docker Desktop, Colima, and Windows execution remain unmeasured.
+  Native Docker may still drop inter-bridge traffic with Paddock's guard removed. A Tailscale host may drop a synthetic
+  tailnet control. Neither result establishes a controlled live probe for that target.
 
 ## The daemon
 
@@ -272,3 +281,12 @@ State is in `~/.local/state/paddock`, configuration in `~/.config/paddock` (`PAD
 Implement `Provider` in `core/types.ts` and add it to the list in `core/daemon.ts`. `detect()` reports each engine with
 its `capabilities`, and `checks()` must give honest evidence for every checklist item of the stage it is asked for.
 `core/providers/docker-sandboxes.ts` is the stub to fill in next.
+
+## Bundled clients
+
+The bundled login extension imports selected Claude and Codex credentials and optional setup, imports GitHub tokens,
+and lists or removes guest logins through the daemon's exec API. It runs host tools as the user, and the imported
+credentials live inside the sandbox. See `extensions/logins/README.md` for the setup allowlist and measured limits.
+Missing setup commands are named only from settings actually sent, with bounded printable names and credential
+values withheld. The CLI also provides streamed exec, port forwards, and SSH access. Inner Docker is a checked core
+option. Templates, remote-engine management, and a hard disk cap are not built.

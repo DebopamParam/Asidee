@@ -57,8 +57,10 @@ Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing depende
 - To open a service that listens inside the sandbox, add a forward and use the `localPort` it reports; leave out
   `--local-port` to get a free one. It listens on this machine's 127.0.0.1 only, carries any bytes, and ends when it
   is removed, when the sandbox stops, restarts or is removed, and when the daemon stops; add it again after a restart.
-  Any process on this machine can connect to it, and on OrbStack so can the engine's host and its other containers.
+  Any process on this machine can connect to it. On OrbStack, `host.docker.internal` relays to this machine's
+  loopback, so the engine host and ordinary containers can reach the forward too. Guarded sandboxes cannot.
   Remove a forward when you are done with it.
+  A client FIN allows two seconds for a response to drain, then ends that connection's relay process.
 - `paddock ssh setup NAME` is for editors and tools that speak SSH. It installs OpenSSH's server from the image's
   package manager when it has none (the sandbox needs internet for that), and opens no port. `ssh NAME.paddock` logs in
   as exec's user and allows `ssh -L` only to the sandbox's loopback. Running setup again makes a new host key. The
@@ -132,7 +134,12 @@ command reads a token from stdin or a hidden prompt. Never put a token in argv, 
 There is no secret proxy in a gVisor container: the token lives inside it and code there can read and send it out.
 Use `login.ts list NAME` and `login.ts logout NAME all` (or an agent and `--profile PROFILE`); the machine stays logged in.
 Guest imported profiles use `CLAUDE_CONFIG_DIR="$HOME/.claude-PROFILE"` or `CODEX_HOME="$HOME/.codex-PROFILE"`.
-File-profile and `gh` imports were checked live once; the Claude Keychain path was not. No eval covers extensions.
+File-profile and `gh` imports were checked live once; the Claude Keychain path was not. Extension unit tests run the
+actual guest programs against temporary homes; core evals do not cover extensions. Missing setup commands are named
+only for settings sent, with bounded printable names and credential values withheld.
+
+The engine measurements are in `evals/SCORECARD.md` and `evals/SCORECARD.linux.md`. Docker Desktop, Colima, Windows
+execution, a hard disk cap, templates, and remote-engine management remain unmeasured or unbuilt as those files state.
 
 ## What you cannot do, by design
 
