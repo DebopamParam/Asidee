@@ -30,5 +30,10 @@ export class DockerSandboxesProvider implements Provider {
   checks() { return this.unsupported() }
   diskUsedBytes() { return this.unsupported() }
   stoppedWhy() { return this.unsupported() }
+  resize() { return this.unsupported() }
+  usage() { return this.unsupported() }
+  snapshot() { return this.unsupported() }
+  templates() { return this.unsupported() }
+  removeTemplate() { return this.unsupported() }
   async sweep() {}
 }

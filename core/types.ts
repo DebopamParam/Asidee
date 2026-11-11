@@ -10,6 +10,9 @@ export type SandboxSpec = {
   // The sandbox may use this much disk. How strictly that holds depends on the engine: see Capabilities.diskLimit.
   diskGb: number
   docker: boolean
+  // The name of a Paddock template (an image made from a sandbox) to start from instead of an image; the core resolves it
+  // to the template's image ID before anything is created.
+  template?: string
 }
 
 export type Capabilities = {
@@ -22,6 +25,25 @@ export type Capabilities = {
   execStream: boolean
   // A connection can be relayed to a port on the sandbox's own loopback (forwards).
   loopbackRelay: boolean
+  // Changing CPUs, memory and the process limit. live: a running sandbox gets the new limits at once. restart: at its next
+  // start. none: they are fixed at creation.
+  resize: "live" | "restart" | "none"
+  // An image can be made from a sandbox's files (a template).
+  snapshot: boolean
+}
+
+export type Limits = { cpus: number; memoryGb: number; pids: number }
+
+// An image the core made from a sandbox. Only the core makes one, under a name of its own on the engine.
+export type Template = {
+  name: string; engine: string; imageId: string
+  // The sandbox it was saved from, and the image that sandbox was made from.
+  source: string; sourceImage: string
+  createdAt: string; sizeBytes: number
+  // Login files (CREDENTIAL_FILES) that were in the sandbox and were left out of the template.
+  loginsRemoved: string[]
+  // Sandboxes on the engine whose container runs this image.
+  dependants: string[]
 }
 
 // One place sandboxes can run: a provider plus the engine it found (a Docker context, for example).
@@ -39,7 +61,7 @@ export type Engine = {
 
 export type CheckId =
   | "kernel" | "hardening" | "mounts" | "network-guard" | "inbound" | "forwards" | "ssh" | "limits" | "disk" | "docker"
-  | "net-host" | "net-peers" | "net-private" | "egress" | "credentials"
+  | "template" | "net-host" | "net-peers" | "net-private" | "egress" | "credentials"
 
 // pass: holds. weak: holds in a weaker form than the title says (the detail says how). fail: does not hold.
 // unsupported: this engine cannot provide it. unknown: could not be checked. info: a disclosure, not a guarantee.
@@ -63,6 +85,8 @@ export type Manifest = {
   stopReason?: string
   // Set by `paddock ssh setup` for this sandbox; a sandbox recreated under the name starts without it.
   ssh?: SshSetup
+  // The template it was made from, as resolved at creation. spec.image is then imageId.
+  template?: { name: string; imageId: string; source: string; createdAt: string }
 }
 // user and home: the login, the same as exec's. unlocked: its locked password was replaced by * (still no password),
 // since sshd refuses a locked account even with a key. hostKey: the public half of the key made inside. editorKey: the
@@ -119,6 +143,16 @@ export interface Provider {
   stoppedWhy(manifest: Manifest): Promise<string | undefined>
   // Removes what an interrupted run of this provider may have left on an engine. Called when the daemon starts.
   sweep(engine: Engine): Promise<void>
+  // Sets the sandbox's limits in the engine, running or not. For a running sandbox it returns the limits its running
+  // instance has afterwards, read from the engine's host; undefined when it is stopped or they could not be read.
+  resize(manifest: Manifest, limits: Limits): Promise<Limits | undefined>
+  // What a running sandbox uses now; undefined when it is not running.
+  usage(manifest: Manifest): Promise<{ memoryBytes: number; tasks: number } | undefined>
+  // Makes a template from the sandbox's files, minus the usual login files, and returns it as templates() lists it.
+  snapshot(manifest: Manifest, name: string): Promise<Template>
+  templates(engine: Engine): Promise<Template[]>
+  // Removes the template's name. Sandboxes made from it keep their image; it goes with the last of them.
+  removeTemplate(engine: Engine, name: string): Promise<{ imageId: string; dependants: string[] }>
 }
 
 export type ErrorCode = "usage" | "not-found" | "conflict" | "dependency" | "check-failed" | "runtime"

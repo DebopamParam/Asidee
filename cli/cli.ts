@@ -5,22 +5,23 @@ import { connect } from "node:net"
 import { dirname, join } from "node:path"
 import { parseArgs } from "node:util"
 import { CHECKLIST } from "../core/checks"
-import type { SandboxView } from "../core/core"
+import type { ResizeChange, SandboxView } from "../core/core"
 import { BUILD, readDaemonFile, runDaemon, VERSION } from "../core/daemon"
 import type { Extension } from "../core/extensions"
 import type { ForwardView } from "../core/forwards"
 import type { SshAccess } from "../core/ssh"
 import { checkSocketPath, defaultDirs, socketPath, streamSocketPath } from "../core/state"
 import { dataFrames, frame, FrameReader, type OpenRequest } from "../core/stream"
-import { PaddockError, type CheckResult, type Engine, type ErrorCode, type RunResult } from "../core/types"
+import { PaddockError, type CheckResult, type Engine, type ErrorCode, type RunResult, type Template } from "../core/types"
 
 // A thin client: every command is one call to the daemon, which is started on first use.
 
 const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, not assumed
 
   paddock doctor                         engines on this machine and what each one needs
-  paddock create NAME [--docker] [--image IMAGE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]
+  paddock create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]
   paddock list
+  paddock resize NAME [--cpus N] [--memory GB] [--pids N] [--disk GB]   says which limits apply now and which at the next start
   paddock start NAME | stop NAME
   paddock verify NAME                    run every check against the sandbox
   paddock exec NAME [--user USER] [--stdin] -- COMMAND…   --stdin sends this command's input (text)
@@ -31,6 +32,8 @@ const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, 
   paddock ssh setup NAME [--write-config]   sshd inside, reached as NAME.paddock through the daemon, no port
   paddock ssh access NAME                   the alias, user and home an editor uses, and whether it is ready
   paddock remove NAME --confirm NAME
+  paddock snapshot NAME --as TEMPLATE    save the sandbox's files, minus the usual logins, as a template
+  paddock template list | template remove TEMPLATE [--engine ID]   sandboxes made from it keep working
   paddock ext list
   paddock ext run EXTENSION ACTION [SANDBOX] [--set FIELD=VALUE]…
   paddock ui [--open]                    the dashboard's address
@@ -148,6 +151,8 @@ async function session(request: OpenRequest): Promise<never> {
   return new Promise<never>(() => {})
 }
 
+const APPLIES: Record<ResizeChange["applies"], string> = { now: "now", "next start": "at the next start", unchanged: "unchanged", "not enforced": "recorded, not enforced" }
+const LIMIT: Record<ResizeChange["limit"], string> = { cpus: "CPUs", memoryGb: "memory (GB)", pids: "task limit", diskGb: "disk (GB)" }
 const MARK: Record<CheckResult["status"], string> = { pass: "✓", weak: "~", fail: "✗", unsupported: "–", unknown: "?", info: "i" }
 function printChecks(checks: CheckResult[]): void {
   for (const check of checks) {
@@ -199,10 +204,10 @@ async function main(argv: string[]): Promise<void> {
         })
       }
       case "create": {
-        const { values, positionals } = parse({ docker: { type: "boolean" }, image: { type: "string" }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" }, pids: { type: "string" }, engine: { type: "string" } })
+        const { values, positionals } = parse({ docker: { type: "boolean" }, image: { type: "string" }, template: { type: "string" }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" }, pids: { type: "string" }, engine: { type: "string" } })
         const name = need(positionals[0], "a name")
         const made = await call<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }> }>("create",
-          { name, docker: values.docker, image: values.image, cpus: values.cpus, memoryGb: values.memory, diskGb: values.disk, pids: values.pids, engine: values.engine }, watching(name))
+          { name, docker: values.docker, image: values.image, template: values.template, cpus: values.cpus, memoryGb: values.memory, diskGb: values.disk, pids: values.pids, engine: values.engine }, watching(name))
         return out(made, () => {
           printSandbox(made.sandbox); printChecks(made.checks)
           for (const hook of made.hooks) console.log(`\n  ${hook.extension} (after create): ${hook.exitCode === 0 ? "done" : `failed with exit ${hook.exitCode}`}${hook.output ? `\n${hook.output}` : ""}`)
@@ -215,7 +220,7 @@ async function main(argv: string[]): Promise<void> {
           for (const view of list) {
             const verified = view.lastVerify ? `verified ${view.lastVerify.at.slice(0, 16).replace("T", " ")} UTC, ${view.lastVerify.results.filter((check) => check.status === "fail").length} failed` : "never verified"
             if (view.status === "damaged") { console.log(`${view.name.padEnd(24)} damaged\n    ${view.stopReason}`); continue }
-            console.log(`${view.name.padEnd(24)} ${view.status.padEnd(8)} ${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  ${view.engine}  (${verified})${view.stopReason ? `\n    ${view.stopReason}` : ""}`)
+            console.log(`${view.name.padEnd(24)} ${view.status.padEnd(8)} ${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  ${view.engine}${view.template ? `  template ${view.template.name}` : ""}  (${verified})${view.stopReason ? `\n    ${view.stopReason}` : ""}`)
           }
         })
       }
@@ -228,6 +233,41 @@ async function main(argv: string[]): Promise<void> {
         out(report, () => { printSandbox(report.sandbox); printChecks(report.checks) })
         if (!report.ok) process.exit(EXIT["check-failed"])
         return
+      }
+      case "resize": {
+        const { values, positionals } = parse({ cpus: { type: "string" }, memory: { type: "string" }, pids: { type: "string" }, disk: { type: "string" } })
+        const name = need(positionals[0], "a name")
+        const resized = await call<{ sandbox: SandboxView; changes: ResizeChange[]; checks: CheckResult[] }>("resize", { name, cpus: values.cpus, memoryGb: values.memory, pids: values.pids, diskGb: values.disk }, watching(name))
+        return out(resized, () => {
+          printSandbox(resized.sandbox)
+          for (const change of resized.changes) console.log(`  ${LIMIT[change.limit]}: ${change.from === change.to ? change.to : `${change.from} -> ${change.to}`}, ${APPLIES[change.applies]}${change.note ? `\n      ${change.note}` : ""}`)
+          console.log(""); printChecks(resized.checks)
+        })
+      }
+      case "snapshot": {
+        const { values, positionals } = parse({ as: { type: "string" } })
+        const name = need(positionals[0], "a name")
+        const saved = await call<{ template: Template; contents: string }>("snapshot", { name, as: need(values.as, "--as TEMPLATE") }, watching(name))
+        return out(saved, () => {
+          console.log(`Saved ${name} as template ${saved.template.name} (${(saved.template.sizeBytes / 1024 ** 2).toFixed(0)} MB). Use it with \`paddock create NAME --template ${saved.template.name}\`.`)
+          console.log(`  Login files left out: ${saved.template.loginsRemoved.join(", ") || "none were present"}.`)
+          console.log(`  ${saved.contents}`)
+        })
+      }
+      case "template": case "templates": {
+        const { values, positionals } = parse({ engine: { type: "string" } }, rest.slice(1))
+        if (rest[0] === "list" || rest[0] === undefined) {
+          const list = await call<Template[]>("templateList")
+          return out(list, () => {
+            if (!list.length) console.log("No templates. Save one with `paddock snapshot NAME --as TEMPLATE`.")
+            for (const template of list) console.log(`${template.name.padEnd(24)} from ${template.source} (${template.sourceImage}), ${template.createdAt.slice(0, 16).replace("T", " ")} UTC, ${(template.sizeBytes / 1024 ** 2).toFixed(0)} MB, ${template.engine}${template.dependants.length ? `\n    used by ${template.dependants.join(", ")}` : ""}`)
+          })
+        }
+        if (rest[0] === "remove" || rest[0] === "rm") {
+          const removed = await call<{ removed: string; note: string }>("templateRemove", { name: need(positionals[0], "a template name"), engine: values.engine })
+          return out(removed, () => console.log(`Removed template ${removed.removed}. ${removed.note}`))
+        }
+        throw new PaddockError("usage", "Use `paddock template list` or `paddock template remove TEMPLATE`.")
       }
       case "remove": case "rm": {
         const { values, positionals } = parse({ confirm: { type: "string" } })

@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { connect, type Socket } from "node:net"
 import { must } from "../run"
-import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type RunOptions, type RunResult, type Runner, type Session, type Stage } from "../types"
+import { PaddockError, type CheckResult, type Engine, type Limits, type Manifest, type Provider, type RunOptions, type RunResult, type Runner, type Session, type Stage, type Template } from "../types"
 import { probeCleanupScript, WAIT_FOR_PROBE_ROUTES } from "./probe"
 import GUARD_RULES from "./guard.nft" with { type: "text" }
 import HELPER_DOCKERFILE from "./helper.Dockerfile" with { type: "text" }
@@ -98,10 +98,34 @@ for pass in 1 2 3; do pids=$(marked "$1"); [ -z "$pids" ] && exit 0; kill -9 $pi
 [ -z "$(marked "$1")" ]`
 // Shell globs under each home. Profile directories (~/.claude-NAME, ~/.codex-NAME) are where the bundled logins
 // extension puts imported logins.
-const CREDENTIAL_FILES = [".claude*/.credentials.json", ".codex*/auth.json", ".config/gh/hosts.yml", ".git-credentials", ".ssh/id_ed25519", ".ssh/id_rsa", ".aws/credentials", ".netrc"]
+export const CREDENTIAL_FILES = [".claude*/.credentials.json", ".codex*/auth.json", ".config/gh/hosts.yml", ".git-credentials", ".ssh/id_ed25519", ".ssh/id_rsa", ".aws/credentials", ".netrc"]
+// Templates are images under a repository of this daemon's own (owner), labelled with what they were made from. Only an
+// image with both is one of its templates. A snapshot's intermediate image and its clean-up container use the snapshot
+// names, which the sweep removes.
+export const LABEL_TEMPLATE = "dev.paddock.template"
+export const LABEL_TEMPLATE_OWNER = "dev.paddock.template.owner"
+const LABEL_TEMPLATE_SOURCE = "dev.paddock.template.source"
+const LABEL_TEMPLATE_SOURCE_IMAGE = "dev.paddock.template.source-image"
+const LABEL_TEMPLATE_LOGINS = "dev.paddock.template.logins-removed"
+export const templateRepository = (owner: string) => `paddock-template-${owner}`
+export const snapshotRepository = (owner: string) => `paddock-snapshot-${owner}`
+// Runs under gVisor, as root, in a container of the committed image with no network, with Paddock's own busybox ($1)
+// and shell builtins only: nothing from the sandbox's image runs. Removes the login files, Paddock's own files (the
+// relay and the SSH host key in /.paddock) and the busybox's directory, and prints each login file it removed.
+const SNAPSHOT_CLEAN = `B=$1
+for home in /root /home/*; do for file in ${CREDENTIAL_FILES.map((file) => `"$home"/${file}`).join(" ")}; do
+  if [ -e "$file" ] || [ -L "$file" ]; then $B rm -f "$file" || exit 1; echo "removed $file"; fi
+done; done
+$B rm -rf /.paddock "\${B%/*}" || exit 1
+echo done`
+// Reads the limits a running container has on the engine's host from its cgroup (v2): memory.max, pids.max, cpu.max.
+const LIVE_LIMITS = `d=$(find /sys/fs/cgroup -maxdepth 4 -type d -name "*$1*" | head -n 1); [ -n "$d" ] || exit 3
+cat "$d/memory.max" "$d/pids.max" "$d/cpu.max"`
 
 type Inspect = {
   Id?: string
+  // The ID of the image the container runs.
+  Image?: string
   State: { Running: boolean; OOMKilled?: boolean; ExitCode?: number; StartedAt?: string; FinishedAt?: string }
   Config: { Labels: Record<string, string> | null }
   HostConfig: {
@@ -119,9 +143,10 @@ const result = (id: CheckResult["id"], status: CheckResult["status"], evidence: 
 const isGvisor = (path: string | undefined) => (path ?? "").split("/").pop() === "runsc"
 export type GuardState = "intact" | "changed" | "missing" | "unknown"
 type VolumeInspect = { Name: string; Driver: string; Options: Record<string, string> | null; Labels: Record<string, string> | null }
+export type ImageInspect = { Id: string; RepoTags?: string[] | null; Created?: string; Size?: number; Config?: { Labels?: Record<string, string> | null } & Record<string, unknown> | null }
 
 // The checks that only need `docker inspect`. Exported for tests.
-export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardState, networkBridge: string | undefined, volumes?: readonly VolumeInspect[]): CheckResult[] {
+export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardState, networkBridge: string | undefined, volumes?: readonly VolumeInspect[], image?: ImageInspect, owner = "1"): CheckResult[] {
   const host = inspect.HostConfig; const name = manifest.name; const out: CheckResult[] = []
   const expected = manifest.spec.docker ? [...DOCKER_CAPABILITIES] : []
   const actual = [...new Set((host.CapAdd ?? []).map((cap) => cap.toUpperCase().replace(/^CAP_/, "")))].sort()
@@ -175,15 +200,35 @@ export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardS
     !((host.PidsLimit ?? 0) > 0) && "processes", !(host.NanoCpus > 0) && "CPU",
     !(host.LogConfig?.Type === "json-file" && Object.entries(LOG_LIMIT).every(([key, value]) => host.LogConfig?.Config?.[key] === value)) && "host logs (json-file with max-size=10m and max-file=2)",
   ].filter(Boolean)
+  // The limits must be the ones Paddock set (at creation or by resize), so one changed behind its back shows.
+  const wanted = engineLimits(manifest.spec)
+  const differ = [
+    host.Memory > 0 && host.Memory !== wanted.memory && `memory is ${host.Memory / 1024 ** 3} GB instead of ${manifest.spec.memoryGb} GB`,
+    (host.PidsLimit ?? 0) > 0 && host.PidsLimit !== wanted.pids && `the task limit is ${host.PidsLimit} instead of ${manifest.spec.pids}`,
+    host.NanoCpus > 0 && host.NanoCpus !== wanted.nanoCpus && `CPUs are ${host.NanoCpus / 1e9} instead of ${manifest.spec.cpus}`,
+  ].filter(Boolean)
   out.push(unlimited.length ? result("limits", "fail", "inspected", `No limit on ${unlimited.join(", ")}.`)
+    : differ.length ? result("limits", "fail", "inspected", `The engine's limits are not the ones Paddock set: ${differ.join("; ")}.`)
     : result("limits", "pass", "inspected", `${host.Memory / 1024 ** 3} GB memory, ${host.PidsLimit} tasks (gVisor's own threads count, so fewer processes than that fit), ${host.NanoCpus / 1e9} CPUs. A sandbox that passes its memory or task limit is killed. What its main process prints${manifest.spec.docker ? " (dockerd's log)" : ""} is kept on the engine's host, outside the watched disk limit, in two files of at most 10 MiB.`))
 
   const disk = manifest.engine.capabilities?.diskLimit
   out.push(disk === "hard" ? result("disk", "pass", "inspected", `${manifest.spec.diskGb} GB; writes fail at the limit.`)
     : disk === "watched" ? result("disk", "weak", "inspected", `Watched, not capped: the daemon stops the sandbox within about 30 seconds of it passing ${manifest.spec.diskGb} GB, so it can overshoot. Stopping the daemon stops the sandbox; if the daemon crashes, nothing watches until it runs again.`)
     : result("disk", "unsupported", "none", "Nothing limits this sandbox's disk use: the engine has no cap, and its gVisor runtime lacks --overlay2=none, without which Paddock cannot measure what the sandbox writes."))
+
+  const recorded = manifest.template; const labels = image?.Config?.Labels ?? {}
+  const short = (id = "") => id.replace(/^sha256:/, "").slice(0, 12)
+  const tagged = Boolean(recorded && (image?.RepoTags ?? []).includes(`${templateRepository(owner)}:${recorded.name}`))
+  out.push(recorded && inspect.Image !== recorded.imageId ? result("template", "fail", "inspected", `The container runs the image ${short(inspect.Image) || "(unknown)"}, not template ${recorded.name}'s image ${short(recorded.imageId)}.`)
+    : recorded && !image ? result("template", "unknown", "none", `Recorded as made from template ${recorded.name} (image ${short(recorded.imageId)}), but the engine could not describe that image.`)
+    : recorded ? result("template", "info", "inspected", `Template ${recorded.name}, saved from the sandbox ${recorded.source} on ${recorded.createdAt.slice(0, 10)}; the container runs its image ${short(recorded.imageId)}.${tagged ? "" : " The template has been removed since; its image stays on the engine until the last sandbox made from it is removed."} It holds the files of the sandbox it was saved from, except the usual login files; the credentials check says what is inside.`)
+    : labels[LABEL_TEMPLATE] && labels[LABEL_TEMPLATE_OWNER] === owner ? result("template", "info", "inspected", `None recorded, but its image ${short(inspect.Image)} is Paddock template ${labels[LABEL_TEMPLATE]}'s, given as a plain image.`)
+    : result("template", "info", "inspected", `None: made from the image ${manifest.spec.image}.`))
   return out
 }
+
+// The engine's values for a spec's limits, as create and resize set them.
+export const engineLimits = (spec: Limits) => ({ memory: Math.round(spec.memoryGb * 1024) * 1024 ** 2, pids: spec.pids, nanoCpus: Math.round(spec.cpus * 1e9) })
 
 export class GvisorProvider implements Provider {
   readonly id = "gvisor"
@@ -235,7 +280,10 @@ export class GvisorProvider implements Provider {
       const measurable = seesWrites(chosen[1].runtimeArgs)
       engines.push({ ...base, label, ready: true, data: { context: context.Name, runtime: chosen[0] },
         problems: measurable ? [] : [`Sandboxes here have no disk limit: the runtime ${chosen[0]} lacks --overlay2=none, without which Paddock cannot measure what a sandbox writes.`],
-        capabilities: { kernelIsolation: "gvisor", diskLimit: measurable ? "watched" : "none", networkGuard: true, docker: measurable && hasRawNetwork(chosen[1].runtimeArgs), execStream: true, loopbackRelay: true } })
+        capabilities: { kernelIsolation: "gvisor", diskLimit: measurable ? "watched" : "none", networkGuard: true, docker: measurable && hasRawNetwork(chosen[1].runtimeArgs), execStream: true, loopbackRelay: true,
+          // docker update changes a running gVisor sandbox's cgroup at once (measured on OrbStack), and resize reads it
+          // back. A commit sees a sandbox's files only when they reach the engine's layer, which needs --overlay2=none.
+          resize: "live", snapshot: measurable } })
     }
     return engines
   }
@@ -358,6 +406,129 @@ export class GvisorProvider implements Provider {
       }
     }
     await this.docker(engine, ["network", "rm", network(name)])
+    await this.dropUnusedTemplates(engine)
+  }
+
+  // A removed template's image stays while sandboxes run it; it goes once none does. Removing an image in use fails, so
+  // only unused ones go.
+  private async dropUnusedTemplates(engine: Engine): Promise<void> {
+    const untagged = (await this.docker(engine, ["image", "ls", "-q", "--no-trunc", "--filter", "dangling=true", "--filter", `label=${LABEL_TEMPLATE_OWNER}=${this.owner}`])).stdout.split("\n").filter(Boolean)
+    for (const id of new Set(untagged)) await this.docker(engine, ["rmi", id])
+  }
+
+  async resize(manifest: Manifest, limits: Limits): Promise<Limits | undefined> {
+    const { engine, name } = manifest
+    const inspect = await this.inspect(manifest)
+    if (!inspect) throw new PaddockError("not-found", `${name} has no container on ${engine.label}.`)
+    const memory = `${Math.round(limits.memoryGb * 1024)}m`
+    must(await this.docker(engine, ["update", "--cpus", String(limits.cpus), "--memory", memory, "--memory-swap", memory, "--pids-limit", String(limits.pids), container(name)], { timeoutMs: 60_000 }), `Resizing ${name}`)
+    if (!inspect.State.Running || !inspect.Id) return undefined
+    // gVisor does not show the sandbox its new limits (its /proc/meminfo keeps the old memory), but the engine's host
+    // enforces the cgroup, so that is what is read back.
+    await this.ensureHelper(engine)
+    const read = await this.docker(engine, ["run", "--rm", "--runtime", "runc", "--privileged", "--cgroupns", "host", "--network", "none", "--entrypoint", "sh", HELPER_IMAGE, "-c", LIVE_LIMITS, "limits", inspect.Id], { timeoutMs: 60_000 })
+    const [memoryMax, pidsMax, cpuMax] = read.stdout.trim().split("\n")
+    const [quota, period] = (cpuMax ?? "").split(" ").map(Number)
+    if (read.exitCode !== 0 || !quota || !period) return undefined
+    return { memoryGb: Number(memoryMax) / 1024 ** 3, pids: Number(pidsMax), cpus: quota / period }
+  }
+
+  async usage(manifest: Manifest): Promise<{ memoryBytes: number; tasks: number } | undefined> {
+    const inspect = await this.inspect(manifest)
+    if (!inspect?.State.Running || !inspect.Id) return undefined
+    const reply = await engineApi(await this.endpoint(manifest.engine), "GET", `/containers/${inspect.Id}/stats?stream=false&one-shot=true`)
+    const memory = reply.body?.memory_stats; const tasks = reply.body?.pids_stats?.current
+    if (reply.status !== 200 || typeof memory?.usage !== "number" || typeof tasks !== "number") throw new PaddockError("runtime", `The engine did not report what ${manifest.name} uses: ${reply.body?.message ?? `HTTP ${reply.status}`}`)
+    // As docker stats counts it: the page cache the kernel can drop is not in use.
+    return { memoryBytes: memory.usage - (memory.stats?.inactive_file ?? 0), tasks }
+  }
+
+  private async runtimeEntry(engine: Engine, runtime: string): Promise<RuntimeEntry | undefined> {
+    const runtimes = await this.docker(engine, ["info", "--format", "{{json .Runtimes}}"])
+    try { return (JSON.parse(runtimes.stdout) as Record<string, RuntimeEntry>)[runtime] } catch { return undefined }
+  }
+
+  // Two commits. The first saves the sandbox's files, pausing it if it runs. A container of that image then runs, under
+  // gVisor with no network and only Paddock's busybox, to delete the login files and Paddock's own files, and the second
+  // commit saves the result under the template's name. Volumes (Docker's /var/lib/docker, any the image declares) are
+  // not in a commit; neither are gVisor's in-memory folders (/dev/shm, and /tmp when the image's /tmp is empty), nor
+  // the engine's /etc/hosts, hostname and resolv.conf.
+  async snapshot(manifest: Manifest, name: string): Promise<Template> {
+    const { engine } = manifest
+    const inspect = await this.inspect(manifest)
+    if (!inspect?.Id || !inspect.Image) throw new PaddockError("not-found", `${manifest.name} has no container on ${engine.label}.`)
+    if (!seesWrites((await this.runtimeEntry(engine, inspect.HostConfig.Runtime))?.runtimeArgs))
+      throw new PaddockError("dependency", `The gVisor runtime ${inspect.HostConfig.Runtime} lacks --overlay2=none, so the engine cannot see the files written in ${manifest.name} and a template would miss them.`)
+    const ref = `${templateRepository(this.owner)}:${name}`
+    if ((await this.docker(engine, ["image", "inspect", ref])).exitCode === 0) throw new PaddockError("conflict", `A template named ${name} already exists. Remove it first, or choose another name.`)
+    const base = await this.docker(engine, ["image", "inspect", inspect.Image])
+    let config: NonNullable<ImageInspect["Config"]> = {}
+    try { config = (JSON.parse(base.stdout) as ImageInspect[])[0]?.Config ?? {} } catch {}
+    if (base.exitCode !== 0) throw new PaddockError("runtime", `The image ${manifest.name} was made from could not be read: ${base.stderr.trim()}`)
+    const socket = await this.endpoint(engine)
+    const tag = randomBytes(6).toString("hex"); const stage = snapshotRepository(this.owner)
+    // The busybox goes in a directory the sandbox could not know of, so nothing it left can redirect the copy.
+    const cleaner = `${stage}-${tag}`; const toolDir = `.paddock-snapshot-${tag}/`; const tool = `/${toolDir}busybox`
+    try {
+      // The image's own settings, not the container's: its entrypoint and command are Paddock's.
+      const first = await engineApi(socket, "POST", `/commit?container=${inspect.Id}&repo=${stage}&tag=${tag}&pause=true`, config)
+      if (first.status !== 201) throw new PaddockError("runtime", `The engine did not save ${manifest.name}'s files: ${first.body?.message ?? `HTTP ${first.status}`}`)
+      // Found again by its name, not a label: a commit copies the container's labels into the image, and from there into
+      // every sandbox made from it.
+      must(await this.docker(engine, ["create", "--name", cleaner, "--runtime", engine.data.runtime!, "--network", "none",
+        "--memory", "256m", "--memory-swap", "256m", "--pids-limit", "64", "--no-healthcheck", "--user", "0", "--entrypoint", tool,
+        `${stage}:${tag}`, "env", "-i", tool, "sh", "-c", SNAPSHOT_CLEAN, "clean", tool]), "Preparing the template's clean-up")
+      await this.copyIn(engine, cleaner, [{ path: toolDir, mode: 0o755 }, { path: tool.slice(1), mode: 0o755, data: await this.busybox(engine) }], "busybox into the template's clean-up")
+      const cleaned = await this.docker(engine, ["start", "-a", cleaner], { timeoutMs: 600_000 })
+      const lines = cleaned.stdout.split("\n").filter(Boolean)
+      if (cleaned.exitCode !== 0 || lines.at(-1) !== "done") throw new PaddockError("runtime", `The template's clean-up did not finish (exit ${cleaned.exitCode}): ${cleaned.stderr.trim().slice(0, 300)}`)
+      const removed = lines.filter((line) => line.startsWith("removed ")).map((line) => line.slice("removed ".length))
+      const labels = { ...(config.Labels ?? {}),
+        // A commit keeps the source container's labels; these mark sandboxes, and a template is not one.
+        [LABEL_NAME]: "", [LABEL_ID]: "",
+        [LABEL_TEMPLATE]: name, [LABEL_TEMPLATE_OWNER]: this.owner, [LABEL_TEMPLATE_SOURCE]: manifest.name, [LABEL_TEMPLATE_SOURCE_IMAGE]: manifest.template?.name ? `template ${manifest.template.name}` : manifest.spec.image,
+        [LABEL_TEMPLATE_LOGINS]: JSON.stringify(removed) }
+      const second = await engineApi(socket, "POST", `/commit?container=${cleaner}&repo=${templateRepository(this.owner)}&tag=${name}&pause=false`, { ...config, Labels: labels })
+      if (second.status !== 201) throw new PaddockError("runtime", `The engine did not save the template: ${second.body?.message ?? `HTTP ${second.status}`}`)
+    } finally {
+      await this.docker(engine, ["rm", "-f", "-v", cleaner])
+      await this.docker(engine, ["rmi", `${stage}:${tag}`])
+    }
+    const made = (await this.templates(engine)).find((template) => template.name === name)
+    if (!made) throw new PaddockError("runtime", `The template ${name} was saved but the engine does not list it.`)
+    return made
+  }
+
+  async templates(engine: Engine): Promise<Template[]> {
+    const repository = templateRepository(this.owner)
+    const listed = await this.docker(engine, ["image", "ls", "--no-trunc", "--format", "{{.ID}}", repository])
+    if (listed.exitCode !== 0) throw new PaddockError("runtime", `The engine did not list images: ${listed.stderr.trim()}`)
+    const ids = [...new Set(listed.stdout.split("\n").filter(Boolean))]
+    if (!ids.length) return []
+    const described = await this.docker(engine, ["image", "inspect", ...ids])
+    if (described.exitCode !== 0) throw new PaddockError("runtime", `The engine did not describe its templates: ${described.stderr.trim()}`)
+    const containers = await engineApi(await this.endpoint(engine), "GET", "/containers/json?all=true")
+    if (containers.status !== 200) throw new PaddockError("runtime", `The engine did not list containers: HTTP ${containers.status}`)
+    const users = (containers.body as unknown as Array<{ ImageID: string; Names: string[]; Labels: Record<string, string> | null }>)
+    return (JSON.parse(described.stdout) as ImageInspect[]).flatMap((image) => {
+      const labels = image.Config?.Labels ?? {}; const name = labels[LABEL_TEMPLATE]
+      // Only an image this daemon made, still under the name its label gives.
+      if (!name || labels[LABEL_TEMPLATE_OWNER] !== this.owner || !(image.RepoTags ?? []).includes(`${repository}:${name}`)) return []
+      let loginsRemoved: string[] = []
+      try { loginsRemoved = JSON.parse(labels[LABEL_TEMPLATE_LOGINS] ?? "[]") } catch {}
+      return [{ name, engine: engine.id, imageId: image.Id, source: labels[LABEL_TEMPLATE_SOURCE] ?? "", sourceImage: labels[LABEL_TEMPLATE_SOURCE_IMAGE] ?? "",
+        createdAt: image.Created ?? "", sizeBytes: image.Size ?? 0, loginsRemoved,
+        dependants: users.filter((user) => user.ImageID === image.Id).map((user) => user.Labels?.[LABEL_NAME] || user.Names[0]!.replace(/^\//, "")).sort() }]
+    })
+  }
+
+  // Sandboxes made from the template keep running and starting: the engine only removes the name while containers use
+  // the image, and the image goes with the last of them (dropUnusedTemplates).
+  async removeTemplate(engine: Engine, name: string): Promise<{ imageId: string; dependants: string[] }> {
+    const template = (await this.templates(engine)).find((entry) => entry.name === name)
+    if (!template) throw new PaddockError("not-found", `There is no template named ${name} on ${engine.label}.`)
+    must(await this.docker(engine, ["rmi", ...(template.dependants.length ? ["--force"] : []), `${templateRepository(this.owner)}:${name}`]), `Removing the template ${name}`)
+    return { imageId: template.imageId, dependants: template.dependants }
   }
 
   async exec(manifest: Manifest, argv: readonly string[], options: { user?: string; stdin?: string } = {}): Promise<RunResult> {
@@ -421,23 +592,31 @@ export class GvisorProvider implements Provider {
   // sandbox through the engine's archive API, so it needs no tool from the sandbox's image and works with any of them.
   // It is given only a number: `busybox nc 127.0.0.1 PORT`. The guest can replace the file, which changes nothing it
   // could not already do with its own loopback.
-  private readonly relays = new Map<string, Promise<Uint8Array>>()
+  private readonly busyboxes = new Map<string, Promise<Uint8Array>>()
+  private busybox(engine: Engine): Promise<Uint8Array> {
+    const known = this.busyboxes.get(engine.id)
+    if (known) return known
+    const read = (async () => {
+      await this.ensureHelper(engine)
+      const output = await this.docker(engine, ["run", "--rm", "--network", "none", "--runtime", "runc", "--entrypoint", "cat", HELPER_IMAGE, "/bin/busybox.static"], { binary: true, timeoutMs: 60_000 })
+      if (output.exitCode !== 0 || !output.raw?.length) throw new PaddockError("runtime", `Could not read busybox from the helper image: ${output.stderr.trim()}`)
+      return output.raw
+    })()
+    read.catch(() => this.busyboxes.delete(engine.id))
+    this.busyboxes.set(engine.id, read)
+    return read
+  }
+
+  // Copies files into a container (created or running) through the engine's archive API.
+  private async copyIn(engine: Engine, id: string, entries: Parameters<typeof tar>[0], what: string): Promise<void> {
+    const response = await fetch(`http://engine/containers/${id}/archive?path=/`, { unix: await this.endpoint(engine), method: "PUT", headers: { "content-type": "application/x-tar" }, body: tar(entries) } as RequestInit)
+    if (response.status !== 200) throw new PaddockError("runtime", `The engine did not copy ${what}: ${(await response.text()).trim().slice(0, 300) || `HTTP ${response.status}`}`)
+  }
+
   async prepareLoopback(manifest: Manifest): Promise<void> {
     const inspect = await this.inspect(manifest)
     if (!inspect?.State.Running || !inspect.Id) throw new PaddockError("conflict", `${manifest.name} is not running. Start it first.`)
-    let relay = this.relays.get(manifest.engine.id)
-    if (!relay) {
-      relay = (async () => {
-        await this.ensureHelper(manifest.engine)
-        const output = await this.docker(manifest.engine, ["run", "--rm", "--network", "none", "--runtime", "runc", "--entrypoint", "cat", HELPER_IMAGE, "/bin/busybox.static"], { binary: true, timeoutMs: 60_000 })
-        if (output.exitCode !== 0 || !output.raw?.length) throw new PaddockError("runtime", `Could not read the relay from the helper image: ${output.stderr.trim()}`)
-        return output.raw
-      })()
-      relay.catch(() => this.relays.delete(manifest.engine.id))
-      this.relays.set(manifest.engine.id, relay)
-    }
-    const response = await fetch(`http://engine/containers/${inspect.Id}/archive?path=/`, { unix: await this.endpoint(manifest.engine), method: "PUT", headers: { "content-type": "application/x-tar" }, body: tar([{ path: ".paddock/", mode: 0o755 }, { path: RELAY.slice(1), mode: 0o755, data: await relay }]) } as RequestInit)
-    if (response.status !== 200) throw new PaddockError("runtime", `The engine did not copy the relay into ${manifest.name}: ${(await response.text()).trim().slice(0, 300) || `HTTP ${response.status}`}`)
+    await this.copyIn(manifest.engine, inspect.Id, [{ path: ".paddock/", mode: 0o755 }, { path: RELAY.slice(1), mode: 0o755, data: await this.busybox(manifest.engine) }], `the relay into ${manifest.name}`)
   }
 
   dialLoopback(manifest: Manifest, port: number): Promise<Session> {
@@ -464,6 +643,11 @@ export class GvisorProvider implements Provider {
     if (stale.length) await this.docker(engine, ["rm", "-f", ...stale])
     const networks = (await this.docker(engine, ["network", "ls", "--format", "{{.Name}}", "--filter", `label=dev.paddock.probe=${this.owner}`])).stdout.split("\n").filter(Boolean)
     if (networks.length) await this.docker(engine, ["network", "rm", ...networks])
+    const cleaners = (await this.docker(engine, ["ps", "-aq", "--filter", `name=^${snapshotRepository(this.owner)}-[0-9a-f]+$`])).stdout.split("\n").filter(Boolean)
+    if (cleaners.length) await this.docker(engine, ["rm", "-f", "-v", ...cleaners])
+    const staged = (await this.docker(engine, ["image", "ls", "--format", "{{.Repository}}:{{.Tag}}", snapshotRepository(this.owner)])).stdout.split("\n").filter(Boolean)
+    if (staged.length) await this.docker(engine, ["rmi", ...staged])
+    await this.dropUnusedTemplates(engine)
   }
 
   async checks(manifest: Manifest, stage: Stage): Promise<CheckResult[]> {
@@ -480,7 +664,10 @@ export class GvisorProvider implements Provider {
           if (read.exitCode === 0) { try { volumes = JSON.parse(read.stdout) as VolumeInspect[] } catch {} }
         }
       }
-      return configChecks(inspect, manifest, await this.guardState(engine), bridgeName.exitCode === 0 ? bridgeName.stdout.trim() : undefined, volumes)
+      let image: ImageInspect | undefined
+      const described = inspect.Image ? await this.docker(engine, ["image", "inspect", inspect.Image]) : undefined
+      if (described?.exitCode === 0) { try { image = (JSON.parse(described.stdout) as ImageInspect[])[0] } catch {} }
+      return configChecks(inspect, manifest, await this.guardState(engine), bridgeName.exitCode === 0 ? bridgeName.stdout.trim() : undefined, volumes, image, this.owner)
     }
     if (stage === "runtime") {
       const kernel = await this.kernelCheck(manifest, inspect)
@@ -501,9 +688,7 @@ export class GvisorProvider implements Provider {
   // The runtime the engine reports, confirmed from inside: gVisor's kernel log and version string name it.
   private async kernelCheck(manifest: Manifest, inspect: Inspect): Promise<CheckResult> {
     const { engine, name } = manifest
-    const runtimes = await this.docker(engine, ["info", "--format", "{{json .Runtimes}}"])
-    let entry: RuntimeEntry | undefined
-    try { entry = (JSON.parse(runtimes.stdout) as Record<string, RuntimeEntry>)[inspect.HostConfig.Runtime] } catch {}
+    const entry = await this.runtimeEntry(engine, inspect.HostConfig.Runtime)
     if (!isGvisor(entry?.path)) return result("kernel", "fail", "inspected", `The container's runtime is ${inspect.HostConfig.Runtime}, which is not gVisor.`)
     const unsafe = unsafeRuntimeArgs(entry?.runtimeArgs)
     if (unsafe.length) return result("kernel", "fail", "inspected", `The gVisor runtime ${inspect.HostConfig.Runtime} is registered with ${unsafe.join(", ")}, which opens a path to the host or switches a limit off.`)

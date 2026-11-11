@@ -26,6 +26,11 @@ export function validName(name: unknown): string {
   if (typeof name !== "string" || !NAME.test(name)) throw new PaddockError("usage", "A sandbox name is 1 to 31 lowercase letters, digits or hyphens, and does not start with a hyphen.")
   return name
 }
+// A template's name is also its tag on the engine, so it follows the same rule.
+export function validTemplateName(name: unknown): string {
+  if (typeof name !== "string" || !NAME.test(name)) throw new PaddockError("usage", "A template name is 1 to 31 lowercase letters, digits or hyphens, and does not start with a hyphen.")
+  return name
+}
 
 function number(value: unknown, label: string, min: number, max: number, fallback: number): number {
   if (value === undefined || value === null || value === "") return fallback
@@ -34,20 +39,26 @@ function number(value: unknown, label: string, min: number, max: number, fallbac
   return parsed
 }
 
+// The range of each size, the same for create and resize.
+export type Sizes = Pick<SandboxSpec, "cpus" | "memoryGb" | "pids" | "diskGb">
+const RANGES: Record<keyof Sizes, [string, number, number]> = { cpus: ["CPUs", 0.25, 64], memoryGb: ["Memory (GB)", 0.25, 256], pids: ["The process limit", 64, 65_536], diskGb: ["Disk (GB)", 1, 2000] }
+export function validSizes(input: Record<string, unknown>, base: Sizes): Sizes {
+  const size = (key: keyof Sizes) => number(input[key], ...RANGES[key], base[key])
+  return { cpus: size("cpus"), memoryGb: size("memoryGb"), pids: Math.round(size("pids")), diskGb: size("diskGb") }
+}
+
 // The only way a spec is made. Unknown fields are dropped, so a client cannot smuggle an engine option through.
 export function validSpec(input: Record<string, unknown>, defaults: Partial<typeof DEFAULT_SPEC> = {}): SandboxSpec {
   const base = { ...DEFAULT_SPEC, ...defaults }
+  const template = input.template === undefined || input.template === "" ? undefined : validTemplateName(input.template)
+  if (template && input.image !== undefined && input.image !== "") throw new PaddockError("usage", "Give an image or a template, not both.")
   const image = input.image === undefined || input.image === "" ? base.image : input.image
   if (typeof image !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$/.test(image)) throw new PaddockError("usage", "The image must be an image reference such as ubuntu:24.04.")
+  // A template is used by its name, so the sandbox records it and its checklist says so.
+  if (/^paddock-(template|snapshot)-/.test(image)) throw new PaddockError("usage", `${image} is one of Paddock's templates. Use --template with its name instead (see \`paddock template list\`).`)
   const docker = input.docker === undefined ? base.docker : input.docker
   if (typeof docker !== "boolean") throw new PaddockError("usage", "docker must be a boolean (true or false).")
-  return {
-    name: validName(input.name), image, docker,
-    cpus: number(input.cpus, "CPUs", 0.25, 64, base.cpus),
-    memoryGb: number(input.memoryGb, "Memory (GB)", 0.25, 256, base.memoryGb),
-    pids: Math.round(number(input.pids, "The process limit", 64, 65_536, base.pids)),
-    diskGb: number(input.diskGb, "Disk (GB)", 1, 2000, base.diskGb),
-  }
+  return { name: validName(input.name), image, docker, ...validSizes(input, base), ...(template ? { template } : {}) }
 }
 
 const manifestDir = (dirs: Dirs) => join(dirs.state, "sandboxes")

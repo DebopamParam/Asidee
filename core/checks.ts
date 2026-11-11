@@ -16,6 +16,7 @@ export const CHECKLIST: readonly ChecklistItem[] = [
   { id: "ssh", title: "SSH access for editors", stage: "config", blocking: false },
   { id: "limits", title: "Memory, process and CPU limits are set", stage: "config", blocking: true },
   { id: "disk", title: "Disk use is limited", stage: "config", blocking: false },
+  { id: "template", title: "The template it was made from", stage: "config", blocking: false },
   { id: "net-host", title: "Cannot reach the host", stage: "probe", blocking: true },
   { id: "net-peers", title: "Cannot reach other sandboxes", stage: "probe", blocking: true },
   { id: "net-private", title: "Cannot reach the LAN, the tailnet, cloud metadata or IPv6", stage: "probe", blocking: true },

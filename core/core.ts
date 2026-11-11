@@ -1,18 +1,25 @@
 import { randomBytes } from "node:crypto"
 import type { Server } from "node:net"
-import { blockers, complete, failures, titleOf } from "./checks"
+import { blockers, CHECKLIST, complete, failures, titleOf } from "./checks"
 import { fieldValues, loadExtensions, runCommand } from "./extensions"
 import { boundPort, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
 import { OUTPUT_LIMIT } from "./run"
 import { addInclude, alias, editorKey, GUEST_SETUP, GUEST_SSH, includeLine, included, parseGuestSetup, userConfig, writeClientFiles, type SshAccess } from "./ssh"
-import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSpec, writeManifest, type Dirs } from "./state"
+import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSizes, validSpec, validTemplateName, writeManifest, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
-import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage } from "./types"
+import { PaddockError, type CheckResult, type Engine, type Limits, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage, type Template } from "./types"
 
 // A running sandbox is stopped when a blocking check could not be made this many timer passes in a row.
 export const UNCHECKED_PASSES = 4
 // Checks the core answers from what it holds itself; a provider's answer for them is ignored.
 const CORE_CHECKS = new Set<CheckResult["id"]>(["forwards", "ssh"])
+// A running sandbox's memory or task limit is not lowered to within this share of what it uses now: the engine kills a
+// sandbox that passes either (measured: one using 351 MB was killed within seconds of a 256 MB limit).
+export const SHRINK_HEADROOM = 0.9
+// Said with every template, since a template is shared on purpose.
+export const TEMPLATE_CONTENTS = "A template holds every file in the sandbox's own filesystem, home folders included, as it was at one moment: shell history, .env files, package-manager tokens and any login not in Paddock's list are inside. Removed before saving: the usual login files (Claude, Codex, GitHub, git, SSH keys, AWS, netrc) under /root and /home/*, and Paddock's own relay and SSH host key. Not in it: running processes and memory, /dev/shm and any other folder gVisor keeps in memory (it does so for /tmp when the image's /tmp is empty; /proc/mounts inside shows them as tmpfs), volumes (inner Docker's /var/lib/docker, so no inner images or containers, and any volume the image declares), and the engine's /etc/hosts, /etc/hostname and /etc/resolv.conf."
+
+export type ResizeChange = { limit: "cpus" | "memoryGb" | "pids" | "diskGb"; from: number; to: number; applies: "now" | "next start" | "unchanged" | "not enforced"; note?: string }
 
 export type SandboxView = {
   // damaged: its state file cannot be read; stopReason says what is wrong with it.
@@ -20,6 +27,7 @@ export type SandboxView = {
   capabilities?: Engine["capabilities"]; lastVerify?: Manifest["lastVerify"]; stopReason?: string
   // What a long operation on it is doing right now.
   activity?: string
+  template?: Manifest["template"]
 }
 
 // Every operation on a sandbox. The rule it keeps: a sandbox runs only while no blocking check fails. Checks that need
@@ -60,7 +68,7 @@ export class Core {
       if (status === "stopped" && !stopReason) stopReason = await this.provider(manifest).stoppedWhy(manifest)
     } catch (error) { if (error instanceof PaddockError && error.code === "conflict") stopReason = error.message }
     return { name: manifest.name, status, engine: manifest.engine.label, spec: manifest.spec, createdAt: manifest.createdAt, capabilities: manifest.engine.capabilities,
-      lastVerify: manifest.lastVerify, stopReason, activity: this.activity.get(manifest.name) }
+      lastVerify: manifest.lastVerify, stopReason, activity: this.activity.get(manifest.name), template: manifest.template }
   }
 
   async list(): Promise<SandboxView[]> {
@@ -143,9 +151,23 @@ export class Core {
       if (spec.docker && !engine.capabilities?.docker) throw new PaddockError("dependency", `${engine.label} cannot run Docker inside a sandbox. Choose an engine with the docker capability (gVisor needs --net-raw and --overlay2=none).`)
       // Written before the engine is touched, so a half-made sandbox can always be removed.
       const manifest: Manifest = { version: 1, name: spec.name, id: randomBytes(16).toString("hex"), engine, spec, createdAt: new Date().toISOString() }
-      await writeManifest(this.dirs, manifest)
-      this.activity.set(spec.name, `Creating (downloading ${spec.image} if it is not here yet)`)
-      await this.provider(manifest).create(manifest)
+      const provider = this.provider(manifest)
+      if (spec.template) {
+        // Held until the container exists: from then on a removal of the template leaves its image to this sandbox.
+        await this.exclusive(`template:${spec.template}`, async () => {
+          const template = (await provider.templates(engine)).find((entry) => entry.name === spec.template)
+          if (!template) throw new PaddockError("not-found", `There is no template named ${spec.template} on ${engine.label}. See \`paddock template list\`.`)
+          spec.image = template.imageId
+          manifest.template = { name: template.name, imageId: template.imageId, source: template.source, createdAt: template.createdAt }
+          await writeManifest(this.dirs, manifest)
+          this.activity.set(spec.name, `Creating from template ${template.name}`)
+          await provider.create(manifest)
+        })
+      } else {
+        await writeManifest(this.dirs, manifest)
+        this.activity.set(spec.name, `Creating (downloading ${spec.image} if it is not here yet)`)
+        await provider.create(manifest)
+      }
       await this.startChecked(manifest)
       const { checks, failed } = await this.verifyNow(manifest)
       if (failed.length) this.refuse(spec.name, failed, "was created but stopped, and is kept for diagnosis")
@@ -185,6 +207,101 @@ export class Core {
       await this.provider(manifest).remove(manifest); await deleteManifest(this.dirs, name)
       if (manifest.ssh) await writeClientFiles(this.dirs, await listManifests(this.dirs))
       return { removed: name }
+    })
+  }
+
+  // CPUs, memory and the task limit are set in the engine, and the manifest follows once it accepted them. For a running
+  // sandbox a limit counts as applied now only when the engine's host reports it back; the disk limit is the daemon's
+  // own number, which its next watch pass (within 30 seconds) uses.
+  resize(name: string, input: Record<string, unknown>): Promise<{ sandbox: SandboxView; changes: ResizeChange[]; checks: CheckResult[] }> {
+    return this.exclusive(validName(name), async () => {
+      const manifest = await readManifest(this.dirs, name); const provider = this.provider(manifest); const before = manifest.spec
+      const keys = ["cpus", "memoryGb", "pids", "diskGb"] as const
+      if (!keys.some((key) => input[key] !== undefined && input[key] !== null && input[key] !== "")) throw new PaddockError("usage", "Give at least one of --cpus, --memory, --pids and --disk.")
+      const next = validSizes(input, before)
+      if (manifest.engine.capabilities?.resize === "none") throw new PaddockError("dependency", `${manifest.engine.label} cannot change a sandbox's limits.`)
+      const status = await provider.status(manifest)
+      if (status === "missing") throw new PaddockError("not-found", `${name} has no container on ${manifest.engine.label}.`)
+      this.activity.set(name, "Resizing")
+      const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(2)} GB`
+      if (status === "running" && (next.memoryGb < before.memoryGb || next.pids < before.pids)) {
+        const use = await provider.usage(manifest).catch(() => undefined)
+        if (!use) throw new PaddockError("conflict", `What ${name} uses now could not be read, so its limits were not lowered while it runs. Stop it and resize again; the new limits then apply at its next start.`)
+        const memory = Math.round(next.memoryGb * 1024) * 1024 ** 2
+        if (next.memoryGb < before.memoryGb && use.memoryBytes >= memory * SHRINK_HEADROOM)
+          throw new PaddockError("conflict", `${name} uses ${gb(use.memoryBytes)} of memory now; a limit of ${next.memoryGb} GB would leave it under ${Math.round((1 - SHRINK_HEADROOM) * 100)}% headroom, and the engine kills a sandbox that passes its limit. Nothing was changed. Free memory inside it, or stop it first.`)
+        if (next.pids < before.pids && use.tasks >= next.pids * SHRINK_HEADROOM)
+          throw new PaddockError("conflict", `${name} runs ${use.tasks} tasks now (gVisor's own threads count); a limit of ${next.pids} would leave it under ${Math.round((1 - SHRINK_HEADROOM) * 100)}% headroom, and a gVisor sandbox that passes it ends. Nothing was changed.`)
+      }
+      if (next.diskGb < before.diskGb && manifest.engine.capabilities?.diskLimit !== "none") {
+        const used = await provider.diskUsedBytes(manifest)
+        if (used === undefined) throw new PaddockError("conflict", `${name}'s disk use could not be measured, so its disk limit was not lowered. Nothing was changed.`)
+        if (used > next.diskGb * 1024 ** 3) throw new PaddockError("conflict", `${name} uses ${gb(used)} of disk, more than ${next.diskGb} GB; the watch would stop it at once. Nothing was changed.`)
+      }
+      const limitsChanged = (["cpus", "memoryGb", "pids"] as const).some((key) => next[key] !== before[key])
+      const live = limitsChanged ? await provider.resize(manifest, next) : undefined
+      manifest.spec = { ...before, ...next }
+      await writeManifest(this.dirs, manifest)
+      const same = (key: keyof Limits, a: number, b: number) => key === "memoryGb" ? Math.round(a * 1024) === Math.round(b * 1024) : key === "cpus" ? Math.round(a * 1e9) === Math.round(b * 1e9) : a === b
+      const changes = keys.map((limit): ResizeChange => {
+        const change = { limit, from: before[limit], to: next[limit] }
+        if (next[limit] === before[limit]) return { ...change, applies: "unchanged" }
+        if (limit === "diskGb") return manifest.engine.capabilities?.diskLimit === "none"
+          ? { ...change, applies: "not enforced", note: "This engine has no disk limit; the number is recorded only." }
+          : { ...change, applies: "now", note: "The daemon's disk watch uses it from its next pass, within 30 seconds." }
+        if (status !== "running") return { ...change, applies: "next start" }
+        if (live && same(limit, live[limit], next[limit])) return { ...change, applies: "now", note: "Read back from the engine's host. Inside, /proc/meminfo keeps the memory gVisor started with and nproc does not follow the CPU limit; the engine's host enforces the new one." }
+        return { ...change, applies: "next start", note: `The engine accepted it, but the running sandbox could not be confirmed to have it${live ? ` (its host reports ${live[limit]})` : ""}. It applies at the next start.` }
+      })
+      const checks = (await this.stage(manifest, ["config"], status === "running")).filter((check) => CHECKLIST.find((item) => item.id === check.id)?.stage === "config")
+      const failed = blockers(checks)
+      if (failed.length && status === "running") await this.stopBecause(manifest, `Stopped after a resize: ${failed.map((entry) => `${titleOf(entry.id)} (${entry.detail})`).join("; ")}`)
+      return { sandbox: await this.view(manifest), changes, checks }
+    })
+  }
+
+  // The sandbox stays locked while its template is made, and a running one is paused for the moment its files are saved.
+  async snapshot(name: string, as: unknown): Promise<{ template: Template; contents: string }> {
+    const templateName = validTemplateName(as)
+    return this.exclusive(validName(name), async () => {
+      const manifest = await readManifest(this.dirs, name); const provider = this.provider(manifest)
+      if (manifest.engine.capabilities?.snapshot === false) throw new PaddockError("dependency", `${manifest.engine.label} cannot make templates: its gVisor runtime lacks --overlay2=none, so the engine does not see a sandbox's files.`)
+      if ((await provider.status(manifest)) === "missing") throw new PaddockError("not-found", `${name} has no container on ${manifest.engine.label}.`)
+      return this.exclusive(`template:${templateName}`, async () => {
+        this.activity.set(name, `Saving template ${templateName}`)
+        return { template: await provider.snapshot(manifest, templateName), contents: TEMPLATE_CONTENTS }
+      })
+    })
+  }
+
+  private async readyEngines(): Promise<Array<{ engine: Engine; provider: Provider }>> {
+    return (await this.engines()).filter((engine) => engine.ready).flatMap((engine) => {
+      const provider = this.providers.find((entry) => entry.id === engine.provider)
+      return provider ? [{ engine, provider }] : []
+    })
+  }
+
+  async templateList(): Promise<Template[]> {
+    const templates: Template[] = []
+    for (const { engine, provider } of await this.readyEngines()) templates.push(...await provider.templates(engine))
+    return templates
+  }
+
+  // Sandboxes made from it keep running, and can be stopped and started; its image is deleted with the last of them.
+  async templateRemove(name: unknown, engineId?: unknown): Promise<{ removed: string; imageId: string; dependants: string[]; note: string }> {
+    const templateName = validTemplateName(name)
+    return this.exclusive(`template:${templateName}`, async () => {
+      const found: Array<{ engine: Engine; provider: Provider }> = []
+      for (const entry of await this.readyEngines()) {
+        if (typeof engineId === "string" && engineId && entry.engine.id !== engineId) continue
+        if ((await entry.provider.templates(entry.engine)).some((template) => template.name === templateName)) found.push(entry)
+      }
+      if (!found.length) throw new PaddockError("not-found", `There is no template named ${templateName}. See \`paddock template list\`.`)
+      if (found.length > 1) throw new PaddockError("usage", `Templates named ${templateName} are on ${found.map((entry) => entry.engine.id).join(" and ")}. Choose one with --engine.`)
+      const removed = await found[0]!.provider.removeTemplate(found[0]!.engine, templateName)
+      return { removed: templateName, ...removed, note: removed.dependants.length
+        ? `Sandboxes made from it keep working (they run, stop and start as before): ${removed.dependants.join(", ")}. Its image is deleted when the last of them is removed.`
+        : "Its image was deleted." }
     })
   }
 

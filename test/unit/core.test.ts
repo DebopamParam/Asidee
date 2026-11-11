@@ -8,20 +8,21 @@ import { Core, UNCHECKED_PASSES } from "../../core/core"
 import { fieldValues, loadExtensions, parseExtension } from "../../core/extensions"
 import { configChecks, DOCKER_CAPABILITIES, dockerVolume, gvisorSetup, network, unsafeRuntimeArgs, type GuardState } from "../../core/providers/gvisor"
 import { OUTPUT_LIMIT, systemRunner } from "../../core/run"
-import { readConfig, validSpec } from "../../core/state"
-import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type Stage } from "../../core/types"
+import { readConfig, validSizes, validSpec, validTemplateName } from "../../core/state"
+import { PaddockError, type CheckResult, type Engine, type Limits, type Manifest, type Provider, type Stage, type Template } from "../../core/types"
 
-const engine: Engine = { id: "fake:1", provider: "fake", label: "Fake engine", ready: true, problems: [], data: { context: "fake", runtime: "runsc" }, capabilities: { kernelIsolation: "gvisor", diskLimit: "watched", networkGuard: true, docker: true, execStream: true, loopbackRelay: true } }
+const engine: Engine = { id: "fake:1", provider: "fake", label: "Fake engine", ready: true, problems: [], data: { context: "fake", runtime: "runsc" }, capabilities: { kernelIsolation: "gvisor", diskLimit: "watched", networkGuard: true, docker: true, execStream: true, loopbackRelay: true, resize: "live", snapshot: true } }
 const pass = (id: CheckResult["id"]): CheckResult => ({ id, status: "pass", evidence: "inspected", detail: "ok" })
 const allPass = (stage: Stage) => CHECKLIST.filter((item) => item.stage === stage).map((item) => pass(item.id))
 
 // A provider whose engine is a few fields, with check results a test can change.
 function fakeProvider(overrides: Partial<Record<Stage, CheckResult[]>> = {}) {
-  const state = { running: false, exists: false, starts: 0, stops: 0, overrides }
+  const state = { running: false, exists: false, starts: 0, stops: 0, overrides, use: { memoryBytes: 0, tasks: 0 } as { memoryBytes: number; tasks: number } | undefined,
+    live: undefined as Limits | undefined, resized: undefined as Limits | undefined, templates: [] as Template[], created: [] as Manifest[] }
   const provider: Provider = {
     id: "fake",
     detect: async () => [engine],
-    create: async () => { state.exists = true },
+    create: async (manifest) => { state.exists = true; state.created.push(structuredClone(manifest)) },
     prepare: async () => {},
     start: async () => { state.running = true; state.starts++ },
     stop: async () => { state.running = false; state.stops++ },
@@ -36,6 +37,18 @@ function fakeProvider(overrides: Partial<Record<Stage, CheckResult[]>> = {}) {
     diskUsedBytes: async () => 0,
     stoppedWhy: async () => undefined,
     sweep: async () => {},
+    resize: async (_manifest, limits) => { state.resized = limits; return state.running ? state.live ?? limits : undefined },
+    usage: async () => state.running ? state.use : undefined,
+    snapshot: async (manifest, name) => {
+      const made: Template = { name, engine: engine.id, imageId: `sha256:${name}`, source: manifest.name, sourceImage: manifest.spec.image, createdAt: "2026-11-11T00:00:00Z", sizeBytes: 1, loginsRemoved: [], dependants: [] }
+      state.templates.push(made); return made
+    },
+    templates: async () => state.templates,
+    removeTemplate: async (_engine, name) => {
+      const found = state.templates.find((entry) => entry.name === name)!
+      state.templates = state.templates.filter((entry) => entry !== found)
+      return { imageId: found.imageId, dependants: found.dependants }
+    },
   }
   return { provider, state }
 }
@@ -47,7 +60,7 @@ async function core(provider: Provider) {
 
 test("a check the provider does not report is unknown, never a pass", () => {
   const results = complete([pass("hardening")], ["config"])
-  expect(results.map((entry) => entry.id)).toEqual(["hardening", "mounts", "network-guard", "inbound", "forwards", "ssh", "limits", "disk"])
+  expect(results.map((entry) => entry.id)).toEqual(["hardening", "mounts", "network-guard", "inbound", "forwards", "ssh", "limits", "disk", "template"])
   expect(results.find((entry) => entry.id === "mounts")!.status).toBe("unknown")
   expect(blockers(results).map((entry) => entry.id)).toEqual(["mounts", "network-guard", "inbound", "limits"])
 })
@@ -66,6 +79,23 @@ test("a spec keeps only known fields and refuses option-like images", () => {
   expect(() => validSpec({ name: "demo", image: "--privileged" })).toThrow(PaddockError)
   expect(() => validSpec({ name: "../x" })).toThrow(PaddockError)
   expect(() => validSpec({ name: "demo", memoryGb: 0 })).toThrow(PaddockError)
+})
+
+test("create and resize share one range for each size, and resize keeps what is not given", () => {
+  const base = { cpus: 2, memoryGb: 4, pids: 4096, diskGb: 20 }
+  expect(validSizes({}, base)).toEqual(base)
+  expect(validSizes({ memoryGb: "8", pids: "100.4" }, base)).toEqual({ ...base, memoryGb: 8, pids: 100 })
+  for (const input of [{ cpus: 0.2 }, { memoryGb: 0.2 }, { pids: 63 }, { diskGb: 0.5 }, { cpus: 65 }, { memoryGb: "lots" }, { pids: "-1" }])
+    expect(() => validSizes(input, base)).toThrow(PaddockError)
+})
+
+test("a template is named like a sandbox, and its images are reached only by that name", () => {
+  expect(validTemplateName("base-1")).toBe("base-1")
+  for (const name of ["", "-x", "Base", "a/b", "a:b", "x".repeat(32), 3]) expect(() => validTemplateName(name)).toThrow("template name")
+  expect(validSpec({ name: "demo", template: "base" })).toMatchObject({ template: "base" })
+  expect(() => validSpec({ name: "demo", template: "base", image: "ubuntu:24.04" })).toThrow("not both")
+  expect(() => validSpec({ name: "demo", template: "../x" })).toThrow(PaddockError)
+  for (const image of ["paddock-template-abc:base", "paddock-snapshot-abc:1"]) expect(() => validSpec({ name: "demo", image })).toThrow("--template")
 })
 
 test("docker is a strict boolean, defaults off, and can be set or overridden in defaults", () => {
@@ -124,6 +154,24 @@ test("each way of loosening a container fails its check", () => {
   expect(failing(inspect((value) => { value.HostConfig.PortBindings = { "22/tcp": [{}] } }))).toEqual(["inbound"])
   expect(failing(inspect((value) => { value.HostConfig.Memory = 0 }))).toEqual(["limits"])
   expect(failing(inspect((value) => { value.HostConfig.PidsLimit = null }))).toEqual(["limits"])
+  // Set, but not to what the spec says: changed behind Paddock's back, or a resize the manifest does not know of.
+  expect(failing(inspect((value) => { value.HostConfig.Memory = value.HostConfig.MemorySwap = 8 * 1024 ** 3 }))).toEqual(["limits"])
+  expect(failing(inspect((value) => { value.HostConfig.PidsLimit = 8192 }))).toEqual(["limits"])
+  expect(failing(inspect((value) => { value.HostConfig.NanoCpus = 3e9 }))).toEqual(["limits"])
+})
+
+test("the template check says what a sandbox was made from, and fails when the engine runs something else", () => {
+  const image = (labels: Record<string, string> = {}, tags = ["paddock-template-own:base"]) => ({ Id: "sha256:t", RepoTags: tags, Config: { Labels: labels } })
+  const templated: Manifest = { ...manifest, template: { name: "base", imageId: "sha256:t", source: "src", createdAt: "2026-11-11T00:00:00Z" } }
+  const check = (value: ReturnType<typeof inspect>, sandbox: Manifest, described?: ReturnType<typeof image>) => configChecks(value, sandbox, "intact", "pdk123", undefined, described, "own").find((entry) => entry.id === "template")!
+  const running = (id: string) => inspect((value) => { (value as any).Image = id })
+  expect(check(running("sha256:t"), templated, image())).toMatchObject({ status: "info" })
+  expect(check(running("sha256:t"), templated, image()).detail).toContain("Template base, saved from the sandbox src")
+  expect(check(running("sha256:t"), templated, image({}, [])).detail).toContain("has been removed since")
+  expect(check(running("sha256:other"), templated, image()).status).toBe("fail")
+  expect(check(running("sha256:t"), templated).status).toBe("unknown")
+  expect(check(running("sha256:i"), manifest, image()).detail).toBe(`None: made from the image ${manifest.spec.image}.`)
+  expect(check(running("sha256:t"), manifest, image({ "dev.paddock.template": "base", "dev.paddock.template.owner": "own" })).detail).toContain("is Paddock template base's")
 })
 
 test("Docker hardening accepts exactly its declared additions inside gVisor", () => {
@@ -408,4 +456,56 @@ test("a forward listens on loopback for one run of its sandbox and ends with it"
   await paddock.remove("demo", "demo")
   expect(await reachable(last.localPort)).toBe(false)
   for (const bad of [0, 70_000, "x"]) await expect(paddock.forwardAdd("demo", bad)).rejects.toMatchObject({ code: "usage" })
+})
+
+test("resize refuses what it cannot do safely, and says when each limit applies", async () => {
+  const { provider, state } = fakeProvider()
+  const paddock = await core(provider)
+  await paddock.create({ name: "demo" })
+  await expect(paddock.resize("ghost", { memoryGb: 8 })).rejects.toMatchObject({ code: "not-found" })
+  await expect(paddock.resize("demo", {})).rejects.toMatchObject({ code: "usage" })
+  await expect(paddock.resize("demo", { memoryGb: 0.1 })).rejects.toMatchObject({ code: "usage" })
+  await expect(paddock.resize("demo", { pids: 10 })).rejects.toMatchObject({ code: "usage" })
+  // Running, using 3 GiB: lowering memory to 3 GB leaves no headroom; nothing changes.
+  state.use = { memoryBytes: 3 * 1024 ** 3, tasks: 100 }
+  await expect(paddock.resize("demo", { memoryGb: 3 })).rejects.toMatchObject({ code: "conflict" })
+  expect(state.resized).toBeUndefined()
+  expect((await paddock.get("demo")).spec.memoryGb).toBe(4)
+  state.use = { memoryBytes: 3 * 1024 ** 3, tasks: 3000 }
+  await expect(paddock.resize("demo", { pids: 3000 })).rejects.toMatchObject({ code: "conflict" })
+  state.use = undefined
+  await expect(paddock.resize("demo", { memoryGb: 2 })).rejects.toMatchObject({ code: "conflict" })
+  // Raising needs no reading. The engine's host confirms memory, not CPUs.
+  state.live = { cpus: 2, memoryGb: 8, pids: 4096 }
+  const raised = await paddock.resize("demo", { memoryGb: 8, cpus: 3 })
+  expect(raised.changes.map((change) => [change.limit, change.applies])).toEqual([["cpus", "next start"], ["memoryGb", "now"], ["pids", "unchanged"], ["diskGb", "unchanged"]])
+  expect(state.resized).toEqual({ cpus: 3, memoryGb: 8, pids: 4096, diskGb: 20 } as Limits)
+  expect((await paddock.get("demo")).spec).toMatchObject({ cpus: 3, memoryGb: 8 })
+  expect(raised.checks.map((check) => check.id)).toContain("limits")
+  // Stopped: everything waits for the next start, and lowering needs no reading.
+  await paddock.stop("demo")
+  const lowered = await paddock.resize("demo", { memoryGb: 1, diskGb: 10 })
+  expect(lowered.changes.find((change) => change.limit === "memoryGb")!.applies).toBe("next start")
+  expect(lowered.changes.find((change) => change.limit === "diskGb")!.applies).toBe("now")
+})
+
+test("a sandbox made from a template records it and runs its image; removing the template says who still uses it", async () => {
+  const { provider, state } = fakeProvider()
+  const paddock = await core(provider)
+  await expect(paddock.create({ name: "copy", template: "base" })).rejects.toMatchObject({ code: "not-found" })
+  expect(await paddock.list()).toEqual([])
+  await paddock.create({ name: "src" })
+  await expect(paddock.snapshot("src", "Bad Name")).rejects.toMatchObject({ code: "usage" })
+  await expect(paddock.snapshot("ghost", "base")).rejects.toMatchObject({ code: "not-found" })
+  const saved = await paddock.snapshot("src", "base")
+  expect(saved.contents).toContain("home folders included")
+  const made = await paddock.create({ name: "copy", template: "base" })
+  expect(made.sandbox.template).toMatchObject({ name: "base", imageId: "sha256:base", source: "src" })
+  expect(state.created.at(-1)!.spec.image).toBe("sha256:base")
+  expect(await paddock.templateList()).toHaveLength(1)
+  state.templates[0]!.dependants = ["copy"]
+  const removed = await paddock.templateRemove("base")
+  expect(removed).toMatchObject({ removed: "base", dependants: ["copy"] })
+  expect(removed.note).toContain("keep working")
+  await expect(paddock.templateRemove("base")).rejects.toMatchObject({ code: "not-found" })
 })
