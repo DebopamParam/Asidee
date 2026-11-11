@@ -5,6 +5,7 @@ import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { VERSION } from "../../core/daemon"
+import { enrollmentOptions, GVISOR, GVISOR_FILES, GVISOR_RELEASE, installationPlan, type HostProbe } from "../../core/hosts"
 import { socketPath, streamSocketPath } from "../../core/state"
 
 const cleanups: Array<() => Promise<void>> = []
@@ -12,14 +13,16 @@ afterEach(async () => { for (const close of cleanups.splice(0)) await close() })
 const CLI = join(import.meta.dir, "../../cli/cli.ts")
 const ESC = "\x1b[2J\x1b[H✓ forged\x9b31m‮"
 
-// A daemon that answers as this build (so the CLI uses it) with text another machine chose.
+// A daemon that answers as this build (so the CLI uses it) with text another machine chose. A reply that is a function
+// is given the request's body.
 async function daemon(replies: Record<string, unknown>) {
   const state = await mkdtemp(join(tmpdir(), "pdk-cli-"))
   const build = `${VERSION}+${Math.round(statSync(CLI).mtimeMs)}`
-  const server = Bun.serve({ unix: socketPath({ state, config: state }), fetch: (request) => {
+  const server = Bun.serve({ unix: socketPath({ state, config: state }), fetch: async (request) => {
     const method = new URL(request.url).pathname.slice(5)
     if (method === "version") return Response.json({ ok: true, data: { version: VERSION, build } })
-    return method in replies ? Response.json(replies[method]) : Response.json({ ok: false, error: { code: "not-found", message: "No such method." } }, { status: 404 })
+    const reply = replies[method]
+    return method in replies ? Response.json(typeof reply === "function" ? reply(await request.json()) : reply) : Response.json({ ok: false, error: { code: "not-found", message: "No such method." } }, { status: 404 })
   } })
   cleanups.push(async () => { server.stop(true); await rm(state, { recursive: true, force: true }) })
   // Asynchronous, so this process keeps answering while the CLI runs.
@@ -47,6 +50,68 @@ test("text from a daemon reaches the terminal without control characters", async
   expect(code).toBe(1)
   expect(err.trim().split("\n")).toHaveLength(1)
 }, 20_000)
+
+test("an enrollment plan is shown as every command, file, download and restart, without the destination's control characters", async () => {
+  // A destination that has Docker and two containers, one of them a sandbox of an earlier Paddock, and that answers
+  // with text chosen to redraw a terminal.
+  const probe: HostProbe = {
+    system: "Linux", arch: "aarch64", libc: ["glibc", "2.39"], uid: 1000, gid: 1000, user: "alice", home: "/home/alice", machine: `m${ESC}`, boot: "b",
+    hostKey: `SHA256:${"A".repeat(43)}`, systemd: true, os: { ID: "ubuntu", PRETTY_NAME: `Ubuntu${ESC}` },
+    docker: { code: 0, out: "{}", err: "" }, containers: { code: 0, out: [{ Names: `owner-web${ESC}`, ID: "123" }, { Names: "sandbox-mine", ID: "456" }].map((row) => JSON.stringify(row)).join("\n"), err: "" },
+    packages: { code: 0, out: "", err: "" }, downloads: [], apt: {}, repositories: {}, ancestors: {},
+    files: Object.fromEntries([
+      "/usr/local/bin/paddock", "/etc/systemd/system/paddock@1000.service", `/opt/paddock/releases/${"a".repeat(64)}/paddock`,
+      ...GVISOR_FILES.map((name) => `/opt/paddock/gvisor/${GVISOR_RELEASE}/${name}`),
+    ].map((path) => [path, { kind: "absent" }])),
+    unit: { code: 0, out: "", err: "" }, dockerGroup: { code: 0, out: "docker:x:999:", err: "" }, lingering: { code: 0, out: "Linger=no", err: "" },
+  }
+  probe.files["/etc/docker/daemon.json"] = { kind: "file", sha256: "c".repeat(64), sha512: "d".repeat(128), uid: 0, mode: 0o644, text: `${JSON.stringify({ labels: [`keep${ESC}`] }, null, 2)}\n` }
+  const asked: Array<Record<string, unknown>> = []
+  const made = (body: Record<string, unknown>) => {
+    asked.push(body)
+    return { ok: true, data: installationPlan(enrollmentOptions({ ...body, host: undefined }), probe, { version: VERSION, sourceDigest: "b".repeat(64) }) }
+  }
+  const paddock = await daemon({ hostPlan: made, hostApply: { ok: false, error: { code: "conflict", message: "Consent is stale." } } })
+  const args = ["host", "add", "build", "--ssh", "alice@build", "--artifact", "/tmp/paddock", "--sha256", "a".repeat(64)]
+  const { code, out, err } = await paddock(...args, "--docker")
+  // No terminal and no accepted hash: the plan is shown and nothing is applied.
+  expect(code).toBe(2)
+  expect(err).toContain("--accept-plan HASH")
+  expect(asked[0]).toMatchObject({ name: "build", ssh: "alice@build", docker: true })
+  const plan = installationPlan(enrollmentOptions({ name: "build", ssh: "alice@build", docker: true, artifact: { path: "/tmp/paddock", sha256: "a".repeat(64) } }), probe, { version: VERSION, sourceDigest: "b".repeat(64) })
+  expect(plan.steps.length).toBeGreaterThan(10)
+  const clean = (text: string) => text.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, " ")
+  for (const step of plan.steps) {
+    expect(out).toContain(clean(step.label))
+    expect(out).toContain(step.argv.join(" "))
+    for (const left of step.leaves) expect(out).toContain(left)
+  }
+  for (const text of [
+    `Plan hash: ${plan.hash}`, `sha256 ${"c".repeat(64)} becomes sha256 ${plan.changes[0]!.sha256}`, '    +    "paddock-runsc": {', '    +        "--net-raw"',
+    `gvisor.tar.bz2: sha512 ${GVISOR.aarch64.archive}`, `takes gvisor-bin/gvisor_sentry: sha256 ${GVISOR.aarch64.files["gvisor-bin/gvisor_sentry"]}`,
+    `paddock: sha256 ${"a".repeat(64)}, uploaded from /tmp/paddock`, "Docker restart: planned. It may interrupt every running container (2):", "sandbox-mine (456)",
+    "Paddock service restart: none planned.", "Docker inside sandboxes: offered", `from ${plan.verification.image}`, "with Docker inside", "Disk limit: watched",
+    `Helper image ${plan.verification.helperImage}, built on the destination from this Dockerfile:`, ...plan.verification.helperDockerfile.trim().split("\n").map((line) => `    ${line}`),
+  ]) expect(out).toContain(text)
+  expect(out).not.toContain("Blockers")
+  expect(out + err).not.toMatch(/[\x1b\x9b\u202e]/)
+  // The line a forged check mark would have started is still one line of the diff.
+  expect(out.split("\n").filter((line) => line.includes("forged")).every((line) => /^(    [ +-]|  Machine:|Docker restart:|  - )/.test(line))).toBe(true)
+
+  // Without the option the plan says inner Docker is not offered, and a blocker is shown as one.
+  const plain = await paddock(...args)
+  expect(asked[1]!.docker).toBeUndefined()
+  expect(plain.out).toContain("Docker inside sandboxes: not offered")
+  expect(plain.out).not.toContain("--net-raw\"")
+  probe.files["/usr/local/bin/paddock"] = { kind: "link", uid: 0, mode: 0o777, target: "/usr/bin/other" }
+  const blocked = await paddock(...args, "--accept-plan", "0".repeat(64))
+  expect(blocked.code).toBe(4)
+  expect(blocked.out).toContain("Blockers (1); nothing is installed while one remains:\n  ✗ /usr/local/bin/paddock is unrelated")
+  // --json is the whole plan and nothing else.
+  const json = JSON.parse((await paddock("--json", ...args)).out)
+  expect(json.data.hash).toMatch(/^[a-f0-9]{64}$/)
+  expect(json.data.destination.machine).toBe(`m${ESC}`)
+}, 30_000)
 
 test("transport stdio hands SSH every byte the daemon sent before it exits, even to a slow reader", async () => {
   const state = await mkdtemp(join(tmpdir(), "pdk-relay-")); const piece = Buffer.alloc(65536, 7); const pieces = 128

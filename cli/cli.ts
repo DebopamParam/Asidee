@@ -27,7 +27,8 @@ const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, 
   paddock list
   paddock list --all                      machines, including unavailable ones and unknown cached sandboxes
   paddock host list                       registered SSH daemons and their connection state
-  paddock host add NAME --ssh DEST --artifact PATH --sha256 HASH [--sudo ask|never] [--disk-policy watched] [--accept-plan HASH]
+  paddock host add NAME --ssh DEST --artifact PATH --sha256 HASH [--docker] [--sudo ask|never] [--disk-policy watched] [--accept-plan HASH]
+                                         plans, shows the plan, and installs only once it is accepted; --docker lets its sandboxes run Docker inside
   paddock host attach NAME --ssh DEST --binary PATH --state-dir PATH   attach an already prepared daemon
   paddock host remove NAME --confirm NAME  forget a prepared host; remote files and service stay
   paddock resize NAME [--cpus N] [--memory GB] [--pids N] [--disk GB]   says which limits apply now and which at the next start
@@ -57,6 +58,66 @@ Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing depende
 // sequence can redraw the screen or forge a check mark) and line breaks (a forged line), and bounded. lines keeps breaks
 // for output that is several lines by nature, such as an extension's.
 const shown = (value: unknown, lines = false) => String(value ?? "").replace(lines ? /[\x00-\x09\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g : /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, lines ? 64_000 : 4000)
+
+// An enrollment plan as a person reviews it: every privileged command with what it leaves, each file's diff, everything
+// delivered with its checksum, and what a restart interrupts. Its text comes from the destination, so each piece goes
+// through shown(). The probe evidence the hash also covers is left to --json.
+function planLines(plan: HostPlan): string[] {
+  const word = (text: string) => /^[A-Za-z0-9_@%+=:,./-]+$/.test(text) ? text : JSON.stringify(text)
+  const list = (items: string[]) => items.map((item) => shown(item)).join(", ")
+  const { destination, runtime, restart, verification: smoke } = plan
+  const lines = [
+    `Enrollment plan for ${shown(plan.options.name)} (${shown(plan.options.ssh)})`,
+    `  Machine: ${shown(destination.os.PRETTY_NAME ?? destination.os.ID)} on ${shown(destination.arch)}, account ${shown(destination.user)} (uid ${shown(destination.uid)}), machine id ${shown(destination.machine)}, host key ${shown(destination.hostKey)}`,
+    `  Mode: ${plan.mode === "install" ? "install" : "reuse. Nothing is installed; what is already there is verified and registered"}`,
+    `  Paddock: ${shown(plan.options.artifact.path)} (sha256 ${shown(plan.options.artifact.sha256)}) as ${shown(plan.binary)}; service ${shown(plan.service)}; state in ${shown(plan.stateDir)}`,
+    `  Runtime: gVisor ${shown(runtime.release)} registered with Docker as ${shown(runtime.name)}: ${shown([runtime.path, ...runtime.runtimeArgs].map(word).join(" "))}`,
+    `  Docker inside sandboxes: ${runtime.innerDocker ? "offered (--docker)" : "not offered (enroll with --docker to offer it)"}`,
+    `  Disk limit: ${shown(plan.options.diskPolicy)}`,
+    "",
+    plan.steps.length ? `Privileged commands (${plan.steps.length}), run in this order${plan.authentication.length ? ` after \`${plan.authentication.join(" ")}\` asks for the password once` : ""}:` : "Privileged commands: none.",
+  ]
+  plan.steps.forEach((step, index) => lines.push(
+    `  ${index + 1}. ${shown(step.label)}`, `       ${shown(step.argv.map(word).join(" "))}`, `       leaves: ${list(step.leaves) || "nothing"}`))
+  lines.push("", plan.changes.length ? `Files written (${plan.changes.length}):` : "Files written: none.")
+  for (const change of plan.changes) {
+    lines.push(`  ${shown(change.path)}: ${change.beforeSha256 ? `sha256 ${shown(change.beforeSha256)}` : "absent"} becomes sha256 ${shown(change.sha256)}`)
+    for (const line of change.diff.split("\n").filter(Boolean)) lines.push(`    ${shown(line)}`)
+  }
+  lines.push("", plan.uploads.length ? `Delivered to the destination (${plan.uploads.length}), each checked there before any command runs:` : "Delivered to the destination: nothing.")
+  for (const upload of plan.uploads) {
+    lines.push(`  ${shown(upload.name)}: ${upload.algorithm} ${shown(upload.checksum)}, ${upload.kind === "artifact" ? `uploaded from ${shown(upload.source)}` : `downloaded by the destination from ${shown(upload.url)}`}`)
+    if (upload.kind === "download" && upload.extract) for (const [name, checksum] of Object.entries(upload.extract.files)) lines.push(`    takes ${shown(name)}: sha256 ${shown(checksum)}`)
+  }
+  const recipe = plan.packageRecipe
+  if (recipe.downloads.length) lines.push(
+    "", `Packages installed (${recipe.downloads.length}): ${list(recipe.downloads.map((download) => `${download.package} ${download.version}`))}`,
+    `  chosen by apt from ${list(Object.keys(recipe.repositories)) || "its sources"}; ${Object.keys(recipe.repositoryHashes).length} apt source, key and index files are hashed into this plan`)
+  lines.push(
+    "",
+    restart.required ? `Docker restart: planned. It may interrupt every running container (${restart.containers.length}): ${list(restart.containers) || "none is running"}` : "Docker restart: none planned.",
+    restart.service ? `Paddock service restart: planned. It stops these running sandboxes (${restart.sandboxes.length}): ${list(restart.sandboxes) || "none is running"}` : "Paddock service restart: none planned.",
+    "",
+    `Verification before the host is registered: sandbox ${shown(smoke.name)} from ${shown(smoke.image)} (${smoke.cpus} CPU, ${smoke.memoryGb} GB memory, ${smoke.diskGb} GB disk, ${smoke.pids} processes), ${smoke.docker ? "with Docker inside" : "without Docker inside"}`,
+    ...smoke.operations.map((operation) => `  - ${shown(operation)}`),
+    `  Helper image ${shown(smoke.helperImage)}, built on the destination from this Dockerfile:`,
+    ...smoke.helperDockerfile.trimEnd().split("\n").map((line) => `    ${shown(line)}`),
+    "", "Notes:", ...plan.warnings.map((warning) => `  - ${shown(warning)}`),
+  )
+  if (plan.blockers.length) lines.push("", `Blockers (${plan.blockers.length}); nothing is installed while one remains:`, ...plan.blockers.map((blocker) => `  ✗ ${shown(blocker)}`))
+  lines.push("", `Plan hash: ${shown(plan.hash)}`)
+  return lines
+}
+// What a refused enrollment carries: a revised plan as a plan, anything else as JSON.
+function detailLines(details: unknown): string[] {
+  const { plan, ...others } = details as { plan?: HostPlan }
+  const lines = plan && Array.isArray(plan.steps) ? planLines(plan) : []
+  const rest = plan && Array.isArray(plan.steps) ? others : details
+  return Object.keys(rest as object).length ? [...lines, shown(JSON.stringify(rest, null, 2), true)] : lines
+}
+
+// A refused enrollment says what was changed and what was left, which is longer than other errors: all of it, on one line.
+const refusal = (message: string) => shown(message.replace(/\s+/g, " "), true)
 
 const EXIT: Record<ErrorCode, number> = { runtime: 1, usage: 2, "not-found": 3, conflict: 4, dependency: 5, "check-failed": 6, offline: 7, incompatible: 8, "identity-changed": 9, "outcome-unknown": 10 }
 let selectedHost: string | undefined
@@ -150,7 +211,7 @@ async function session(request: OpenRequest | EnrollmentRequest): Promise<never>
       else if (kind === "error") {
         socket.removeAllListeners("close")
         const error = JSON.parse(payload.toString()) as { code: ErrorCode; message: string }
-        void leave(EXIT[error.code] ?? 1, shown(error.message))
+        void leave(EXIT[error.code] ?? 1, request.kind === "enroll" ? refusal(error.message) : shown(error.message))
       } else if (kind === "ready" && !ready) {
         ready = true
         if (raw) {
@@ -407,11 +468,11 @@ async function main(argv: string[]): Promise<void> {
       }
       case "host": {
         if (selectedHost && selectedHost !== "local") throw new PaddockError("usage", "The host registry belongs to the primary machine.")
-        const { values, positionals } = parse({ ssh: { type: "string" }, binary: { type: "string" }, "state-dir": { type: "string" }, confirm: { type: "string" }, artifact: { type: "string" }, sha256: { type: "string" }, sudo: { type: "string" }, "disk-policy": { type: "string" }, "accept-plan": { type: "string" } }, rest.slice(1))
+        const { values, positionals } = parse({ ssh: { type: "string" }, binary: { type: "string" }, "state-dir": { type: "string" }, confirm: { type: "string" }, artifact: { type: "string" }, sha256: { type: "string" }, sudo: { type: "string" }, "disk-policy": { type: "string" }, "accept-plan": { type: "string" }, docker: { type: "boolean" } }, rest.slice(1))
         if (rest[0] === "add") {
-          const plan = await call<HostPlan>("hostPlan", { name: need(positionals[0], "a host name"), ssh: need(values.ssh, "--ssh DEST"), artifact: { path: resolve(need(values.artifact, "--artifact PATH")), sha256: need(values.sha256, "--sha256 HASH") }, sudo: values.sudo, diskPolicy: values["disk-policy"] })
+          const plan = await call<HostPlan>("hostPlan", { name: need(positionals[0], "a host name"), ssh: need(values.ssh, "--ssh DEST"), artifact: { path: resolve(need(values.artifact, "--artifact PATH")), sha256: need(values.sha256, "--sha256 HASH") }, sudo: values.sudo, diskPolicy: values["disk-policy"], docker: values.docker })
           if (asJson) return out(plan, () => {})
-          console.log(JSON.stringify(plan, null, 2))
+          console.log(planLines(plan).join("\n"))
           if (values["accept-plan"] !== undefined) {
             if (values["accept-plan"] !== plan.hash) throw new PaddockError("conflict", "Consent is stale. Review the revised plan above and accept its hash. Nothing was installed.", { plan })
           }
@@ -465,7 +526,10 @@ async function main(argv: string[]): Promise<void> {
     const code: ErrorCode = error instanceof PaddockError ? error.code : "runtime"
     const message = (error as Error).message
     if (asJson) console.log(JSON.stringify({ ok: false, error: { code, message, details: error instanceof PaddockError ? error.details : undefined } }))
-    else if (command === "host" && rest[0] === "add" && error instanceof PaddockError && error.details !== undefined) { console.error(`paddock: ${shown(message)}`); console.error(JSON.stringify(error.details, null, 2)) }
+    else if (command === "host" && rest[0] === "add") {
+      console.error(`paddock: ${refusal(message)}`)
+      if (error instanceof PaddockError && error.details !== undefined) for (const line of detailLines(error.details)) console.error(line)
+    }
     else if (code === "check-failed" && error instanceof PaddockError && Array.isArray(error.details)) {
       console.error(`paddock: ${shown(message.split(": ")[0])}. These checks did not hold:`)
       for (const check of error.details as CheckResult[]) console.error(`  ${MARK[check.status] ?? "?"} ${CHECKLIST.find((entry) => entry.id === check.id)?.title ?? shown(check.id)}\n      ${shown(check.detail)}`)
