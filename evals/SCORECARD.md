@@ -2,10 +2,10 @@
 
 Written by `bun evals/run.ts --write`. Do not edit by hand.
 
-- Paddock 0.3.0 at `7e182ff` plus uncommitted changes
+- Paddock 0.3.0 at `df130a8` plus uncommitted changes
 - Engine: OrbStack 29.8.2 (context orbstack), runtime `runsc-sandbox`, disk limit watched
-- Run from darwin arm64 on 2026-11-10
-- **76 of 80 hold, 0 do not, 4 could not be measured here.**
+- Run from darwin arm64 on 2026-11-11
+- **84 of 88 hold, 0 do not, 4 could not be measured here.**
 
 | | Id | Claim | Note |
 |---|---|---|---|
@@ -18,12 +18,12 @@ Written by `bun evals/run.ts --write`. Do not edit by hand.
 | ✓ | H06 | From inside a sandbox, cloud metadata and IPv6 do not answer | no control: nothing listens at these addresses on this machine |
 | ✓ | H07 | The engine object has no host folder, published port, privilege or host namespace |  |
 | ✓ | H08 | The process limit holds: a fork bomb ends at the limit, in failed forks or a killed sandbox, and the engine is unharmed | the sandbox was killed at its limit, and the list says so |
-| ✓ | H09 | The memory limit holds: a process that passes it is killed, not the engine | exit 128; the sandbox is stopped (Killed by the engine at 2026-11-10 22:06 UTC: it passed its memory limit of 1 GB.) |
+| ✓ | H09 | The memory limit holds: a process that passes it is killed, not the engine | exit 128; the sandbox is stopped (Killed by the engine at 2026-11-11 00:05 UTC: it passed its memory limit of 1 GB.) |
 | ✓ | H10 | A sandbox killed by its memory limit says so in the list |  |
-| ✓ | H11 | The disk limit is what the checklist says: a sandbox past it is stopped within a minute | watched: stopped 2 s after the write ended |
+| ✓ | H11 | The disk limit is what the checklist says: a sandbox past it is stopped within a minute | watched: stopped 19 s after the write ended |
 | ✓ | H12 | The disclosures are true: internet access and the logins found inside |  |
 | ✓ | H14 | Two sandboxes verified at the same moment are both probed, not one of them waved through |  |
-| ✓ | I01 | NET_ADMIN and SYS_ADMIN are minimal additions: removing either breaks inner Docker | SYS_ADMIN: dockerd cannot create its bridge; NET_ADMIN: image extraction cannot unshare; none: dockerd cannot create its bridge; both additions: docker run prints inner-ok. Minimal relative to Docker's unchanged default capabilities, not a proof about alternate Docker implementations. |
+| ✓ | I01 | NET_ADMIN and SYS_ADMIN are inclusion-minimal for copy-on-write pull, run, HTTPS and build | none: bridge creation denied; SYS_ADMIN: bridge creation denied; NET_ADMIN: overlayfs image extraction denied (ounts/containerd-mount2506068724: operation not permitted: failed to mount /var/lib/docker/containerd/daemon/tmpmounts/containerd-mount2506068724: mount source: "/var/lib/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/2/fs", target: "/var/lib/docker/containerd/daemon/tmpmounts/containerd-mount2506068724", fstype: bind, flags: 20480, data: "", err: operation not permitted); NET_ADMIN+SYS_ADMIN: overlayfs, pull, run, HTTPS, one-RUN build and its output passed. Relative to Docker's unchanged defaults, this image and engine; no other additions needed. |
 | ✓ | I02 | An inner container runs a small image and reaches the internet over HTTPS |  |
 | ✓ | I03 | An inner container cannot reach the engine's host, with working controls | 192.168.148.1; the host reached every listener, and the same inner probes connected with the guard removed |
 | ✓ | I04 | An inner container cannot reach the other sandbox, with working controls | 192.168.147.2; the host reached every listener, and the same inner probes connected with the guard removed |
@@ -31,14 +31,22 @@ Written by `bun evals/run.ts --write`. Do not edit by hand.
 | ✓ | I06 | The checklist includes live network attempts from an inner container |  |
 | ✓ | I07 | Inner Docker survives stop/start, a daemon enforce pass, and a daemon restart; its death stops the sandbox |  |
 | ✓ | I08 | An inner container cannot exceed the sandbox's memory limit, even with its own privileged mode | bounded 16 MiB control passed; hog exit 128; outer OOMKilled=true under 1 GiB despite an inner 2 GiB limit |
-| ✓ | I09 | Inner image pulls and writes are measured outside the sandbox, and the disk watch stops excess use | image pull +4214784 B; inner write +1394118656 B; daemon stopped the 1 GiB sandbox for disk use |
+| ✓ | I09 | Inner image pulls and writes are measured outside the sandbox, and the disk watch stops excess use | image pull +6086656 B; inner write +1377824768 B; daemon stopped the 1 GiB sandbox for disk use |
 | ✓ | I10 | A Docker sandbox with an extra capability or privileged mode is refused at start and stopped if running |  |
-| ✓ | I11 | Without --docker, no capabilities are added and even root cannot start the inner daemon | no CapAdd; dockerd fails with a permission error even as root |
+| ✓ | I11 | Without --docker, no capabilities are added and even root cannot start the inner daemon | no CapAdd (Docker mode adds exactly NET_ADMIN + SYS_ADMIN); Paddock's dockerd start command fails with a permission error even as root |
 | ✓ | I12 | The docker default is a strict boolean and cannot smuggle engine flags |  |
 | ✓ | I13 | Removing a Docker sandbox removes its container, network, inner images and private volume |  |
 | ✓ | I14 | An engine volume backed by a host folder is refused before a Docker sandbox starts | the engine reports Type=volume; volume inspect exposes device=/tmp,o=bind; start refuses it without running the container |
+| ✓ | I15 | Copy-on-write images share layer data across two pulled references and two running containers | overlayfs; engine-side du: before 364544 B, first pull 6451200 B, second pull/tag 6451200 B, two containers 6545408 B; image size 6017928 B; each incremental step < half the first pull's allocated data |
+| ✓ | I16 | A Docker build executes one RUN layer and its image runs | BuildKit executed RUN echo build-ok > /built; the resulting image returned build-ok |
+| ✓ | I17 | Docker compose up runs a one-service file with HTTPS | Docker Compose version v5.6.1; one service on compose's own bridge reached HTTPS and exited successfully |
+| ✓ | I18 | Inner containers inherit sandbox DNS; the engine resolver failure and public fallback are disclosed | engine assigned 127.0.0.11: runc resolved, gVisor refused; engine upstream 0.250.250.200 timed out behind the guard; outer and inner use nameserver 1.1.1.1; nameserver 8.8.8.8 and resolve successfully; an inner user-defined network resolves through the inner daemon's 127.0.0.11, which forwards to them |
+| ✓ | I19 | Verify removes a newly pulled probe image and preserves a pre-existing probe image and user tags | absent before -> absent after; present before -> same image ID after; shared alpine:latest user tag preserved; all network probes passed in both cases |
+| ✓ | I20 | Verify on a nearly full sandbox reports unknown with a disk reason and leaves no probe image | 1047937024 B used of 1 GiB; all four network results unknown with the 64 MiB headroom reason; no image pulled, no crash |
+| ✓ | I21 | Repeated start keeps one NAT rule, segmentation at one, and an inner HTTPS workload running | three starts: identical NAT rules (one masquerade), gso_max_segs=1, same inner StartedAt, HTTPS successes before and after without failure |
+| ✓ | I22 | Host daemon logs rotate within two 10 MiB files; a replacement with a larger cap fails the config check | max-size=1g control (writable layer unchanged): host log 37703659 -> 75405467 B after two 8 MiB writes; Paddock's sandbox: 15510046, 10918292 B after two 16 MiB writes; a 1g cap refused at start. Control's merged options: {"max-file":"5","max-size":"1g"} |
 | ✓ | T01 | The evals can see an open path: with the guard removed, the same attempts connect |  |
-| ✓ | T02 | A removed guard is noticed without anyone asking: the daemon stops the sandbox within a minute | stopped after 5 s |
+| ✓ | T02 | A removed guard is noticed without anyone asking: the daemon stops the sandbox within a minute | stopped after 18 s |
 | ✓ | T03 | Starting a sandbox puts the guard back, and the paths are closed again |  |
 | ✓ | T04 | A rule slipped in front of the guard's drops fails verify, with exit code 6, and stops the sandbox |  |
 | ✓ | T05 | A sandbox attached to a second network behind Paddock's back is stopped |  |

@@ -29,7 +29,9 @@ Works, and was run on OrbStack on an Apple Silicon Mac:
 
 - The gVisor provider: any local Docker engine with a gVisor runtime. Create, start, stop, remove, exec, shell.
 - Optional inner Docker, tested on OrbStack. `paddock create demo --docker` starts a private daemon; its containers
-  reach HTTPS through the sandbox's guarded network. It adds exactly `NET_ADMIN` and `SYS_ADMIN` inside gVisor.
+  reach HTTPS through the sandbox's guarded network. It uses copy-on-write `overlayfs` storage (two containers from one
+  image share its layers) and adds exactly `NET_ADMIN` and `SYS_ADMIN` inside gVisor, each shown necessary for pull,
+  run, HTTPS and build. A one-RUN `docker build` and a one-service `docker compose up` were run.
 - The checklist, with live network probes that have controls, and a stop when a blocking check fails. The probes
   cover the host, other sandboxes, and stand-in addresses in each private (LAN) range and the tailnet range.
 - The firewall guard is compared rule for rule with the one Paddock ships, so an added or removed rule shows as changed.
@@ -73,6 +75,12 @@ bin/paddock remove builder --confirm builder
 `docker` defaults to `false`. Config defaults can set `"docker": true` as a JSON boolean. The engine needs gVisor
 registered with `--net-raw` and `--overlay2=none`; Paddock reports whether it has the `docker` capability and refuses
 the option when it does not. Inner images, containers and volumes count toward the same watched disk limit.
+Inner containers use the sandbox's DNS. Under gVisor the engine's resolver refuses queries and its upstream is in a
+range the guard drops, so Paddock gives the sandbox a public fallback, **1.1.1.1 and 8.8.8.8**, disclosed by the Docker
+check. Verify removes its probe
+image if it was newly pulled and preserves it if already present. With less than 64 MiB of disk headroom it reports
+unknown network evidence with the disk reason. Dockerd's logs are stored on the engine's host, outside the watched
+limit, so they rotate at 10 MiB with two files, which the checklist verifies.
 
 Stopping the daemon (`paddock daemon stop`) stops the sandboxes whose disk limit it watches, because nothing would
 enforce the limit afterwards. Their contents stay; `paddock start` brings them back.

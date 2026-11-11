@@ -37,7 +37,13 @@ Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing depende
 - To run containers inside, create with `--docker` and the default image. Then use
   `paddock exec NAME -- docker run --rm alpine:latest echo inner-ok`. This private daemon adds exactly `NET_ADMIN`
   and `SYS_ADMIN` inside gVisor. Its containers use the sandbox's guarded network and share its outer limits.
-  Images, containers and inner volumes count toward the watched disk limit and are deleted with the sandbox.
+  It uses copy-on-write `overlayfs` storage; `docker build` and `docker compose up` work. Images, containers and inner
+  volumes count toward the watched disk limit and are deleted with the sandbox. Inner containers use the sandbox's
+  public DNS fallback, **1.1.1.1 and 8.8.8.8**; the engine's own resolver refuses gVisor queries. The Docker check
+  discloses this choice.
+  Verify removes its probe image only if newly pulled; a pre-existing image stays. Less than 64 MiB of disk
+  headroom yields unknown network checks with a disk reason. Free space and verify again. Host daemon logs are
+  outside the watched limit and rotate at 10 MiB with two files, checked by the core.
   Dockerd is the sandbox's main process. If it dies the sandbox stops; `paddock start NAME` starts it again.
   `paddock doctor` reports whether the engine supports inner Docker. An engine lacking the capability refuses it.
 

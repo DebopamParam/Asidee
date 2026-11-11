@@ -23,12 +23,12 @@ out as "could not be checked", never as a pass.
 | Check | Blocking | When | How the gVisor provider checks it |
 |---|---|---|---|
 | Isolated kernel | yes | after start | The runtime is gVisor, and the kernel inside identifies as gVisor. |
-| Inner Docker is available when requested | yes | after start | Its Unix socket answers and its data root is /var/lib/docker. Not requested is a disclosure. |
+| Inner Docker is available when requested | yes | after start | Its Unix socket answers, its data root is /var/lib/docker, and its driver is the copy-on-write `overlayfs`. The detail discloses the public DNS fallback. Not requested is a disclosure. |
 | No privileged mode, host namespaces, undeclared capabilities or devices | yes | before start | Engine configuration. With Docker, exactly NET_ADMIN and SYS_ADMIN added inside gVisor; otherwise no additions. |
 | No host folders | yes | before start | Engine configuration; with Docker, volume driver options and ownership too. |
 | Own network, guard loaded | yes | before start | Engine configuration, and the loaded firewall rules compared rule for rule with the shipped ones. |
 | No open ports | yes | before start | Engine configuration. |
-| Memory, process, CPU limits | yes | before start | Engine configuration. |
+| Memory, process, CPU limits | yes | before start | Engine configuration, including json-file daemon log rotation (10 MiB, two files) for Docker sandboxes. |
 | Disk limit | no | before start | The engine's capability: hard, watched or none. Watched needs a runtime with `--overlay2=none`. |
 | Cannot reach the host | yes | verify | Live probe with controls. |
 | Cannot reach other sandboxes | yes | verify | Live probe with controls. |
@@ -70,24 +70,50 @@ The helper runs from an image built from `core/providers/helper.Dockerfile` (Alp
 sandbox's image, so a tampered image cannot fake a result or run as root on the engine's host.
 
 With `docker` enabled, verify also runs a container from the helper's pinned Alpine base inside the sandbox's Docker
-daemon. The network checks include its connection attempts. An internet connection controls whether the inner
-container has a working outward path; a failed control makes its isolation evidence unknown. The I evals also remove
-the guard and show that the same inner probes then reach the host, another sandbox, and all four private-range stand-ins.
+daemon. The network checks include its connection attempts. Verify first inspects the inner probe image and removes
+it afterwards only if it was absent before, so a pre-existing copy and the user's own tags stay (I19, both cases).
+A failed removal makes the network results unknown. Before pulling anything, verify needs 64 MiB of headroom below
+the watched disk limit; with less, or with no disk measurement, the network checks are unknown with that reason and
+nothing is pulled (I20, at 24 MiB of headroom). The reserve is checked, not held. An internet connection controls
+whether the inner container has a working outward path; a failed control makes its isolation evidence unknown. The I
+evals also remove the guard and show that the same inner probes then reach the host, another sandbox, and all four
+private-range stand-ins.
 
 ### Inner Docker
 
-`docker` adds `NET_ADMIN` and `SYS_ADMIN` to Docker's default capabilities. These privileges apply inside gVisor,
-whose kernel remains the boundary. I01 runs all three smaller subsets on the live engine. Without `NET_ADMIN`, dockerd
-cannot create its bridge. With only `NET_ADMIN`, it starts but cannot extract an image (`unshare: operation not
-permitted`). Both additions run an Alpine container and reach HTTPS. This establishes minimal additions for this
-daemon and workload on this engine, not a universal minimum for every Docker implementation.
+`docker` adds exactly `NET_ADMIN` and `SYS_ADMIN` to Docker's default capabilities. These privileges apply inside
+gVisor, whose kernel remains the boundary. I01 runs all four subsets on the live engine against the workload: a
+copy-on-write daemon, image pull, container run, HTTPS, and a build with one RUN layer. Without `NET_ADMIN`, bridge
+creation is denied. With only `NET_ADMIN`, overlayfs image extraction cannot mount its unpack directory. Both additions
+pass the entire workload; no further capabilities were needed. This is an inclusion-minimal set for the measured
+image and engine relative to Docker's unchanged defaults, not a minimum for every Docker implementation.
 
-The provider starts dockerd as the sandbox's main process, as root, on each start. It uses a fixed configuration,
-`--storage-driver=vfs`, `--iptables=false` and `--ip6tables=false`. It clears stale PID files, waits for Docker's
-socket, and sets `iptables-legacy` masquerading out of `eth0`. The runtime must have `--net-raw` and `--overlay2=none`.
-The host helper sets `gso_max_segs 1` on this sandbox's veth so forwarded traffic receives separate packets.
-An exited dockerd stops the sandbox; there is no automatic restart. `paddock start` starts it again after the guard
-and configuration checks. The runtime check repeats the socket probe on every enforce pass.
+The provider starts dockerd as the sandbox's main process, as root, on each start. Its fixed configuration enables the
+containerd snapshotter and names `--storage-driver=overlayfs`, so dockerd fails to start rather than fall back to a
+driver that copies layers; it adds `--iptables=false` and `--ip6tables=false`. The runtime check rejects any driver but
+overlayfs. I01 runs this same start command for every capability subset. I15 measures allocated bytes from the engine
+side: pulling BusyBox (a 6.0 MB image) added 6.1 MB, a second pull by digest and a second tag added nothing, and two
+running containers from it added 94 KB. Layers are shared, not copied.
+
+It clears stale PID files and sets the sandbox's DNS before starting dockerd, so inner containers inherit the same
+resolvers rather than having a separate daemon DNS override. On this engine a user-defined network supplies
+`127.0.0.11`: a runc control resolves through it, but gVisor refuses the connection. The engine's upstream,
+`0.250.250.200`, is in the guard's blocked 0/8 range. Paddock therefore writes a **public DNS fallback, 1.1.1.1 and
+8.8.8.8**, for the sandbox, which the inner daemon inherits. This is a product choice of where DNS queries go; the
+`docker` check discloses it. Private DNS and split DNS were not measured.
+
+On a network the inner daemon creates (compose makes one per project), inner containers ask dockerd's own resolver at
+`127.0.0.11`, which forwards to the sandbox's servers. Dockerd sets up that resolver with `iptables` even with
+`--iptables=false`, and the image's `iptables` is the nft variant, which gVisor does not support ("Failed to initialize
+nft"); names then failed to resolve. Dockerd therefore runs with a `PATH` in which `iptables` and `ip6tables` are the
+legacy ones. I18 resolves on such a network and I17 runs `docker compose up` of a service that reaches HTTPS.
+
+Start waits for Docker's socket and sets `iptables-legacy` masquerading out of `eth0`. The runtime needs `--net-raw`
+and `--overlay2=none`. The host helper sets `gso_max_segs 1` on this sandbox's veth so forwarded traffic receives
+separate packets. The NAT step checks for the rule before adding it, and the segmentation step sets the same value
+without cycling the link. An exited dockerd stops the sandbox; there is no automatic restart. `paddock start` starts
+it again after the guard and configuration checks. The runtime check repeats the socket and driver probe on every
+enforce pass.
 
 `/var/lib/docker` uses a volume unique to the sandbox's random id, with ownership labels. It is not a host folder.
 For Docker sandboxes, the mounts check also inspects every mounted engine volume. Only the local driver without
@@ -96,7 +122,14 @@ The Docker data volume must have the sandbox's ownership labels. An unreadable v
 replaces the data volume with one backed by the engine host's `/tmp` and shows that start refuses it without running it.
 The disk measurement adds the writable layer and engine-side `du` of volumes mounted read-only in the trusted
 helper. It never asks the sandbox to report its own usage. Remove deletes the Docker volume even if the sandbox's
-container was already deleted. The `vfs` driver copies layers and can use more space than a host Docker engine.
+container was already deleted.
+
+Dockerd's output is the container's, which the engine stores on its host, outside the watched limit. I22's control, a
+container whose cap is 1 GB, grew its host log from 38 MB to 75 MB with two 8 MiB writes while its own layer stayed the
+same (the engine stores each short line as a JSON record several times its size). Docker sandboxes therefore set
+`json-file` logging with `max-size=10m` and `max-file=2`, and the limits check fails on any other setting; after two
+16 MiB writes the sandbox's host log was 15 MB, then 11 MB. This engine's own default is already bounded (20 MB, five
+files); Paddock sets its own cap so the bound does not depend on the engine.
 
 ## Where the guarantee ends
 

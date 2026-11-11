@@ -129,6 +129,7 @@ test("Docker hardening accepts exactly its declared additions inside gVisor", ()
   }), enabled, "intact", "pdk123", [{ Name: dockerVolume(enabled), Driver: "local", Options: null, Labels: { "dev.paddock.id": enabled.id, "dev.paddock.name": enabled.name } }])
   const hardening = (caps: string[], change?: (value: any) => void) => checked(caps, change).find((entry) => entry.id === "hardening")!
   expect(hardening([...DOCKER_CAPABILITIES])).toMatchObject({ status: "pass", evidence: "inspected" })
+  expect(DOCKER_CAPABILITIES).toEqual(["NET_ADMIN", "SYS_ADMIN"])
   expect(hardening(["CAP_SYS_ADMIN", "cap_net_admin"]).status).toBe("pass")
   for (const word of [...DOCKER_CAPABILITIES, "inside gVisor"]) expect(hardening([...DOCKER_CAPABILITIES]).detail).toContain(word)
   for (const caps of [[], ["NET_ADMIN"], ["SYS_ADMIN"], ["ALL"], [...DOCKER_CAPABILITIES, "SYS_PTRACE"]]) expect(hardening(caps).status).toBe("fail")
@@ -140,6 +141,20 @@ test("Docker hardening accepts exactly its declared additions inside gVisor", ()
     (value: any) => { value.HostConfig.Runtime = "runc" },
   ]) expect(hardening([...DOCKER_CAPABILITIES], change).status).toBe("fail")
   expect(checked([...DOCKER_CAPABILITIES], (value) => { value.Mounts[0].Name = "someone-elses-volume" }).find((entry) => entry.id === "mounts")!.status).toBe("fail")
+})
+
+test("Docker daemon stdout must have bounded host logging", () => {
+  const enabled = { ...manifest, spec: { ...manifest.spec, docker: true } }
+  const limits = (LogConfig?: { Type: string; Config: Record<string, string> | null }) => configChecks(inspect((value) => {
+    value.HostConfig.LogConfig = LogConfig
+  }), enabled, "intact", "pdk123").find((entry) => entry.id === "limits")!
+  expect(limits({ Type: "json-file", Config: { "max-size": "10m", "max-file": "2" } }).status).toBe("pass")
+  const invalid: Parameters<typeof limits>[0][] = [undefined, { Type: "json-file", Config: {} }, { Type: "json-file", Config: { "max-size": "10m" } },
+    { Type: "json-file", Config: { "max-size": "10m", "max-file": "200" } }, { Type: "local", Config: { "max-size": "10m", "max-file": "2" } }]
+  for (const config of invalid) {
+    expect(limits(config)).toMatchObject({ status: "fail" })
+    expect(limits(config).detail).toContain("bounded daemon logs")
+  }
 })
 
 test("Docker volumes cannot disguise host folders or another sandbox's data", () => {

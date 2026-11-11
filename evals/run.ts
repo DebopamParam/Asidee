@@ -14,7 +14,7 @@ import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } fro
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { CHECKLIST } from "../core/checks"
-import { HELPER_IMAGE } from "../core/providers/gvisor"
+import { DOCKER_CAPABILITIES, DOCKER_DRIVER, DOCKER_START, HELPER_IMAGE } from "../core/providers/gvisor"
 import HELPER_DOCKERFILE from "../core/providers/helper.Dockerfile" with { type: "text" }
 
 const ROOT = join(dirname(Bun.main), "..")
@@ -331,7 +331,7 @@ ev("H14", "Two sandboxes verified at the same moment are both probed, not one of
 
 // I: Docker inside gVisor. These commands go straight to the engine, outside Paddock.
 const innerDocker = (name: string, argv: string[], options: Parameters<typeof sh>[1] = {}) =>
-  docker(["exec", "-u", "0", containerOf(name), "docker", "--host", "unix:///var/run/docker.sock", ...argv], options)
+  docker(["exec", ...(options.stdin === undefined ? [] : ["-i"]), "-u", "0", containerOf(name), "docker", "--host", "unix:///var/run/docker.sock", ...argv], options)
 const innerRun = (name: string, argv: string[], options: Parameters<typeof sh>[1] = {}) => innerDocker(name, ["run", "--rm", "alpine:latest", ...argv], options)
 const innerReaches = async (name: string, ip: string, port: string) => {
   const attempt = await innerRun(name, ["nc", "-w", "2", ip, port], { timeoutMs: 20_000 })
@@ -352,38 +352,51 @@ const volumeBytes = async (volume: string) => {
   return bytes
 }
 
-ev("I01", "NET_ADMIN and SYS_ADMIN are minimal additions: removing either breaks inner Docker", async () => {
-  const failures: string[] = []
-  for (const caps of [["SYS_ADMIN"], ["NET_ADMIN"], []]) {
+ev("I01", "NET_ADMIN and SYS_ADMIN are inclusion-minimal for copy-on-write pull, run, HTTPS and build", async () => {
+  // Each subset runs Paddock's own start command, so the measured daemon is the one sandboxes get.
+  await ensureInner()
+  expect(JSON.stringify(DOCKER_CAPABILITIES) === JSON.stringify(["NET_ADMIN", "SYS_ADMIN"]), "update the measured capability set")
+  const evidence: string[] = []
+  for (const caps of [[], ["SYS_ADMIN"], ["NET_ADMIN"], [...DOCKER_CAPABILITIES]]) {
     const name = `${PREFIX}-caps`
+    const exec = (argv: string[], options: Parameters<typeof sh>[1] = {}) => docker(["exec", "-i", "-u", "0", name, ...argv], options)
     try {
-      const created = await docker(["run", "-d", "--name", name, "--runtime", engine!.data.runtime, "--memory", "1g", "--memory-swap", "1g", "--cpus", "1", "--pids-limit", "4096",
-        ...caps.flatMap((cap) => ["--cap-add", cap]), "--mount", "type=volume,dst=/var/lib/docker,volume-nocopy", "-u", "0", "--entrypoint", "sh", DOCKER_IMAGE, "-c", "exec dockerd --iptables=false --ip6tables=false --storage-driver=vfs"])
+      const created = await docker(["run", "-d", "--name", name, "--runtime", engine!.data.runtime, "--network", `paddock-net-${INNER}`, "--memory", "1g", "--memory-swap", "1g", "--cpus", "1", "--pids-limit", "4096",
+        "--log-driver", "json-file", "--log-opt", "max-size=10m", "--log-opt", "max-file=2", ...caps.flatMap((cap) => ["--cap-add", cap]), "--mount", "type=volume,dst=/var/lib/docker,volume-nocopy", "-u", "0", "--entrypoint", "sh", DOCKER_IMAGE, "-c", DOCKER_START])
       expect(created.code === 0, `the capability experiment could not start: ${created.err}`)
       let ready = false
-      for (let attempt = 0; attempt < 30; attempt++) {
-        if ((await docker(["exec", name, "docker", "info"])).code === 0) { ready = true; break }
+      for (let attempt = 0; attempt < 40; attempt++) {
+        if ((await exec(["docker", "info"])).code === 0) { ready = true; break }
         if ((await docker(["inspect", "--format", "{{.State.Running}}", name])).out.trim() !== "true") break
         await Bun.sleep(500)
       }
       const log = await docker(["logs", name])
       if (!caps.includes("NET_ADMIN")) {
-        expect(!ready && /operation not permitted|permission denied/i.test(log.out + log.err), `missing NET_ADMIN did not produce a permission failure: ${log.out}${log.err}`)
-        failures.push(`${caps.join("+") || "none"}: dockerd cannot create its bridge`)
-      } else {
-        expect(ready, `NET_ADMIN-only daemon failed for an unrelated reason: ${log.out}${log.err}`)
-        const run = await docker(["exec", name, "docker", "run", "--rm", "alpine:latest", "echo", "inner-ok"])
-        expect(run.code !== 0 && /unshare: operation not permitted/i.test(run.err), `missing SYS_ADMIN failed differently: ${run.out}${run.err}`)
-        failures.push("NET_ADMIN: image extraction cannot unshare")
+        expect(!ready && /operation not permitted|permission denied/i.test(log.out + log.err) && /bridge|network controller/.test(log.out + log.err), `missing NET_ADMIN did not produce a bridge permission failure: ${log.out}${log.err}`)
+        evidence.push(`${caps.join("+") || "none"}: bridge creation denied`)
+        continue
       }
+      expect(ready, `dockerd failed for an unrelated reason: ${log.out}${log.err}`)
+      const driver = (await exec(["docker", "info", "--format", "{{.Driver}}"])).out.trim()
+      expect(driver === DOCKER_DRIVER, `not copy-on-write: ${driver}`)
+      const pulled = await exec(["docker", "pull", "alpine:latest"])
+      if (!caps.includes("SYS_ADMIN")) {
+        expect(pulled.code !== 0 && /operation not permitted|permission denied/i.test(pulled.out + pulled.err), `missing SYS_ADMIN did not deny extraction: ${pulled.out}${pulled.err}`)
+        evidence.push(`NET_ADMIN: ${driver} image extraction denied (${pulled.err.trim().slice(-400)})`)
+        continue
+      }
+      expect(pulled.code === 0, `full set pull failed: ${pulled.err}`)
+      expect((await exec(["sh", "-ec", "iptables-legacy -t nat -A POSTROUTING -o eth0 -j MASQUERADE"])).code === 0, "could not set inner NAT")
+      const bridge = (await docker(["network", "inspect", "--format", '{{index .Options "com.docker.network.bridge.name"}}', `paddock-net-${INNER}`])).out.trim()
+      expect((await asRoot(`for port in /sys/class/net/${bridge}/brif/*; do ip link set "\${port##*/}" gso_max_segs 1; done`)).code === 0, "could not set segmentation")
+      const online = await exec(["docker", "run", "--rm", "alpine:latest", "wget", "-T", "20", "-qO-", "https://example.com"])
+      expect(online.code === 0 && online.out.includes("Example Domain"), `full set HTTPS failed: ${online.err}`)
+      const built = await exec(["docker", "build", "-t", "cap-built", "-"], { stdin: "FROM alpine:latest\nRUN echo build-ok > /built\n" })
+      expect(built.code === 0 && (await exec(["docker", "run", "--rm", "cap-built", "cat", "/built"])).out.trim() === "build-ok", `full set RUN build failed: ${built.err}`)
+      evidence.push(`NET_ADMIN+SYS_ADMIN: ${driver}, pull, run, HTTPS, one-RUN build and its output passed`)
     } finally { await docker(["rm", "-f", "-v", name]) }
   }
-  await ensureInner()
-  const output = await innerRun(INNER, ["echo", "inner-ok"])
-  expect(output.code === 0 && output.out.trim() === "inner-ok", `both additions failed: ${output.out}${output.err}`)
-  const caps = (await inspect(INNER)).HostConfig.CapAdd.map((cap: string) => cap.replace(/^CAP_/, "")).sort()
-  expect(JSON.stringify(caps) === JSON.stringify(["NET_ADMIN", "SYS_ADMIN"]), `actual additions: ${caps}`)
-  return `${failures.join("; ")}; both additions: docker run prints inner-ok. Minimal relative to Docker's unchanged default capabilities, not a proof about alternate Docker implementations.`
+  return `${evidence.join("; ")}. Relative to Docker's unchanged defaults, this image and engine; no other additions needed.`
 })
 
 ev("I02", "An inner container runs a small image and reaches the internet over HTTPS", async () => {
@@ -464,6 +477,8 @@ ev("I08", "An inner container cannot exceed the sandbox's memory limit, even wit
     expect(control.code === 0 && control.out.trim() === "16777216", "the bounded memory control did not run")
     const hog = await innerDocker(name, ["run", "--rm", "--privileged", "--memory", "2g", "alpine:latest", "tail", "/dev/zero"], { timeoutMs: 120_000 })
     expect(hog.code !== 0 && hog.code !== 124, `the memory hog ended ${hog.code}: ${hog.err}`)
+    // The inner client can return before the engine records the sandbox's death.
+    await until(async () => !await running(name), 15)
     const after = await inspect(name)
     expect(!after.State.Running && after.State.OOMKilled, `the outer memory limit did not kill the sandbox: ${JSON.stringify(after.State)}`)
     expect((await docker(["info", "--format", "{{.ServerVersion}}"])).code === 0, "the engine was harmed")
@@ -500,7 +515,7 @@ ev("I10", "A Docker sandbox with an extra capability or privileged mode is refus
     try {
       const made = await docker(["create", "--name", containerOf(name), "--label", `dev.paddock.name=${name}`, "--label", `dev.paddock.id=${original.Config.Labels["dev.paddock.id"]}`,
         "--runtime", engine!.data.runtime, "--network", `paddock-net-${name}`, "--memory", "1g", "--memory-swap", "1g", "--cpus", "1", "--pids-limit", "4096",
-        "--cap-add", "NET_ADMIN", "--cap-add", "SYS_ADMIN", ...tamper, "--mount", `type=volume,src=${volume},dst=/var/lib/docker`, "--entrypoint", "sleep", DOCKER_IMAGE, "infinity"])
+        ...DOCKER_CAPABILITIES.flatMap((cap) => ["--cap-add", cap]), "--log-driver", "json-file", "--log-opt", "max-size=10m", "--log-opt", "max-file=2", ...tamper, "--mount", `type=volume,src=${volume},dst=/var/lib/docker`, "--entrypoint", "sleep", DOCKER_IMAGE, "infinity"])
       expect(made.code === 0, `the tamper container could not be made: ${made.err}`)
       const refused = await pdkJson(["start", name])
       expect(refused.code === 6 && /capabilities|privileged/.test(refused.reply.error?.message ?? "") && !await running(name), `start failed to catch tamper: ${refused.out}${refused.err}`)
@@ -517,10 +532,10 @@ ev("I11", "Without --docker, no capabilities are added and even root cannot star
   try {
     const data = await inspect(name)
     expect(!data.HostConfig.Privileged && !(data.HostConfig.CapAdd ?? []).length, "a default sandbox gained extra capabilities")
-    const daemon = await docker(["exec", "-u", "0", containerOf(name), "dockerd", "--iptables=false", "--ip6tables=false", "--storage-driver=vfs"], { timeoutMs: 20_000 })
+    const daemon = await docker(["exec", "-u", "0", containerOf(name), "sh", "-c", DOCKER_START], { timeoutMs: 20_000 })
     expect(daemon.code !== 0 && daemon.code !== 124 && /operation not permitted|permission denied/i.test(daemon.out + daemon.err), `dockerd was not denied: ${daemon.code} ${daemon.out}${daemon.err}`)
     expect((await innerDocker(name, ["info"])).code !== 0, "an inner daemon answered without the option")
-    return "no CapAdd; dockerd fails with a permission error even as root"
+    return `no CapAdd (Docker mode adds exactly ${DOCKER_CAPABILITIES.join(" + ")}); Paddock's dockerd start command fails with a permission error even as root`
   } finally { await pdk(["remove", name, "--confirm", name]) }
 })
 
@@ -568,13 +583,223 @@ ev("I14", "An engine volume backed by a host folder is refused before a Docker s
     const made = await docker(["volume", "create", "--label", `dev.paddock.id=${data.Config.Labels["dev.paddock.id"]}`, "--label", `dev.paddock.name=${name}`, "--opt", "type=none", "--opt", "o=bind", "--opt", "device=/tmp", volume])
     expect(made.code === 0, `could not create the bind-backed control volume: ${made.err}`)
     const created = await docker(["create", "--name", containerOf(name), "--label", `dev.paddock.id=${data.Config.Labels["dev.paddock.id"]}`, "--label", `dev.paddock.name=${name}`,
-      "--runtime", engine!.data.runtime, "--network", `paddock-net-${name}`, "--memory", "1g", "--memory-swap", "1g", "--cpus", "1", "--pids-limit", "4096", "--cap-add", "NET_ADMIN", "--cap-add", "SYS_ADMIN",
+      "--runtime", engine!.data.runtime, "--network", `paddock-net-${name}`, "--memory", "1g", "--memory-swap", "1g", "--cpus", "1", "--pids-limit", "4096", ...DOCKER_CAPABILITIES.flatMap((cap) => ["--cap-add", cap]), "--log-driver", "json-file", "--log-opt", "max-size=10m", "--log-opt", "max-file=2",
       "--mount", `type=volume,src=${volume},dst=/var/lib/docker,volume-nocopy`, "--entrypoint", "sleep", DOCKER_IMAGE, "infinity"])
     expect(created.code === 0 && (await inspect(name)).Mounts[0].Type === "volume", "the control does not look like an engine volume")
     const refused = await pdkJson(["start", name])
     expect(refused.code === 6 && /host-folder binds/.test(refused.reply.error?.message ?? "") && !await running(name), `the disguised host folder was not refused: ${refused.out}${refused.err}`)
     return "the engine reports Type=volume; volume inspect exposes device=/tmp,o=bind; start refuses it without running the container"
   } finally { await pdk(["remove", name, "--confirm", name]) }
+})
+
+ev("I15", "Copy-on-write images share layer data across two pulled references and two running containers", async () => {
+  const name = `${PREFIX}-icow`
+  await ensure(name, { image: DOCKER_IMAGE, docker: true, diskGb: 2 })
+  try {
+    const driver = (await innerDocker(name, ["info", "--format", "{{.Driver}}"])).out.trim()
+    expect(driver === DOCKER_DRIVER, `not the copy-on-write driver: ${driver}`)
+    const volume = await dockerVolumeName(name)
+    const before = await volumeBytes(volume)
+    const pull = await innerDocker(name, ["pull", "busybox:stable"])
+    expect(pull.code === 0, `pull failed: ${pull.err}`)
+    const reference = (await innerDocker(name, ["image", "inspect", "--format", "{{index .RepoDigests 0}}", "busybox:stable"])).out.trim()
+    const size = Number((await innerDocker(name, ["image", "inspect", "--format", "{{.Size}}", "busybox:stable"])).out.trim())
+    const pulled = await volumeBytes(volume)
+    expect(size > 1024 ** 2 && pulled > before + 1024 ** 2, "the control image did not add a measurable layer")
+    expect((await innerDocker(name, ["pull", reference])).code === 0, "second pull of the same image failed")
+    expect((await innerDocker(name, ["tag", reference, "cow-second:latest"])).code === 0, "second tag failed")
+    const twice = await volumeBytes(volume)
+    for (const [index, image] of ["busybox:stable", "cow-second:latest"].entries()) {
+      const run = await innerDocker(name, ["run", "-d", "--name", `cow-${index}`, image, "sleep", "600"])
+      expect(run.code === 0, `container failed: ${run.err}`)
+    }
+    const runningBytes = await volumeBytes(volume)
+    const budget = (pulled - before) / 2
+    expect(twice - pulled < budget && runningBytes - twice < budget, `layer duplication: image ${size} B, first pull ${pulled - before} B, second reference ${twice - pulled} B, two containers ${runningBytes - twice} B`)
+    return `${driver}; engine-side du: before ${before} B, first pull ${pulled} B, second pull/tag ${twice} B, two containers ${runningBytes} B; image size ${size} B; each incremental step < half the first pull's allocated data`
+  } finally { await pdk(["remove", name, "--confirm", name]) }
+})
+
+ev("I16", "A Docker build executes one RUN layer and its image runs", async () => {
+  await ensureInner()
+  const built = await innerDocker(INNER, ["build", "-t", "eval-built", "-"], { stdin: "FROM alpine:latest\nRUN echo build-ok > /built\n" })
+  expect(built.code === 0, `build failed: ${built.out}${built.err}`)
+  const run = await innerDocker(INNER, ["run", "--rm", "eval-built", "cat", "/built"])
+  expect(run.code === 0 && run.out.trim() === "build-ok", `built image failed: ${run.out}${run.err}`)
+  return "BuildKit executed RUN echo build-ok > /built; the resulting image returned build-ok"
+})
+
+ev("I17", "Docker compose up runs a one-service file with HTTPS", async () => {
+  await ensureInner()
+  const version = await innerDocker(INNER, ["compose", "version"])
+  if (version.code !== 0) skip(`compose is not installed in ${DOCKER_IMAGE}; not measured: ${version.err.trim()}`)
+  const file = "services:\n  web:\n    image: alpine:latest\n    command: [sh, -ec, 'wget -T 20 -qO- https://example.com; echo compose-ok']\n"
+  try {
+    const up = await innerDocker(INNER, ["compose", "-p", "eval-compose", "-f", "-", "up", "--abort-on-container-exit", "--exit-code-from", "web"], { stdin: file })
+    expect(up.code === 0 && up.out.includes("compose-ok") && up.out.includes("Example Domain"), `compose up failed: ${up.out}${up.err}`)
+    return `${version.out.trim()}; one service on compose's own bridge reached HTTPS and exited successfully`
+  } finally {
+    const down = await innerDocker(INNER, ["compose", "-p", "eval-compose", "-f", "-", "down", "--volumes", "--remove-orphans"], { stdin: file })
+    expect(down.code === 0, `compose cleanup failed: ${down.err}`)
+  }
+})
+
+ev("I18", "Inner containers inherit sandbox DNS; the engine resolver failure and public fallback are disclosed", async () => {
+  await ensureInner()
+  const names = [`${PREFIX}-dns-control`, `${PREFIX}-dns-gvisor`]
+  try {
+    for (const [index, runtime] of ["runc", engine!.data.runtime].entries()) {
+      const made = await docker(["run", "-d", "--name", names[index]!, "--network", `paddock-net-${INNER}`, "--runtime", runtime, "--entrypoint", "sleep", DOCKER_IMAGE, "120"])
+      expect(made.code === 0, `DNS control did not start: ${made.err}`)
+    }
+    const assigned = await docker(["exec", names[1]!, "cat", "/etc/resolv.conf"])
+    expect(assigned.out.includes("nameserver 127.0.0.11"), `engine resolver changed: ${assigned.out}`)
+    const control = await docker(["exec", names[0]!, "nslookup", "-timeout=1", "-retry=1", "example.com", "127.0.0.11"])
+    const denied = await docker(["exec", names[1]!, "nslookup", "-timeout=1", "-retry=1", "example.com", "127.0.0.11"])
+    expect(control.code === 0 && control.out.includes("example.com"), `runc resolver control failed: ${control.out}${control.err}`)
+    expect(denied.code !== 0 && /refused/.test(denied.out + denied.err), `gVisor resolver failure changed: ${denied.out}${denied.err}`)
+    const upstream = assigned.out.match(/ExtServers: \[host\(([\d.]+)\)/)?.[1]
+    let upstreamNote = "upstream address not exposed by the engine"
+    if (upstream) {
+      const blocked = await docker(["exec", names[1]!, "nslookup", "-timeout=1", "-retry=1", "example.com", upstream])
+      expect(blocked.code !== 0 && /timed out|no servers could be reached/.test(blocked.out + blocked.err), `upstream unexpectedly reachable: ${blocked.out}${blocked.err}`)
+      upstreamNote = `engine upstream ${upstream} timed out behind the guard`
+    }
+    const outer = await docker(["exec", containerOf(INNER), "cat", "/etc/resolv.conf"])
+    const inner = await innerRun(INNER, ["cat", "/etc/resolv.conf"])
+    const servers = (text: string) => text.split("\n").filter((line) => line.startsWith("nameserver ")).join("; ")
+    expect(inner.code === 0 && servers(outer.out) === servers(inner.out), `inner resolver differs: ${outer.out} vs ${inner.out}`)
+    expect((await innerRun(INNER, ["nslookup", "example.com"])).code === 0, "inherited DNS did not resolve")
+    // On a network of the inner daemon's own (as compose makes), its resolver at 127.0.0.11 forwards to the same servers.
+    expect((await innerDocker(INNER, ["network", "create", "eval-dns"])).code === 0, "could not create an inner network")
+    try {
+      const own = await innerDocker(INNER, ["run", "--rm", "--network", "eval-dns", "alpine:latest", "sh", "-c", "grep -E '^nameserver|ExtServers' /etc/resolv.conf; nslookup example.com"])
+      expect(own.code === 0 && own.out.includes("nameserver 127.0.0.11") && own.out.includes("host(1.1.1.1) host(8.8.8.8)"), `an inner user-defined network did not resolve through the inner daemon: ${own.out}${own.err}`)
+    } finally { await innerDocker(INNER, ["network", "rm", "eval-dns"]) }
+    const checks = (await pdkJson(["verify", INNER])).reply.data.checks
+    const detail = checks.find((check: { id: string }) => check.id === "docker").detail
+    for (const word of ["fallback", "127.0.0.11", "1.1.1.1", "8.8.8.8"]) expect(detail.includes(word), `missing DNS disclosure: ${detail}`)
+    return `engine assigned 127.0.0.11: runc resolved, gVisor refused; ${upstreamNote}; outer and inner use ${servers(inner.out)} and resolve successfully; an inner user-defined network resolves through the inner daemon's 127.0.0.11, which forwards to them`
+  } finally { await docker(["rm", "-f", ...names]) }
+})
+
+ev("I19", "Verify removes a newly pulled probe image and preserves a pre-existing probe image and user tags", async () => {
+  const name = `${PREFIX}-iprobe`
+  const image = HELPER_DOCKERFILE.match(/^FROM (\S+)/m)![1]!
+  await ensure(name, { image: DOCKER_IMAGE, docker: true, diskGb: 2 })
+  try {
+    expect((await innerDocker(name, ["image", "inspect", image])).code !== 0, "create left its probe image behind")
+    expect((await innerDocker(name, ["pull", "alpine:latest"])).code === 0, "could not seed a user tag")
+    const user = (await innerDocker(name, ["image", "inspect", "--format", "{{.Id}}", "alpine:latest"])).out.trim()
+    // The tag and the pinned probe can share content. Remove only the probe reference for the absent case.
+    await innerDocker(name, ["image", "rm", image])
+    expect((await innerDocker(name, ["image", "inspect", image])).code !== 0, "probe absent control failed")
+    const verify = async () => {
+      const run = await pdkJson(["verify", name])
+      expect(run.code === 0 && ["net-host", "net-peers", "net-private"].every((id) => run.reply.data.checks.find((check: { id: string }) => check.id === id)?.status === "pass"), `probe was not measured: ${run.out}${run.err}`)
+    }
+    await verify()
+    expect((await innerDocker(name, ["image", "inspect", image])).code !== 0, "verify left a newly pulled probe image")
+    expect((await innerDocker(name, ["image", "inspect", "--format", "{{.Id}}", "alpine:latest"])).out.trim() === user, "cleanup removed the user's tag")
+    expect((await innerDocker(name, ["pull", image])).code === 0, "could not seed the existing probe image")
+    const before = (await innerDocker(name, ["image", "inspect", "--format", "{{.Id}}", image])).out.trim()
+    await verify()
+    const after = await innerDocker(name, ["image", "inspect", "--format", "{{.Id}}", image])
+    expect(after.code === 0 && after.out.trim() === before, "verify removed or changed an existing probe image")
+    return "absent before -> absent after; present before -> same image ID after; shared alpine:latest user tag preserved; all network probes passed in both cases"
+  } finally { await pdk(["remove", name, "--confirm", name]) }
+})
+
+ev("I20", "Verify on a nearly full sandbox reports unknown with a disk reason and leaves no probe image", async () => {
+  const name = `${PREFIX}-ifull`
+  const image = HELPER_DOCKERFILE.match(/^FROM (\S+)/m)![1]!
+  await ensure(name, { image: DOCKER_IMAGE, docker: true, diskGb: 1 })
+  try {
+    const volume = await dockerVolumeName(name)
+    const layer = Number((await docker(["inspect", "--size", "--format", "{{.SizeRw}}", containerOf(name)])).out.trim())
+    const count = Math.floor((1024 ** 3 - layer - await volumeBytes(volume)) / 1024 ** 2) - 24
+    expect(count > 0, "no room for the near-full control")
+    expect((await docker(["exec", "-u", "0", containerOf(name), "dd", "if=/dev/zero", "of=/var/lib/docker/eval-fill", "bs=1M", `count=${count}`])).code === 0, "could not fill to just below the watched limit")
+    const used = layer + await volumeBytes(volume)
+    expect(used < 1024 ** 3 && used > 1024 ** 3 - 64 * 1024 ** 2, `near-full control is invalid: ${used} B`)
+    const verified = await pdkJson(["verify", name])
+    expect(verified.reply.ok && await running(name), `verify crashed or stopped the below-limit sandbox: ${verified.out}${verified.err}`)
+    for (const id of ["net-host", "net-peers", "net-private", "egress"]) {
+      const check = verified.reply.data.checks.find((check: { id: string }) => check.id === id)
+      expect(check?.status === "unknown" && /64 MiB.*nearly full/.test(check.detail), `false pass or unclear disk failure: ${JSON.stringify(check)}`)
+    }
+    expect((await innerDocker(name, ["image", "inspect", image])).code !== 0, "near-full verify pulled an image")
+    return `${used} B used of 1 GiB; all four network results unknown with the 64 MiB headroom reason; no image pulled, no crash`
+  } finally { await pdk(["remove", name, "--confirm", name]) }
+})
+
+ev("I21", "Repeated start keeps one NAT rule, segmentation at one, and an inner HTTPS workload running", async () => {
+  await ensureInner()
+  const started = await innerDocker(INNER, ["run", "-d", "--name", "start-online", "alpine:latest", "sh", "-ec", "while :; do wget -T 15 -qO /dev/null https://example.com && echo online || { echo FAILED; exit 1; }; sleep 1; done"])
+  expect(started.code === 0, `could not start the live workload: ${started.err}`)
+  try {
+    const state = () => innerDocker(INNER, ["inspect", "--format", "{{.State.StartedAt}} {{.State.Running}}", "start-online"])
+    const before = (await state()).out.trim()
+    const nat = () => docker(["exec", "-u", "0", containerOf(INNER), "iptables-legacy", "-t", "nat", "-S", "POSTROUTING"])
+    const rules = (await nat()).out
+    expect(rules.split("\n").filter((line) => line === "-A POSTROUTING -o eth0 -j MASQUERADE").length === 1, `unexpected NAT control: ${rules}`)
+    expect(await until(async () => (await innerDocker(INNER, ["logs", "start-online"])).out.includes("online"), 25), "HTTPS control failed before start")
+    const logsBefore = (await innerDocker(INNER, ["logs", "start-online"])).out.length
+    for (let i = 0; i < 3; i++) expect((await pdk(["start", INNER])).code === 0, "start on a running Docker sandbox failed")
+    expect((await nat()).out === rules, "start changed or duplicated the NAT rules")
+    const bridge = (await docker(["network", "inspect", "--format", '{{index .Options "com.docker.network.bridge.name"}}', `paddock-net-${INNER}`])).out.trim()
+    const gso = await asRoot(`for port in /sys/class/net/${bridge}/brif/*; do ip -d link show "\${port##*/}"; done`)
+    expect(gso.code === 0 && /gso_max_segs 1(?:\s|$)/.test(gso.out), `segmentation changed: ${gso.out}${gso.err}`)
+    expect(await until(async () => (await innerDocker(INNER, ["logs", "start-online"])).out.length > logsBefore, 25), "HTTPS stopped after start")
+    const logs = await innerDocker(INNER, ["logs", "start-online"])
+    expect(!logs.out.includes("FAILED") && (await state()).out.trim() === before, `inner workload was interrupted: ${logs.out}${logs.err}`)
+    return "three starts: identical NAT rules (one masquerade), gso_max_segs=1, same inner StartedAt, HTTPS successes before and after without failure"
+  } finally { await innerDocker(INNER, ["rm", "-f", "start-online"]) }
+})
+
+ev("I22", "Host daemon logs rotate within two 10 MiB files; a replacement with a larger cap fails the config check", async () => {
+  await ensureInner()
+  const bytes = async (name: string) => {
+    const log = (await docker(["inspect", "--format", "{{.LogPath}}", name])).out.trim()
+    expect(log.startsWith("/"), "engine did not expose its log path")
+    const read = await docker(["run", "--rm", "--network", "none", "--runtime", "runc", "--mount", `type=bind,src=${dirname(log)},dst=/logs,readonly`, HELPER_IMAGE, "sh", "-ec", "wc -c /logs/*-json.log* | tail -1"])
+    const n = Number(read.out.trim().split(/\s+/)[0])
+    expect(read.code === 0 && Number.isFinite(n), `cannot read engine log size: ${read.out}${read.err}`)
+    return n
+  }
+  const flood = async (name: string, mib: number) => {
+    const run = await docker(["exec", "-u", "0", name, "sh", "-ec", `yes paddock-log-control | head -c ${mib * 1024 ** 2} > /proc/1/fd/1`])
+    expect(run.code === 0, `log flood failed: ${run.err}`)
+  }
+  // Control: the same output, with a cap far above Paddock's, grows the host's log while the sandbox's own layer stays
+  // the same. The engine merges its own default options into a container's, so the control names its cap.
+  const control = `${PREFIX}-big-log`
+  try {
+    expect((await docker(["run", "-d", "--name", control, "--runtime", "runc", "--log-driver", "json-file", "--log-opt", "max-size=1g", HELPER_IMAGE, "sleep", "120"])).code === 0, "could not start the logging control")
+    const layerBefore = (await docker(["inspect", "--size", "--format", "{{.SizeRw}}", control])).out.trim()
+    await flood(control, 8); const first = await bytes(control)
+    await flood(control, 8); const second = await bytes(control)
+    expect((await docker(["inspect", "--size", "--format", "{{.SizeRw}}", control])).out.trim() === layerBefore, "the host log control changed the writable layer")
+    expect(second > first + 8 * 1024 ** 2 && second > 42 * 1024 ** 2, `the control did not grow past Paddock's cap: ${first} -> ${second}`)
+    const data = await inspect(INNER)
+    expect(data.HostConfig.LogConfig.Type === "json-file" && data.HostConfig.LogConfig.Config["max-size"] === "10m" && data.HostConfig.LogConfig.Config["max-file"] === "2", "outer daemon logging has no declared cap")
+    await flood(containerOf(INNER), 16); const cappedFirst = await bytes(containerOf(INNER))
+    await flood(containerOf(INNER), 16); const cappedSecond = await bytes(containerOf(INNER))
+    expect(cappedFirst <= 21 * 1024 ** 2 && cappedSecond <= 21 * 1024 ** 2, `logs exceeded cap plus record overhead: ${cappedFirst}, ${cappedSecond}`)
+    const name = `${PREFIX}-ilog-tamper`
+    await ensure(name, { image: DOCKER_IMAGE, docker: true, diskGb: 2 })
+    try {
+      const original = await inspect(name); const volume = await dockerVolumeName(name)
+      await docker(["rm", "-f", "-v", containerOf(name)])
+      expect((await docker(["create", "--name", containerOf(name), "--label", `dev.paddock.id=${original.Config.Labels["dev.paddock.id"]}`, "--label", `dev.paddock.name=${name}`,
+        "--runtime", engine!.data.runtime, "--network", `paddock-net-${name}`, "--memory", "1g", "--memory-swap", "1g", "--cpus", "1", "--pids-limit", "4096", ...DOCKER_CAPABILITIES.flatMap((cap) => ["--cap-add", cap]),
+        "--log-driver", "json-file", "--log-opt", "max-size=1g", "--log-opt", "max-file=2", "--mount", `type=volume,src=${volume},dst=/var/lib/docker`, "--entrypoint", "sleep", DOCKER_IMAGE, "infinity"])).code === 0, "could not create an unbounded replacement")
+      const refused = await pdkJson(["start", name])
+      expect(refused.code === 6 && /bounded daemon logs/.test(refused.reply.error?.message ?? "") && !await running(name), `a larger log cap was accepted: ${refused.out}${refused.err}`)
+    } finally { await pdk(["remove", name, "--confirm", name]) }
+    const engineDefault = JSON.stringify(JSON.parse((await docker(["inspect", control])).out)[0].HostConfig.LogConfig.Config)
+    return `max-size=1g control (writable layer unchanged): host log ${first} -> ${second} B after two 8 MiB writes; Paddock's sandbox: ${cappedFirst}, ${cappedSecond} B after two 16 MiB writes; a 1g cap refused at start. Control's merged options: ${engineDefault}`
+  } finally { await docker(["rm", "-f", control]) }
 })
 
 // T: a sandbox that stops holding is caught.
@@ -1224,6 +1449,10 @@ for (const [id, claim, why] of [
 ] as const) ev(id, claim, async () => skip(why))
 
 ev("Z01", "Nothing is left on the engine or this machine when the run ends", async () => {
+  // Control: the scan sees this run's daemon while it runs, so an empty scan after teardown means none is left.
+  await pdk(["list"])
+  const live = (await daemonFile()).pid
+  expect((await evalDaemons()).includes(live), `the process scan does not see this run's daemon (pid ${live})`)
   await teardown()
   const containers = (await docker(["ps", "-a", "--format", "{{.Names}} {{.Labels}}"])).out.split("\n").filter((line) => line.includes(PREFIX) || line.includes("dev.paddock.probe"))
   const networks = (await docker(["network", "ls", "--format", "{{.Name}}"])).out.split("\n").filter((line) => line.includes(PREFIX) || line.startsWith("paddock-net-probe-"))
@@ -1231,9 +1460,17 @@ ev("Z01", "Nothing is left on the engine or this machine when the run ends", asy
   const leftLinks = async () => (await asRoot("ip -br link")).out.split("\n").filter((line) => line.startsWith(PREFIX) || /^pv[0-9a-f]{8}/.test(line))
   await until(async () => (await leftLinks()).length === 0, 15)
   const links = await leftLinks()
-  const processes = (await sh(["pgrep", "-fl", tmp])).out.trim()
-  expect(!containers.length && !networks.length && !links.length && !processes, `left behind: ${[...containers, ...networks, ...links, processes].filter(Boolean).join(", ")}`)
+  const processes = [(await sh(["pgrep", "-fl", tmp])).out.trim(), ...(await evalDaemons()).map((pid) => `paddock daemon run (pid ${pid})`)].filter(Boolean)
+  expect(!containers.length && !networks.length && !links.length && !processes.length, `left behind: ${[...containers, ...networks, ...links, ...processes].join(", ")}`)
 })
+
+// A daemon's command line is only `paddock daemon run`; its state folder is in its environment, which ps shows for the
+// user's own processes. Every state folder the evals use is under tmp.
+async function evalDaemons(): Promise<number[]> {
+  const listed = await sh(process.platform === "darwin" ? ["ps", "-axEww", "-o", "pid=,command="] : ["ps", "axeww", "-o", "pid=,command="])
+  return listed.out.split("\n").filter((line) => line.includes(" daemon run") && line.includes(`PADDOCK_STATE_DIR=${tmp}`)).map((line) => Number(line.trim().split(/\s+/)[0]))
+}
+const killDaemons = async () => { for (const pid of await evalDaemons()) try { process.kill(pid, "SIGKILL") } catch {} }
 
 let tornDown = false
 async function teardown(): Promise<void> {
@@ -1264,7 +1501,7 @@ await docker(["pull", "-q", "alpine:latest"], { timeoutMs: 300_000 })
 
 type Outcome = { id: string; claim: string; result: "pass" | "fail" | "not measured"; note: string; seconds: number }
 const outcomes: Outcome[] = []
-const interrupted = () => { void teardown().then(() => process.exit(130)) }
+const interrupted = () => { void teardown().then(killDaemons).then(() => process.exit(130)) }
 process.on("SIGINT", interrupted); process.on("SIGTERM", interrupted)
 for (const entry of wanted) {
   const start = Date.now(); let result: Outcome["result"] = "pass"; let note = ""
@@ -1274,6 +1511,8 @@ for (const entry of wanted) {
   console.error(`${result === "pass" ? "✓" : result === "fail" ? "✗" : "–"} ${entry.id} ${entry.claim}${note ? `\n      ${note}` : ""}`)
 }
 await teardown()
+// Z01 has already failed for any daemon still alive; none may outlive the run.
+await killDaemons()
 await rm(tmp, { recursive: true, force: true })
 
 const passed = outcomes.filter((entry) => entry.result === "pass").length; const failed = outcomes.filter((entry) => entry.result === "fail").length

@@ -17,10 +17,22 @@ export const network = (name: string) => `paddock-net-${name}`
 export const dockerVolume = (manifest: Manifest) => `paddock-docker-${manifest.id}`
 // Inclusion-minimal additions to Docker's default capabilities, measured by I01 (each removal breaks the workload).
 export const DOCKER_CAPABILITIES = ["NET_ADMIN", "SYS_ADMIN"] as const
-const DOCKER_START = `set -e
+// gVisor cannot use the engine's resolver on a user-defined network (127.0.0.11 is refused), and the engine's upstream is in
+// a range the guard drops, so public resolvers are written (measured by I18). Inner Docker containers inherit them.
+const SANDBOX_DNS = "nameserver 1.1.1.1\nnameserver 8.8.8.8\n"
+// The copy-on-write driver is named, so dockerd fails to start rather than fall back to one that copies layers. Dockerd's
+// resolver for its own networks (compose's) needs iptables even with --iptables=false, and gVisor lacks nft (I17, I18).
+export const DOCKER_DRIVER = "overlayfs"
+export const DOCKER_START = `set -e
 rm -f /var/run/docker.pid /var/run/docker/containerd/containerd.pid
-printf '{}' > /run/paddock-docker.json
-exec dockerd --config-file=/run/paddock-docker.json --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --storage-driver=vfs --iptables=false --ip6tables=false --dns=1.1.1.1 --dns=8.8.8.8`
+printf '${SANDBOX_DNS}' > /etc/resolv.conf
+printf '{"features":{"containerd-snapshotter":true}}' > /run/paddock-docker.json
+mkdir -p /run/paddock-bin
+ln -sf "$(command -v iptables-legacy)" /run/paddock-bin/iptables
+ln -sf "$(command -v ip6tables-legacy)" /run/paddock-bin/ip6tables
+PATH=/run/paddock-bin:$PATH exec dockerd --config-file=/run/paddock-docker.json --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --storage-driver=${DOCKER_DRIVER} --iptables=false --ip6tables=false`
+// Dockerd writes to the container's output, which the engine stores on its host, outside the watched disk limit (I22).
+export const DOCKER_LOG = { "max-size": "10m", "max-file": "2" } as const
 const INNER_NAT = "iptables-legacy -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || iptables-legacy -t nat -A POSTROUTING -o eth0 -j MASQUERADE"
 // Linux limits interface names to 15 characters. The guard matches on this prefix.
 export const BRIDGE_PREFIX = "pdk"
@@ -53,7 +65,6 @@ export function unsafeRuntimeArgs(args: readonly string[] = []): string[] {
 // overlay, which Docker does not measure; only with --overlay2=none do they reach the layer (measured on OrbStack).
 const seesWrites = (args: readonly string[] = []) => args.includes("--overlay2=none")
 const hasRawNetwork = (args: readonly string[] = []) => args.filter((arg) => /^--?net-raw(?:=(?:true|false))?$/.test(arg)).at(-1)?.endsWith("false") === false
-const SANDBOX_DNS = "nameserver 1.1.1.1\nnameserver 8.8.8.8\n"
 const PROBE_REPLY = "paddock-probe"
 const PROBE_PORT = "7777"
 // One unused address in each private range and in the tailnet range. For a probe, the helper gives each to a listener in
@@ -84,6 +95,7 @@ type Inspect = {
     Binds?: string[] | null; VolumesFrom?: string[] | null; DeviceRequests?: unknown[] | null; Annotations?: Record<string, string> | null
     UTSMode: string; UsernsMode: string; SecurityOpt: string[] | null; NetworkMode: string; PublishAllPorts: boolean
     PortBindings: Record<string, unknown> | null; Memory: number; MemorySwap: number; PidsLimit: number | null; NanoCpus: number
+    LogConfig?: { Type: string; Config: Record<string, string> | null }
   }
   Mounts: Array<{ Type: string; Source: string; Destination: string; Name?: string; RW?: boolean }> | null
   NetworkSettings: { Networks: Record<string, { IPAddress: string }> | null }
@@ -147,9 +159,10 @@ export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardS
   const unlimited = [
     !(host.Memory > 0) && "memory", host.Memory > 0 && host.MemorySwap !== host.Memory && "swap",
     !((host.PidsLimit ?? 0) > 0) && "processes", !(host.NanoCpus > 0) && "CPU",
+    manifest.spec.docker && !(host.LogConfig?.Type === "json-file" && Object.entries(DOCKER_LOG).every(([key, value]) => host.LogConfig?.Config?.[key] === value)) && "bounded daemon logs (json-file, max-size=10m, max-file=2)",
   ].filter(Boolean)
   out.push(unlimited.length ? result("limits", "fail", "inspected", `No limit on ${unlimited.join(", ")}.`)
-    : result("limits", "pass", "inspected", `${host.Memory / 1024 ** 3} GB memory, ${host.PidsLimit} tasks (gVisor's own threads count, so fewer processes than that fit), ${host.NanoCpus / 1e9} CPUs. A sandbox that passes its memory or task limit is killed.`))
+    : result("limits", "pass", "inspected", `${host.Memory / 1024 ** 3} GB memory, ${host.PidsLimit} tasks (gVisor's own threads count, so fewer processes than that fit), ${host.NanoCpus / 1e9} CPUs. A sandbox that passes its memory or task limit is killed.${manifest.spec.docker ? " Host daemon logs rotate at 10 MiB with two files; these are outside the watched disk limit." : ""}`))
 
   const disk = manifest.engine.capabilities?.diskLimit
   out.push(disk === "hard" ? result("disk", "pass", "inspected", `${manifest.spec.diskGb} GB; writes fail at the limit.`)
@@ -258,7 +271,7 @@ export class GvisorProvider implements Provider {
       "create", "--name", container(name), "--hostname", name, "--label", `${LABEL_NAME}=${name}`, "--label", `${LABEL_ID}=${manifest.id}`,
       "--runtime", engine.data.runtime!, "--network", network(name), "--restart", "no",
       "--cpus", String(spec.cpus), "--memory", memory, "--memory-swap", memory, "--pids-limit", String(spec.pids),
-      ...(spec.docker ? [...DOCKER_CAPABILITIES.flatMap((cap) => ["--cap-add", cap]), "--mount", `type=volume,src=${dockerVolume(manifest)},dst=/var/lib/docker,volume-nocopy`, "--user", "0", "--entrypoint", "sh", spec.image, "-c", DOCKER_START]
+      ...(spec.docker ? ["--log-driver", "json-file", ...Object.entries(DOCKER_LOG).flatMap(([key, value]) => ["--log-opt", `${key}=${value}`]), ...DOCKER_CAPABILITIES.flatMap((cap) => ["--cap-add", cap]), "--mount", `type=volume,src=${dockerVolume(manifest)},dst=/var/lib/docker,volume-nocopy`, "--user", "0", "--entrypoint", "sh", spec.image, "-c", DOCKER_START]
         : ["--entrypoint", "sleep", spec.image, "infinity"]),
     ], { timeoutMs: 1_800_000 }), `Creating ${name}`)
   }
@@ -294,9 +307,11 @@ export class GvisorProvider implements Provider {
     const { engine, name } = manifest
     if ((await this.inspect(manifest))?.State.Running) { if (!manifest.spec.docker) return }
     else must(await this.docker(engine, ["start", container(name)]), `Starting ${name}`)
-    // gVisor cannot use Docker's DNS server on a user-defined network (127.0.0.11 is refused), so public resolvers are written.
-    const dns = await this.docker(engine, ["exec", "-i", "-u", "0", container(name), "sh", "-c", "cat > /etc/resolv.conf"], { stdin: SANDBOX_DNS })
-    if (dns.exitCode !== 0) throw new PaddockError("runtime", `${name} started, but its DNS could not be set: ${dns.stderr.trim()}`)
+    // A Docker sandbox writes its DNS before dockerd starts, so the daemon's containers inherit it.
+    if (!manifest.spec.docker) {
+      const dns = await this.docker(engine, ["exec", "-i", "-u", "0", container(name), "sh", "-c", "cat > /etc/resolv.conf"], { stdin: SANDBOX_DNS })
+      if (dns.exitCode !== 0) throw new PaddockError("runtime", `${name} started, but its DNS could not be set: ${dns.stderr.trim()}`)
+    }
     if (manifest.spec.docker) {
       must(await this.docker(engine, ["exec", "-u", "0", container(name), "sh", "-c", INNER_NAT]), "Setting Docker's inner NAT (needs iptables-legacy and gVisor --net-raw)")
       // Merged packets accepted by gVisor's own sockets can be dropped when forwarded to inner containers.
@@ -380,8 +395,8 @@ export class GvisorProvider implements Provider {
       const kernel = await this.kernelCheck(manifest, inspect)
       if (!manifest.spec.docker) return [kernel, result("docker", "info", "inspected", "Not requested; no capabilities are added for inner Docker.")]
       const info = kernel.status === "pass" ? await this.dockerInfo(manifest) : undefined
-      return [kernel, info?.exitCode === 0 && info.stdout.trim() === "/var/lib/docker" ? result("docker", "pass", "probed", "The private Docker daemon answers on its Unix socket inside gVisor, using /var/lib/docker. It is the sandbox's main process; if it exits, the sandbox stops. Start runs it again.")
-        : result("docker", "fail", "probed", `The requested inner Docker daemon did not answer: ${info?.stderr.trim() ?? "the isolated kernel check did not pass"}`)]
+      return [kernel, info?.exitCode === 0 && info.stdout.trim() === `/var/lib/docker ${DOCKER_DRIVER}` ? result("docker", "pass", "probed", `The private Docker daemon answers on its Unix socket inside gVisor, with its data in /var/lib/docker on the copy-on-write ${DOCKER_DRIVER} driver. It is the sandbox's main process; if it exits, the sandbox stops. Inner containers use the sandbox's DNS, a public fallback of 1.1.1.1 and 8.8.8.8: under gVisor the engine's resolver 127.0.0.11 refuses queries, and its upstream is in a range the guard drops.`)
+        : result("docker", "fail", "probed", `The requested inner Docker daemon did not answer with /var/lib/docker on the ${DOCKER_DRIVER} driver: ${info ? `${info.stdout.trim()} ${info.stderr.trim()}` : "the isolated kernel check did not pass"}`)]
     }
     const next = (this.probing.get(manifest.engine.id) ?? Promise.resolve()).then(() => this.probe(manifest, inspect))
     this.probing.set(manifest.engine.id, next.catch(() => {}))
@@ -389,7 +404,7 @@ export class GvisorProvider implements Provider {
   }
 
   private dockerInfo(manifest: Manifest): Promise<RunResult> {
-    return this.docker(manifest.engine, ["exec", "-u", "0", container(manifest.name), "docker", "--host", "unix:///var/run/docker.sock", "info", "--format", "{{.DockerRootDir}}"], { timeoutMs: 10_000 })
+    return this.docker(manifest.engine, ["exec", "-u", "0", container(manifest.name), "docker", "--host", "unix:///var/run/docker.sock", "info", "--format", "{{.DockerRootDir}} {{.Driver}}"], { timeoutMs: 10_000 })
   }
 
   // The runtime the engine reports, confirmed from inside: gVisor's kernel log and version string name it.
@@ -438,8 +453,18 @@ export class GvisorProvider implements Provider {
       return false
     }
     const out: CheckResult[] = []
+    const innerDocker = (args: string[]) => this.docker(engine, ["exec", "-u", "0", container(name), "docker", "--host", "unix:///var/run/docker.sock", ...args], { timeoutMs: 120_000 })
+    let removeProbeImage = false
     try {
       await this.ensureHelper(engine)
+      if (manifest.spec.docker) {
+        const used = await this.diskUsedBytes(manifest)
+        if (used === undefined) throw new Error("Inner Docker probe disk headroom could not be measured.")
+        if (manifest.spec.diskGb * 1024 ** 3 - used < 64 * 1024 ** 2) throw new Error("Inner Docker probe needs 64 MiB of disk headroom; the sandbox is nearly full. Free space and verify again.")
+        const present = await innerDocker(["image", "inspect", INNER_PROBE_IMAGE])
+        if (present.exitCode !== 0 && !/No such image/i.test(present.stderr)) throw new Error(`Could not inspect the inner probe image: ${present.stderr.trim()}`)
+        removeProbeImage = present.exitCode !== 0
+      }
       const gateway = (await this.docker(engine, ["network", "inspect", "--format", "{{(index .IPAM.Config 0).Gateway}}", network(name)])).stdout.trim()
       const hostPort = String(20_000 + Math.floor(Math.random() * 40_000))
       must(await this.docker(engine, ["network", "create", "--label", `dev.paddock.probe=${this.owner}`, "-o", `com.docker.network.bridge.name=${BRIDGE_PREFIX}x${tag}`, peerNet]), "Creating the probe network")
@@ -495,6 +520,16 @@ export class GvisorProvider implements Provider {
     } finally {
       await this.docker(engine, ["rm", "-f", hostC, peerC, probeC])
       await this.docker(engine, ["network", "rm", peerNet])
+      if (removeProbeImage) {
+        const removed = await innerDocker(["image", "rm", INNER_PROBE_IMAGE])
+        if (removed.exitCode !== 0 && !/No such image/i.test(removed.stderr)) {
+          const detail = `The inner probe image could not be cleaned up: ${removed.stderr.trim()}`
+          for (const check of out) {
+            if (check.status === "fail") check.detail += ` ${detail}`
+            else Object.assign(check, { status: "unknown", evidence: "none", detail })
+          }
+        }
+      }
     }
 
     const script = `for home in /root /home/*; do for file in ${CREDENTIAL_FILES.join(" ")}; do [ -e "$home/$file" ] && echo "$home/$file"; done; done; true`
