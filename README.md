@@ -49,12 +49,20 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   runs sshd in inetd mode through a daemon session, so no port is opened anywhere. It trusts only a key made for this
   machine's editors and the host key made inside that sandbox; scp, SFTP and `ssh -L` to the sandbox's loopback work.
   `--write-config` adds one `Include` line to `~/.ssh/config`; without it the line is printed.
+- Resize: `paddock resize demo --memory 8 --cpus 4` changes memory, tasks, CPUs and the disk limit, and says for each
+  whether it applies now or at the next start. "Now" is said only after the new value is read back from the engine's
+  host; inside, gVisor does not show the new limits (`/proc/meminfo` keeps the old memory). Lowering memory or tasks
+  below what the sandbox uses is refused, and the limits check holds the sandbox to the new values.
+- Templates: `paddock snapshot demo --as base` saves the sandbox's files, and `paddock create next --template base`
+  starts from them, with the same checklist. **A template holds every file in the sandbox, home folders included:
+  shell history, `.env` files and tokens other than the usual login files are in it.** The usual login files are
+  removed before saving; volumes (inner Docker's images and containers), memory and `/dev/shm` are not saved. Removing
+  a template leaves the sandboxes made from it working. See [Templates](docs/architecture.md#templates).
 - The daemon, the CLI with `--json`, a web dashboard, and extensions.
 
 Not built yet:
 
 - Docker Sandboxes (microVM) support. It is detected and reported as not supported.
-- Templates. Agent and GitHub login import exists in the bundled extension below.
 - A hard disk cap, Windows execution, remote-engine management, a desktop app, and installers.
 - Docker Desktop and Colima measurements. Native Linux Docker and OrbStack have separate scorecards.
 - A license. Nothing here is published.

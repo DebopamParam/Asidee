@@ -11,9 +11,10 @@
 - **The core is rigid.** It is the only code that runs engine commands. It holds the sandbox spec, the checklist, the
   providers and the rule that a sandbox with a failed blocking check does not run.
 - **Everything else is a client.** The CLI, the dashboard and extensions can only call the methods in `core/daemon.ts`.
-- **The API cannot express an unsafe sandbox.** A spec is a name, an image, four sizes and a boolean `docker`
-  option (`validSpec` in `core/state.ts`); unknown fields are dropped. There is no field for a mount, a capability,
-  a runtime or a port. Each engine reports whether it supports `docker`; create refuses an unsupported request.
+- **The API cannot express an unsafe sandbox.** A spec is a name, an image or one of Paddock's templates, four sizes
+  and a boolean `docker` option (`validSpec` in `core/state.ts`); unknown fields are dropped. There is no field for a
+  mount, a capability, a runtime or a port. Each engine reports whether it supports `docker`; create refuses an
+  unsupported request.
 
 ## The checklist
 
@@ -30,8 +31,9 @@ out as "could not be checked", never as a pass.
 | No engine-published ports; requested forwards are loopback-only | yes | before start | Engine configuration. Forwards are the daemon's, not the engine's. |
 | Forwards to this machine's loopback | no | before start | Checked by the core: each active forward's address, its port inside, and its id; a disclosure. |
 | SSH access for editors | no | before start | Checked by the core: whether `paddock ssh setup` was run for this sandbox, its user, and the editor key's fingerprint; a disclosure. |
-| Memory, process, CPU limits | yes | before start | Engine configuration, including json-file host log rotation (10 MiB, two files) for every sandbox. |
+| Memory, process, CPU limits | yes | before start | Engine configuration: the values must be the spec's (as created or resized), with json-file host log rotation (10 MiB, two files) for every sandbox. |
 | Disk limit | no | before start | The engine's capability: hard, watched or none. Watched needs a runtime with `--overlay2=none`. |
+| The template it was made from | no | before start | The template recorded at creation and the image the container runs, which must be the template's; a disclosure. |
 | Cannot reach the host | yes | verify | Live probe with controls. |
 | Cannot reach other sandboxes | yes | verify | Live probe with controls. |
 | Cannot reach LAN, tailnet, metadata, IPv6 | yes | verify | Live probe with controls of a stand-in address in each private range and the tailnet range; one attempt at the metadata address; IPv6 by the loaded rules. |
@@ -222,6 +224,78 @@ service itself, was refused by sshd; a client asking to forward its agent got no
 alias was refused. A05: after removing and recreating the name, the old alias was refused before setup and failed host
 key verification after it; the new files logged in. A06: SSH to a stopped sandbox failed and it stayed stopped.
 
+### Resize
+
+`paddock resize NAME` changes the memory, task limit, CPUs and disk limit of a running or stopped sandbox, and says for
+each whether it applies now or at the next start. The provider sets memory, tasks and CPUs with the engine's update
+and, for a running sandbox, reads them back from the sandbox's cgroup on the engine's host; "now" is said only when
+what it read is the new value, and otherwise the change is reported for the next start with the reason. A stopped
+sandbox's change is "next start". The disk limit is the daemon's watch, so a new one applies at its next pass, within
+30 seconds. The manifest records the new values and the limits check then fails on any other value, so a limit
+changed behind Paddock's back stops the sandbox.
+
+Inside, gVisor does not show the new limits: L01's `/proc/meminfo` kept the 512 MiB it started with after a resize to
+1 GB, and L03's `nproc` said 2 under one CPU and under two. The engine's host enforces the new ones. L01: 700 MB in
+one process was killed under 0.5 GB (the control) and completed after a resize to 1 GB, with `memory.max` at 1 GiB on
+the engine's host. L02: lowering to 0.5 GB took effect on the running sandbox, and 1 GB and 1024 tasks set while
+stopped were the host's values after the start and passed verify. L03: three busy loops used about one CPU, then about
+two after `--cpus 2`; 300 sleeps failed under 256 tasks and ran after `--pids 2048`.
+
+Lowering a running sandbox's memory or task limit is refused with a conflict (exit 4) when what it uses now is 90% or
+more of the new limit, because the engine kills a sandbox that passes either; so is a disk limit below its disk use,
+and a lowering whose use cannot be read is refused rather than guessed. Memory in use is counted as `docker stats`
+counts it. Sizes outside the ranges of create are a usage error (exit 2), an unknown sandbox exit 3, and a refused
+resize changes nothing. L04: 300 MB written to `/dev/shm`, which gVisor keeps in memory, was counted as in use and
+refused a 0.25 GB limit, and 300 sleeping processes refused a task limit of 256; once the memory was freed, 0.5 GB
+was allowed. L05: `docker update --memory 2g` behind Paddock's
+back failed verify with exit 6 and stopped the sandbox. L06: 1.3 GB on disk refused a 1 GB disk limit; once freed, the
+limit was set, and the same write was stopped by the disk watch.
+
+### Templates
+
+`paddock snapshot NAME --as TEMPLATE` saves a sandbox's files as a template, and `paddock create NEW --template
+TEMPLATE` (or `"template"` in a spec) makes a sandbox from it. A template is an image under a repository named for
+this daemon (`paddock-template-<owner>`, where the owner is a hash of this machine's name and the state folder), with
+labels for its name, its owner, the sandbox it came from and the login files left out. `paddock template list` shows
+only images with all three: this owner's repository, its owner label, and a tag equal to its name label. An image name
+in Paddock's template or snapshot space is refused as `--image` (C06); a template is chosen by name, resolved to its
+image ID under the template's lock, and the manifest records the template and the ID. The checklist's template check
+fails if the container runs another image and otherwise discloses the template, its source and date, whether it has
+been removed since, and, for a sandbox given a template's image ID as a plain image, that it is one. A template sandbox
+is created and checked like any other (C04: every blocking check held, with live network probes, and the host did not
+answer it).
+
+What a template holds: every file in the sandbox's own filesystem as the engine's layer has it, home folders included:
+shell history, `.env` files, package-manager tokens and any login not in Paddock's list. Removed before saving: the
+login files the credentials check looks for (Claude, Codex, GitHub, git, SSH keys, AWS, netrc) under `/root` and
+`/home/*`, and Paddock's own relay and SSH host key. Not in it: processes and memory, `/dev/shm` and any other folder
+gVisor keeps in memory (`/proc/mounts` inside shows them as tmpfs; it was so for `/tmp` in Alpine, whose `/tmp` is
+empty, and not in the default image, whose `/tmp` is not empty, so that `/tmp` is saved), volumes (inner Docker's
+`/var/lib/docker`, so no inner images or containers, and any volume the image declares), and the engine's
+`/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf`. The snapshot's result states this. Paddock does not claim a
+template has no secrets: C02 shows `.npmrc` is carried.
+
+How it is made: the engine commits the sandbox, pausing a running one for the commit (C03: the engine's events show a
+pause and an unpause; the sandbox kept running with its processes and the same start time). A container of that
+image then runs under gVisor with no network and only Paddock's busybox, copied in to a randomly named folder, to
+delete the login files and Paddock's own files; a second commit saves the result under the template's name, and the
+intermediate image and container are removed. It needs a runtime with `--overlay2=none`, without which the engine does
+not see the sandbox's writes (C01's control reads a file from the engine right after it was written inside). Paddock
+refuses a snapshot otherwise; no engine here lacks the flag, so that refusal is not measured. The pause makes the copy
+consistent at the file level for that moment, as a power cut would leave a disk: a program halfway through writing a
+file is saved halfway.
+
+C01 (Alpine): files written under `/root`, `/home` and `/opt` carried; `/dev/shm`, `/tmp` and lines added to
+`/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` did not. C02: the three login files planted were absent from the
+image as the engine copies it out, the template says it left them out, the new sandbox's credentials check found none,
+`.npmrc` was there, and the image had neither the relay nor the snapshot's busybox. C05 (the default image): a Docker
+sandbox made from a Docker sandbox's template had its files, `/tmp` included, its own data volume and none of the
+source's inner images.
+
+Removing a template removes its name. Sandboxes made from it keep running, stopping and starting, because the engine
+keeps an image a container uses; the image is deleted when the last of them is removed (C07). A template no sandbox
+uses is deleted at once (C05, C07). A stopped sandbox can be saved without starting it (C07).
+
 ## Where the guarantee ends
 
 - **A forward is open to this machine.** It listens on loopback, which every process of every user here can connect
@@ -254,6 +328,11 @@ key verification after it; the new files logged in. A06: SSH to a stopped sandbo
 - **The limits are read, not re-measured, by the checklist.** The evals measure them. On OrbStack, passing the memory
   limit kills the sandbox, and so does running out of the task limit: gVisor's own threads count against it, so a
   limit of 256 held about a hundred processes. `paddock list` says which of the two happened.
+- **A template carries secrets that are not on Paddock's list.** Only the usual login files are removed. Shell history,
+  `.env` files, package-manager tokens and logins kept elsewhere are saved, and every sandbox made from the template
+  has them. A file being written at the moment of the save is saved as it was then.
+- **Inside a resized sandbox, gVisor does not show the new limits.** The engine's host enforces them; resize's report
+  and the limits check are the place to read them, not `/proc/meminfo` or `nproc`.
 - **Two Paddocks on one engine share the guard.** Each sweeps only its own probe helpers, but a guard changed for one
   is changed for both.
 - **Measurements belong to an engine and OS.** See `evals/SCORECARD.md` for OrbStack on Apple Silicon and
@@ -290,4 +369,5 @@ and lists or removes guest logins through the daemon's exec API. It runs host to
 credentials live inside the sandbox. See `extensions/logins/README.md` for the setup allowlist and measured limits.
 Missing setup commands are named only from settings actually sent, with bounded printable names and credential
 values withheld. The CLI also provides streamed exec, port forwards, and SSH access. Inner Docker is a checked core
-option. Templates, remote-engine management, and a hard disk cap are not built.
+option, and the core resizes sandboxes and saves them as templates. Remote-engine management and a hard disk cap are
+not built.

@@ -15,7 +15,7 @@ Add `--json` to any command for `{"ok":true,"data":…}` or `{"ok":false,"error"
 
 ```sh
 paddock doctor                              # engines and what each needs
-paddock create NAME [--docker] [--image IMAGE] [--cpus N] [--memory GB] [--disk GB]
+paddock create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--pids N] [--disk GB]
 paddock list
 paddock exec NAME [--stdin] -- COMMAND ARG… # exit code, stdout and stderr are the command's
 paddock exec NAME --stream -- COMMAND ARG…  # raw bytes in and out, no size limit
@@ -25,6 +25,9 @@ paddock forward list [NAME] | paddock forward remove ID
 paddock ssh setup NAME [--write-config]     # then `ssh NAME.paddock`; ask the user before --write-config
 paddock ssh access NAME                     # alias, user, home, and whether ssh would log in now
 paddock verify NAME                         # exit 6 if a blocking check failed
+paddock resize NAME [--cpus N] [--memory GB] [--pids N] [--disk GB]  # says what applies now, what at the next start
+paddock snapshot NAME --as TEMPLATE         # saves its files as a template; read what it says is inside
+paddock template list | paddock template remove TEMPLATE
 paddock remove NAME --confirm NAME          # deletes everything in it; ask the user first
 ```
 
@@ -54,6 +57,15 @@ Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing depende
   process prints) is outside the watched limit and rotates at 10 MiB with two files, checked by the core.
   Dockerd is the sandbox's main process. If it dies the sandbox stops; `paddock start NAME` starts it again.
   `paddock doctor` reports whether the engine supports inner Docker. An engine lacking the capability refuses it.
+- `paddock resize` reports, for each limit, `now` (read back from the engine's host), `next start` or `unchanged`.
+  Inside, gVisor does not show the new limits (`/proc/meminfo` keeps the old memory, `nproc` ignores the CPU limit);
+  trust resize's report, not those. Lowering
+  memory or tasks to within 10% of what the sandbox uses, or the disk limit below what it uses, is refused with exit 4.
+- A template holds every file of the sandbox it was saved from, home folders included: shell history, `.env` files and
+  tokens other than the usual login files. Only the usual login files and Paddock's own files are removed. Before you
+  snapshot a sandbox the user did not ask you to, or hand a template to anyone, tell the user this. Volumes are not
+  saved, so a `--docker` sandbox's inner images are not in its template. Removing a template does not affect the
+  sandboxes made from it.
 - To open a service that listens inside the sandbox, add a forward and use the `localPort` it reports; leave out
   `--local-port` to get a free one. It listens on this machine's 127.0.0.1 only, carries any bytes, and ends when it
   is removed, when the sandbox stops, restarts or is removed, and when the daemon stops; add it again after a restart.
@@ -107,8 +119,8 @@ Create `~/.config/paddock/extensions/ID/extension.json`:
 Copy the built-in page (`ui/index.html` in the Paddock source) to `~/.config/paddock/ui/index.html` and edit the copy.
 Other files in that folder are served next to it. The page calls `POST /api/METHOD` with a JSON body and the header
 `Authorization: Bearer TOKEN`; it reads the token from the `#token=` part of the link `paddock ui` prints. Methods:
-`checklist`, `engines`, `list`, `get`, `create`, `start`, `stop`, `remove`, `verify`, `exec`, `forwardAdd`, `forwardList`,
-`forwardRemove`, `sshAccess`, `extensions`, `action`.
+`checklist`, `engines`, `list`, `get`, `create`, `start`, `stop`, `remove`, `verify`, `resize`, `snapshot`, `templateList`,
+`templateRemove`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `sshAccess`, `extensions`, `action`.
 
 Keep showing each check's status and detail as the API returns them.
 
@@ -140,7 +152,7 @@ actual guest programs against temporary homes; core evals do not cover extension
 only for settings sent, with bounded printable names and credential values withheld.
 
 The engine measurements are in `evals/SCORECARD.md` and `evals/SCORECARD.linux.md`. Docker Desktop, Colima, Windows
-execution, a hard disk cap, templates, and remote-engine management remain unmeasured or unbuilt as those files state.
+execution, a hard disk cap, and remote-engine management remain unmeasured or unbuilt as those files state.
 
 ## What you cannot do, by design
 
