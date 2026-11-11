@@ -1,7 +1,7 @@
 // Bootstrap uses Python already on the destination. No shell interprets a package, path or argument from a plan.
 
 // Reads the destination without changing it and without sudo. The request on stdin names the artifact digest and the
-// runtime path, so the probe knows which release paths to inspect. Prints one JSON object.
+// runtime's files, so the probe knows which release paths to inspect. Prints one JSON object.
 export const HOST_PROBE = String.raw`
 import os, sys, json, subprocess, hashlib, platform, pwd, grp, glob, shlex, stat, urllib.parse
 
@@ -51,12 +51,11 @@ paths = [
     '/etc/systemd/system/paddock@' + str(uid) + '.service',
     release,
     state + '/machine-id',
-    request['runtime'],
-]
+] + request['runtimeFiles']
 
 # Include ancestors: replacing a root path through a link must not escape the reviewed installation layout.
 ancestors = {}
-for path in paths + [state, request['runtime']]:
+for path in paths + [state]:
     parent = os.path.dirname(path)
     while parent != '/':
         if parent not in ancestors:
@@ -73,23 +72,25 @@ for line in open('/etc/os-release'):
         k, v = line.rstrip().split('=', 1)
         os_release[k] = v.strip('"')
 
-# Only fields that stay the same between two probes are kept, so an unchanged engine gives an unchanged plan.
+# Only fields that stay the same between two probes are kept, so an unchanged engine gives an unchanged plan. Of each
+# runtime Docker has loaded, that is its path and arguments.
 info = command(['docker', '--host', 'unix:///var/run/docker.sock', 'info', '--format', '{{json .}}'])
 if info['code'] == 0:
     full = json.loads(info['out'])
-    info['out'] = json.dumps(
-        {k: full.get(k) for k in ['ID', 'ServerVersion', 'Architecture', 'DockerRootDir', 'Driver', 'Runtimes', 'LiveRestoreEnabled']},
-        sort_keys=True)
+    kept = {k: full.get(k) for k in ['ID', 'ServerVersion', 'Architecture', 'DockerRootDir', 'Driver', 'LiveRestoreEnabled']}
+    kept['Runtimes'] = {name: {k: entry.get(k) for k in ['path', 'runtimeArgs']} for name, entry in (full.get('Runtimes') or {}).items()}
+    info['out'] = json.dumps(kept, sort_keys=True)
 containers = command(['docker', '--host', 'unix:///var/run/docker.sock', 'ps', '--no-trunc', '--format', '{{json .}}'])
 if containers['code'] == 0:
     rows = [{k: v[k] for k in ['ID', 'Names', 'Image']} for v in map(json.loads, filter(None, containers['out'].splitlines()))]
     containers['out'] = '\n'.join(json.dumps(row, sort_keys=True) for row in sorted(rows, key=lambda row: row['ID']))
 
-# Where Docker is absent, apt says which packages installing it would download. Nothing is downloaded or locked.
-packages = (
-    command(['apt-get', '-qq', '--print-uris', '--yes', '--no-install-recommends', '-o', 'Debug::NoLocking=1', 'install', 'docker.io'])
-    if command(['which', 'docker'])['code']
-    else dict(code=0, out='', err=''))
+# Where Docker is absent, apt says which packages installing it would download, and the apt sources, keys and indexes
+# that answer came from are recorded. Nothing is downloaded or locked. Where Docker is present, apt is not consulted.
+absent = command(['which', 'docker'])['code'] != 0
+packages = dict(code=0, out='', err='')
+if absent:
+    packages = command(['apt-get', '-qq', '--print-uris', '--yes', '--no-install-recommends', '-o', 'Debug::NoLocking=1', 'install', 'docker.io'])
 downloads = []
 for line in packages['out'].splitlines():
     if line.startswith("'"):
@@ -100,12 +101,14 @@ for line in packages['out'].splitlines():
         downloads.append(dict(url=words[0], file=words[1], bytes=words[2], sha256=sha, package=fields[0], version=fields[1]))
 apt = {}
 repositories = {}
-for path in sorted(glob.glob('/etc/apt/sources.list') + glob.glob('/etc/apt/sources.list.d/*')):
+sources = glob.glob('/etc/apt/sources.list') + glob.glob('/etc/apt/sources.list.d/*') if absent else []
+evidence = (
+    sources + glob.glob('/var/lib/apt/lists/*') + glob.glob('/etc/apt/trusted.gpg')
+    + glob.glob('/etc/apt/trusted.gpg.d/*') + glob.glob('/usr/share/keyrings/*')) if absent else []
+for path in sorted(sources):
     if os.path.isfile(path):
         repositories[path] = open(path).read()
-for path in sorted(
-        glob.glob('/etc/apt/sources.list') + glob.glob('/etc/apt/sources.list.d/*') + glob.glob('/var/lib/apt/lists/*')
-        + glob.glob('/etc/apt/trusted.gpg') + glob.glob('/etc/apt/trusted.gpg.d/*') + glob.glob('/usr/share/keyrings/*')):
+for path in sorted(evidence):
     if os.path.isfile(path):
         try:
             apt[path] = hashlib.sha256(open(path, 'rb').read()).hexdigest()
@@ -137,7 +140,7 @@ print(json.dumps(dict(
 // Runs the approved plan on the destination. The plan arrives on stdin, or in the private request file named by the
 // first argument when a terminal is attached for sudo. Prints one JSON report; the journal records each step.
 export const HOST_APPLY = String.raw`
-import os, sys, json, subprocess, hashlib, urllib.request, shutil
+import os, sys, json, subprocess, hashlib, urllib.request, shutil, base64, tarfile, io
 
 p = json.load(open(sys.argv[1])) if len(sys.argv) > 1 else json.load(sys.stdin)
 completed = []
@@ -172,15 +175,37 @@ try:
         target = stage + '/' + item['name']
         if item['kind'] == 'artifact':
             # Binary bytes follow as base64 in this private SSH request, never in a plan or journal.
-            import base64
             data = base64.b64decode(p['artifactBytes'], validate=True)
         else:
             with urllib.request.urlopen(item['url'], timeout=120) as response:
                 data = response.read(128 * 1024 * 1024)
         if hashlib.new(item['algorithm'], data).hexdigest() != item['checksum']:
             raise RuntimeError(item['name'] + ' checksum mismatch; nothing installed')
-        with open(target, 'wb') as f:
-            f.write(data)
+        if 'extract' not in item:
+            with open(target, 'wb') as f:
+                f.write(data)
+            continue
+        # An archive: exactly the files the plan names are taken from it, each checked, and nothing else may be in it.
+        # Their paths come from the plan, never from the archive, so no member can be written outside staging.
+        wanted = item['extract']['files']
+        directories = {os.path.dirname(name) for name in wanted} - {''}
+        taken = set()
+        with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+            for member in archive.getmembers():
+                if member.isdir() and member.name in directories:
+                    continue
+                if not member.isfile() or member.name not in wanted or member.name in taken:
+                    raise RuntimeError(item['name'] + ' holds an unexpected entry ' + repr(member.name)[:200] + '; nothing installed')
+                content = archive.extractfile(member).read()
+                if hashlib.sha256(content).hexdigest() != wanted[member.name]:
+                    raise RuntimeError(item['name'] + ' file ' + member.name + ' checksum mismatch; nothing installed')
+                path = stage + '/' + item['extract']['directory'] + '/' + member.name
+                os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+                with open(path, 'wb') as f:
+                    f.write(content)
+                taken.add(member.name)
+        if taken != set(wanted):
+            raise RuntimeError(item['name'] + ' lacks ' + ', '.join(sorted(set(wanted) - taken)) + '; nothing installed')
     for change in p['changes']:
         if change['after'] is not None:
             with open(stage + '/' + change['staged'], 'w') as f:
@@ -189,10 +214,7 @@ try:
         subprocess.run(['sudo', '-v'], check=True, timeout=120)
 
     # Probe again, here and now: the steps below run only on the destination the plan was made for.
-    check = subprocess.run(
-        ['python3', '-c', p['probeScript']],
-        input=json.dumps(dict(sha256=p['options']['artifact']['sha256'], runtime=p['runtime'])).encode(),
-        capture_output=True, timeout=90)
+    check = subprocess.run(['python3', '-c', p['probeScript']], input=json.dumps(p['probeRequest']).encode(), capture_output=True, timeout=90)
     if check.returncode:
         raise RuntimeError('Final read-only probe failed: ' + check.stderr.decode())
     actual = json.loads(check.stdout)
@@ -202,6 +224,8 @@ try:
         report(dict(ok=False, stale=True, completed=[], error='Inputs changed during artifact delivery; nothing installed'))
         sys.exit(0)
 
+    # Staging was private. What root installs gets root's usual permissions, whatever umask sudo passes on.
+    os.umask(0o022)
     for step in p['steps']:
         started = step['label']
         save()
