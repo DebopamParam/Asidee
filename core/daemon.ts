@@ -41,6 +41,8 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     fleet: { run: async (body) => machines?.fleet(body.refresh) },
     hostAttach: { run: async (body) => machines?.attach(body), socketOnly: true },
     hostRemove: { run: async (body) => machines?.remove(body), socketOnly: true },
+    sessionTarget: { run: (body) => core.sessionTarget(body.name), socketOnly: true },
+    sshPrepare: { run: (body) => core.sshSetup(String(body.name), false, typeof body.publicKey === "string" ? body.publicKey : ""), socketOnly: true },
     checklist: { run: async () => CHECKLIST },
     engines: { run: () => core.engines() },
     list: { run: () => core.list() },
@@ -59,7 +61,7 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     action: { run: (body) => core.runAction(body.extension, body.action, body.sandbox, body.values) },
     forwardAdd: { run: (body) => core.forwardAdd(String(body.name), body.port, body.localPort) },
     forwardList: { run: async (body) => core.forwardList(body.name) },
-    forwardRemove: { run: async (body) => core.forwardRemove(body.id) },
+    forwardRemove: { run: async (body) => machines?.forwardRemove(body.id) ?? core.forwardRemove(body.id) },
     sshAccess: { run: (body) => core.sshAccess(String(body.name)) },
     // It writes to the user's SSH configuration, so a web page cannot ask for it.
     sshSetup: { run: (body) => core.sshSetup(String(body.name), body.writeConfig === true), socketOnly: true },
@@ -132,7 +134,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   const digest = new Bun.CryptoHasher("sha256")
   for await (const bytes of Bun.file(Bun.main.startsWith("/$bunfs/") ? process.execPath : Bun.main).stream()) digest.update(bytes)
   const core = new Core([new GvisorProvider(systemRunner, createHash("sha256").update(`${hostname()}\0${dirs.state}`).digest("hex").slice(0, 10)), new DockerSandboxesProvider(systemRunner)], dirs, systemRunner, cliDir, identity)
-  const hello: Hello = { machineId: identity, bootId: randomBytes(16).toString("hex"), version: VERSION, buildDigest: digest.digest("hex"), protocols: [PROTOCOL], methods: Object.keys(CATALOG), features: ["machines"] }
+  const hello: Hello = { machineId: identity, bootId: randomBytes(16).toString("hex"), version: VERSION, buildDigest: digest.digest("hex"), protocols: [PROTOCOL], methods: Object.keys(CATALOG), features: ["machines", "remote-streams", "remote-forwards", "ssh"] }
   const machines = new Machines(dirs, hello, async () => ({ hello, sandboxes: await core.list(), checkedAt: new Date().toISOString() }))
   const token = randomBytes(24).toString("hex")
   let stop: (keepSandboxes: boolean) => void = () => {}
@@ -154,7 +156,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   // down: each side pauses until the other has taken what it was given.
   const streams = createServer({ allowHalfOpen: true }, (connection) => {
     if (stopping) return connection.destroy()
-    serveStream(connection, (request) => core.openSession(request))
+    serveStream(connection, (request) => machines.openSession(request, (request) => core.openSession(request)))
   })
   await new Promise<void>((resolve, reject) => { streams.once("error", reject); streams.listen(streamSocketPath(dirs), () => resolve()) })
   await chmod(streamSocketPath(dirs), 0o600)
@@ -180,6 +182,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   stopping = true
   clearInterval(timer)
   core.closeSessions()
+  await machines.close()
   if (!keepSandboxes) await core.stopWatched()
   streams.close()
   await Promise.all([unix.stop(true), tcp?.stop(true)])

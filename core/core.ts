@@ -1,13 +1,14 @@
 import { randomBytes } from "node:crypto"
+import { EventEmitter } from "node:events"
 import type { Server } from "node:net"
 import { blockers, CHECKLIST, complete, failures, titleOf } from "./checks"
 import { fieldValues, loadExtensions, runCommand } from "./extensions"
 import { boundPort, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
 import { OUTPUT_LIMIT } from "./run"
-import { addInclude, alias, editorKey, GUEST_SETUP, GUEST_SSH, includeLine, included, parseGuestSetup, userConfig, writeClientFiles, type SshAccess } from "./ssh"
+import { addInclude, alias, editorKey, GUEST_SETUP, GUEST_SSH, includeLine, included, keyFingerprint, parseGuestSetup, userConfig, validPublicKey, writeClientFiles, type SshAccess } from "./ssh"
 import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSizes, validSpec, validTemplateName, writeManifest, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
-import { PaddockError, type CheckResult, type Engine, type Limits, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage, type Template } from "./types"
+import { PaddockError, type CheckResult, type Engine, type Limits, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage, type Template, type SshSetup } from "./types"
 
 // A running sandbox is stopped when a blocking check could not be made this many timer passes in a row.
 export const UNCHECKED_PASSES = 4
@@ -40,6 +41,7 @@ export class Core {
   private readonly unchecked = new Map<string, number>()
   // Open sessions per sandbox name, closed when it stops or is removed.
   private readonly sessions = new Map<string, Set<Session>>()
+  private readonly leases = new Map<string, { name: string; sandboxId: string; generation: string; port: number; session: Session; dials: Set<Session> }>()
   // Forwards by id. They live in this daemon only: a stop, restart or removal of their sandbox, or the daemon's exit,
   // ends them, and nothing brings one back.
   private readonly forwards = new Map<string, { view: Omit<ForwardView, "connections">; server: Server; connections: Set<Session>; watch: ReturnType<typeof setInterval> }>()
@@ -326,16 +328,56 @@ export class Core {
   // undo a stop.
   async openSession(request: OpenRequest): Promise<Session> {
     const manifest = await readManifest(this.dirs, request.name); const provider = this.provider(manifest)
+    if (request.machineId !== undefined && request.machineId !== this.machineId) throw new PaddockError("identity-changed", "The session names another machine.")
+    if (request.sandboxId !== undefined && request.sandboxId !== manifest.id) throw new PaddockError("identity-changed", "The sandbox was recreated; open a new session or forward explicitly.")
+    if (request.generation !== undefined && request.generation !== await provider.generation(manifest)) throw new PaddockError("conflict", "The sandbox's run changed; open a new forward explicitly.")
     if (manifest.engine.capabilities?.execStream === false) throw new PaddockError("dependency", `${manifest.engine.label} cannot relay a session's bytes.`)
     if ((await provider.status(manifest)) !== "running") throw new PaddockError("conflict", `${request.name} is not running. Start it with \`paddock start ${request.name}\`.`)
+    if (request.kind === "lease") {
+      if (this.leases.has(request.leaseId)) throw new PaddockError("conflict", "This relay lease already exists.")
+      if (manifest.engine.capabilities?.loopbackRelay === false) throw new PaddockError("dependency", "This engine cannot relay sandbox loopback.")
+      await provider.prepareLoopback(manifest)
+      const events = new EventEmitter(); let ended = false; let paused = false; let checking = false
+      const close = (reason = "The relay control stream ended.") => { if (ended) return; ended = true; clearInterval(watch); clearInterval(heartbeat); this.leases.delete(request.leaseId); for (const dial of lease.dials) dial.close(reason); events.emit("end", { error: reason }) }
+      const session: Session = Object.assign(events, { tty: false, write: () => true, end: () => close(), resize: async () => {}, pause: () => { paused = true }, resume: () => { paused = false }, close })
+      const lease = { name: manifest.name, sandboxId: manifest.id, generation: request.generation, port: request.port, session, dials: new Set<Session>() }
+      this.leases.set(request.leaseId, lease)
+      const watch = setInterval(async () => {
+        if (checking || ended) return
+        checking = true
+        try { if (await provider.generation(manifest).catch(() => undefined) !== request.generation) close("The forward's sandbox stopped or restarted.") } finally { checking = false }
+      }, 2000)
+      const heartbeat = setInterval(() => { if (!paused && !ended) events.emit("output", "stdout", Buffer.from([1])) }, 5000)
+      watch.unref(); heartbeat.unref()
+      this.trackSession(manifest.name, session)
+      return session
+    }
+    if (request.kind === "dial") {
+      const lease = this.leases.get(request.leaseId)
+      if (!lease || lease.name !== manifest.name || lease.sandboxId !== manifest.id || lease.generation !== request.generation || lease.port !== request.port) throw new PaddockError("conflict", "The forward lease is no longer open for this run and port.")
+      const session = await provider.dialLoopback(manifest, request.port)
+      if (this.leases.get(request.leaseId) !== lease) { session.close(); throw new PaddockError("conflict", "The forward lease ended while connecting.") }
+      lease.dials.add(session); session.on("end", () => lease.dials.delete(session)); this.trackSession(manifest.name, session)
+      return session
+    }
     // sshd in inetd mode serves this one connection; -e sends its complaints to the client's stderr.
     if (request.kind === "ssh" && !manifest.ssh) throw new PaddockError("conflict", `SSH is not set up for ${request.name}. Run \`paddock ssh setup ${request.name}\`.`)
     const session = request.kind === "ssh" ? await provider.openExec(manifest, [manifest.ssh!.sshd, "-i", "-e", "-f", `${GUEST_SSH}/sshd_config`], { user: "0", tty: false })
       : await provider.openExec(manifest, request.argv, request)
-    const open = this.sessions.get(request.name) ?? new Set<Session>()
-    this.sessions.set(request.name, open.add(session))
-    session.on("end", () => open.delete(session))
+    this.trackSession(request.name, session)
     return session
+  }
+
+  private trackSession(name: string, session: Session): void {
+    const open = this.sessions.get(name) ?? new Set<Session>()
+    this.sessions.set(name, open.add(session))
+    session.on("end", () => open.delete(session))
+  }
+
+  async sessionTarget(name: unknown): Promise<{ name: string; machineId: string; sandboxId: string; generation: string }> {
+    const manifest = await readManifest(this.dirs, validName(name)); const generation = await this.provider(manifest).generation(manifest)
+    if (!generation) throw new PaddockError("conflict", `${manifest.name} is not running.`)
+    return { name: manifest.name, machineId: this.machineId, sandboxId: manifest.id, generation }
   }
 
   closeSessions(): void {
@@ -401,6 +443,8 @@ export class Core {
   // A disclosure, from the listeners themselves: any process on this machine can connect to a loopback port.
   private forwardCheck(manifest: Manifest): CheckResult {
     const mine = [...this.forwards.values()].filter((forward) => forward.view.sandboxId === manifest.id)
+    const leases = [...this.leases.entries()].filter(([, lease]) => lease.sandboxId === manifest.id)
+    if (leases.length) return { id: "forwards", status: "info", evidence: "inspected", detail: `${leases.map(([id, lease]) => `SSH lease ${id} to sandbox loopback port ${lease.port}`).join(", ")}. This daemon checked the sandbox run and port. The primary's loopback listener address and current reachability are unknown here; the primary owns that evidence. The lease ends with its control stream or sandbox run.` }
     if (!mine.length) return { id: "forwards", status: "info", evidence: "inspected", detail: "None. A forward added with `paddock forward add` listens on 127.0.0.1 only and ends when the sandbox stops." }
     const listed = mine.map((forward) => { const address = forward.server.address(); return `${typeof address === "object" && address ? `${address.address}:${address.port}` : "not listening"} to port ${forward.view.port} (${forward.view.id})` })
     return { id: "forwards", status: "info", evidence: "inspected", detail: `${listed.join(", ")}. Any process on this machine can connect to these, and so can whatever the engine relays to its loopback: on OrbStack, the engine's host and its other containers, through host.docker.internal.` }
@@ -408,12 +452,13 @@ export class Core {
 
   // Prepares sshd inside, trusts only this machine's editor key there, and writes the alias and its host key here. Run
   // again, it makes a new host key; the old one stops being trusted.
-  sshSetup(name: string, writeConfig = false): Promise<SshAccess & { config: string; include: string; included: boolean; editorKey: string; keyFile: string }> {
+  sshSetup(name: string, writeConfig = false, publicKey?: string): Promise<SshAccess & { config: string; include: string; included: boolean; editorKey: string; keyFile: string; sandboxId: string; setup: SshSetup }> {
     return this.exclusive(validName(name), async () => {
       const manifest = await readManifest(this.dirs, name); const provider = this.provider(manifest)
       if (manifest.engine.capabilities?.execStream === false) throw new PaddockError("dependency", `${manifest.engine.label} cannot relay a session's bytes, which SSH needs.`)
       if ((await provider.status(manifest)) !== "running") throw new PaddockError("conflict", `${name} is not running. Start it with \`paddock start ${name}\`, then set up SSH.`)
-      const key = await editorKey(this.dirs)
+      if (publicKey !== undefined && !validPublicKey(publicKey)) throw new PaddockError("usage", "SSH preparation needs an Ed25519 public key.")
+      const key = publicKey === undefined ? await editorKey(this.dirs) : { path: "", publicKey, fingerprint: keyFingerprint(publicKey) }
       this.activity.set(name, "Preparing SSH")
       try {
         const who = await provider.exec(manifest, ["id", "-un"])
@@ -423,12 +468,12 @@ export class Core {
         if (done.exitCode !== 0) throw new PaddockError(done.exitCode === 4 ? "dependency" : "runtime", `Could not prepare sshd in ${name}: ${done.stderr.trim().split("\n").slice(-3).join(" ")}`)
         // A second setup finds the password already unlocked; the first one's word for it is kept.
         const guest = parseGuestSetup(done.stdout)
-        manifest.ssh = { user, ...guest, unlocked: guest.unlocked || Boolean(manifest.ssh?.unlocked), editorKey: key.fingerprint, at: new Date().toISOString() }
+        manifest.ssh = { user, ...guest, unlocked: guest.unlocked || Boolean(manifest.ssh?.unlocked), editorKey: key.fingerprint, at: new Date().toISOString(), ...(publicKey === undefined ? {} : { editorKeyOrigin: "client" as const }) }
         await writeManifest(this.dirs, manifest)
-        await writeClientFiles(this.dirs, await listManifests(this.dirs))
+        if (publicKey === undefined) await writeClientFiles(this.dirs, await listManifests(this.dirs))
       } finally { this.activity.delete(name) }
-      if (writeConfig) await addInclude(this.dirs)
-      return { ...await this.sshAccessOf(manifest), config: userConfig(), include: includeLine(this.dirs), included: await included(this.dirs), editorKey: key.fingerprint, keyFile: key.path }
+      if (writeConfig && publicKey === undefined) await addInclude(this.dirs)
+      return { ...await this.sshAccessOf(manifest), config: userConfig(), include: includeLine(this.dirs), included: publicKey === undefined && await included(this.dirs), editorKey: key.fingerprint, keyFile: key.path, sandboxId: manifest.id, setup: manifest.ssh! }
     })
   }
 
@@ -442,7 +487,7 @@ export class Core {
 
   private sshCheck(manifest: Manifest): CheckResult {
     if (!manifest.ssh) return { id: "ssh", status: "info", evidence: "inspected", detail: "Not set up. `paddock ssh setup` opens no port; it reaches sshd through the daemon." }
-    return { id: "ssh", status: "info", evidence: "inspected", detail: `Set up ${manifest.ssh.at.slice(0, 10)} for ${manifest.ssh.user} (${manifest.ssh.home}) with this machine's editor key ${manifest.ssh.editorKey}, kept in Paddock's state folder. Anything that can read that key can log in as ${manifest.ssh.user} and forward to the sandbox's loopback; no agent forwarding, no other key.${manifest.ssh.unlocked ? ` Setup replaced ${manifest.ssh.user}'s locked password with * (still no password) because sshd refuses a locked account.` : ""}` }
+    return { id: "ssh", status: "info", evidence: "inspected", detail: `Set up ${manifest.ssh.at.slice(0, 10)} for ${manifest.ssh.user} (${manifest.ssh.home}) with ${manifest.ssh.editorKeyOrigin === "client" ? "the requesting client's editor public key" : "this machine's editor key"} ${manifest.ssh.editorKey}, ${manifest.ssh.editorKeyOrigin === "client" ? "whose private half is not installed by this daemon" : "kept in Paddock's state folder"}. Anything that can read that private key can log in as ${manifest.ssh.user} and forward to the sandbox's loopback; no agent forwarding, no other key.${manifest.ssh.unlocked ? ` Setup replaced ${manifest.ssh.user}'s locked password with * (still no password) because sshd refuses a locked account.` : ""}` }
   }
 
   extensions() { return loadExtensions(this.dirs) }

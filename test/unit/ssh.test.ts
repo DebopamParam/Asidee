@@ -2,7 +2,7 @@ import { afterAll, expect, test } from "bun:test"
 import { lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { addInclude, editorKey, hostBlock, includeLine, included, parseGuestSetup, shellWord, validPublicKey, writeClientFiles } from "../../core/ssh"
+import { addInclude, editorKey, hostBlock, includeLine, included, keyFingerprint, parseGuestSetup, parseSshSetup, remoteAliases, shellWord, updateRemoteAlias, validPublicKey, writeClientFiles } from "../../core/ssh"
 import type { Manifest } from "../../core/types"
 
 const KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
@@ -69,4 +69,23 @@ test("the guest's report is read strictly", () => {
   for (const bad of ["", "no\n/root\n/usr/sbin/sshd\nssh-rsa AAAA", `no\nroot\n/usr/sbin/sshd\n${KEY}`, `no\n/root\nsshd\n${KEY}`, `no\n/root\n/usr/sbin/sshd\n${KEY} two words`, `/root\n/usr/sbin/sshd\n${KEY}`])
     expect(() => parseGuestSetup(bad)).toThrow("did not report")
   expect(validPublicKey(`${KEY}\nssh-ed25519 ${KEY.split(" ")[1]}`)).toBe(false)
+})
+
+test("remote aliases pin both identities, keep the private key here, coexist with local aliases and are removed per host", async () => {
+  const dirs = await dirsIn()
+  const key = await editorKey(dirs)
+  expect(keyFingerprint(key.publicKey)).toBe(key.fingerprint)
+  const setup = parseSshSetup({ user: "root", home: "/root", unlocked: false, sshd: "/usr/sbin/sshd", hostKey: KEY, editorKey: key.fingerprint, at: "2026-11-11T00:00:00Z" })
+  const entry = { host: "build", name: "demo", machineId: "a".repeat(32), sandboxId: "b".repeat(32), setup }
+  await Promise.all([updateRemoteAlias(dirs, "build", "demo", entry), updateRemoteAlias(dirs, "other", "demo", { ...entry, host: "other", machineId: "c".repeat(32) })])
+  await writeClientFiles(dirs, [manifest("demo", "local-id")])
+  const config = await readFile(join(dirs.state, "ssh", "config"), "utf8")
+  for (const name of ["demo.paddock", "demo.build.paddock", "demo.other.paddock"]) expect(config).toContain(`Host ${name}\n`)
+  expect(config).toContain(`HostKeyAlias paddock-${entry.machineId}-${entry.sandboxId}`)
+  expect(config).toContain(`'--host' 'build' 'ssh' 'proxy' 'demo' '--sandbox-id' '${entry.sandboxId}'`)
+  expect(config).toContain(`IdentityFile "${key.path}"`)
+  expect(JSON.stringify(await remoteAliases(dirs))).not.toContain("PRIVATE KEY")
+  await updateRemoteAlias(dirs, "build")
+  expect((await remoteAliases(dirs)).map((entry) => entry.host)).toEqual(["other"])
+  for (const bad of [{ ...setup, user: "root\nProxyCommand id" }, { ...setup, home: "/root\nBad" }, { ...setup, hostKey: "ssh-rsa AAAA" }]) expect(() => parseSshSetup(bad)).toThrow()
 })

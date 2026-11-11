@@ -65,6 +65,26 @@ test("a check the provider does not report is unknown, never a pass", () => {
   expect(blockers(results).map((entry) => entry.id)).toEqual(["mounts", "network-guard", "inbound", "limits"])
 })
 
+test("remote relay leases require the current sandbox and run and are revoked on stop", async () => {
+  const { provider, state } = fakeProvider(); const paddock = await core(provider)
+  const made = await paddock.create({ name: "demo" }); const target = await paddock.sessionTarget("demo")
+  expect(made.sandbox.sandboxId).toBe(target.sandboxId)
+  const lease = { kind: "lease" as const, ...target, port: 3000, leaseId: "a".repeat(32) }
+  await expect(paddock.openSession({ ...lease, sandboxId: "b".repeat(32) })).rejects.toThrow("recreated")
+  await expect(paddock.openSession({ ...lease, generation: "old" })).rejects.toThrow("run changed")
+  const control = await paddock.openSession(lease); let ended = ""
+  control.on("end", (exit) => { ended = exit.error ?? "" })
+  const checks = (await paddock.verify("demo")).checks
+  expect(checks.find((check) => check.id === "forwards")?.detail).toContain("SSH lease")
+  await expect(paddock.openSession({ ...lease, kind: "dial", port: 3001 })).rejects.toThrow("no longer open")
+  await expect(paddock.openSession({ ...lease, kind: "dial", leaseId: "b".repeat(32) })).rejects.toThrow("no longer open")
+  await paddock.stop("demo")
+  expect(ended).toContain("stopped")
+  expect(state.running).toBe(false)
+  await paddock.start("demo")
+  await expect(paddock.openSession({ ...lease, kind: "dial" })).rejects.toThrow("run changed")
+})
+
 test("a failed blocking check blocks; an unknown probe and a weak disk limit do not", () => {
   const results: CheckResult[] = [
     { id: "net-host", status: "unknown", evidence: "none", detail: "" }, { id: "net-peers", status: "fail", evidence: "probed", detail: "" },

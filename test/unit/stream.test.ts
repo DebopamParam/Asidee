@@ -103,6 +103,14 @@ test("a connection that does not open a session first, sends before ready, or as
   expect(JSON.parse(early[0]!.payload.toString()).message).toBe("Wait for ready before sending.")
 })
 
+test("hosted sessions preserve routing identity and relay sessions require a run and lease", () => {
+  const target = { name: "demo", host: "build", machineId: "a".repeat(32), sandboxId: "b".repeat(32), bootId: "c".repeat(32), protocol: 1, version: "0.4.0", generation: "run-1" }
+  expect(parseOpen({ ...target, kind: "exec", argv: ["id"], tty: false })).toEqual({ ...target, kind: "exec", argv: ["id"], tty: false })
+  expect(parseOpen({ ...target, kind: "lease", port: 3000, leaseId: "d".repeat(32) })).toEqual({ ...target, kind: "lease", port: 3000, leaseId: "d".repeat(32) })
+  for (const input of [{ ...target, machineId: "bad" }, { ...target, generation: "a\nb" }, { ...target, sandboxId: undefined }, { ...target, port: 0 }])
+    expect(() => parseOpen({ kind: "dial", port: 3000, leaseId: "d".repeat(32), ...input })).toThrow()
+})
+
 test("a client that goes away closes its session", async () => {
   const session = new Echo()
   const { talk, close } = await served(async () => session)

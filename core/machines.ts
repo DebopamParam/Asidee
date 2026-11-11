@@ -1,9 +1,13 @@
 import { randomBytes } from "node:crypto"
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import type { Server } from "node:net"
 import type { SandboxView } from "./core"
+import { boundPort, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
 import { validName, validSpec, type Dirs } from "./state"
-import { absolutePath, HttpPeer, object, PROTOCOL, sshDestination, type Endpoint } from "./transport"
+import type { OpenRequest } from "./stream"
+import { addInclude, alias, editorKey, included, includeLine, parseSshSetup, remoteAliases, updateRemoteAlias, userConfig } from "./ssh"
+import { absolutePath, HttpPeer, object, PROTOCOL, RemoteSession, sshDestination, type Endpoint } from "./transport"
 import { PaddockError, type CheckResult } from "./types"
 
 export const CATALOG = {
@@ -15,6 +19,8 @@ export const CATALOG = {
   forwardAdd: ["dashboard", "primary"], forwardList: ["dashboard", "primary"], forwardRemove: ["dashboard", "primary"],
   sshAccess: ["dashboard", "primary"], sshSetup: ["socket", "primary"], shutdown: ["socket", "write"],
   hostList: ["dashboard", "primary"], fleet: ["dashboard", "primary"], hostAttach: ["socket", "primary"], hostRemove: ["socket", "primary"],
+  sessionTarget: ["socket", "read"],
+  sshPrepare: ["socket", "write"],
 } as const
 export type MethodName = keyof typeof CATALOG
 export const isMethod = (method: string): method is MethodName => Object.hasOwn(CATALOG, method)
@@ -132,6 +138,8 @@ type Cached = { view: HostView; summary?: MachineSummary; pending?: Promise<void
 export class Machines {
   private readonly cache = new Map<string, Cached>()
   private registryWrite: Promise<unknown> = Promise.resolve()
+  private readonly forwards = new Map<string, { host: string; view: ForwardView & { host: string; machineId: string }; server: Server; lease: RemoteSession; connections: Set<RemoteSession>; timer: ReturnType<typeof setInterval> }>()
+  private readonly sessions = new Set<RemoteSession>()
   constructor(readonly dirs: Dirs, readonly hello: Hello, private readonly localSummary: () => Promise<MachineSummary>, private readonly connectPeer: (endpoint: Endpoint) => Pick<HttpPeer, "call" | "close"> = (endpoint) => new HttpPeer(endpoint)) {}
 
   async resolve(host: unknown): Promise<HostRecord> {
@@ -154,11 +162,115 @@ export class Machines {
     const { host: selected, ...payload } = body
     if (selected === undefined || selected === "local") return undefined
     const host = await this.resolve(selected)
+    if (method === "forwardAdd") return this.forwardAdd(host, body)
+    if (method === "forwardList") return this.forwardList(host.name, body.name)
+    if (method === "forwardRemove") return this.forwardRemove(body.id, host.name)
+    if (method === "sshSetup") return this.sshSetup(host, body)
+    if (method === "sshAccess") return this.sshAccess(host, body.name)
     if (CATALOG[method][1] === "primary") throw new PaddockError("dependency", `${method} has no remote implementation yet.`)
     return this.peer(host, async (peer, hello) => {
       if (!hello.methods.includes(method)) throw new PaddockError("incompatible", `The daemon on ${host.name} does not offer ${method}.`)
-      return peer.call(method, payload, { mutation: mutates(method), machineId: host.machineId, version: this.hello.version, ...(!mutates(method) ? { timeoutMs: 10_000 } : {}) })
+      const result = await peer.call(method, payload, { mutation: mutates(method), machineId: host.machineId, version: this.hello.version, ...(!mutates(method) ? { timeoutMs: 10_000 } : {}) })
+      if (method === "remove") await updateRemoteAlias(this.dirs, host.name, validName(body.name))
+      return result
     })
+  }
+
+  private async sshSetup(host: HostRecord, body: Record<string, unknown>) {
+    const name = validName(body.name); const key = await editorKey(this.dirs)
+    const result = await this.peer(host, async (peer) => peer.call("sshPrepare", { name, publicKey: key.publicKey }, { mutation: true, machineId: host.machineId, version: this.hello.version }))
+    if (!object(result) || !id(result.sandboxId)) throw new PaddockError("incompatible", "Invalid remote SSH identity.")
+    const setup = parseSshSetup(result.setup)
+    if (setup.editorKey !== key.fingerprint) throw new PaddockError("incompatible", "The remote daemon prepared another editor key.")
+    await updateRemoteAlias(this.dirs, host.name, name, { host: host.name, name, machineId: host.machineId, sandboxId: result.sandboxId, setup })
+    if (body.writeConfig === true) await addInclude(this.dirs)
+    return { ...await this.sshAccess(host, name), config: userConfig(), include: includeLine(this.dirs), included: await included(this.dirs), editorKey: key.fingerprint, keyFile: key.path }
+  }
+  private async sshAccess(host: HostRecord, input: unknown) {
+    const name = validName(input); const setup = (await remoteAliases(this.dirs)).find((entry) => entry.host === host.name && entry.machineId === host.machineId && entry.name === name)
+    const current = await this.peer(host, (peer) => peer.call("get", { name }, { timeoutMs: 10_000, machineId: host.machineId, version: this.hello.version }))
+    const same = object(current) && current.sandboxId === setup?.sandboxId
+    return { alias: alias(name, host.name), user: same ? setup?.setup.user ?? "" : "", home: same ? setup?.setup.home ?? "" : "", loopbackForwarding: Boolean(same && setup),
+      batchReady: Boolean(same && setup && current.status === "running" && await included(this.dirs)) }
+  }
+
+  private async target(peer: Pick<HttpPeer, "call">, host: HostRecord, name: unknown) {
+    const value = await peer.call("sessionTarget", { name: validName(name) }, { timeoutMs: 10_000, machineId: host.machineId, version: this.hello.version })
+    if (!object(value) || value.name !== name || value.machineId !== host.machineId || !id(value.sandboxId) || typeof value.generation !== "string" || value.generation.length > 128) throw new PaddockError("incompatible", "Invalid remote sandbox identity.")
+    return { name: validName(name), machineId: host.machineId, sandboxId: value.sandboxId, generation: value.generation }
+  }
+
+  private async remoteSession(host: HostRecord, hello: Hello, request: OpenRequest): Promise<RemoteSession> {
+    const session = await RemoteSession.open(host, { ...request, host: undefined, machineId: host.machineId, bootId: hello.bootId, protocol: PROTOCOL, version: this.hello.version })
+    this.sessions.add(session); void session.closed.finally(() => this.sessions.delete(session))
+    return session
+  }
+
+  async openSession(request: OpenRequest, local: (request: OpenRequest) => Promise<import("./types").Session>): Promise<import("./types").Session> {
+    if (request.host === undefined || request.host === "local") {
+      if (request.bootId !== undefined && request.bootId !== this.hello.bootId) throw new PaddockError("identity-changed", "The daemon restarted before this session opened.")
+      if (request.protocol !== undefined && (request.protocol !== PROTOCOL || request.version !== this.hello.version)) throw new PaddockError("incompatible", "The stream protocol or daemon version differs.")
+      return local(request)
+    }
+    const host = await this.resolve(request.host)
+    return this.peer(host, async (peer, hello) => {
+      if (!hello.features.includes("remote-streams")) throw new PaddockError("dependency", "The remote daemon does not offer hosted streams.")
+      const target = await this.target(peer, host, request.name)
+      if (request.sandboxId && request.sandboxId !== target.sandboxId) throw new PaddockError("identity-changed", "The sandbox was recreated; set up its alias again.")
+      return this.remoteSession(host, hello, { ...request, ...target })
+    })
+  }
+
+  private async forwardAdd(host: HostRecord, body: Record<string, unknown>): Promise<ForwardView> {
+    const port = validPort(body.port, "The port"); const local = body.localPort === undefined ? undefined : validPort(body.localPort, "The local port")
+    return this.peer(host, async (peer, hello) => {
+      if (!hello.features.includes("remote-forwards")) throw new PaddockError("dependency", "The remote daemon does not offer hosted forwards.")
+      const target = await this.target(peer, host, body.name); const leaseId = randomBytes(16).toString("hex")
+      const lease = await this.remoteSession(host, hello, { kind: "lease", ...target, port, leaseId })
+      let server: Server
+      try { server = await listenLoopback(local) } catch (error) { lease.close(); await lease.closed; throw error }
+      const forwardId = randomBytes(4).toString("hex"); let heard = Date.now()
+      const forward = { host: host.name, view: { id: forwardId, ...target, host: host.name, localAddress: "127.0.0.1" as const, localPort: boundPort(server), port, createdAt: new Date().toISOString(), connections: 0 }, server, lease, connections: new Set<RemoteSession>(),
+        timer: setInterval(() => { if (Date.now() - heard >= 15_000) this.endForward(forwardId, "The SSH control stream was silent for 15 seconds; add a new forward explicitly.") }, 1000) }
+      forward.timer.unref()
+      this.forwards.set(forwardId, forward)
+      lease.on("output", () => { heard = Date.now() }); lease.on("end", () => this.endForward(forwardId, "The remote daemon, sandbox run or SSH control link ended.")); lease.resume()
+      server.on("connection", async (socket) => {
+        socket.on("error", () => {})
+        if (!this.forwards.has(forwardId) || Date.now() - heard >= 15_000) { this.endForward(forwardId, "The SSH control stream expired."); return socket.destroy() }
+        let session: RemoteSession
+        try { session = await this.remoteSession(host, hello, { kind: "dial", ...target, port, leaseId }) } catch { return socket.destroy() }
+        if (!this.forwards.has(forwardId) || socket.destroyed) { session.close(); socket.destroy(); return }
+        forward.connections.add(session)
+        // A service closing normally ends only that connection. Transport failure ends the listener as well.
+        session.on("end", (exit) => { forward.connections.delete(session); if (session.linkLost) this.endForward(forwardId, exit.error ?? "The SSH relay was lost.") })
+        relay(socket, session); session.resume()
+      })
+      return forward.view
+    })
+  }
+
+  private endForward(id: string, reason: string): void {
+    const forward = this.forwards.get(id)
+    if (!forward) return
+    this.forwards.delete(id); clearInterval(forward.timer); forward.server.close(); forward.lease.close(reason)
+    for (const session of forward.connections) session.close(reason)
+  }
+  forwardList(host: string, name?: unknown): ForwardView[] {
+    const only = name === undefined ? undefined : validName(name)
+    return [...this.forwards.values()].filter((forward) => forward.host === host && (!only || forward.view.name === only)).map((forward) => ({ ...forward.view, connections: forward.connections.size }))
+  }
+  forwardRemove(id: unknown, host?: string): { closed: string } | undefined {
+    if (typeof id !== "string" || !this.forwards.has(id) || (host && this.forwards.get(id)!.host !== host)) {
+      if (host) throw new PaddockError("not-found", "No such primary forward for this host.")
+      return undefined
+    }
+    this.endForward(id, "The forward was removed."); return { closed: id }
+  }
+  async close(): Promise<void> {
+    for (const id of [...this.forwards.keys()]) this.endForward(id, "The primary daemon stopped.")
+    const sessions = [...this.sessions]; for (const session of sessions) session.close("The primary daemon stopped.")
+    await Promise.all(sessions.map((session) => session.closed))
   }
 
   // Serializes only registry writes; a slow or unreachable machine never holds another machine's refresh.
@@ -180,7 +292,9 @@ export class Machines {
     return this.edit(async () => {
       const host = await this.resolve(body.name)
       if (body.confirm !== host.name) throw new PaddockError("usage", "Confirm removal with --confirm NAME. A prepared daemon and all remote data are retained.")
+      for (const [id, forward] of this.forwards) if (forward.host === host.name) this.endForward(id, "The host was removed.")
       await writeHosts(this.dirs, (await readHosts(this.dirs)).filter((entry) => entry.name !== host.name))
+      await updateRemoteAlias(this.dirs, host.name)
       this.cache.delete(host.name); return { removed: host.name, remoteRetained: true }
     })
   }

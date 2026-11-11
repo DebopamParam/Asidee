@@ -2,7 +2,9 @@ import { spawn } from "node:child_process"
 import { Agent, request } from "node:http"
 import { connect } from "node:net"
 import { Duplex } from "node:stream"
-import { PaddockError, type ErrorCode } from "./types"
+import { EventEmitter } from "node:events"
+import { dataFrames, frame, FrameReader, type Frame, type OpenRequest } from "./stream"
+import { PaddockError, type ErrorCode, type Session } from "./types"
 
 export const PROTOCOL = 1
 export const MAX_REPLY = 8 * 1024 ** 2
@@ -104,4 +106,79 @@ export async function transportStdio(path: string): Promise<void> {
     process.stdin.pipe(socket); socket.pipe(process.stdout)
     process.stdin.on("end", () => socket.end())
   })
+}
+
+// Remote stdout is frames, never executable instructions. The one-frame/socket bound applies on both SSH pipes too.
+export class RemoteSession extends EventEmitter implements Session {
+  readonly tty: boolean
+  linkLost = false
+  private readonly connection: ReturnType<typeof sshConnection>
+  private readonly reader = new FrameReader()
+  private pending: Frame[] = []
+  private paused = true
+  private done = false
+  private ready = false
+  private opened: (error?: PaddockError) => void = () => {}
+  readonly closed: Promise<void>
+  private closedResolve: () => void = () => {}
+  private readonly timer: ReturnType<typeof setTimeout>
+  private constructor(host: Endpoint, request: OpenRequest) {
+    super(); this.tty = request.kind === "exec" && request.tty
+    this.connection = sshConnection(host, true)
+    this.closed = new Promise((resolve) => { this.closedResolve = resolve })
+    const wire = this.connection.wire
+    wire.on("drain", () => this.emit("drain"))
+    wire.on("error", (error) => { if (!this.done) this.linkLost = true; this.finish({ error: `The SSH session was lost: ${error.message}` }) })
+    wire.on("close", () => { if (!this.done) { this.linkLost = true; this.finish({ error: `The SSH session was lost before an exit status arrived. ${this.connection.diagnostic()}`.trim() }) } })
+    wire.on("data", (chunk: Buffer) => {
+      try {
+        const frames = this.reader.push(chunk)
+        if (!this.ready) {
+          const first = frames.shift()
+          if (!first) return
+          if (first.kind === "error") { const error = this.error(first.payload); this.opened(error); return this.finish({ error: error.message }) }
+          if (first.kind !== "ready") throw new PaddockError("incompatible", "The remote stream did not send ready.")
+          this.ready = true; clearTimeout(this.timer); wire.pause(); this.pending.push(...frames); this.opened(); return
+        }
+        this.pending.push(...frames); this.flush()
+      } catch (error) { const failure = error instanceof PaddockError ? error : new PaddockError("incompatible", "Malformed remote stream."); this.opened(failure); this.finish({ error: failure.message }) }
+    })
+    this.timer = setTimeout(() => { this.opened(new PaddockError("offline", "The remote stream did not become ready in 10 seconds.")); this.finish({ error: "The remote stream timed out." }) }, 10_000)
+    wire.write(frame("open", request))
+  }
+  static async open(host: Endpoint, request: OpenRequest): Promise<RemoteSession> {
+    const session = new RemoteSession(host, request)
+    await new Promise<void>((resolve, reject) => { session.opened = (error) => error ? reject(error) : resolve() })
+    return session
+  }
+  private error(payload: Buffer): PaddockError {
+    const value: unknown = JSON.parse(payload.toString())
+    if (!object(value) || typeof value.message !== "string" || !ERROR_CODES.some((code) => code === value.code)) return new PaddockError("incompatible", "Malformed remote stream error.")
+    return new PaddockError(ERROR_CODES.find((code) => code === value.code)!, value.message)
+  }
+  private flush(): void {
+    while (!this.paused && !this.done && this.pending.length) {
+      const piece = this.pending.shift()!
+      if (piece.kind === "stdout" || piece.kind === "stderr") this.emit("output", piece.kind, piece.payload)
+      else if (piece.kind === "error") this.finish({ error: this.error(piece.payload).message })
+      else if (piece.kind === "exit") {
+        const value: unknown = JSON.parse(piece.payload.toString())
+        if (!object(value) || !Number.isInteger(value.code)) return this.finish({ error: "Malformed remote exit status." })
+        this.finish({ code: Number(value.code) })
+      } else this.finish({ error: `A remote daemon cannot send ${piece.kind}.` })
+    }
+  }
+  private finish(exit: { code?: number; error?: string }): void {
+    if (this.done) return
+    this.done = true; clearTimeout(this.timer)
+    if (!this.ready) this.opened(new PaddockError("offline", exit.error ?? "The remote stream ended before ready."))
+    this.emit("end", exit)
+    void this.connection.close().finally(() => this.closedResolve())
+  }
+  write(bytes: Uint8Array): boolean { let writable = true; for (const piece of dataFrames("stdin", bytes)) if (!this.connection.wire.write(piece)) writable = false; return writable }
+  end(): void { this.connection.wire.write(frame("eof")) }
+  async resize(cols: number, rows: number): Promise<void> { this.connection.wire.write(frame("resize", { cols, rows })) }
+  pause(): void { this.paused = true; this.connection.wire.pause() }
+  resume(): void { this.paused = false; this.flush(); if (!this.paused && !this.done) this.connection.wire.resume() }
+  close(reason = "The SSH session was closed."): void { this.finish({ error: reason }) }
 }

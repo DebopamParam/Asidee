@@ -68,8 +68,8 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
 Not built yet:
 
 - Docker Sandboxes (microVM) support. It is detected and reported as not supported.
-- A hard disk cap, Windows execution, remote streams/forwards/editor aliases, reviewed host installation, a desktop app,
-  and installers. Prepared-daemon routing is the first Machines unit; the remote dashboard is later.
+- A hard disk cap, Windows execution, reviewed host installation, a desktop app, and installers. The remote dashboard
+  is later.
 - Docker Desktop and Colima measurements. Native Linux Docker and OrbStack have separate scorecards.
 - A license. Nothing here is published.
 

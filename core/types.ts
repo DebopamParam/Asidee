@@ -91,7 +91,7 @@ export type Manifest = {
 // user and home: the login, the same as exec's. unlocked: its locked password was replaced by * (still no password),
 // since sshd refuses a locked account even with a key. hostKey: the public half of the key made inside. editorKey: the
 // fingerprint of the key this machine's editors log in with.
-export type SshSetup = { user: string; home: string; unlocked: boolean; sshd: string; hostKey: string; editorKey: string; at: string }
+export type SshSetup = { user: string; home: string; unlocked: boolean; sshd: string; hostKey: string; editorKey: string; at: string; editorKeyOrigin?: "client" }
 
 // overflow: the command printed more than its output limit on that stream, was killed, and its output was discarded.
 // raw: stdout's bytes, when asked for with `binary`.

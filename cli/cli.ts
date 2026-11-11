@@ -110,7 +110,7 @@ async function call<T>(method: string, body: object = {}, watch?: string): Promi
 // socket, and waits whenever the other side has not taken what it was given. On a terminal the session gets one too:
 // keystrokes, Ctrl-C included, go to the sandbox, and the terminal's settings are put back however the session ends.
 async function session(request: OpenRequest): Promise<never> {
-  if (selectedHost && selectedHost !== "local") throw new PaddockError("dependency", "Remote streams are not implemented yet.")
+  request = { ...request, host: selectedHost }
   await ensureDaemon()
   const socket = connect(streamSocketPath(dirs))
   const raw = request.kind === "exec" && request.tty && process.stdin.isTTY
@@ -318,7 +318,7 @@ async function main(argv: string[]): Promise<void> {
         const { values, positionals } = parse({ port: { type: "string" }, "local-port": { type: "string" } }, rest.slice(1))
         if (rest[0] === "add") {
           const made = await call<ForwardView>("forwardAdd", { name: need(positionals[0], "a name"), port: need(values.port, "--port"), localPort: values["local-port"] })
-          return out(made, () => console.log(`Forwarding 127.0.0.1:${made.localPort} to port ${made.port} in ${made.name} (forward ${made.id}). It ends when ${made.name} stops or restarts, or the daemon stops; then add it again.`))
+          return out(made, () => console.log(`Forwarding 127.0.0.1:${made.localPort} to port ${made.port} in ${selectedHost && selectedHost !== "local" ? `${selectedHost}/` : ""}${made.name} (forward ${made.id}). It ends when the sandbox run, either daemon or the SSH link ends; a silent control link closes it after 15 seconds without a heartbeat. Then add it again.`))
         }
         if (rest[0] === "list" || rest[0] === undefined) {
           const list = await call<ForwardView[]>("forwardList", { name: positionals[0] })
@@ -334,9 +334,9 @@ async function main(argv: string[]): Promise<void> {
         throw new PaddockError("usage", "Use `paddock forward add NAME --port PORT`, `paddock forward list [NAME]` or `paddock forward remove ID`.")
       }
       case "ssh": {
-        const { values, positionals } = parse({ "write-config": { type: "boolean" } }, rest.slice(1))
+        const { values, positionals } = parse({ "write-config": { type: "boolean" }, "sandbox-id": { type: "string" } }, rest.slice(1))
         // The ProxyCommand an alias runs; ssh speaks through this process's stdin and stdout.
-        if (rest[0] === "proxy") return await session({ kind: "ssh", name: need(positionals[0], "a name") })
+        if (rest[0] === "proxy") return await session({ kind: "ssh", name: need(positionals[0], "a name"), ...(typeof values["sandbox-id"] === "string" ? { sandboxId: values["sandbox-id"] } : {}) })
         if (rest[0] === "setup") {
           const done = await call<SshAccess & { config: string; include: string; included: boolean; editorKey: string; keyFile: string }>("sshSetup", { name: need(positionals[0], "a name"), writeConfig: values["write-config"] === true }, positionals[0])
           return out(done, () => console.log(done.included

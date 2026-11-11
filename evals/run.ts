@@ -2678,6 +2678,113 @@ ev("M05", "With the primary stopped, the remote daemon stops a weakened sandbox 
   return "remote network tamper stopped within 65 s while the primary was absent; an untampered remote control kept running"
 })
 
+ev("M06", "Hosted streams carry binary stdin/stdout, separate stderr, EOF and exit status, and a remote shell receives terminal size and resize", async () => {
+  await remoteSandbox()
+  const file = join(tmp, "remote-stream.bin"); const bytes = new Uint8Array(8 * 1048576)
+  for (let at = 0; at < bytes.length; at += 65536) crypto.getRandomValues(bytes.subarray(at, at + 65536))
+  await writeFile(file, bytes)
+  const want = new Bun.CryptoHasher("sha256").update(bytes).digest("hex")
+  try {
+    const run = await streamed(["--host", MH, "exec", MS, "--stream", "--", "sh", "-c", "cat; echo remote-stderr >&2; exit 5"], { input: file })
+    expect(run.code === 5 && run.bytes === bytes.length && run.sha === want && run.err === "remote-stderr\n", `hosted stream changed data/status: ${run.code}, ${run.bytes}, ${run.err}`)
+    const terminal = await onTerminal(["--host", MH, "shell", MS], [["size", 30, 100], ["type", "stty size; echo m-$((1))\r"], ["wait", "m-1"], ["size", 40, 120], ["pause", 1], ["type", "stty size; exit 7\r"], ["wait", "code="]])
+    const shown = terminal.out.replace(/\r/g, "")
+    expect(/\n30 100\n/.test(shown) && /\n40 120\n/.test(shown) && shown.includes("code=7") && restored(shown.slice(shown.indexOf("code=7"))), `remote terminal failed: ${shown.slice(-500)} ${terminal.err}`)
+  } finally { await rm(file, { force: true }) }
+  return "8 MiB random echo matched SHA-256, separate stderr, exit 5 after EOF; remote TTY 30x100 then 40x120, exit 7 and restored terminal"
+})
+
+async function hostedForward(port: number) {
+  const made = await hosted(["forward", "add", MS, "--port", String(port)])
+  expect(made.reply.ok, `remote forward failed: ${made.out}${made.err}`)
+  return made.reply.data as { id: string; localPort: number }
+}
+const hostedNonce = (port: number, nonce: string) => hosted(["exec", MS, "--", "sh", "-c", `(nc -lk -s 127.0.0.1 -p ${port} -e echo ${nonce} </dev/null >/dev/null 2>&1 &)`])
+ev("M07", "A hosted forward binds only primary loopback, reaches remote sandbox loopback, publishes no engine port and creates no listener on the remote host", async () => {
+  await remoteSandbox()
+  const port = 3123; const nonce = `${PREFIX}-remote-nonce`
+  expect((await hostedNonce(port, nonce)).code === 0, "remote nonce service failed")
+  expect((await remoteDocker(["exec", containerOf(MS), "nc", "-w", "2", "127.0.0.1", String(port)])).out.includes(nonce), "independent guest control failed")
+  const listeners = async () => (await remote(["sh", "-c", "ss -ltnH | awk '{print $4}' | sort"])).out
+  const before = await listeners(); const forward = await hostedForward(port)
+  try {
+    expect((await tcpRead("127.0.0.1", forward.localPort)).toString().includes(nonce), "primary loopback did not reach remote sandbox loopback")
+    expect(await listeners() === before, "forward added a listener on the remote host")
+    const owner = await daemonFile()
+    expect((await listenersOf([owner.pid])).includes(`n127.0.0.1:${forward.localPort}`), "the primary daemon did not own its loopback listener")
+    const control = await controlListener("0.0.0.0"); let tried = 0
+    try {
+      for (const address of Object.values(networkInterfaces()).flat().filter((entry) => entry && entry.family === "IPv4" && !entry.internal).map((entry) => entry!.address)) {
+        if (!(await tcpRead(address, control.port, "", 2)).toString().includes(REPLY)) continue
+        tried++; expect(!(await tcpRead(address, forward.localPort, "", 2)).toString().includes(nonce), "hosted forward answered off loopback")
+      }
+      expect(tried > 0, "no non-loopback positive control was available")
+    } finally { control.close() }
+    const data = await remoteInspect(MS)
+    expect(!data.HostConfig.PublishAllPorts && Object.keys(data.HostConfig.PortBindings ?? {}).length === 0, "remote engine published a port")
+    const checks = (await hosted(["verify", MS])).reply.data.checks
+    expect(/SSH lease/.test(checks.find((check: { id: string }) => check.id === "forwards").detail), "remote verification hid its relay lease")
+  } finally { await hosted(["forward", "remove", forward.id]) }
+})
+
+const sshStreamPids = async () => {
+  const daemon = (await daemonFile()).pid
+  return (await sh(["ps", "-axo", "pid=,ppid=,command="])).out.split("\n").filter((line) => Number(line.trim().split(/\s+/)[1]) === daemon && line.includes(remoteDir) && line.includes("--stream")).map((line) => Number(line.trim().split(/\s+/)[0]))
+}
+ev("M08", "Hosted forwards end on stop, run replacement, daemon exit and SSH loss; a silent control stream closes within seventeen seconds and is never recreated", async () => {
+  await remoteSandbox()
+  const one = async (act: () => Promise<unknown>) => {
+    await remotePdk(["list"]); await remoteSandbox()
+    const forward = await hostedForward(3123)
+    expect(!await refused(forward.localPort), "forward listener control failed")
+    await act()
+    expect(await until(() => refused(forward.localPort), 17), "hosted listener survived its ending condition")
+    return forward
+  }
+  await one(() => hosted(["stop", MS]))
+  await one(() => remoteDocker(["restart", "-t", "1", containerOf(MS)]))
+  await one(() => remotePdk(["daemon", "stop"]))
+  await remotePdk(["list"]); await remoteSandbox()
+  const control = await hostedForward(3123); const before = new Set(await sshStreamPids())
+  let link = 0
+  const lost = await hostedForward(3123)
+  try {
+    const pids = (await sshStreamPids()).filter((pid) => !before.has(pid)); expect(pids.length === 1, `expected one new SSH control stream, saw ${pids}`); link = pids[0]!
+    process.kill(link, "SIGSTOP")
+    expect(await until(() => refused(lost.localPort), 17), "silent SSH control survived 17 seconds")
+    expect(!await refused(control.localPort), "healthy control forward ended")
+    process.kill(link, "SIGCONT"); link = 0
+    await Bun.sleep(2000)
+    expect(await refused(lost.localPort), "SSH recovery recreated the old listener")
+  } finally { if (link) { try { process.kill(link, "SIGCONT"); process.kill(link) } catch {} }; await hosted(["forward", "remove", control.id]) }
+  const killedBefore = new Set(await sshStreamPids()); const killed = await hostedForward(3123)
+  const pid = (await sshStreamPids()).find((pid) => !killedBefore.has(pid)); expect(pid, "no SSH process to kill"); process.kill(pid!, "SIGKILL")
+  expect(await until(() => refused(killed.localPort), 10), "killed SSH link retained listener")
+  await one(() => pdk(["daemon", "stop"]))
+  await remotePdk(["list"]); await remoteSandbox()
+  return "stop, engine run replacement, remote daemon exit, killed SSH and primary exit closed listeners; SIGSTOP of one control link closed only its listener within 17 s; healthy control stayed open; no automatic recreation"
+})
+
+ev("M09", "A remote SSH alias uses the primary editor key and pinned machine/sandbox identity without host listeners; stopped and recreated sandboxes refuse it", async () => {
+  await remoteSandbox()
+  const setup = await hosted(["ssh", "setup", MS, "--write-config"], { timeoutMs: 300_000 })
+  expect(setup.reply.ok && setup.reply.data.alias === `${MS}.${MH}.paddock`, `hosted SSH setup failed: ${setup.out}${setup.err}`)
+  const target = setup.reply.data.alias
+  const run = await sh(["ssh", ...sshArgs(), target, "id -un; echo $HOME"])
+  expect(run.code === 0 && run.out === `${setup.reply.data.user}\n${setup.reply.data.home}\n`, `remote SSH failed: ${run.out}${run.err}`)
+  const remoteFiles = await remote(["sh", "-c", 'test ! -e "$1/s/ssh/editor_ed25519" && test ! -e "$1/s/ssh/config"', "check", remoteDir])
+  expect(remoteFiles.code === 0, "an editor private key or client SSH config was created remotely")
+  const marker = join(tmp, "m09.bin"); await writeFile(marker, crypto.getRandomValues(new Uint8Array(65536)))
+  const transfer = await sh(["sftp", "-q", ...sshArgs(), "-b", "-", target], { stdin: `put ${marker} /tmp/m09.bin\nget /tmp/m09.bin ${marker}.back\n` })
+  expect(transfer.code === 0 && Buffer.compare(await readFile(marker), await readFile(`${marker}.back`)) === 0, `remote SFTP changed bytes: ${transfer.err}`)
+  await hosted(["stop", MS])
+  const stopped = await sh(["ssh", ...sshArgs(), target, "true"])
+  expect(stopped.code === 255 && /not running/.test(stopped.err) && !(await remoteInspect(MS)).State.Running, "remote SSH restarted a stopped sandbox")
+  await hosted(["remove", MS, "--confirm", MS]); await remoteSandbox()
+  const recreated = await sh(["ssh", ...sshArgs(), target, "true"])
+  expect(recreated.code === 255, "old alias reached a recreated sandbox")
+})
+
 ev("Z01", "Nothing is left on the engine or this machine when the run ends", async () => {
   // Control: the scan sees this run's daemon while it runs, so an empty scan after teardown means none is left.
   await pdk(["list"])

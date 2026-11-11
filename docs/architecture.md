@@ -368,8 +368,8 @@ are retained. Reviewed installation and its removal are not implemented yet.
 unqualified names are always local, even when absent. Sandbox views carry `machineId` and `sandboxId`, so identical
 names on two machines have distinct identities. `machineId` can also be supplied as a precondition with `host` and
 `name`. An unknown host never falls back. Buffered sandbox operations, engines, templates, extensions, checklist,
-verify and daemon status/stop route over SSH. Streams, forwards and SSH setup/access for remote sandboxes are
-explicitly unavailable in this unit.
+verify and daemon status/stop route over SSH. Streams, primary loopback forwards and SSH setup/access also select
+the remote daemon. The dashboard UI has not been changed to group remote machines.
 
 The gateway executes the registered absolute binary's fixed `transport stdio --protocol 1` command, with the state
 directory set explicitly. That command only relays bytes to an existing daemon socket; it cannot install, start or
@@ -400,6 +400,30 @@ Reboot persistence and automatic recovery are unmeasured; the fixture daemon run
 The scorecards record the actual M results. Root installation and Linux user-service installation have not been built
 or measured in this unit.
 
+Hosted streams use the existing second Unix socket and frame protocol over their own SSH process. The gateway first
+retrieves the current sandbox identity and run; the stream opens with that identity plus the expected daemon boot,
+version and protocol. A stopped, replaced or restarted target refuses the stale request. Input and output use the same
+bounded backpressure as local sessions. Losing SSH ends the session with an error; commands are never replayed.
+
+A hosted forward binds once on the primary's `127.0.0.1`. Its remote control stream grants a lease for one sandbox ID,
+engine start time and numeric loopback port. Each accepted connection gets a separate SSH dial stream validated
+against that lease. The target checks the run every two seconds, and closes its lease and dials on stop/remove or
+daemon exit. It reports the requested lease in verify, while explicitly saying that the primary's listener is unknown
+from there. The primary owns the actual listener evidence. The control emits a byte every five seconds; after fifteen
+seconds without one, a primary timer closes the listener and active connections. An observed SSH/control/dial failure
+closes it immediately when delivered. There is no automatic recreation. M08 measured closure within seventeen seconds
+with a control SSH process stopped by SIGSTOP, beside a healthy forward that stayed open. This is an awake-daemon
+measurement, not a continuous enforcement claim during a suspended process or machine.
+
+Remote editor aliases are `SANDBOX.HOST.paddock`, preserving unqualified local aliases. Only the primary makes or
+reads its editor private key. The target receives its public half through socket-only `sshPrepare`, prepares guest
+sshd, and returns the guest public host key. The primary validates that data and writes its own state-directory SSH
+files. Both machine and sandbox IDs form the pinned HostKeyAlias; ProxyCommand also sends the expected sandbox ID.
+Removing a prepared host or remote sandbox removes its primary alias. Ordinary SSH configuration is modified only
+when `--write-config` is explicitly requested; evals redirect it to a temporary file. M09 measured login and SFTP,
+absence of a remote editor private key, and refusal of stopped/recreated sandboxes. Real editor bootstrap and T3 over
+the remote alias remain unmeasured.
+
 ## Adding a provider
 
 Implement `Provider` in `core/types.ts` and add it to the list in `core/daemon.ts`. `detect()` reports each engine with
@@ -414,4 +438,5 @@ credentials live inside the sandbox. See `extensions/logins/README.md` for the s
 Missing setup commands are named only from settings actually sent, with bounded printable names and credential
 values withheld. The CLI also provides streamed exec, port forwards, and SSH access. Inner Docker is a checked core
 option, and the core resizes sandboxes and saves them as templates. Buffered operations can select a prepared remote
-daemon; remote streams, forwards, aliases, installation and a hard disk cap are not built.
+daemon; streams, forwards and editor aliases use the same route. Reviewed host installation and a hard disk cap are
+not built.

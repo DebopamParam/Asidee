@@ -1,4 +1,5 @@
 import type { Socket } from "node:net"
+import { validPort } from "./forwards"
 import { validName } from "./state"
 import { PaddockError, type ErrorCode, type Session } from "./types"
 
@@ -46,9 +47,13 @@ export class FrameReader {
   }
 }
 
-export type OpenRequest =
+type RelayRequest = { name: string; sandboxId: string; generation: string; port: number; leaseId: string }
+type SessionRequest =
   | { kind: "exec"; name: string; argv: string[]; user?: string; tty: boolean; cols?: number; rows?: number }
   | { kind: "ssh"; name: string }
+  | ({ kind: "lease" } & RelayRequest)
+  | ({ kind: "dial" } & RelayRequest)
+export type OpenRequest = SessionRequest & { host?: string; machineId?: string; bootId?: string; protocol?: number; version?: string; sandboxId?: string; generation?: string }
 
 const USER = /^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}$/
 const size = (value: unknown, what: string) => {
@@ -64,14 +69,29 @@ const record = (value: unknown): Record<string, unknown> => {
 export function parseOpen(value: unknown): OpenRequest {
   const body = record(value)
   const name = validName(body.name)
-  if (body.kind === "ssh") return { kind: "ssh", name }
+  const route: Pick<OpenRequest, "host" | "machineId" | "bootId" | "protocol" | "version" | "sandboxId" | "generation"> = {}
+  if (body.host !== undefined) route.host = validName(body.host)
+  for (const key of ["machineId", "bootId", "sandboxId"] as const) if (body[key] !== undefined) {
+    if (typeof body[key] !== "string" || !/^[a-f0-9]{32}$/.test(body[key])) throw new PaddockError("usage", `${key} must be an identity.`)
+    route[key] = body[key]
+  }
+  if (body.protocol !== undefined) { if (!Number.isSafeInteger(body.protocol)) throw new PaddockError("usage", "protocol must be an integer."); route.protocol = body.protocol as number }
+  for (const key of ["version", "generation"] as const) if (body[key] !== undefined) {
+    if (typeof body[key] !== "string" || body[key].length > 128 || /[\x00-\x1f]/.test(body[key])) throw new PaddockError("usage", `${key} must be bounded text.`)
+    route[key] = body[key]
+  }
+  if (body.kind === "ssh") return { ...route, kind: "ssh", name }
+  if (body.kind === "lease" || body.kind === "dial") {
+    if (!route.sandboxId || !route.generation || typeof body.leaseId !== "string" || !/^[a-f0-9]{32}$/.test(body.leaseId)) throw new PaddockError("usage", "A relay needs sandbox identity, run generation and lease identity.")
+    return { ...route, kind: body.kind, name, sandboxId: route.sandboxId, generation: route.generation, port: validPort(body.port, "The relay port"), leaseId: body.leaseId }
+  }
   if (body.kind !== "exec") throw new PaddockError("usage", "A session is an exec or an ssh session.")
   const argv = body.argv
   if (!Array.isArray(argv) || argv.length === 0 || !argv.every((part) => typeof part === "string" && !part.includes("\0"))) throw new PaddockError("usage", "exec needs a command.")
   if (body.user !== undefined && (typeof body.user !== "string" || !USER.test(body.user))) throw new PaddockError("usage", "The user must be a user name or id.")
   if (body.tty !== undefined && typeof body.tty !== "boolean") throw new PaddockError("usage", "tty must be true or false.")
   const tty = body.tty === true
-  return { kind: "exec", name, argv: argv as string[], tty, ...(body.user === undefined ? {} : { user: body.user as string }),
+  return { ...route, kind: "exec", name, argv: argv as string[], tty, ...(body.user === undefined ? {} : { user: body.user as string }),
     ...(tty && body.cols !== undefined ? { cols: size(body.cols, "cols") } : {}), ...(tty && body.rows !== undefined ? { rows: size(body.rows, "rows") } : {}) }
 }
 
@@ -114,6 +134,7 @@ export function serveStream(socket: Socket, open: (request: OpenRequest) => Prom
           opened.on("drain", () => { if (inputWaits) { inputWaits = false; socket.resume() } })
           opened.on("end", (exit) => finish(exit.error === undefined ? frame("exit", { code: exit.code ?? -1 }) : frame("error", { code: "runtime", message: exit.error })))
           socket.write(frame("ready", { tty: opened.tty }))
+          opened.resume()
           socket.resume()
         }, (error) => fail((error as Error).message, error instanceof PaddockError ? error.code : "runtime"))
         continue

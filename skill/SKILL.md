@@ -38,8 +38,12 @@ This installs nothing. `paddock host list` refreshes their availability. Add `--
 to select that daemon; names without it always mean local. `paddock list --all` shows each machine, keeping stale
 sandboxes and checks unknown. An unreachable host is not an empty successful list. A version/identity mismatch is a
 failure; never replace the remote daemon or retry a mutation automatically. Exit 10 means reconcile with a read and
-the user before another mutation. Remote streams, forwards, editor aliases and reviewed installation are not built
-in this first Machines unit. `paddock host remove NAME --confirm NAME` forgets a prepared daemon and leaves all remote
+the user before another mutation. `--host NAME` also selects streamed exec, shell, loopback forwards and SSH setup.
+Remote aliases are `SANDBOX.HOST.paddock`; their private editor key stays on the primary. A hosted forward listens
+on the primary's 127.0.0.1 and closes when its sandbox run, either daemon or the SSH control stream ends. A silent
+control stream closes the listener after fifteen seconds without a heartbeat (measured within seventeen seconds
+with an awake primary); it never reconnects or recreates itself. Add a new forward explicitly after link loss.
+Reviewed installation is not built yet. `paddock host remove NAME --confirm NAME` forgets a prepared daemon and leaves all remote
 files and services intact. Group M is unmeasured without `PADDOCK_EVAL_HOST`; read the scorecards for measured results.
 
 - A name is lowercase letters, digits and hyphens.
