@@ -7,7 +7,7 @@ import { boundPort, LEASE_RENEW_MS, LEASE_TTL_MS, listenLoopback, relay, validPo
 import { validName, validSpec, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
 import { addInclude, alias, editorKey, included, includeLine, parseSshSetup, remoteAliases, updateRemoteAlias, userConfig } from "./ssh"
-import { absolutePath, HttpPeer, KILL_GRACE_MS, MUTATION_DEADLINE_MS, object, PROTOCOL, RemoteSession, sshDestination, sshIdentity, type Endpoint } from "./transport"
+import { absolutePath, bounded, HttpPeer, KILL_GRACE_MS, MUTATION_DEADLINE_MS, object, PROTOCOL, RemoteSession, sshDestination, sshIdentity, type Endpoint } from "./transport"
 import { PaddockError, type CheckResult } from "./types"
 
 export const CATALOG = {
@@ -402,7 +402,7 @@ export class Machines {
     for (const id of [...this.forwards.keys()]) this.endForward(id, "The primary daemon stopped.")
     const sessions = [...this.sessions.keys()]; for (const session of sessions) session.close("The primary daemon stopped.")
     const peers = [...this.peers].map((peer) => peer.close("The primary daemon stopped.").catch(() => {}))
-    await Promise.race([Promise.all([...sessions.map((session) => session.closed), ...peers]), Bun.sleep(3 * KILL_GRACE_MS)])
+    await bounded(Promise.all([...sessions.map((session) => session.closed), ...peers]), 3 * KILL_GRACE_MS)
   }
 
   // Serializes only registry writes; a slow or unreachable machine never holds another machine's refresh.

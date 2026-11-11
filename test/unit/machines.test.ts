@@ -304,3 +304,19 @@ test("two builds of one version are refused in both directions, saying how to up
   expect(refused).toMatchObject({ ok: false, error: { code: "incompatible" } }); expect(ran).toBe(0)
   expect(await (await call(REMOTE.sourceDigest)).json()).toMatchObject({ ok: true }); expect(ran).toBe(1)
 })
+
+test("closing Machines and an SSH process leaves no timer that keeps a stopping daemon alive", async () => {
+  const dirs = await setup(); const bin = join(dirs.config, "bin"); await mkdir(bin)
+  await writeFile(join(bin, "ssh"), "#!/bin/sh\nexec sleep 600\n", { mode: 0o755 })
+  const script = join(dirs.config, "close.ts")
+  await writeFile(script, `import { Machines } from ${JSON.stringify(join(import.meta.dir, "../../core/machines"))}
+import { sshConnection } from ${JSON.stringify(join(import.meta.dir, "../../core/transport"))}
+await sshConnection(${JSON.stringify(HOST)}).close()
+await new Machines(${JSON.stringify(dirs)}, ${JSON.stringify(LOCAL)}, async () => { throw new Error("unused") }).close()
+console.log(Date.now())
+`)
+  const child = Bun.spawn([process.execPath, script], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, stdout: "pipe" })
+  const done = Number((await new Response(child.stdout).text()).trim()); await child.exited
+  expect(child.exitCode).toBe(0)
+  expect(Date.now() - done).toBeLessThan(1000)
+}, 15_000)

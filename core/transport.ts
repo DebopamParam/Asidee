@@ -13,6 +13,12 @@ export const MUTATION_DEADLINE_MS = 45 * 60_000
 // How long a closing SSH process gets after SIGTERM, and then after SIGKILL, before its close is given up on. A stopped
 // or wedged ssh must not hold a daemon's shutdown, which stops the sandboxes only that daemon watches.
 export const KILL_GRACE_MS = 1500
+// A promise that settles by `ms` at the latest, whose timer is cleared once it settles, so it never keeps a stopping
+// process alive (Bun.sleep cannot be cancelled).
+export function bounded<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let clear = () => {}
+  return Promise.race([promise, new Promise<undefined>((resolve) => { const timer = setTimeout(resolve, ms); clear = () => clearTimeout(timer) })]).finally(() => clear())
+}
 export const ERROR_CODES: readonly ErrorCode[] = ["usage", "not-found", "conflict", "dependency", "check-failed", "runtime", "offline", "incompatible", "identity-changed", "outcome-unknown"]
 export const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
 export const shellQuote = (word: string) => `'${word.replaceAll("'", "'\\''")}'`
@@ -50,7 +56,7 @@ export function sshConnection(host: Endpoint, stream = false) {
   let done = false
   const exited = new Promise<void>((resolve) => child.once("close", () => { done = true; wire.destroy(); resolve() }))
   wire.on("error", () => {})
-  const settled = (ms: number) => Promise.race([exited, Bun.sleep(ms)]).then(() => done)
+  const settled = (ms: number) => bounded(exited, ms).then(() => done)
   return { wire, pid: child.pid, diagnostic: () => diagnostic.trim(), async close() {
     wire.destroy(); child.kill()
     if (!await settled(KILL_GRACE_MS)) { child.kill("SIGKILL"); await settled(KILL_GRACE_MS) }
