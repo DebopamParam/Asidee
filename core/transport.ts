@@ -122,6 +122,15 @@ export class HttpPeer {
   async close(reason?: string): Promise<void> { this.ended ??= reason; this.agent.destroy(); await this.connection.close() }
 }
 
+// The host key a verbose ssh says it verified. Through a jump host ssh prints one such line per hop, the destination's
+// last (measured with OpenSSH 10.3 and ProxyJump), so the last line is the one that names the destination.
+export function serverHostKey(log: string): string | undefined {
+  return [...log.matchAll(/Server host key: \S+ (SHA256:[A-Za-z0-9+/]{43})/g)].at(-1)?.[1]
+}
+// What to check when ssh named no host key. Paddock's own connections never share a multiplexed one (ControlPath=none),
+// so an open master connection is not the cause.
+export const hostKeyHelp = (destination: string) => `Check that \`ssh -v ${destination} true 2>&1 | grep 'Server host key'\` prints a line: Paddock needs OpenSSH's own client first on PATH, not a wrapper that drops -v or its output.`
+
 // The account and outer host key SSH really uses for a destination, from ssh itself: `ssh -G` resolves the user from the
 // user's own configuration, and a verbose connection names the host key it verified. Recorded when a host is attached.
 export async function sshIdentity(endpoint: Endpoint): Promise<{ user: string; hostKey: string }> {
@@ -132,8 +141,9 @@ export async function sshIdentity(endpoint: Endpoint): Promise<{ user: string; h
   const argv = sshArgv(endpoint.ssh, transportCommand(endpoint))
   const probe = Bun.spawn([argv[0]!, "-v", ...argv.slice(1)], { stdin: "ignore", stdout: "ignore", stderr: "pipe", timeout: 20_000 })
   const [, log] = await Promise.all([probe.exited, new Response(probe.stderr).text()])
-  const hostKey = log.match(/Server host key: \S+ (SHA256:[A-Za-z0-9+/]{43})/)?.[1]
-  if (resolved !== 0 || !user || !hostKey) throw new PaddockError("dependency", `SSH did not report the user and host key it uses for ${endpoint.ssh}, so nothing was registered.`)
+  const hostKey = serverHostKey(log)
+  if (resolved !== 0 || !user) throw new PaddockError("dependency", `SSH did not report the user it uses for ${endpoint.ssh}, so nothing was registered.`)
+  if (!hostKey) throw new PaddockError("dependency", `SSH did not report the host key it verified for ${endpoint.ssh}, so nothing was registered. ${hostKeyHelp(endpoint.ssh)}`)
   return { user, hostKey }
 }
 
