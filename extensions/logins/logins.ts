@@ -4,7 +4,7 @@ import { GUEST } from "./guest"
 import { claudeState, collectSetup } from "./setup"
 
 export type Login = { agent: Agent | "github"; profile: string; account?: string }
-export type Imported = { agent: Agent; profile: string; files: number; missingCommands: string[] }
+export type Imported = { agent: Agent; profile: string; files: number; missingCommands: number }
 
 export async function importLogin(host: Host, options: { name: string; agent: Agent; profile: string; target?: string; replace: boolean; setup: boolean }): Promise<Imported> {
   const target = profileName(options.target ?? options.profile)
@@ -12,10 +12,8 @@ export async function importLogin(host: Host, options: { name: string; agent: Ag
   const setup = options.setup ? await collectSetup(options.agent, options.profile, host.home) : undefined
   const state = options.agent === "claude" ? (setup?.state ?? await claudeState(options.profile, host.home)) : undefined
   const result = await execute(host.runner, options.name, GUEST, ["import", options.agent, target, options.replace ? "replace" : "create"], JSON.stringify({ credential, setup, account: state?.oauthAccount }))
-  // Names come back from the guest and are printed here, so only printable ASCII, and only when a setup was sent.
-  const names = object(result) ? result.missingCommands : undefined
-  if (!object(result) || typeof result.files !== "number" || !Number.isSafeInteger(result.files) || result.files < 0 || result.files > 2000 || !Array.isArray(names) || names.length > (setup && options.agent === "claude" ? 100 : 0) || !names.every((name): name is string => typeof name === "string" && /^[\x20-\x7e]{1,256}$/.test(name))) throw new Error("Invalid import response; contents withheld.")
-  return { agent: options.agent, profile: target, files: result.files, missingCommands: names }
+  if (!object(result) || typeof result.files !== "number" || !Number.isSafeInteger(result.files) || result.files < 0 || result.files > 2000 || typeof result.missingCommands !== "number" || !Number.isSafeInteger(result.missingCommands) || result.missingCommands < 0 || (result.missingCommands > 0 && !(setup && options.agent === "claude"))) throw new Error("Invalid import response; contents withheld.")
+  return { agent: options.agent, profile: target, files: result.files, missingCommands: result.missingCommands }
 }
 
 export type GithubSource = { kind: "token"; value: string } | { kind: "host"; account?: string }

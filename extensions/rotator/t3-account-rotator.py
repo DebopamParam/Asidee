@@ -9,8 +9,8 @@ provider is limited, the thread waits, and the first account whose limit resets 
 told to resume) or another one (it is moved first). A thread never changes provider or model. It only reads T3's
 database, so an idle check costs nothing.
 
-The same script runs on the Mac (rotate.sh starts it in tmux) and inside sandboxes (the sandbox dashboard copies it in
-and starts it).
+This sandbox copy follows sandbox-manager's account rotation. Its logs and helper titles omit private thread data,
+and disabled accounts are excluded when resuming their own threads.
 
 Usage: rotate.py --watch [--providers claude,codex]   check every 2 minutes until stopped
        rotate.py [--providers ...]                     check once
@@ -66,7 +66,11 @@ where l.n = 1 and l.status = 'failed' and t.archived_at is null and t.deleted_at
 
 def now() -> datetime: return datetime.now(timezone.utc)
 def iso(t: datetime) -> str: return t.isoformat(timespec="seconds")
-def log(message: str): print(f"{iso(now())} {message}", flush=True)
+def log(message: str):
+    event = ("watching" if message.startswith("rotating ") else "rotation requested" if message.startswith("rotate ")
+             else "resume requested" if message.startswith("resume ") else "check failed" if message.startswith("check failed")
+             else "log entry (details withheld)")
+    print(f"{iso(now())} {event}", flush=True)
 
 
 def parse_time(value) -> datetime | None:
@@ -132,7 +136,7 @@ def free(name: str, state: dict, grace: timedelta = timedelta(0)) -> bool:
 
 # The thread's own account first (with stay=True), once its limit has reset; then the others of the same provider.
 def pick(current: str, driver: str, state: dict, settings: dict, stay: bool = False) -> str | None:
-    if stay and current in settings and free(current, state, RESUME_GRACE) and logged_in({"driver": driver, **settings[current]}): return current
+    if stay and current in settings and settings[current].get("enabled", True) is not False and free(current, state, RESUME_GRACE) and logged_in({"driver": driver, **settings[current]}): return current
     for name, instance in settings.items():
         if name == current or not free(name, state) or instance.get("driver") != driver or instance.get("enabled", True) is False: continue
         if logged_in(instance): return name
@@ -165,7 +169,7 @@ Then reply with one line: "Moved {thread_id} from {current} to {target} and resu
     log(f"rotate {thread_id} ({title!r}) {current} -> {target} model={model['model']}{' [dry run]' if dry_run else ''}")
     if dry_run: return
     subprocess.run([t3_cli(), "thread", "start", "--base-dir", str(T3_HOME), "--provider", target, "--model", selection["model"],
-                    "--title", f"Account rotation: {title}"[:80], project_id, "-"], input=prompt,
+                    "--title", "Account rotation", project_id, "-"], input=prompt,
                    check=True, capture_output=True, text=True, timeout=120)
 
 
@@ -249,4 +253,8 @@ def scan(drivers: set[str], dry_run: bool, waiting: set[str]):
 
 
 if __name__ == "__main__":
-    main()
+    try: main()
+    except SystemExit as error:
+        if error.code not in (None, 0): log("check failed"); sys.exit(1)
+    except Exception:
+        log("check failed"); sys.exit(1)

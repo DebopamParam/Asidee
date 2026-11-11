@@ -65,7 +65,9 @@ Markdown file or a referenced home script is copied as is, so review those befor
 reference copied these keys. TOML is re-serialized, so its comments and formatting are not preserved. Setup is limited to 16 MiB and 2000 files. UTF-8 setup files have literal host-home paths
 rewritten to the guest home. Existing guest setup files absent from the bundle stay in place.
 
-Missing hook or status-line executables and interpreter script paths are reported without executing the commands.
+Missing hook or status-line executables and interpreter script paths are counted without executing the commands.
+Only the count crosses back to the host. Names can contain secrets or guest-controlled text and are withheld from
+action output. JSON and the re-serialized TOML escape the rewritten home path, including quotes and backslashes.
 This is a static check of simple shell commands. Dynamic shell expressions, dependencies inside scripts, and commands
 fetched at runtime are not verified. Setup writes are atomic per file, not one transaction. An I/O failure can leave a
 partially copied setup or an imported login; list logins after a failure before retrying with `--replace`.
@@ -114,3 +116,4 @@ configuration directory. A stand-in `security` that always fails was placed firs
 
 Not checked live: the Claude Keychain path (no prompt may be triggered), ending a running agent session at logout (the
 image has no Claude or Codex CLI), and whether an imported Claude or Codex login is accepted by its agent.
+The later change to report only missing-command counts and escape rewritten home paths has unit coverage only.

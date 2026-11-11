@@ -56,7 +56,7 @@ test("imports one profile via stdin, writes 0600 atomically, requires replacemen
   await put(h, ".codex-work/auth.json", credential); await put(h, ".codex-other/auth.json", '{"secret":"not-selected"}')
   expect(await discoverProfiles("codex", host(h, transport.runner))).toEqual(["other", "work"])
   const options = { name: "demo", agent: "codex", profile: "work", replace: false, setup: false } satisfies Parameters<typeof importLogin>[1]
-  expect(await importLogin(host(h, transport.runner), options)).toEqual({ agent: "codex", profile: "work", files: 0, missingCommands: [] })
+  expect(await importLogin(host(h, transport.runner), options)).toEqual({ agent: "codex", profile: "work", files: 0, missingCommands: 0 })
   const dest = join(g, ".codex-work/auth.json")
   expect(await readFile(dest, "utf8")).toBe(credential)
   expect((await stat(dest)).mode & 0o777).toBe(0o600)
@@ -143,7 +143,7 @@ test("copies only allowlisted symlinked Claude setup, scripts and state, rewrite
   expect(bundle.homeFiles.map((file) => file.path)).toEqual([".config/ai/status.sh", ".config/ccstatusline/settings.json"])
   expect(JSON.stringify(bundle)).not.toContain(secret)
   const result = await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "work", replace: false, setup: true })
-  expect(result.files).toBe(7); expect(result.missingCommands).toEqual(["paddock-missing-unit-hook"])
+  expect(result.files).toBe(7); expect(result.missingCommands).toBe(1)
   expect(await readFile(join(g, ".config/ai/status.sh"), "utf8")).toContain(`${g}/project`)
   expect(await readFile(join(g, ".claude-work/skills/demo/SKILL.md"), "utf8")).toBe(`read ${g}/project`)
   expect((await stat(join(g, ".claude-work/hooks/ok.sh"))).mode & 0o777).toBe(0o700)
@@ -314,7 +314,7 @@ test("successful guest login responses cannot return arbitrary account text or m
   await expect(listLogins(response([{ agent: "codex", profile: "work", account: secret }]), "demo")).rejects.toThrow("withheld")
   // A C1 control (single-byte CSI) in a label could rewrite the terminal that prints it.
   await expect(listLogins(response([{ agent: "claude", profile: "work", account: "agent@ex\u009b2Jample.com" }]), "demo")).rejects.toThrow("withheld")
-  for (const missingCommands of [["\u001b]0;spoof\u0007"], [1], 0]) {
+  for (const missingCommands of [["\u001b]0;spoof\u0007"], [1], -1]) {
     await expect(importLogin(host(h, response({ files: 0, missingCommands })), { name: "demo", agent: "codex", profile: "work", replace: false, setup: false })).rejects.toThrow("withheld")
   }
   // Without a copied setup there is no command for the guest to report.
@@ -355,4 +355,38 @@ test("invalid Claude logout metadata fails before deleting its credential", asyn
   await put(g, ".claude-work/.claude.json", "invalid")
   await expect(logout(transport.runner, "demo", { agent: "claude", profile: "work" })).rejects.toThrow("failed")
   expect(await readFile(join(g, ".claude-work/.credentials.json"), "utf8")).toBe(credential)
+})
+
+test("a secret used as a missing hook name is withheld even in a successful setup response", async () => {
+  const h = await home(), g = await home(), transport = guestRunner(g)
+  await put(h, ".claude-work/.credentials.json", credential)
+  await put(h, ".claude-work/settings.json", JSON.stringify({ statusLine: { command: secret } }))
+  const imported = await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "work", replace: false, setup: true })
+  expect(imported.missingCommands).toBe(1)
+  expect(JSON.stringify(imported)).not.toContain(secret)
+})
+
+test("JSON and TOML home rewrites escape guest path characters", async () => {
+  const h = await home(), root = await home(), g = join(root, 'guest"\\home')
+  await mkdir(g)
+  const transport = guestRunner(g)
+  for (const agent of ["claude", "codex"] as const) {
+    await put(h, `.${agent}-work/${agent === "claude" ? ".credentials.json" : "auth.json"}`, credential)
+    await put(h, `.${agent}-work/${agent === "claude" ? "settings.json" : "config.toml"}`, agent === "claude" ? JSON.stringify({ model: "keep", extra: `${h}/project` }) : `cwd = ${JSON.stringify(`${h}/project`)}\n`)
+    await importLogin(host(h, transport.runner), { name: "demo", agent, profile: "work", replace: false, setup: true })
+  }
+  expect((await json(join(g, ".claude-work/settings.json"))).extra).toBe(`${g}/project`)
+  expect(Bun.TOML.parse(await readFile(join(g, ".codex-work/config.toml"), "utf8"))).toEqual({ cwd: `${g}/project` })
+})
+
+test("GitHub import with missing gh or git fails before storing a token or making an API call", async () => {
+  for (const missing of ["gh", "git"]) {
+    const g = await home(), bin = join(g, "bin")
+    await put(g, `bin/${missing === "gh" ? "git" : "gh"}`, "#!/bin/sh\nexit 0\n", 0o700)
+    const prefix = `process.env.PATH = ${JSON.stringify(bin)}; require('https').get = () => { require('fs').writeFileSync(require('os').homedir() + '/network-called', 'bad'); throw new Error(); };`
+    await expect(importGithub(guestRunner(g, prefix).runner, "demo", { kind: "token", value: secret }, false)).rejects.toThrow("exit 69")
+    expect(existsSync(join(g, ".config/gh/hosts.yml"))).toBe(false)
+    expect(existsSync(join(g, "network-called"))).toBe(false)
+    expect(existsSync(join(g, ".paddock-logins.lock"))).toBe(false)
+  }
 })

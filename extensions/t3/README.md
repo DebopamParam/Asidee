@@ -30,7 +30,9 @@ preserved, including user-configured built-ins. An unowned ID collision uses `pa
 fails without replacing the settings file. Claude providers override `ANTHROPIC_API_KEY` with an empty value to select
 the imported subscription login. Settings are written atomically with mode 0600 under the logins extension's
 `~/.paddock-logins.lock`. Invalid settings are refused. Changes made concurrently by T3 itself are not serialized by
-that lock. No credentials or subprocess diagnostics are printed. The sidecar records both generations before settings
+that lock. Before renaming, sync compares the current settings bytes with the original and aborts if they changed.
+There is still a race between that check and rename; eliminating it requires coordination with T3's own settings writer.
+No credentials or subprocess diagnostics are printed. The sidecar records both generations before settings
 publication so retries recover ownership after an interrupted update. No extension metadata is added to T3 settings.
 
 ## Needs from the core

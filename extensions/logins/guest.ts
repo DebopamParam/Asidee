@@ -119,7 +119,12 @@ function installSetup(a, p, bundle) {
     safe(target)
     let data = Buffer.from(file.data, "base64")
     const text = data.toString("utf8")
-    if (!data.includes(0) && Buffer.from(text).equals(data)) data = Buffer.from(text.split(hostPrefix).join(home + "/"))
+    if (!data.includes(0) && Buffer.from(text).equals(data)) {
+      const encoded = file.path.endsWith(".json") || (base === root && file.path === "config.toml")
+      const from = encoded ? JSON.stringify(hostPrefix).slice(1, -1) : hostPrefix
+      const to = encoded ? JSON.stringify(home + "/").slice(1, -1) : home + "/"
+      data = Buffer.from(text.split(from).join(to))
+    }
     pending.push({ target, data, mode: file.mode === 0o700 ? 0o700 : 0o600 })
   }
   for (const file of bundle.files) add(file, root)
@@ -134,7 +139,7 @@ function installSetup(a, p, bundle) {
       for (const key of ["hasCompletedOnboarding", "lastOnboardingVersion", "oauthAccount", "theme", "editorMode"]) if (Object.hasOwn(bundle.state, key)) state[key] = bundle.state[key]
       atomic(stateFile, JSON.stringify(state, null, 2) + "\n")
     }
-    return { files: pending.length, missingCommands: a === "claude" ? missingCommands(json(path.join(root, "settings.json"))) : [] }
+    return { files: pending.length, missingCommands: a === "claude" ? missingCommands(json(path.join(root, "settings.json"))).length : 0 }
   }
 }
 function stopSessions(a, p) {
@@ -200,7 +205,7 @@ async function main() {
     mkdir(root); fs.chmodSync(root, 0o700)
     atomic(dest, payload.credential, 0o600, choice === "replace")
     if (statePath) atomic(statePath, JSON.stringify(state, null, 2) + "\n")
-    const result = setup ? setup() : { files: 0, missingCommands: [] }
+    const result = setup ? setup() : { files: 0, missingCommands: 0 }
     if (agent === "claude") {
       const settings = json(settingsPath)
       if (settings.env !== undefined && !object(settings.env)) fail(66)

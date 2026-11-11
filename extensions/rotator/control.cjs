@@ -14,6 +14,7 @@ function read(p) { safe(p); return info(p) ? fs.readFileSync(p, "utf8") : "" }
 function identity(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 1) return false
   const result = cp.spawnSync("ps", ["-p", String(pid), "-o", "args="], { encoding: "utf8" })
+  if (result.error || result.signal || ![0, 1].includes(result.status)) throw new Error()
   return result.status === 0 && result.stdout.trim().endsWith(script + " --watch --providers " + read(path.join(dir, "providers")).trim())
 }
 function pid() { const text = read(pidFile).trim(); return /^\d+$/.test(text) ? Number(text) : 0 }
@@ -35,11 +36,11 @@ function summary() {
     try { const size = fs.fstatSync(fd).size, bytes = Buffer.alloc(Math.min(size, 64 * 1024)); fs.readSync(fd, bytes, 0, bytes.length, Math.max(0, size - bytes.length)); return bytes.toString("utf8") }
     finally { fs.closeSync(fd) }
   })() : ""
-  // The unchanged upstream script logs thread titles and exceptions. Export only fixed event categories.
+  // Old logs and guest-modified scripts may contain private text. Export only fixed event categories.
   const lines = text.split(/\r?\n/).filter(Boolean).slice(-20).map(line => {
     const at = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00 /.exec(line)?.[0] || ""
     const event = line.slice(at.length)
-    return at + (event.startsWith("rotating ") ? "watching" : event.startsWith("rotate ") ? "rotation requested" : event.startsWith("resume ") ? "resume requested" : event.startsWith("check failed:") ? "check failed" : "log entry (details withheld)")
+    return at + (["watching", "rotation requested", "resume requested", "check failed", "log entry (details withheld)"].includes(event) ? event : event.startsWith("rotating ") ? "watching" : event.startsWith("rotate ") ? "rotation requested" : event.startsWith("resume ") ? "resume requested" : event.startsWith("check failed:") ? "check failed" : "log entry (details withheld)")
   })
   return { mode: running ? configured : "off", log: lines }
 }
@@ -62,7 +63,7 @@ async function main() {
     try { fs.writeFileSync(tmp, data, { flag: "wx", mode: 0o600 }); fs.renameSync(tmp, script) }
     finally { fs.rmSync(tmp, { force: true }) }
     fs.writeFileSync(path.join(dir, "providers"), mode + "\n", { mode: 0o600 })
-    const fd = fs.openSync(log, "a", 0o600); fs.fchmodSync(fd, 0o600)
+    const fd = fs.openSync(log, "w", 0o600); fs.fchmodSync(fd, 0o600)
     try {
       const child = cp.spawn("python3", ["-u", script, "--watch", "--providers", mode], { detached: true, stdio: ["ignore", fd, fd], env: { ...process.env, T3CODE_HOME: path.join(home, ".t3") } })
       await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject) })

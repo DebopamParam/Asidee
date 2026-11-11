@@ -2,7 +2,9 @@ import { expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { chmod, readFile } from "node:fs/promises"
 import { join } from "node:path"
+import { deflateSync } from "node:zlib"
 import { clone, MAX_BUNDLE_BYTES, parseBundle, repository, save } from "../../extensions/repo/repo"
+import { inspectBundle, MAX_OBJECT_BYTES, MAX_OBJECTS } from "../../extensions/repo/bundle"
 import { fixture, fakeExec, local, must, put } from "./client-feature-fixtures"
 
 async function repositoryFixture() {
@@ -128,4 +130,70 @@ test("a highly compressed large object is rejected before host Git or target cre
   await expect(save(async (argv, stdin) => { calls.push(argv); return transport.runner(argv, stdin) }, { name: "demo", workspace: guest.work, target }, transport.streamer)).rejects.toThrow("expanded")
   expect(calls.some(argv => argv[0] === "git")).toBe(false)
   expect(await Bun.file(join(target, "HEAD")).exists()).toBe(false)
+})
+
+test("dishonest guest bundles cannot add refs, depend on host history or change their pack checksum", async () => {
+  const guest = await repositoryFixture(), transport = fakeExec(guest.home), target = join(guest.home, "never.git")
+  const exported = await transport.streamer(["paddock", "exec", "demo", "--stream", "--", "node", "-e", await Bun.file(join(import.meta.dir, "../../extensions/repo/guest.cjs")).text()], JSON.stringify({ action: "save", workspace: guest.work }), MAX_BUNDLE_BYTES + 4096)
+  expect(exported.exitCode).toBe(0)
+  const bundle = parseBundle(exported.stdout), end = bundle.data.indexOf("\n\n"), pack = bundle.data.subarray(end + 2)
+  const header = bundle.data.subarray(0, end).toString(), reference = bundle.tip + " " + bundle.ref
+  const corruptPack = Buffer.from(pack); corruptPack[corruptPack.length - 1] = corruptPack[corruptPack.length - 1]! ^ 1
+  for (const bytes of [
+    Buffer.concat([Buffer.from(header + "\n" + bundle.tip + " refs/heads/other\n\n"), pack]),
+    Buffer.concat([Buffer.from(`# v2 git bundle\n-${bundle.tip} prerequisite\n${reference}\n\n`), pack]),
+    Buffer.concat([Buffer.from(`# v3 git bundle\n@filter=blob:none\n${reference}\n\n`), pack]),
+    Buffer.concat([bundle.data.subarray(0, end + 2), corruptPack]),
+  ]) {
+    const stdout = Buffer.concat([Buffer.from(JSON.stringify({ branch: "main", tip: bundle.tip, ref: bundle.ref, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") }) + "\n"), bytes])
+    await expect(save(transport.runner, { name: "demo", workspace: guest.work, target }, async () => ({ exitCode: 0, stdout }))).rejects.toThrow("expanded")
+    expect(await Bun.file(join(target, "HEAD")).exists()).toBe(false)
+  }
+})
+
+test("pack resource checks include delta result sizes, aggregate expansion and object count", () => {
+  const variable = (number: number) => {
+    const bytes: number[] = []
+    do { const low = number % 128; number = Math.floor(number / 128); bytes.push(low | (number ? 128 : 0)) } while (number)
+    return Buffer.from(bytes)
+  }
+  const object = (data: Buffer) => {
+    let size = Math.floor(data.length / 16)
+    const bytes = [(7 << 4) | (data.length & 15) | (size ? 128 : 0)]
+    while (size) { const low = size % 128; size = Math.floor(size / 128); bytes.push(low | (size ? 128 : 0)) }
+    return Buffer.concat([Buffer.from(bytes), Buffer.alloc(20), deflateSync(data)])
+  }
+  const tip = "a".repeat(40), ref = "refs/paddock-export/12345678-1234-1234-1234-123456789abc"
+  const bundle = (objects: Buffer[], count = objects.length) => {
+    const header = Buffer.alloc(12); header.write("PACK"); header.writeUInt32BE(2, 4); header.writeUInt32BE(count, 8)
+    const body = Buffer.concat([header, ...objects])
+    return Buffer.concat([Buffer.from(`# v2 git bundle\n${tip} ${ref}\n\n`), body, createHash("sha1").update(body).digest()])
+  }
+  const tooLarge = object(Buffer.concat([variable(0), variable(MAX_OBJECT_BYTES + 1)]))
+  expect(() => inspectBundle(bundle([tooLarge]), tip, ref)).toThrow("expanded")
+  const delta = object(Buffer.concat([variable(0), variable(MAX_OBJECT_BYTES)]))
+  expect(() => inspectBundle(bundle(Array.from({ length: 5 }, () => delta)), tip, ref)).toThrow("expanded")
+  expect(() => inspectBundle(bundle([], MAX_OBJECTS + 1), tip, ref)).toThrow("expanded")
+})
+
+test("strict quarantine rejects a Git tree containing .git before creating a host destination", async () => {
+  const guest = await repositoryFixture(), transport = fakeExec(guest.home), target = join(guest.home, "never.git")
+  const blob = await guest.git(["hash-object", "-w", "--stdin"], "malicious metadata")
+  const tree = await guest.git(["mktree"], `100644 blob ${blob}\t.git\n`)
+  const tip = await guest.git(["commit-tree", tree, "-m", "Unsafe tree"])
+  await guest.git(["update-ref", "refs/heads/unsafe", tip])
+  await expect(save(transport.runner, { name: "demo", workspace: guest.work, target, branch: "unsafe" }, transport.streamer)).rejects.toThrow("failed")
+  expect(await Bun.file(join(target, "HEAD")).exists()).toBe(false)
+})
+
+test("valid delta-packed history still round-trips through quarantine", async () => {
+  const guest = await repositoryFixture(), transport = fakeExec(guest.home), target = join(guest.home, "deltas.git")
+  const text = "shared fixture line\n".repeat(2048)
+  for (let revision = 0; revision < 4; revision++) {
+    await put(guest.home, "workspace/delta", text + revision)
+    await guest.git(["add", "delta"]); await guest.git(["commit", "-qm", "Revision " + revision])
+  }
+  await guest.git(["repack", "-adf", "--window=10", "--depth=10"])
+  const saved = await save(transport.runner, { name: "demo", workspace: guest.work, target }, transport.streamer)
+  expect(await must(guest.run, ["git", "-C", target, "show", saved.branch + ":delta"])).toBe(text + "3")
 })
