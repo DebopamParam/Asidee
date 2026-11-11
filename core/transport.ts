@@ -54,7 +54,8 @@ export function sshConnection(host: Endpoint, stream = false) {
   child.stderr.on("data", (bytes: Buffer) => { if (diagnostic.length < 4000) diagnostic += bytes.toString().slice(0, 4000 - diagnostic.length) })
   child.on("error", (error) => wire.destroy(error))
   let done = false
-  const exited = new Promise<void>((resolve) => child.once("close", () => { done = true; wire.destroy(); resolve() }))
+  // ssh can be gone while its last output still waits behind a slow reader: the wire closes once that is read.
+  const exited = new Promise<void>((resolve) => child.once("close", () => { done = true; if (wire.readableEnded) wire.destroy(); else wire.once("end", () => wire.destroy()); resolve() }))
   wire.on("error", () => {})
   const settled = (ms: number) => bounded(exited, ms).then(() => done)
   return { wire, pid: child.pid, diagnostic: () => diagnostic.trim(), async close() {
@@ -88,7 +89,7 @@ export class HttpPeer {
     this.agent.reuseSocket = () => {}
   }
   async call(method: string, body: object = {}, options: { timeoutMs?: number; mutation?: boolean; machineId?: string; version?: string; build?: string } = {}): Promise<unknown> {
-    let dispatched = false
+    let dispatched = false; let settle = () => {}
     try {
       const value = await new Promise<unknown>((resolve, reject) => {
         const bytes = Buffer.from(JSON.stringify(body))
@@ -101,10 +102,13 @@ export class HttpPeer {
         })
         req.on("error", reject)
         req.once("finish", () => { dispatched = true })
-        const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => req.destroy(new Error(`No reply came within ${Math.round(options.timeoutMs! / 1000)} seconds.`)), options.timeoutMs)
-        req.once("close", () => clearTimeout(timer))
+        const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => { const late = new Error(`No reply came within ${Math.round(options.timeoutMs! / 1000)} seconds.`); req.destroy(late); reject(late) }, options.timeoutMs)
+        // Bun's request on a connection that is gone emits nothing, even when destroyed, so the call settles by itself.
+        const lost = () => reject(new Error("The connection closed before a reply arrived."))
+        if (this.connection.wire.destroyed) lost(); else this.connection.wire.once("close", lost)
+        settle = () => { clearTimeout(timer); this.connection.wire.off("close", lost) }
         req.end(bytes)
-      })
+      }).finally(() => settle())
       return parseReply(value)
     } catch (error) {
       if (error instanceof RemoteFailure) throw error
@@ -155,6 +159,7 @@ export class RemoteSession extends EventEmitter implements Session {
   private paused = true
   private done = false
   private ready = false
+  private wireClosed = false
   private opened: (error?: PaddockError) => void = () => {}
   readonly closed: Promise<void>
   private closedResolve: () => void = () => {}
@@ -166,7 +171,8 @@ export class RemoteSession extends EventEmitter implements Session {
     const wire = this.connection.wire
     wire.on("drain", () => this.emit("drain"))
     wire.on("error", (error) => { if (!this.done) this.linkLost = true; this.finish({ error: `The SSH session was lost: ${error.message}` }) })
-    wire.on("close", () => { if (!this.done) { this.linkLost = true; this.finish({ error: `The SSH session was lost before an exit status arrived. ${this.connection.diagnostic()}`.trim() }) } })
+    // Frames already read, an exit among them, are still delivered after the wire closes (flush).
+    wire.on("close", () => { this.wireClosed = true; this.flush() })
     wire.on("data", (chunk: Buffer) => {
       try {
         const frames = this.reader.push(chunk)
@@ -206,6 +212,7 @@ export class RemoteSession extends EventEmitter implements Session {
       } else this.finish({ error: `A remote daemon cannot send ${piece.kind}.` })
     }
     } catch { this.finish({ error: "Malformed remote stream control frame." }) }
+    if (this.wireClosed && !this.done && !this.pending.length) { this.linkLost = true; this.finish({ error: `The SSH session was lost before an exit status arrived. ${this.connection.diagnostic()}`.trim() }) }
   }
   private finish(exit: { code?: number; error?: string }): void {
     if (this.done) return

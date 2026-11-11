@@ -3,7 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { connect, createServer, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { frame, FrameReader, serveStream, type Frame } from "../../core/stream"
+import { dataFrames, frame, FrameReader, serveStream, type Frame } from "../../core/stream"
 import { HttpPeer, MAX_REPLY, RemoteSession, sshConnection } from "../../core/transport"
 
 const cleanups: Array<() => Promise<void>> = []
@@ -114,6 +114,41 @@ test("closing an SSH process that was stopped (SIGSTOP) finishes within its kill
   expect(Date.now() - started).toBeLessThan(4000)
   expect(() => process.kill(connection.pid!, 0)).toThrow()
 }, 10_000)
+
+// A stand-in ssh on PATH that prints `output` and exits without reading its stdin.
+async function exitingSsh(output: Uint8Array) {
+  const root = await mkdtemp(join(tmpdir(), "pdk-ssh-")); const path = process.env.PATH
+  await writeFile(join(root, "output"), output)
+  await writeFile(join(root, "ssh"), `#!/bin/sh\nexec cat '${join(root, "output")}'\n`); await chmod(join(root, "ssh"), 0o755)
+  process.env.PATH = `${root}:${path}`
+  cleanups.push(async () => { process.env.PATH = path; await rm(root, { recursive: true, force: true }) })
+}
+
+test("a hosted stream whose ssh exits while its reader is slow still delivers every byte and the exit status", async () => {
+  const bytes = new Uint8Array(4 * 1048576); for (let at = 0; at < bytes.length; at += 65536) crypto.getRandomValues(bytes.subarray(at, at + 65536))
+  await exitingSsh(Buffer.concat([frame("ready", { tty: false }), ...dataFrames("stdout", bytes), frame("exit", { code: 5 })]))
+  const session = await RemoteSession.open(host, { kind: "exec", name: "demo", argv: ["true"], tty: false })
+  const ended = new Promise<{ code?: number; error?: string }>((resolve) => session.on("end", resolve))
+  let received = 0
+  session.on("output", (_kind, chunk: Buffer) => { received += chunk.length; session.pause(); setTimeout(() => session.resume(), 1) })
+  session.resume()
+  expect(await within(ended, 20_000, "the slow stream's end")).toEqual({ code: 5 })
+  expect(received).toBe(bytes.length)
+  expect(session.linkLost).toBe(false)
+}, 30_000)
+
+test("a call over an SSH link that has already ended fails at once as offline instead of waiting", async () => {
+  const body = JSON.stringify({ ok: true, data: "hello" })
+  await exitingSsh(Buffer.from(`HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\n\r\n${body}`))
+  const connection = sshConnection(host); const client = new HttpPeer(host, connection)
+  cleanups.push(() => client.close())
+  expect(await client.call("hello", {}, { timeoutMs: 5000 })).toBe("hello")
+  for (let at = 0; at < 100 && !connection.wire.destroyed; at++) await Bun.sleep(20)
+  expect(connection.wire.destroyed).toBe(true)
+  const started = Date.now()
+  await expect(within(client.call("hello", {}, { timeoutMs: 5000 }), 3000, "the call on an ended link")).rejects.toMatchObject({ code: "offline" })
+  expect(Date.now() - started).toBeLessThan(1000)
+})
 
 test("a mutation's unusable reply and a cancelled call say so, and both have unknown outcomes", async () => {
   const oversized = await peer((socket) => { const body = "x".repeat(MAX_REPLY + 1); socket.end(`HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\n\r\n${body}`) })
