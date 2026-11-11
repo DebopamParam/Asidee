@@ -69,13 +69,15 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   seconds without a heartbeat from the other side ends it on either machine. Add a new forward after link loss.
   See [Machines](docs/architecture.md#machines) for the current limits and opt-in measurements.
 - `paddock host add NAME --ssh DEST --artifact PATH --sha256 HASH` enrolls a Linux systemd host after a read-only probe
-  and review of a hash-bound plan. `--json` applies nothing; interactive consent requires `yes`, and automation uses
-  `--accept-plan HASH`. The installer verifies artifacts, preserves unrelated Docker configuration, names every running
-  container a planned restart may interrupt, installs a service as the SSH user and registers only after sandbox smoke
-  verification. Disk limits are watched; this runtime does not offer inner Docker. `--sudo never` only reuses a verified
-  prepared system service. The disposable-fixture N evals cover approval, stale plans, both checksum checks, partial
-  failure, installation and manual uninstall. Read [Enroll a Linux host](docs/host-enrollment.md) for prerequisites,
-  explicit build commands, sudo behavior and retained remote objects. Reboot persistence remains unmeasured.
+  and review of a hash-bound plan: every privileged command and what it leaves, every file diff and checksum, and every
+  running container a planned Docker restart may interrupt. `--json` applies nothing; interactive consent requires
+  `yes`, and automation uses `--accept-plan HASH`. The installer verifies artifacts, preserves unrelated Docker
+  configuration, installs a service as the SSH user and registers only after sandbox smoke verification. Disk limits are
+  watched. The host's sandboxes can run Docker inside only when it is enrolled with `--docker`. `--sudo never` only
+  reuses an installation that is already complete. The disposable-fixture N evals cover approval, stale plans, both
+  checksum checks, partial failure, installation, inner Docker and manual uninstall. Read
+  [Enroll a Linux host](docs/host-enrollment.md) for prerequisites, explicit build commands, sudo behavior and retained
+  remote objects. Reboot persistence remains unmeasured.
 
 
 Not built yet:

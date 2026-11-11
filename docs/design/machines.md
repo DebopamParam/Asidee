@@ -239,16 +239,19 @@ It does not revoke the SSH user's access. Remote uninstall is a separate future 
 
 ### Enrollment implementation record
 
-`host add`, `hostPlan` and `hostApply` now implement the system-service path. N01 through N13 are the outside
+`host add`, `hostPlan` and `hostApply` now implement the system-service path. N01 through N20 are the outside
 measurements; see the scorecard for the source revision and actual results. The changes below override the proposal
 where they differ. [Enrollment instructions](../host-enrollment.md) contain the commands and manual uninstall steps.
 
 | Choice or deviation | Reason and evidence |
 |---|---|
 | Explicit native Linux ELF and SHA-256 only; no implicit build or release channel | U6 remains conservative. Both endpoints check the artifact; N04 refuses a wrong primary checksum and N11 changes one uploaded byte to prove destination refusal. N06 checks the installed artifact digest and daemon source. |
-| gVisor `20251110.0`, with pinned SHA-512 per architecture | This point release is a single-file runtime. Newer gVisor distributions require sidecar delivery, which is not assumed here. The actual arm64 binary and embedded helper run in the disposable fixture. Release signing and a modern multi-file delivery channel remain unverified U6. |
+| gVisor `20261026.0`, delivered as its release archive with a pinned SHA-512 per architecture and a pinned SHA-256 per file | On the arm64 fixture the last single-file release, `20251110.0`, could not start a container under Docker inside a sandbox; `20261026.0` does (N19). That release is `runsc`, the containerd shim and six files under `gvisor-bin/`. The destination downloads the archive and the installer takes only the files the plan names, each checked; N20 alters the archive five ways and each is refused before any step. N06 checks every installed file's digest, owner and mode. Release signing remains unverified U6. |
 | Watched disk policy only; no disk helper, disk packages or sudoers entry | Stage 1d is separate. N02 inspects the plan and N06 writes bytes, obtains an engine-side measurement and requires applicable blocking checks. |
-| Runtime has `--allow-suid` and `--overlay2=none`, without `--net-raw` | Enrollment selects an ordinary sandbox capability. Inner Docker is unavailable on this runtime rather than claiming an unmeasured capability. No default-runtime change is made. |
+| Runtime has `--allow-suid` and `--overlay2=none`; `--net-raw` only with `host add --docker` | Raw sockets are a capability the owner chooses per host, shown in the plan and its hash. Without the option the host does not offer inner Docker and N06 sees `create --docker` refused. With it the smoke sandbox has to pass the inner Docker check, and N19 runs a container inside a sandbox made through the primary. No default-runtime change is made. |
+| The daemon prefers the runtime named `paddock-runsc` | An enrolled host can hold other gVisor runtimes, registered with other arguments. N16 registers one that sorts first and offers raw sockets; Paddock still runs on its own, and verification refuses a service that would not. |
+| Plan only what is missing | A binary, runtime, unit or registration that is already in place is not installed again, and Docker restarts only to load a runtime entry it lacks. N15 plans one step for a service enabled only until reboot. N17 installs another artifact with a Paddock service restart and no Docker restart; the plan names the running sandbox that restart stops. |
+| A report of success is not enough | The installer's SSH session has to exit 0 (N17 returns 77 after a complete report: outcome unknown), and the smoke sandbox's verify after the disk write has to hold with every blocking check passing (N14 alters that reply three ways, beside an unaltered control). |
 | Existing Python 3 and usable signed apt cache are prerequisites | The probe must not install tools or refresh indexes before consent. An empty or unreadable recipe refuses before installation. Existing Docker access must be readable to enumerate restart impact. |
 | Show existing repository contents and hash sources, keys and indexes; download the exact resolved .deb set and use `dpkg --install` | `apt-get --no-download` did not consume the staged local archives on the fixture. Direct installation avoids another dependency resolution or undeclared download after consent. N08 checks every installed version and unchanged login groups. No repository or key is added. |
 | Debian/Ubuntu recipe also accepts Linux Mint based on Ubuntu noble | The owner's routing machine is Mint 22.3, an Ubuntu-noble derivative. Its read-only plan is measured; privileged Mint installation is not. Other distributions refuse automatic installation. |
@@ -258,23 +261,25 @@ where they differ. [Enrollment instructions](../host-enrollment.md) contain the 
 | Hash stable installation inputs instead of Docker's full human/status output | Docker info has a current-time field; container listings have changing uptime text. These are excluded. Engine identity/version/runtime configuration and the exact running container IDs/names remain bound. N03 changes real inventory and configuration; N06 keeps a control running during delivery and observes its interruption by the approved restart. |
 | Re-probe after delivery and authentication, before root installation | Downloads and password entry can take time. Changed inputs return a revised plan. N03 supplies stale consent beside accepted-plan controls. |
 | Retry an approved install or reuse its verified service; do not roll back shared resources | The journal names completed and interrupted steps plus prior file hashes. N05 forces Docker validation failure, observes partial root changes, unchanged Docker configuration and no registry entry. A half-installed machine without readable Docker access may require owner preparation before another complete plan is possible. |
-| Keep a failed create for diagnosis when no successful create reply proves ownership | A create error or lost reply cannot justify deleting a pre-existing sandbox of the same name. Successful smoke creates are always removed before registration. The error reports the diagnostic name and possibly retained shared helper/guard objects. |
-| Manual remote uninstall, separate from host remove | N07 proves remove retains the service. N12 removes the disposable fixture's unit, runtime, artifacts, state, backups, guard and helper image while preserving unrelated Docker configuration and usable Docker. Shared distro packages stay. |
+| Keep a failed create for diagnosis when no successful create reply proves ownership | A create error or lost reply cannot justify deleting a pre-existing sandbox of the same name. Successful smoke creates are always removed before registration. The error reports the diagnostic name and possibly retained shared helper/guard objects. N18 puts a sandbox of that name on the host first: enrollment refuses, leaves it running and prints the command that removes it. |
+| Manual remote uninstall, separate from host remove | N07 proves remove retains the service. N12 follows the documented steps on the disposable fixture: the unit, runtime, artifacts, state, backups, firewall tables and helper image are gone, unrelated Docker configuration and a usable Docker remain. The firewall tables outlive the stopped service and are deleted through the helper image. Pulled sandbox images and shared distro packages stay. |
 
 **U4 is partially measured.** Ubuntu 24.04 arm64 on an OrbStack Linux machine supports the systemd account setup,
 boot-accessible state path, distro Docker package transaction and native compiled artifact. The host daemon's user,
-enabled unit, socket-only listener, checksum, sandbox checks and disk measurement are inspected. Linux Mint 22.3
-x86_64 is probed read-only. Privileged x86_64, Debian, logout and reboot installation behavior remain unmeasured.
+enabled unit, socket-only listener, checksum, sandbox checks and disk measurement are inspected, and with `--docker`
+a container runs inside a sandbox there. Linux Mint 22.3 x86_64 is probed and planned read-only (N01). Privileged
+x86_64, Debian, logout and reboot installation behavior remain unmeasured.
 
 **U5 uses the conservative choice.** A runtime configuration change always plans a Docker restart, even with live
 restore. Docker 29.1.3 on the disposable Ubuntu fixture validates the merged file, preserves unrelated settings and
 interrupts the named running control in N06. Reload-only registration and other Docker versions remain unverified.
-When the runtime entry is unchanged, no Docker restart is planned.
+When the runtime entry is unchanged and Docker has it loaded, no Docker restart is planned (N07, N17).
 
 **U6 is partially measured.** Explicit per-architecture compilation, native ELF rejection, both checksum boundaries,
-installed digest/source matching and embedded helper delivery are measured on the arm64 fixture. There is no signed
-manifest, release infrastructure, implicit compiler or claim about a modern multi-file gVisor delivery pipeline.
-The pinned checksums are explicit project trust anchors, not independently authenticated releases.
+installed digest/source matching, embedded helper delivery and the multi-file gVisor archive are measured on the arm64
+fixture. The x86_64 archive's checksums are pinned and appear in N01's plan; its installation is not measured. There is
+no signed manifest, release infrastructure or implicit compiler. The pinned checksums are explicit project trust
+anchors, not independently authenticated releases.
 
 ## 3. A hard cap must cover persistent sandbox writes
 
@@ -549,7 +554,7 @@ Sequence work into verifiable units. Each unit must pass its relevant outside me
 - **U3, unverified.** The selected Bun version and local engine support Unix HTTP upgrade, binary duplex flow control, TTY exec, demultiplexing, and resize as required.
 - **U4, partially measured.** See the enrollment implementation record. Ubuntu arm64 installation and the Mint x86_64 read-only probe are measured; other install combinations and reboot behavior remain unverified.
 - **U5, conservative restart with one measured Docker version.** See the enrollment implementation record. Reload alternatives and other versions remain unverified.
-- **U6, partially measured.** Explicit native artifacts, checksums and embedded helper delivery are measured on the arm64 fixture. Signed releases and modern multi-file runtime delivery remain unverified.
+- **U6, partially measured.** Explicit native artifacts, checksums, embedded helper delivery and the multi-file gVisor archive are measured on the arm64 fixture. Signed releases and x86_64 installation remain unverified.
 - **U7, unverified.** Bounded-v1 preserves supported image layouts, package installs, generated files, nested Docker data, and snapshots without a persistent-write bypass.
 - **U8, unverified.** Candidate quota/storage backends and their limitations apply to any new Linux fixture; reference measurements establish no Paddock result there.
 - **U9, unverified.** Scoped sudo helper, ext4 exhaustion/growth, mount identity/propagation, mount units, and interrupted cleanup satisfy the proposed safety properties.

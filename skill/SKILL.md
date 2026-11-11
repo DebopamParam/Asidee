@@ -46,13 +46,16 @@ on the primary's 127.0.0.1 and closes when its sandbox run, either daemon or the
 ends it after fifteen seconds without the other's heartbeat; it never reconnects or recreates itself. Its evidence is
 `paddock --host NAME forward list` on the primary, not a check. Add a new forward explicitly after link loss.
 `paddock host add NAME --ssh DEST --artifact PATH --sha256 HASH --json` produces a read-only installation plan. Build the
-Linux artifact explicitly from the same source as the primary. Review every sudo vector, file diff, artifact and package
-checksum, service, watched disk choice and Docker restart victim. `--json` never applies. Interactive enrollment needs
+Linux artifact explicitly from the same source as the primary. Review every sudo vector and what it leaves, file diff,
+artifact and package checksum, service, watched disk choice, Docker restart victim and sandbox a Paddock service restart
+stops. `--json` never applies. Interactive enrollment needs
 the word `yes`; automation needs `--accept-plan HASH`. A revised plan requires new consent. Interactive sudo uses the
 primary's private terminal stream; never put a password in an API body, plan or log. Automation needs noninteractive
-sudo. Registration follows verified artifacts, enabled user service inspection, isolation/disk smoke checks and cleanup.
+sudo. Registration follows verified artifacts, enabled system service inspection, isolation/disk smoke checks and cleanup.
 Ctrl-C during verification requests cancellation; wait for cleanup and exit 130. Completed installation changes remain,
-and no host is registered (N13). The installed runtime has watched disks and no inner-Docker capability. Hard disk helpers and disk tools are not installed.
+and no host is registered (N13). The installed runtime has watched disks. Its sandboxes can run Docker inside only when
+the host is enrolled with `host add --docker`, which registers gVisor's raw sockets and shows that in the plan. Hard
+disk helpers and disk tools are not installed.
 `--sudo never` can reuse a verified enabled system service in the enrolled layout, and otherwise refuses unattended
 installation. Do not install a user unit or infer reboot behavior from lingering. See [Enroll a Linux host](../docs/host-enrollment.md)
 for build commands, preparation, failure journals and manual uninstall. A refusal or failure must leave this enrollment

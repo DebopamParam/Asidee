@@ -461,12 +461,16 @@ checksums appear when Docker is absent. Apply downloads and verifies that resolv
 on those files. It does not add repositories, refresh apt metadata or resolve more dependencies after consent.
 
 The primary verifies an explicitly supplied Linux ELF artifact before SSH and again before delivery. The destination
-checks its SHA-256 before installation, and checks the pinned gVisor point release's SHA-512. There is no signed release
-channel or implicit compilation. Root-owned immutable paths select the artifact; an unrelated command or service is
+checks its SHA-256 before installation. It downloads the pinned gVisor release archive, checks its SHA-512, and takes
+from it only the files the plan names, each against a pinned SHA-256; anything else in the archive refuses the
+installation before its first step (N20). There is no signed release channel or implicit compilation. Root-owned immutable paths select the artifact; an unrelated command or service is
 refused. Root paths through symlinks or directories writable by another account are refused. A backup with the wrong
-bytes is refused. Exactly one named Docker runtime is merged, with full before/after contents and diffs. A changed
+bytes is refused. Exactly one named Docker runtime is merged, with full before/after contents and a line diff. A changed
 runtime plans validation, backup, configuration installation and Docker restart. Every running container is listed,
-even with live restore. An unchanged runtime plans no Docker restart.
+even with live restore. An unchanged runtime that Docker has loaded plans no Docker restart. Only what is missing is
+planned: a binary, runtime or unit already in place is not installed again. Another artifact plans a restart of the
+Paddock service alone, and the plan names the running sandboxes that restart stops (N17). Each step records what it
+leaves on the host, and the CLI prints the plan as text with the destination's control characters removed.
 
 The daemon re-probes before delivery. The destination probes again after delivery and optional sudo authentication,
 before installation. Changed inputs return a revised plan and invalidate consent. Interactive enrollment opens a
@@ -478,16 +482,21 @@ restored and no registration (N13). A disconnected terminal cannot commit a host
 The system unit runs as the SSH user with `SupplementaryGroups=docker`, a fixed PATH, socket-only access and
 `Restart=on-failure`, after Docker. State/configuration live under `/var/lib/paddock/UID`. Login groups and sudoers are
 not changed. Docker authority is effectively root. Installation progress and the interrupted step are journaled there,
-separately from sandbox manifests. Failure reports completed steps and retained paths, without shared-package rollback.
+separately from sandbox manifests. Failure reports the completed steps, what they left and what the interrupted step
+may have left, without shared-package rollback; a failure before the first step says that none ran. An installer
+session that reports success and exits nonzero is an unknown outcome and registers nothing (N17).
 `--sudo never` reuses a verified enabled system service in this layout; user-unit installation is conservatively refused
 because its boot behavior is unmeasured. Another prepared layout can still use `host attach`.
 
-Registration follows the artifact/source/protocol handshake, active/enabled service inspection, local engine readiness,
-all applicable blocking smoke checks, a real disk write and host-side byte measurement, and smoke cleanup. `verify`
-returns `diskUsedBytes` when measurable and omits it otherwise. Disk enforcement remains watched. The installed runtime
-omits `--net-raw`, so it does not advertise inner Docker. No hard disk helper, disk tools or sudoers entry is installed.
-No reboot recovery is claimed. [Enrollment instructions](host-enrollment.md) include manual uninstall and explain which
-remote objects `host remove` retains. N01 through N13 provide the outside controls; unavailable fixtures are not measured.
+Registration follows the artifact/source/protocol handshake, active/enabled service inspection, a ready local engine on
+the runtime `paddock-runsc`, all applicable blocking smoke checks at creation and again after a real disk write with
+host-side byte measurement, and smoke cleanup. `verify` returns `diskUsedBytes` when measurable and omits it otherwise.
+Disk enforcement remains watched. The daemon prefers `paddock-runsc` to any other gVisor runtime registered on its
+engine (N16). That runtime is registered without `--net-raw` and does not advertise inner Docker, unless the host is
+enrolled with `--docker`; the option is part of the plan and its hash, and the smoke sandbox then has to pass the inner
+Docker check (N19). No hard disk helper, disk tools or sudoers entry is installed. No reboot recovery is claimed.
+[Enrollment instructions](host-enrollment.md) include manual uninstall and explain which remote objects `host remove`
+retains. N01 through N20 provide the outside controls; unavailable fixtures are not measured.
 
 Hosted streams use the existing second Unix socket and frame protocol over their own SSH process. The gateway first
 retrieves the current sandbox identity and run; the stream opens with that identity plus the expected daemon boot,
