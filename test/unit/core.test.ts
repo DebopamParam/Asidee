@@ -6,6 +6,7 @@ import { blockers, CHECKLIST, complete } from "../../core/checks"
 import { Core, UNCHECKED_PASSES } from "../../core/core"
 import { fieldValues, loadExtensions, parseExtension } from "../../core/extensions"
 import { configChecks, DOCKER_CAPABILITIES, dockerVolume, gvisorSetup, network, unsafeRuntimeArgs, type GuardState } from "../../core/providers/gvisor"
+import { OUTPUT_LIMIT, systemRunner } from "../../core/run"
 import { readConfig, validSpec } from "../../core/state"
 import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type Stage } from "../../core/types"
 
@@ -85,7 +86,8 @@ function inspect(change: (value: any) => void = () => {}) {
   const value = {
     State: { Running: true }, Config: { Labels: {} }, Mounts: [],
     HostConfig: { Runtime: "runsc", Privileged: false, CapAdd: null, Devices: [], PidMode: "", IpcMode: "private", UTSMode: "", UsernsMode: "", SecurityOpt: null,
-      NetworkMode: network("demo"), PublishAllPorts: false, PortBindings: {}, Memory: 4 * 1024 ** 3, MemorySwap: 4 * 1024 ** 3, PidsLimit: 4096, NanoCpus: 2e9 },
+      NetworkMode: network("demo"), PublishAllPorts: false, PortBindings: {}, Memory: 4 * 1024 ** 3, MemorySwap: 4 * 1024 ** 3, PidsLimit: 4096, NanoCpus: 2e9,
+      LogConfig: { Type: "json-file", Config: { "max-size": "10m", "max-file": "2" } } as { Type: string; Config: Record<string, string> | null } | undefined },
     NetworkSettings: { Networks: { [network("demo")]: { IPAddress: "10.0.0.2" } } },
   }
   change(value); return value
@@ -143,17 +145,19 @@ test("Docker hardening accepts exactly its declared additions inside gVisor", ()
   expect(checked([...DOCKER_CAPABILITIES], (value) => { value.Mounts[0].Name = "someone-elses-volume" }).find((entry) => entry.id === "mounts")!.status).toBe("fail")
 })
 
-test("Docker daemon stdout must have bounded host logging", () => {
-  const enabled = { ...manifest, spec: { ...manifest.spec, docker: true } }
-  const limits = (LogConfig?: { Type: string; Config: Record<string, string> | null }) => configChecks(inspect((value) => {
-    value.HostConfig.LogConfig = LogConfig
-  }), enabled, "intact", "pdk123").find((entry) => entry.id === "limits")!
-  expect(limits({ Type: "json-file", Config: { "max-size": "10m", "max-file": "2" } }).status).toBe("pass")
-  const invalid: Parameters<typeof limits>[0][] = [undefined, { Type: "json-file", Config: {} }, { Type: "json-file", Config: { "max-size": "10m" } },
-    { Type: "json-file", Config: { "max-size": "10m", "max-file": "200" } }, { Type: "local", Config: { "max-size": "10m", "max-file": "2" } }]
-  for (const config of invalid) {
-    expect(limits(config)).toMatchObject({ status: "fail" })
-    expect(limits(config).detail).toContain("bounded daemon logs")
+test("every sandbox's main-process output must have bounded host logging, with or without Docker", () => {
+  for (const docker of [false, true]) {
+    const sandbox = { ...manifest, spec: { ...manifest.spec, docker } }
+    const limits = (LogConfig?: { Type: string; Config: Record<string, string> | null }) => configChecks(inspect((value) => {
+      value.HostConfig.LogConfig = LogConfig
+    }), sandbox, "intact", "pdk123").find((entry) => entry.id === "limits")!
+    expect(limits({ Type: "json-file", Config: { "max-size": "10m", "max-file": "2" } }).status).toBe("pass")
+    const invalid: Parameters<typeof limits>[0][] = [undefined, { Type: "json-file", Config: {} }, { Type: "json-file", Config: { "max-size": "10m" } },
+      { Type: "json-file", Config: { "max-size": "10m", "max-file": "200" } }, { Type: "local", Config: { "max-size": "10m", "max-file": "2" } }]
+    for (const config of invalid) {
+      expect(limits(config)).toMatchObject({ status: "fail" })
+      expect(limits(config).detail).toContain("host logs (json-file with max-size=10m")
+    }
   }
 })
 
@@ -180,6 +184,26 @@ test("create starts a sandbox whose checks hold, and remove needs its name repea
   expect(state.exists).toBe(true)
   await paddock.remove("demo", "demo")
   expect(await paddock.list()).toEqual([])
+})
+
+test("a command that prints more than the output limit is killed, and nothing it printed is returned", async () => {
+  const whole = await systemRunner(["sh", "-c", `head -c ${OUTPUT_LIMIT} /dev/zero; exit 3`])
+  expect(whole.exitCode).toBe(3); expect(whole.stdout.length).toBe(OUTPUT_LIMIT); expect(whole.overflow).toBeUndefined()
+  const started = Date.now()
+  const over = await systemRunner(["sh", "-c", "yes paddock; echo finished > /dev/null"])
+  expect(over).toMatchObject({ exitCode: 124, stdout: "", overflow: "stdout" })
+  expect(over.stderr).toContain("16 MiB on stdout")
+  expect(Date.now() - started).toBeLessThan(20_000)
+  expect(await systemRunner(["sh", "-c", "yes paddock >&2"], { maxOutputBytes: 1024 ** 2 })).toMatchObject({ exitCode: 124, stdout: "", overflow: "stderr" })
+  const bytes = new Uint8Array([0, 255, 128, 10, 0xc3])
+  expect([...(await systemRunner(["cat"], { stdin: bytes, binary: true })).raw!]).toEqual([...bytes])
+})
+
+test("exec refuses output past the limit with an error that names it, never a cut-off result", async () => {
+  const { provider } = fakeProvider(); const paddock = await core(provider)
+  await paddock.create({ name: "demo" })
+  provider.exec = async () => ({ exitCode: 124, stdout: "", stderr: "", overflow: "stdout" })
+  await expect(paddock.exec("demo", ["yes"])).rejects.toMatchObject({ code: "runtime", message: expect.stringContaining("16 MiB on stdout") })
 })
 
 test("a sandbox whose configuration fails a check is never started", async () => {

@@ -31,8 +31,9 @@ mkdir -p /run/paddock-bin
 ln -sf "$(command -v iptables-legacy)" /run/paddock-bin/iptables
 ln -sf "$(command -v ip6tables-legacy)" /run/paddock-bin/ip6tables
 PATH=/run/paddock-bin:$PATH exec dockerd --config-file=/run/paddock-docker.json --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --storage-driver=${DOCKER_DRIVER} --iptables=false --ip6tables=false`
-// Dockerd writes to the container's output, which the engine stores on its host, outside the watched disk limit (I22).
-export const DOCKER_LOG = { "max-size": "10m", "max-file": "2" } as const
+// What a sandbox's main process prints (dockerd's log, or anything written to /proc/1/fd/1, which a sandbox without
+// Docker can do too) is stored by the engine on its host, outside the watched disk limit (I22, I23).
+export const LOG_LIMIT = { "max-size": "10m", "max-file": "2" } as const
 const INNER_NAT = "iptables-legacy -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || iptables-legacy -t nat -A POSTROUTING -o eth0 -j MASQUERADE"
 // Linux limits interface names to 15 characters. The guard matches on this prefix.
 export const BRIDGE_PREFIX = "pdk"
@@ -40,7 +41,6 @@ export const bridge = (name: string) => `${BRIDGE_PREFIX}${createHash("sha256").
 // The privileged steps (loading the guard) and the probes run from this image, never from a sandbox's image, which an
 // agent or a tampered template could have changed. Its tag is a hash of its Dockerfile, so it is built once per engine.
 export const HELPER_IMAGE = `paddock-helper:${createHash("sha256").update(HELPER_DOCKERFILE).digest("hex").slice(0, 12)}`
-const INNER_PROBE_IMAGE = HELPER_DOCKERFILE.match(/^FROM (\S+)/m)![1]!
 // Loads the guard into a scratch network namespace and compares how nft prints it there with how it prints the tables
 // on the engine's host: any added, removed or reordered rule shows. Printing both with the same nft avoids depending on
 // one version's wording. Prints intact, changed or missing.
@@ -85,7 +85,13 @@ const hostProbeScript = (tag: string, gateway: string, port: string) => `nc -lk 
   done
   ip netns exec far nc -lk -p ${PROBE_PORT} -e echo ${PROBE_REPLY} & ) || true
 echo ready; wait`
-const CREDENTIAL_FILES = [".claude/.credentials.json", ".codex/auth.json", ".config/gh/hosts.yml", ".git-credentials", ".ssh/id_ed25519", ".ssh/id_rsa", ".aws/credentials", ".netrc"]
+// Ends every process carrying PADDOCK_EXEC=$1, a few passes in case one forks meanwhile; fails if any is left.
+const END_EXEC = `marked() { for p in /proc/[0-9]*; do tr '\\0' '\\n' < "$p/environ" 2>/dev/null | grep -qx "PADDOCK_EXEC=$1" && echo "\${p#/proc/}"; done; true; }
+for pass in 1 2 3; do pids=$(marked "$1"); [ -z "$pids" ] && exit 0; kill -9 $pids 2>/dev/null; sleep 0.2; done
+[ -z "$(marked "$1")" ]`
+// Shell globs under each home. Profile directories (~/.claude-NAME, ~/.codex-NAME) are where the bundled logins
+// extension puts imported logins.
+const CREDENTIAL_FILES = [".claude*/.credentials.json", ".codex*/auth.json", ".config/gh/hosts.yml", ".git-credentials", ".ssh/id_ed25519", ".ssh/id_rsa", ".aws/credentials", ".netrc"]
 
 type Inspect = {
   State: { Running: boolean; OOMKilled?: boolean; ExitCode?: number; FinishedAt?: string }
@@ -159,10 +165,10 @@ export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardS
   const unlimited = [
     !(host.Memory > 0) && "memory", host.Memory > 0 && host.MemorySwap !== host.Memory && "swap",
     !((host.PidsLimit ?? 0) > 0) && "processes", !(host.NanoCpus > 0) && "CPU",
-    manifest.spec.docker && !(host.LogConfig?.Type === "json-file" && Object.entries(DOCKER_LOG).every(([key, value]) => host.LogConfig?.Config?.[key] === value)) && "bounded daemon logs (json-file, max-size=10m, max-file=2)",
+    !(host.LogConfig?.Type === "json-file" && Object.entries(LOG_LIMIT).every(([key, value]) => host.LogConfig?.Config?.[key] === value)) && "host logs (json-file with max-size=10m and max-file=2)",
   ].filter(Boolean)
   out.push(unlimited.length ? result("limits", "fail", "inspected", `No limit on ${unlimited.join(", ")}.`)
-    : result("limits", "pass", "inspected", `${host.Memory / 1024 ** 3} GB memory, ${host.PidsLimit} tasks (gVisor's own threads count, so fewer processes than that fit), ${host.NanoCpus / 1e9} CPUs. A sandbox that passes its memory or task limit is killed.${manifest.spec.docker ? " Host daemon logs rotate at 10 MiB with two files; these are outside the watched disk limit." : ""}`))
+    : result("limits", "pass", "inspected", `${host.Memory / 1024 ** 3} GB memory, ${host.PidsLimit} tasks (gVisor's own threads count, so fewer processes than that fit), ${host.NanoCpus / 1e9} CPUs. A sandbox that passes its memory or task limit is killed. What its main process prints${manifest.spec.docker ? " (dockerd's log)" : ""} is kept on the engine's host, outside the watched disk limit, in two files of at most 10 MiB.`))
 
   const disk = manifest.engine.capabilities?.diskLimit
   out.push(disk === "hard" ? result("disk", "pass", "inspected", `${manifest.spec.diskGb} GB; writes fail at the limit.`)
@@ -271,7 +277,8 @@ export class GvisorProvider implements Provider {
       "create", "--name", container(name), "--hostname", name, "--label", `${LABEL_NAME}=${name}`, "--label", `${LABEL_ID}=${manifest.id}`,
       "--runtime", engine.data.runtime!, "--network", network(name), "--restart", "no",
       "--cpus", String(spec.cpus), "--memory", memory, "--memory-swap", memory, "--pids-limit", String(spec.pids),
-      ...(spec.docker ? ["--log-driver", "json-file", ...Object.entries(DOCKER_LOG).flatMap(([key, value]) => ["--log-opt", `${key}=${value}`]), ...DOCKER_CAPABILITIES.flatMap((cap) => ["--cap-add", cap]), "--mount", `type=volume,src=${dockerVolume(manifest)},dst=/var/lib/docker,volume-nocopy`, "--user", "0", "--entrypoint", "sh", spec.image, "-c", DOCKER_START]
+      "--log-driver", "json-file", ...Object.entries(LOG_LIMIT).flatMap(([key, value]) => ["--log-opt", `${key}=${value}`]),
+      ...(spec.docker ? [...DOCKER_CAPABILITIES.flatMap((cap) => ["--cap-add", cap]), "--mount", `type=volume,src=${dockerVolume(manifest)},dst=/var/lib/docker,volume-nocopy`, "--user", "0", "--entrypoint", "sh", spec.image, "-c", DOCKER_START]
         : ["--entrypoint", "sleep", spec.image, "infinity"]),
     ], { timeoutMs: 1_800_000 }), `Creating ${name}`)
   }
@@ -347,7 +354,14 @@ export class GvisorProvider implements Provider {
 
   async exec(manifest: Manifest, argv: readonly string[], options: { user?: string; stdin?: string } = {}): Promise<RunResult> {
     if ((await this.status(manifest)) !== "running") throw new PaddockError("conflict", `${manifest.name} is not running. Start it first.`)
-    return this.docker(manifest.engine, ["exec", ...(options.stdin === undefined ? [] : ["-i"]), ...(options.user ? ["-u", options.user] : []), container(manifest.name), ...argv], { stdin: options.stdin })
+    const tag = randomBytes(8).toString("hex")
+    const ran = await this.docker(manifest.engine, ["exec", ...(options.stdin === undefined ? [] : ["-i"]), ...(options.user ? ["-u", options.user] : []), "-e", `PADDOCK_EXEC=${tag}`, container(manifest.name), ...argv], { stdin: options.stdin })
+    if (!ran.overflow) return ran
+    // The engine leaves an exec's processes running when its client is killed (measured: one kept a CPU busy), so they
+    // are found by the variable they inherited and ended, as the same user: even root cannot read another user's
+    // environment inside the sandbox. A process that cleared its environment or changed its user is not found.
+    const ended = await this.docker(manifest.engine, ["exec", ...(options.user ? ["-u", options.user] : []), container(manifest.name), "sh", "-c", END_EXEC, "end", tag], { timeoutMs: 30_000 })
+    return { ...ran, stderr: ended.exitCode === 0 ? "Its processes inside the sandbox were ended." : `Its processes inside the sandbox could not all be ended (${ended.stderr.trim() || `exit ${ended.exitCode}`}); look for them with ps.` }
   }
 
   attachArgv(manifest: Manifest, argv: readonly string[]): string[] {
@@ -443,8 +457,10 @@ export class GvisorProvider implements Provider {
     // For targets without a listener of ours: true when the TCP connection opens.
     const connects = async (from: string, ip: string, port: string) =>
       (await this.docker(engine, ["exec", from, "sh", "-c", 'nc -w 3 "$1" "$2" </dev/null', "connect", ip, port], { timeoutMs: 15_000 })).exitCode === 0
+    // The inner probe runs from the helper image by its ID, so no other image inside the sandbox can stand in for it.
+    let probeImage = ""
     const inner = async (ip: string, port: string) => {
-      const attempt = await this.docker(engine, ["exec", "-u", "0", container(name), "docker", "--host", "unix:///var/run/docker.sock", "run", "--rm", INNER_PROBE_IMAGE, "sh", "-c", 'nc -w 2 "$1" "$2" </dev/null', "connect", ip, port], { timeoutMs: 120_000 })
+      const attempt = await innerDocker(["run", "--rm", "--pull", "never", probeImage, "sh", "-c", 'nc -w 2 "$1" "$2" </dev/null', "connect", ip, port])
       if (attempt.exitCode !== 0 && attempt.exitCode !== 1) throw new Error(`The inner probe could not run (exit ${attempt.exitCode}): ${attempt.stderr.trim()}`)
       return attempt
     }
@@ -453,7 +469,7 @@ export class GvisorProvider implements Provider {
       return false
     }
     const out: CheckResult[] = []
-    const innerDocker = (args: string[]) => this.docker(engine, ["exec", "-u", "0", container(name), "docker", "--host", "unix:///var/run/docker.sock", ...args], { timeoutMs: 120_000 })
+    const innerDocker = (args: string[], stdin?: Uint8Array) => this.docker(engine, ["exec", ...(stdin ? ["-i"] : []), "-u", "0", container(name), "docker", "--host", "unix:///var/run/docker.sock", ...args], { timeoutMs: 120_000, stdin })
     let removeProbeImage = false
     try {
       await this.ensureHelper(engine)
@@ -461,9 +477,26 @@ export class GvisorProvider implements Provider {
         const used = await this.diskUsedBytes(manifest)
         if (used === undefined) throw new Error("Inner Docker probe disk headroom could not be measured.")
         if (manifest.spec.diskGb * 1024 ** 3 - used < 64 * 1024 ** 2) throw new Error("Inner Docker probe needs 64 MiB of disk headroom; the sandbox is nearly full. Free space and verify again.")
-        const present = await innerDocker(["image", "inspect", INNER_PROBE_IMAGE])
-        if (present.exitCode !== 0 && !/No such image/i.test(present.stderr)) throw new Error(`Could not inspect the inner probe image: ${present.stderr.trim()}`)
-        removeProbeImage = present.exitCode !== 0
+        // The probe image is the engine's own helper, copied in as bytes (docker save, then docker load on exec's
+        // stdin), so verify never asks a registry for it and works offline or behind a mirror.
+        const want = (await this.docker(engine, ["image", "inspect", "--format", "{{.Id}}", HELPER_IMAGE])).stdout.trim()
+        if (!/^sha256:[0-9a-f]{64}$/.test(want)) throw new Error("The helper image's ID could not be read on the engine.")
+        const innerId = async () => {
+          const present = await innerDocker(["image", "inspect", "--format", "{{.Id}}", HELPER_IMAGE])
+          if (present.exitCode !== 0 && !/No such image/i.test(present.stderr)) throw new Error(`Could not inspect the inner probe image: ${present.stderr.trim()}`)
+          return present.exitCode === 0 ? present.stdout.trim() : undefined
+        }
+        const before = await innerId()
+        if (before !== undefined && before !== want) throw new Error(`The image ${HELPER_IMAGE} inside the sandbox is not Paddock's helper (its ID differs), so it cannot be used as the probe. Remove it inside the sandbox and verify again.`)
+        if (before === undefined) {
+          removeProbeImage = true
+          const saved = await this.docker(engine, ["save", HELPER_IMAGE], { binary: true, timeoutMs: 120_000 })
+          if (saved.exitCode !== 0 || !saved.raw) throw new Error(`The helper image could not be read from the engine: ${saved.stderr.trim()}`)
+          const loaded = await innerDocker(["load", "-q"], saved.raw)
+          if (loaded.exitCode !== 0) throw new Error(`The helper image could not be loaded into the sandbox's Docker: ${loaded.stderr.trim()}`)
+          if (await innerId() !== want) throw new Error("The image loaded into the sandbox's Docker does not have the helper's ID.")
+        }
+        probeImage = want
       }
       const gateway = (await this.docker(engine, ["network", "inspect", "--format", "{{(index .IPAM.Config 0).Gateway}}", network(name)])).stdout.trim()
       const hostPort = String(20_000 + Math.floor(Math.random() * 40_000))
@@ -521,7 +554,7 @@ export class GvisorProvider implements Provider {
       await this.docker(engine, ["rm", "-f", hostC, peerC, probeC])
       await this.docker(engine, ["network", "rm", peerNet])
       if (removeProbeImage) {
-        const removed = await innerDocker(["image", "rm", INNER_PROBE_IMAGE])
+        const removed = await innerDocker(["image", "rm", HELPER_IMAGE])
         if (removed.exitCode !== 0 && !/No such image/i.test(removed.stderr)) {
           const detail = `The inner probe image could not be cleaned up: ${removed.stderr.trim()}`
           for (const check of out) {
@@ -532,7 +565,7 @@ export class GvisorProvider implements Provider {
       }
     }
 
-    const script = `for home in /root /home/*; do for file in ${CREDENTIAL_FILES.join(" ")}; do [ -e "$home/$file" ] && echo "$home/$file"; done; done; true`
+    const script = `for home in /root /home/*; do for file in ${CREDENTIAL_FILES.map((file) => `"$home"/${file}`).join(" ")}; do [ -e "$file" ] && echo "$file"; done; done; true`
     const found = await this.docker(engine, ["exec", "-u", "0", container(name), "sh", "-c", script])
     const files = found.stdout.split("\n").filter(Boolean)
     out.push(found.exitCode !== 0 ? result("credentials", "unknown", "none", `Could not look: ${found.stderr.trim()}`)

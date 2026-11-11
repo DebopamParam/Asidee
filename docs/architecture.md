@@ -28,7 +28,7 @@ out as "could not be checked", never as a pass.
 | No host folders | yes | before start | Engine configuration; with Docker, volume driver options and ownership too. |
 | Own network, guard loaded | yes | before start | Engine configuration, and the loaded firewall rules compared rule for rule with the shipped ones. |
 | No open ports | yes | before start | Engine configuration. |
-| Memory, process, CPU limits | yes | before start | Engine configuration, including json-file daemon log rotation (10 MiB, two files) for Docker sandboxes. |
+| Memory, process, CPU limits | yes | before start | Engine configuration, including json-file host log rotation (10 MiB, two files) for every sandbox. |
 | Disk limit | no | before start | The engine's capability: hard, watched or none. Watched needs a runtime with `--overlay2=none`. |
 | Cannot reach the host | yes | verify | Live probe with controls. |
 | Cannot reach other sandboxes | yes | verify | Live probe with controls. |
@@ -69,12 +69,16 @@ already routes somewhere is skipped and named in the result. One probe runs per 
 The helper runs from an image built from `core/providers/helper.Dockerfile` (Alpine pinned by digest), never from the
 sandbox's image, so a tampered image cannot fake a result or run as root on the engine's host.
 
-With `docker` enabled, verify also runs a container from the helper's pinned Alpine base inside the sandbox's Docker
-daemon. The network checks include its connection attempts. Verify first inspects the inner probe image and removes
-it afterwards only if it was absent before, so a pre-existing copy and the user's own tags stay (I19, both cases).
-A failed removal makes the network results unknown. Before pulling anything, verify needs 64 MiB of headroom below
-the watched disk limit; with less, or with no disk measurement, the network checks are unknown with that reason and
-nothing is pulled (I20, at 24 MiB of headroom). The reserve is checked, not held. An internet connection controls
+With `docker` enabled, verify also runs containers from the helper image inside the sandbox's Docker daemon. The
+network checks include their connection attempts. The image is the engine's own copy, read with `docker save` and
+loaded with `docker load` on exec's stdin as bytes, so no registry is asked: I24 blocks Docker Hub inside the sandbox
+(a control pull fails, HTTPS still works) and verify still probes. The inner probes run by the image's ID, which must
+equal the helper's on the engine; I24 records every inner container verify creates and finds only that ID. An image
+inside under the helper's name with another ID makes the network checks unknown and is left alone. Verify removes its
+copy afterwards only if the image was absent before, so a pre-existing copy and the user's own tags stay (I19, both
+cases). A failed removal makes the network results unknown. Before loading anything, verify needs 64 MiB of headroom
+below the watched disk limit; with less, or with no disk measurement, the network checks are unknown with that reason
+and nothing is loaded (I20, at 24 MiB of headroom). The reserve is checked, not held. An internet connection controls
 whether the inner container has a working outward path; a failed control makes its isolation evidence unknown. The I
 evals also remove the guard and show that the same inner probes then reach the host, another sandbox, and all four
 private-range stand-ins.
@@ -126,10 +130,26 @@ container was already deleted.
 
 Dockerd's output is the container's, which the engine stores on its host, outside the watched limit. I22's control, a
 container whose cap is 1 GB, grew its host log from 38 MB to 75 MB with two 8 MiB writes while its own layer stayed the
-same (the engine stores each short line as a JSON record several times its size). Docker sandboxes therefore set
-`json-file` logging with `max-size=10m` and `max-file=2`, and the limits check fails on any other setting; after two
-16 MiB writes the sandbox's host log was 15 MB, then 11 MB. This engine's own default is already bounded (20 MB, five
-files); Paddock sets its own cap so the bound does not depend on the engine.
+same (the engine stores each short line as a JSON record several times its size). A sandbox without Docker can do the
+same: its main process is `sleep`, but anything running as that process's user (root in Alpine) can write to
+`/proc/1/fd/1` (a user other than PID 1's was refused). Before the cap, two 8 MiB writes through `paddock exec` grew
+such a sandbox's host log to 75 MB and a third to 93 MB, where the engine's default rotation took over. Every sandbox therefore sets `json-file` logging with `max-size=10m` and `max-file=2`, and the limits check
+fails on any other setting. After two 16 MiB writes the host log was 15 MB, then 11 MB, both for a Docker sandbox
+(I22) and for one without Docker (I23); a replacement with a 1 GB cap is refused at start in both. This engine's own
+default is already bounded (20 MB, five files); Paddock sets its own cap so the bound does not depend on the engine.
+
+### Exec output
+
+What `exec` returns is held in the daemon's memory, so each stream is limited to 16 MiB (`OUTPUT_LIMIT` in
+`core/run.ts`; the same limit applies to every command the core runs, including the sandbox's own tools during
+checks and extension commands). A command that passes it is not returned cut off: the core stops reading, kills the engine client, and
+returns an error that names the limit and the stream. The engine leaves an exec's processes running when its client
+is killed (measured: a `yes` kept a CPU busy), so each exec carries a random `PADDOCK_EXEC` variable and the core ends
+every process that has it, as the same user (root inside gVisor cannot read another user's environment). A process
+that cleared its environment or changed its user is not found. Ended processes stay as zombies until the sandbox
+restarts, because `sleep`, its main process, does not reap them; they count against the task limit. U12: exactly
+16 MiB comes back whole; more on stdout, on stderr, and 1 GiB on stdout are each refused with the limit named, no
+flooding process is left running, and the same daemon answers afterwards.
 
 ## Where the guarantee ends
 

@@ -33,7 +33,9 @@ Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing depende
   `paddock list` shows the reason. Report it; start the sandbox again only if the reason is gone.
 - Long operations print progress lines starting with `…` on stderr. Stdout stays the result.
 - A sandbox has no host folders. Send a text file in with `paddock exec NAME --stdin -- sh -c 'cat > FILE' < local-file`,
-  and read one out with `paddock exec NAME -- cat FILE`. Binary files are not supported this way yet.
+  and read one out with `paddock exec NAME -- cat FILE`. Binary files are not supported this way yet. One exec returns
+  at most 16 MiB on each of stdout and stderr; past that it fails with an error naming the limit and the command is
+  ended. Read large files in parts (`split`, `head -c`, `tail -c`).
 - To run containers inside, create with `--docker` and the default image. Then use
   `paddock exec NAME -- docker run --rm alpine:latest echo inner-ok`. This private daemon adds exactly `NET_ADMIN`
   and `SYS_ADMIN` inside gVisor. Its containers use the sandbox's guarded network and share its outer limits.
@@ -41,9 +43,10 @@ Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing depende
   volumes count toward the watched disk limit and are deleted with the sandbox. Inner containers use the sandbox's
   public DNS fallback, **1.1.1.1 and 8.8.8.8**; the engine's own resolver refuses gVisor queries. The Docker check
   discloses this choice.
-  Verify removes its probe image only if newly pulled; a pre-existing image stays. Less than 64 MiB of disk
-  headroom yields unknown network checks with a disk reason. Free space and verify again. Host daemon logs are
-  outside the watched limit and rotate at 10 MiB with two files, checked by the core.
+  Verify copies its probe image in from the engine (no registry) and removes it only if it was not there before; an
+  image named like it with another ID makes the network checks unknown. Less than 64 MiB of disk headroom yields
+  unknown network checks with a disk reason. Free space and verify again. Every sandbox's host log (what its main
+  process prints) is outside the watched limit and rotates at 10 MiB with two files, checked by the core.
   Dockerd is the sandbox's main process. If it dies the sandbox stops; `paddock start NAME` starts it again.
   `paddock doctor` reports whether the engine supports inner Docker. An engine lacking the capability refuses it.
 

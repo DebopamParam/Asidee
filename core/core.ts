@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto"
 import { blockers, complete, failures, titleOf } from "./checks"
 import { fieldValues, loadExtensions, runCommand } from "./extensions"
+import { OUTPUT_LIMIT } from "./run"
 import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSpec, writeManifest, type Dirs } from "./state"
 import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type RunResult, type Runner, type Stage } from "./types"
 
@@ -175,7 +176,9 @@ export class Core {
     if (!Array.isArray(argv) || argv.length === 0 || !argv.every((part) => typeof part === "string")) throw new PaddockError("usage", "exec needs a command.")
     if (options.user !== undefined && !/^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}$/.test(options.user)) throw new PaddockError("usage", "The user must be a user name or id.")
     const manifest = await readManifest(this.dirs, name)
-    return this.provider(manifest).exec(manifest, argv as string[], options)
+    const result = await this.provider(manifest).exec(manifest, argv as string[], options)
+    if (result.overflow) throw new PaddockError("runtime", `The command printed more than ${OUTPUT_LIMIT / 1024 ** 2} MiB on ${result.overflow}, the most one exec may return, so Paddock stopped reading and discarded its output. ${result.stderr} Write large output to a file inside the sandbox and read it in parts.`.replace(/  +/g, " "))
+    return result
   }
 
   async attach(name: string, argv: unknown): Promise<{ argv: string[] }> {

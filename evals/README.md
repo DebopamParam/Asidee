@@ -13,6 +13,14 @@ calls ready. Sandboxes it makes are named `evXXXX-…` and removed at the end. I
 sandboxes run on the engine, because the tamper evals change the firewall guard they share. It needs Docker, Bun, and
 for a few evals `python3` and a Chromium-based browser; an eval that lacks what it needs is reported as not measured.
 
+**Docker Hub pulls.** A full run pulls from Docker Hub at most five times, all from inner Docker: I01 twice
+(`alpine:latest`; the attempt without `SYS_ADMIN` fails only after fetching), I09 once (`busybox:stable`) and I15
+twice (`busybox:stable`, then by digest). Verify's probe and the other evals use images loaded from the engine, and I24
+blocks the registry on purpose. The engine pulls `alpine:latest`, `docker:cli` (P02) and
+`docker/sandbox-templates:shell-docker` only when they are missing. Docker Hub's anonymous quota read from this
+machine's address showed 100 of 100 left both before and after the full run on 2026-11-11, so the five could not be
+confirmed against the quota from here.
+
 ## How an eval decides
 
 - **It does not ask Paddock.** "Cannot reach the host" is a listener on the engine's host and a connection attempt

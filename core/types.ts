@@ -59,8 +59,10 @@ export type Manifest = {
   stopReason?: string
 }
 
-export type RunResult = { exitCode: number; stdout: string; stderr: string }
-export type RunOptions = { stdin?: string; timeoutMs?: number; env?: Record<string, string>; cwd?: string }
+// overflow: the command printed more than its output limit on that stream, was killed, and its output was discarded.
+// raw: stdout's bytes, when asked for with `binary`.
+export type RunResult = { exitCode: number; stdout: string; stderr: string; overflow?: "stdout" | "stderr"; raw?: Uint8Array }
+export type RunOptions = { stdin?: string | Uint8Array; timeoutMs?: number; env?: Record<string, string>; cwd?: string; maxOutputBytes?: number; binary?: boolean }
 // Every external command goes through a Runner, so tests run without an engine.
 export type Runner = (argv: readonly string[], options?: RunOptions) => Promise<RunResult>
 
