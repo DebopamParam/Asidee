@@ -70,6 +70,8 @@ export function unsafeRuntimeArgs(args: readonly string[] = []): string[] {
 // overlay, which Docker does not measure; only with --overlay2=none do they reach the layer (measured on OrbStack).
 const seesWrites = (args: readonly string[] = []) => args.includes("--overlay2=none")
 const hasRawNetwork = (args: readonly string[] = []) => args.filter((arg) => /^--?net-raw(?:=(?:true|false))?$/.test(arg)).at(-1)?.endsWith("false") === false
+// The runtime `paddock host add` registers: a pinned, checksum-verified gVisor that enrollment's smoke sandbox ran on.
+export const MANAGED_RUNTIME = "paddock-runsc"
 const PROBE_REPLY = "paddock-probe"
 const PROBE_PORT = "7777"
 // One unused address in each private range and in the tailnet range. For a probe, the helper gives each to a listener in
@@ -268,8 +270,10 @@ export class GvisorProvider implements Provider {
       const label = `${parsed.OperatingSystem ?? "Docker"} ${parsed.ServerVersion} (context ${context.Name})`
       const gvisor = Object.entries(parsed.Runtimes ?? {}).filter(([, entry]) => isGvisor(entry.path)).sort(([a], [b]) => a.localeCompare(b))
       const usable = gvisor.filter(([, entry]) => unsafeRuntimeArgs(entry.runtimeArgs).length === 0)
-      // Prefer a runtime whose writes Paddock can measure.
-      const chosen = usable.find(([, entry]) => seesWrites(entry.runtimeArgs)) ?? usable[0]
+      // Prefer a runtime whose writes Paddock can measure, and among those the one enrollment installed and verified:
+      // an unrelated entry whose name sorts first must not take an enrolled host's sandboxes to an unverified runtime.
+      const measured = usable.filter(([, entry]) => seesWrites(entry.runtimeArgs))
+      const chosen = measured.find(([name]) => name === MANAGED_RUNTIME) ?? measured[0] ?? usable[0]
       if (!chosen) {
         const problems = gvisor.length
           ? gvisor.map(([name, entry]) => `The gVisor runtime ${name} is registered with ${unsafeRuntimeArgs(entry.runtimeArgs).join(", ")}, which opens a path to the host or switches a limit off.`)
