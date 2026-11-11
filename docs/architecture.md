@@ -361,13 +361,22 @@ State is in `~/.local/state/paddock`, configuration in `~/.config/paddock` (`PAD
 The first Machines unit registers an already prepared daemon with `host attach NAME --ssh DEST --binary PATH
 --state-dir PATH`. It installs nothing. The primary alone writes `CONFIG/hosts.json` atomically, mode 0600. Each
 daemon keeps a random persistent `STATE/machine-id`; each daemon process has a separate boot ID. Registry aliases
-cannot be rebound implicitly. Removing a prepared host forgets its entry and cache; its remote installation and data
-are retained. Reviewed installation and its removal are not implemented yet.
+cannot be rebound implicitly. Attach records the account and the outer host-key fingerprint (`SHA256:…`) that SSH used,
+from `ssh -G` and the verbose handshake; `host list` shows them, with whether the remote daemon has its dashboard
+listener and whether it runs under systemd. Removing a prepared host forgets its entry and cache and ends its open
+sessions and forwards; its remote installation and data are retained. Reviewed installation and its removal are not
+implemented yet.
+
+`hosts.json` must be `{version: 1, hosts: [...]}`; each record in it is then read on its own. A record this Paddock does
+not know (another service kind or disk policy, as a later `host add` may write) or a damaged one is listed by `host
+list` and `list --all` as `unknown-record` with the reason, and routing to it is refused; the other hosts keep working.
+`host remove NAME --confirm NAME` forgets such a record, and attaching another host writes it back unchanged.
 
 `--host NAME` before the command's `--` selects a registered machine. The API uses `{host: "NAME", name: "demo"}`;
 unqualified names are always local, even when absent. Sandbox views carry `machineId` and `sandboxId`, so identical
-names on two machines have distinct identities. `machineId` can also be supplied as a precondition with `host` and
-`name`. An unknown host never falls back. Buffered sandbox operations, engines, templates, extensions, checklist,
+names on two machines have distinct identities. `machineId` can also be supplied as a precondition with `host`: every
+routed call, stream, forward and SSH setup/access whose `machineId` differs from the host's record is refused before
+any connection is opened. An unknown host never falls back. Buffered sandbox operations, engines, templates, extensions, checklist,
 verify and daemon status/stop route over SSH. Streams, primary loopback forwards and SSH setup/access also select
 the remote daemon. The dashboard UI has not been changed to group remote machines.
 
@@ -379,21 +388,49 @@ remote Docker context is introduced. Only the target daemon's core operates its 
 Each operation gets its own system SSH connection, reading the user's SSH config for ports and jump hosts. BatchMode
 and strict host-key verification are required; UpdateHostKeys, agent/X11 forwarding, configured port forwarding and
 shared control masters are disabled. Paddock writes no outer SSH config or trust file. The user must have established
-outer host trust before attaching. The transport handshakes and sends the request on one HTTP connection; the target
-also checks the selected machine ID, protocol and version on the request. The handshake includes an artifact SHA-256,
-protocols, methods and features. Version mismatch refuses work and never upgrades the target. Local CLI build
-replacement retains its previous behavior. After a mutation is sent, transport failure means `outcome-unknown`; no
-mutation is automatically replayed.
+outer host trust before attaching. The transport handshakes and sends the request on one HTTP connection. The
+handshake carries the version, protocols, methods, features, the artifact's own SHA-256 (`buildDigest`) and a source
+digest: SHA-256 over every file under `core/`, `cli/` and `ui/` and `package.json`, computed when the program is bundled
+or loaded, so the x64 and arm64 binaries of one source tree have the same one. Exactly these are refused, with nothing
+sent to the sandbox and nothing replaced:
 
-Lost, malformed or oversized mutation replies are unknown outcomes even if SSH had already accepted their bytes.
-A valid daemon refusal keeps its reported error. Transport unit tests drive real Unix byte connections for these
-cases. M10 also substitutes a hostile SSH transport on the Linux fixture: malformed exit JSON, error JSON and an
-out-of-range exit code are refused, the same primary daemon keeps answering, and a valid-stream control still works.
+- by the primary, on every connection: a remote version other than its own, a remote that does not offer protocol 1,
+  a remote source digest other than its own (two builds of one version), and a machine ID other than the record's;
+- by the remote daemon, on every routed request: a request whose machine ID, protocol, version or source digest
+  headers differ from its own;
+- by the remote stream socket: an open whose boot ID, protocol, version or source digest differs.
+
+`buildDigest` is shown but not compared, because it differs between platforms. There is no negotiation and no upgrade:
+the refusal says to build Paddock for that machine from this source (`bun build --compile --target=bun-linux-x64` or
+`bun-linux-arm64`), put it in place of the recorded binary and restart that daemon. Local CLI build replacement retains
+its previous behavior. After a mutation is sent, transport failure means `outcome-unknown`; no mutation is
+automatically replayed.
+
+Every remote call has a deadline: ten seconds for the handshake and reads, 45 minutes for a mutation (a `create` with
+an image pull). A client that goes away (Ctrl-C, a closed dashboard request) closes that call's SSH connection; a
+mutation already sent is then `outcome-unknown`, said as a cancellation. Closing an SSH process sends SIGTERM, then
+SIGKILL after 1.5 seconds, and gives up after 1.5 more, so a stopped or wedged `ssh` cannot hold the primary: `daemon
+stop` waits at most 4.5 seconds for remote links before it stops the local sandboxes whose disk limit it watches.
+
+Lost, malformed or oversized mutation replies are unknown outcomes even if SSH had already accepted their bytes, and
+the error says which of the three happened. A valid daemon refusal keeps its reported error, cut to 4000 characters, as
+are remote stream errors. Transport unit tests drive real Unix byte connections for these
+cases. M10 also substitutes a hostile SSH transport on the Linux fixture. On streams it sends malformed exit and error
+JSON, an out-of-range exit code, a 65,000-character error, a 4 GiB length header, an unknown kind byte and output before
+`ready`; for buffered calls a relay answers the handshake from the real daemon and then sends a reply of the wrong
+shape, invalid JSON or 9 MiB. Each is refused (reads exit 8, mutations exit 10), the same primary daemon keeps
+answering, and valid stream and buffered controls still work. M02 measured an unroutable host offline after about five
+seconds (SSH's connect timeout) and a silent daemon after ten (the handshake deadline). M11 stopped the primary in under
+five seconds with one of its SSH processes stopped by SIGSTOP, and its local watched sandbox was stopped.
 
 The typed method catalog in `core/machines.ts` limits routing. The gateway checks socket-only access before SSH is
 opened, and the target validates the ordinary request again. Bootstrap and primary resources are not a generic RPC
-proxy. Remote JSON replies are capped at 8 MiB, with a clear overflow error. Machine summaries are validated before
-replacing cached evidence. `host list` refreshes hosts concurrently with bounded read deadlines. `fleet`/`list --all`
+proxy. Remote JSON replies are capped at 8 MiB: past that a read fails as `incompatible` and a mutation is
+`outcome-unknown`, both saying the reply exceeded 8 MiB. Every routed reply is checked against its method's shape
+before it is used: a malformed one is refused (`incompatible` for a read, `outcome-unknown` for a mutation). A sandbox
+row the primary cannot read is shown `damaged` with the reason, and the machine stays online with its other rows; a row
+that names another machine rejects the whole reply. Machine summaries are validated before replacing cached evidence.
+The CLI replaces control and bidirectional-override characters in any text a daemon sends before printing it. `host list` refreshes hosts concurrently with bounded read deadlines. `fleet`/`list --all`
 return the cache and schedule independent refreshes with retries capped at 60 seconds. A lost or stale machine keeps
 its last-known sandboxes with `unknown` status and unknown checks, with the original check time. A machine with no
 successful summary has no sandbox inventory and is shown as connecting/offline, never as a successful empty list.
@@ -414,17 +451,25 @@ A hosted forward binds once on the primary's `127.0.0.1`. Its remote control str
 engine start time and numeric loopback port. Each accepted connection gets a separate SSH dial stream validated
 against that lease. The target checks the run every two seconds, and closes its lease and dials on stop/remove or
 daemon exit. It reports the requested lease in verify, while explicitly saying that the primary's listener is unknown
-from there. The primary owns the actual listener evidence. The control emits a byte every five seconds; after fifteen
-seconds without one, a primary timer closes the listener and active connections. An observed SSH/control/dial failure
+from there; no check reports hosted forwards on the primary, where `paddock --host HOST forward list` shows them. The
+lease is renewed in both directions. The target's control emits a byte every five seconds; after fifteen seconds
+without one, a primary timer closes the listener and active connections. The primary writes a renewal byte every five
+seconds; after fifteen seconds without one (checked every two), the target ends the lease and its dials, and the
+stream's `transport stdio` process exits, so a partitioned or stopped primary leaves nothing open on the target. An observed SSH/control/dial failure
 closes it immediately when delivered. There is no automatic recreation. M08 measured closure within seventeen seconds
-with a control SSH process stopped by SIGSTOP, beside a healthy forward that stayed open. This is an awake-daemon
-measurement, not a continuous enforcement claim during a suspended process or machine.
+with a control SSH process stopped by SIGSTOP, beside a healthy forward that stayed open. With the primary daemon itself
+stopped by SIGSTOP (so it neither renews nor closes, and its SSH links stay up), the target ended the lease and its
+`transport stdio` relay exited after 16 to 17 seconds; after a killed SSH link, the remote daemon's exit and the primary's
+exit, no relay was left on the target. These are awake-daemon measurements on one fixture, not a continuous enforcement
+claim during a suspended machine.
 
 Remote editor aliases are `SANDBOX.HOST.paddock`, preserving unqualified local aliases. Only the primary makes or
 reads its editor private key. The target receives its public half through socket-only `sshPrepare`, prepares guest
 sshd, and returns the guest public host key. The primary validates that data and writes its own state-directory SSH
 files. Both machine and sandbox IDs form the pinned HostKeyAlias; ProxyCommand also sends the expected sandbox ID.
-Removing a prepared host or remote sandbox removes its primary alias. Ordinary SSH configuration is modified only
+Removing a prepared host, or a remote sandbox through this primary's `--host HOST remove`, removes its primary
+alias (a failure to update it is reported beside the completed removal). A sandbox removed on its own machine leaves
+the alias, which then refuses to connect because the sandbox ID differs. Ordinary SSH configuration is modified only
 when `--write-config` is explicitly requested; evals redirect it to a temporary file. M09 measured login and SFTP,
 absence of a remote editor private key, and refusal of stopped/recreated sandboxes. Real editor bootstrap and T3 over
 the remote alias remain unmeasured.

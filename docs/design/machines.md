@@ -16,6 +16,12 @@ Nothing described as proposed below is implemented or measured by this document.
   is the riskiest part and is not needed to be honest. First version of hard mode: the reference's two capped disks
   (home, inner Docker data) with the rest of the root still measured by the watcher, reported as exactly that
   ("hard for home and Docker data, watched for the system"). The bounded layout stays a later option behind its spike.
+- **Decided in stage 4 review:** two machines talk only when version, protocol 1 and source digest are equal; there
+  is no protocol negotiation and no upgrade, and the refusal says how to rebuild the other machine. The artifact digest
+  is reported, not compared, because it differs per platform. A forward lease is renewed in both directions (five
+  seconds, fifteen-second expiry). Hosted forwards have no check on the primary; `paddock --host HOST forward list` is
+  their evidence there (section 6's "primary listener inspection" is not built). `hosts.json` is read per record, so a
+  record a later `host add` writes is refused alone, not the file.
 
 ## Evidence and scope
 

@@ -35,6 +35,13 @@ outer transport reads the user's existing SSH config with UpdateHostKeys disable
 installation, system-file change, Docker restart or SSH-file write is performed. Installer, service and reboot
 behavior remain unmeasured. The remote fixture is not an extra network listener.
 
+Group M also needs `python3`, `ss`, `lsof` and `pgrep` on the fixture, and `lsof` here. Each is checked by a positive
+control (a listener or process of the run that the tool must show), so a missing tool fails or leaves the eval
+unmeasured instead of passing it. M02 needs `192.0.2.1` (TEST-NET-1) to be unroutable from this machine, and says so
+when it is not. M03 builds two more gateways here: one with another version and one from changed source with the same
+version. M08 stops this run's primary daemon with SIGSTOP for up to thirty seconds to measure the remote lease expiry,
+and M11 stops one of its SSH processes the same way before `daemon stop`; both resume or kill what they stopped.
+
 **Docker Hub pulls.** A full run pulls from Docker Hub at most five times, all from inner Docker: I01 twice
 (`alpine:latest`; the attempt without `SYS_ADMIN` fails only after fetching), I09 once (`busybox:stable`) and I15
 twice (`busybox:stable`, then by digest). Verify's probe and the other evals use images loaded from the engine, and I24

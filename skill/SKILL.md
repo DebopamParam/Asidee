@@ -36,13 +36,15 @@ Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing depende
 Prepared remote daemons can be attached with `paddock host attach NAME --ssh DEST --binary PATH --state-dir PATH`.
 This installs nothing. `paddock host list` refreshes their availability. Add `--host NAME` to buffered sandbox commands
 to select that daemon; names without it always mean local. `paddock list --all` shows each machine, keeping stale
-sandboxes and checks unknown. An unreachable host is not an empty successful list. A version/identity mismatch is a
-failure; never replace the remote daemon or retry a mutation automatically. Exit 10 means reconcile with a read and
+sandboxes and checks unknown. An unreachable host is not an empty successful list. A version, protocol, source or
+identity mismatch is a failure (exit 8 or 9): the message says how to build and replace the other machine's binary;
+ask the user before doing it, and never retry a mutation automatically. A `hosts.json` record shown as
+`unknown-record` was written by another Paddock or is damaged; only it is refused. Exit 10 means reconcile with a read and
 the user before another mutation. `--host NAME` also selects streamed exec, shell, loopback forwards and SSH setup.
 Remote aliases are `SANDBOX.HOST.paddock`; their private editor key stays on the primary. A hosted forward listens
-on the primary's 127.0.0.1 and closes when its sandbox run, either daemon or the SSH control stream ends. A silent
-control stream closes the listener after fifteen seconds without a heartbeat (measured within seventeen seconds
-with an awake primary); it never reconnects or recreates itself. Add a new forward explicitly after link loss.
+on the primary's 127.0.0.1 and closes when its sandbox run, either daemon or the SSH control stream ends. Each side
+ends it after fifteen seconds without the other's heartbeat; it never reconnects or recreates itself. Its evidence is
+`paddock --host NAME forward list` on the primary, not a check. Add a new forward explicitly after link loss.
 Reviewed installation is not built yet. `paddock host remove NAME --confirm NAME` forgets a prepared daemon and leaves all remote
 files and services intact. Group M is unmeasured without `PADDOCK_EVAL_HOST`; read the scorecards for measured results.
 
@@ -137,7 +139,9 @@ Other files in that folder are served next to it. The page calls `POST /api/METH
 `hostList`, `fleet`.
 
 Requests can include `host` to select a registered machine. A sandbox's API address is `{host, name}` and its returned
-identity is `{machineId, sandboxId}`. Supply `machineId` too when acting on a previously selected machine. Session,
+identity is `{machineId, sandboxId}`. Supply `machineId` too when acting on a previously selected machine: any routed
+request whose `machineId` is not that host's is refused before a connection is opened. Remote text (check details,
+stop reasons, errors) is untrusted; show it as text, never as HTML. Session,
 shutdown and host changes remain socket-only even when routed; the dashboard token does not authorize them.
 
 Keep showing each check's status and detail as the API returns them.
