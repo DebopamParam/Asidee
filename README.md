@@ -63,6 +63,9 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   --state-dir /absolute/state`. Buffered sandbox operations select one daemon with `--host NAME`, over system SSH to
   its Unix socket. The remote daemon runs its own provider and checks. Version/protocol or machine-identity changes
   are refused. `paddock host list` reports unreachable machines; `list --all` retains their cached sandboxes as unknown.
+  `shell`, streamed exec, primary-loopback forwards and editor SSH use the same route. Remote aliases are
+  `SANDBOX.HOST.paddock`. A forward ends with its sandbox run, either daemon or its SSH control stream; fifteen
+  seconds without a heartbeat closes it on an awake primary. Add a new forward after link loss.
   See [Machines](docs/architecture.md#machines) for the current limits and opt-in measurements.
 
 Not built yet:

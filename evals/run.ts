@@ -2770,6 +2770,8 @@ ev("M09", "A remote SSH alias uses the primary editor key and pinned machine/san
   const setup = await hosted(["ssh", "setup", MS, "--write-config"], { timeoutMs: 300_000 })
   expect(setup.reply.ok && setup.reply.data.alias === `${MS}.${MH}.paddock`, `hosted SSH setup failed: ${setup.out}${setup.err}`)
   const target = setup.reply.data.alias
+  const oldConfig = join(tmp, "m09-old-config")
+  await writeFile(oldConfig, await readFile(join(env.PADDOCK_STATE_DIR, "ssh", "config")))
   const run = await sh(["ssh", ...sshArgs(), target, "id -un; echo $HOME"])
   expect(run.code === 0 && run.out === `${setup.reply.data.user}\n${setup.reply.data.home}\n`, `remote SSH failed: ${run.out}${run.err}`)
   const remoteFiles = await remote(["sh", "-c", 'test ! -e "$1/s/ssh/editor_ed25519" && test ! -e "$1/s/ssh/config"', "check", remoteDir])
@@ -2781,8 +2783,32 @@ ev("M09", "A remote SSH alias uses the primary editor key and pinned machine/san
   const stopped = await sh(["ssh", ...sshArgs(), target, "true"])
   expect(stopped.code === 255 && /not running/.test(stopped.err) && !(await remoteInspect(MS)).State.Running, "remote SSH restarted a stopped sandbox")
   await hosted(["remove", MS, "--confirm", MS]); await remoteSandbox()
-  const recreated = await sh(["ssh", ...sshArgs(), target, "true"])
-  expect(recreated.code === 255, "old alias reached a recreated sandbox")
+  const recreated = await sh(["ssh", ...sshArgs(oldConfig), target, "true"])
+  expect(recreated.code === 255 && /recreated/.test(recreated.err) && (await remoteInspect(MS)).State.Running, `old alias was not refused by sandbox identity: ${recreated.err}`)
+})
+
+ev("M10", "Malformed remote exit/error frames are rejected without crashing the primary, beside a valid-stream control", async () => {
+  await remoteSandbox()
+  if ((await remote(["python3", "--version"])).code !== 0) skip("python3 is needed only for the hostile remote byte fixture")
+  const wrapper = `${remoteDir}/hostile-transport`; const script = `${remoteDir}/hostile.py`
+  const write = async (file: string, contents: string) => {
+    const result = await remote(["sh", "-c", 'cat > "$1"; chmod 700 "$1"', "write", file], { stdin: contents })
+    expect(result.code === 0, `could not write the hostile fixture: ${result.err}`)
+  }
+  await write(wrapper, `#!/bin/sh\ncase "$*" in *--stream*) exec python3 ${word(script)};; *) exec ${word(`${remoteDir}/paddock`)} "$@";; esac\n`)
+  const registry = join(env.PADDOCK_CONFIG_DIR, "hosts.json"); const original = await readFile(registry, "utf8"); const daemon = (await daemonFile()).pid
+  try {
+    const data = JSON.parse(original); data.hosts.find((host: { name: string }) => host.name === MH).binary = wrapper
+    await writeFile(registry, JSON.stringify(data))
+    for (const [kind, payload] of [[8, "{"], [9, "{"], [8, '{"code":100000000000000000000}']] as const) {
+      await write(script, `import sys,struct,json\nh=sys.stdin.buffer.read(5)\nn=struct.unpack('!I',h[1:])[0]\nsys.stdin.buffer.read(n)\ndef f(k,b): return bytes([k])+struct.pack('!I',len(b))+b\nsys.stdout.buffer.write(f(2,b'{"tty":false}')+f(${kind},${JSON.stringify(payload)}.encode()))\nsys.stdout.buffer.flush()\nsys.stdin.buffer.read()\n`)
+      const result = await pdk(["--host", MH, "exec", MS, "--stream", "--", "true"], { timeoutMs: 20_000 })
+      expect(result.code === 1 && /Malformed remote/.test(result.err), `malformed frame was not rejected: ${result.code} ${result.out}${result.err}`)
+      expect((await daemonFile()).pid === daemon && (await pdk(["list"])).code === 0, "malformed remote frame crashed or replaced the primary")
+    }
+  } finally { await writeFile(registry, original) }
+  const control = await pdk(["--host", MH, "exec", MS, "--stream", "--", "echo", "valid-stream"])
+  expect(control.code === 0 && control.out === "valid-stream\n", "valid hosted stream control failed")
 })
 
 ev("Z01", "Nothing is left on the engine or this machine when the run ends", async () => {

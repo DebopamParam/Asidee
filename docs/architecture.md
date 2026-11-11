@@ -385,6 +385,11 @@ protocols, methods and features. Version mismatch refuses work and never upgrade
 replacement retains its previous behavior. After a mutation is sent, transport failure means `outcome-unknown`; no
 mutation is automatically replayed.
 
+Lost, malformed or oversized mutation replies are unknown outcomes even if SSH had already accepted their bytes.
+A valid daemon refusal keeps its reported error. Transport unit tests drive real Unix byte connections for these
+cases. M10 also substitutes a hostile SSH transport on the Linux fixture: malformed exit JSON, error JSON and an
+out-of-range exit code are refused, the same primary daemon keeps answering, and a valid-stream control still works.
+
 The typed method catalog in `core/machines.ts` limits routing. The gateway checks socket-only access before SSH is
 opened, and the target validates the ordinary request again. Bootstrap and primary resources are not a generic RPC
 proxy. Remote JSON replies are capped at 8 MiB, with a clear overflow error. Machine summaries are validated before

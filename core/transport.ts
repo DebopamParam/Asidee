@@ -47,21 +47,22 @@ export function sshConnection(host: Endpoint, stream = false) {
   return { wire, diagnostic: () => diagnostic.trim(), async close() { wire.destroy(); child.kill(); await exited } }
 }
 
+class RemoteFailure extends PaddockError {}
 export function parseReply(value: unknown): unknown {
   if (!object(value) || typeof value.ok !== "boolean") throw new PaddockError("incompatible", "The remote daemon returned a malformed reply.")
   if (value.ok) { if (!Object.hasOwn(value, "data")) throw new PaddockError("incompatible", "The remote daemon returned no data."); return value.data }
   const error = value.error
   if (!object(error) || typeof error.code !== "string" || !ERROR_CODES.some((code) => code === error.code) || typeof error.message !== "string") throw new PaddockError("incompatible", "The remote daemon returned a malformed error.")
   const code = ERROR_CODES.find((code) => code === error.code)!
-  throw new PaddockError(code, error.message, error.details)
+  throw new RemoteFailure(code, error.message, error.details)
 }
 
 // hello and the operation use the same daemon connection. A reconnect never replays a mutation.
 export class HttpPeer {
   private readonly agent = new Agent({ keepAlive: true, maxSockets: 1 })
   private readonly connection: ReturnType<typeof sshConnection>
-  constructor(readonly endpoint: Endpoint) {
-    this.connection = sshConnection(endpoint)
+  constructor(readonly endpoint: Endpoint, connection?: ReturnType<typeof sshConnection>) {
+    this.connection = connection ?? sshConnection(endpoint)
     this.agent.createConnection = () => this.connection.wire
     // SSH owns keepalives and connection lifetime; the HTTP agent must not apply TCP operations to its byte pipe.
     this.agent.keepSocketAlive = () => true
@@ -87,7 +88,8 @@ export class HttpPeer {
       })
       return parseReply(value)
     } catch (error) {
-      if (error instanceof PaddockError) throw error
+      if (error instanceof RemoteFailure) throw error
+      if (error instanceof PaddockError && !(options.mutation && dispatched)) throw error
       throw new PaddockError(options.mutation && dispatched ? "outcome-unknown" : "offline", options.mutation && dispatched
         ? `The SSH link to ${this.endpoint.ssh} ended after sending ${method}; its outcome is unknown. It was not retried. Reconcile with get before acting again.`
         : `${this.endpoint.ssh} is unreachable: ${this.connection.diagnostic() || (error as Error).message}`)
@@ -122,9 +124,9 @@ export class RemoteSession extends EventEmitter implements Session {
   readonly closed: Promise<void>
   private closedResolve: () => void = () => {}
   private readonly timer: ReturnType<typeof setTimeout>
-  private constructor(host: Endpoint, request: OpenRequest) {
+  private constructor(host: Endpoint, request: OpenRequest, connection?: ReturnType<typeof sshConnection>) {
     super(); this.tty = request.kind === "exec" && request.tty
-    this.connection = sshConnection(host, true)
+    this.connection = connection ?? sshConnection(host, true)
     this.closed = new Promise((resolve) => { this.closedResolve = resolve })
     const wire = this.connection.wire
     wire.on("drain", () => this.emit("drain"))
@@ -146,8 +148,8 @@ export class RemoteSession extends EventEmitter implements Session {
     this.timer = setTimeout(() => { this.opened(new PaddockError("offline", "The remote stream did not become ready in 10 seconds.")); this.finish({ error: "The remote stream timed out." }) }, 10_000)
     wire.write(frame("open", request))
   }
-  static async open(host: Endpoint, request: OpenRequest): Promise<RemoteSession> {
-    const session = new RemoteSession(host, request)
+  static async open(host: Endpoint, request: OpenRequest, connection?: ReturnType<typeof sshConnection>): Promise<RemoteSession> {
+    const session = new RemoteSession(host, request, connection)
     await new Promise<void>((resolve, reject) => { session.opened = (error) => error ? reject(error) : resolve() })
     return session
   }
@@ -157,20 +159,23 @@ export class RemoteSession extends EventEmitter implements Session {
     return new PaddockError(ERROR_CODES.find((code) => code === value.code)!, value.message)
   }
   private flush(): void {
+    try {
     while (!this.paused && !this.done && this.pending.length) {
       const piece = this.pending.shift()!
       if (piece.kind === "stdout" || piece.kind === "stderr") this.emit("output", piece.kind, piece.payload)
       else if (piece.kind === "error") this.finish({ error: this.error(piece.payload).message })
       else if (piece.kind === "exit") {
         const value: unknown = JSON.parse(piece.payload.toString())
-        if (!object(value) || !Number.isInteger(value.code)) return this.finish({ error: "Malformed remote exit status." })
+        if (!object(value) || !Number.isInteger(value.code) || Number(value.code) < -1 || Number(value.code) > 255) return this.finish({ error: "Malformed remote exit status." })
         this.finish({ code: Number(value.code) })
       } else this.finish({ error: `A remote daemon cannot send ${piece.kind}.` })
     }
+    } catch { this.finish({ error: "Malformed remote stream control frame." }) }
   }
   private finish(exit: { code?: number; error?: string }): void {
     if (this.done) return
     this.done = true; clearTimeout(this.timer)
+    this.pending = []
     if (!this.ready) this.opened(new PaddockError("offline", exit.error ?? "The remote stream ended before ready."))
     this.emit("end", exit)
     void this.connection.close().finally(() => this.closedResolve())

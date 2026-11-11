@@ -173,8 +173,9 @@ function printChecks(checks: CheckResult[]): void {
 }
 
 function printSandbox(view: SandboxView): void {
-  console.log(`${view.name}: ${view.status} on ${view.engine}${view.stopReason ? `\n  ${view.stopReason}` : ""}`)
+  console.log(`${displayName(view.name)}: ${view.status} on ${view.engine}${view.stopReason ? `\n  ${view.stopReason}` : ""}`)
 }
+const displayName = (name: string) => selectedHost && selectedHost !== "local" ? `${selectedHost}/${name}` : name
 
 // Waits for the output to be written before exiting: into a pipe, an exit right after a write loses what did not fit.
 async function printRun(output: RunResult, asJson = false): Promise<never> {
@@ -246,8 +247,8 @@ async function main(argv: string[]): Promise<void> {
           if (!list.length) console.log("No sandboxes. Create one with `paddock create NAME`.")
           for (const view of list) {
             const verified = view.lastVerify ? `verified ${view.lastVerify.at.slice(0, 16).replace("T", " ")} UTC, ${view.lastVerify.results.filter((check) => check.status === "fail").length} failed` : "never verified"
-            if (view.status === "damaged") { console.log(`${view.name.padEnd(24)} damaged\n    ${view.stopReason}`); continue }
-            console.log(`${view.name.padEnd(24)} ${view.status.padEnd(8)} ${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  ${view.engine}${view.template ? `  template ${view.template.name}` : ""}  (${verified})${view.stopReason ? `\n    ${view.stopReason}` : ""}`)
+            if (view.status === "damaged") { console.log(`${displayName(view.name).padEnd(24)} damaged\n    ${view.stopReason}`); continue }
+            console.log(`${displayName(view.name).padEnd(24)} ${view.status.padEnd(8)} ${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  ${view.engine}${view.template ? `  template ${view.template.name}` : ""}  (${verified})${view.stopReason ? `\n    ${view.stopReason}` : ""}`)
           }
         })
       }

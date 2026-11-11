@@ -29,7 +29,9 @@ is unmeasured. The fixture must have native Linux x86_64/arm64, a ready local Do
 SSH and established host-key trust, and no running Paddock sandboxes. The evals build for its architecture here and
 copy a checksum-checked binary to `~/.pdk-machines-XXXXXX`, start a private socket-only daemon, and use `host attach`.
 They create disposable sandboxes, tamper only with those sandboxes/Paddock resources, stop the primary for the
-independent-enforcement check, then remove the sandboxes, registration, daemon and directory. No sudo, package
+independent-enforcement check, exercise hosted streams/forwards and an editor SSH alias, then remove the sandboxes,
+registration, daemon and directory. The inner editor SSH client reads only the run's temporary config (`-F`); the
+outer transport reads the user's existing SSH config with UpdateHostKeys disabled. No sudo, host package
 installation, system-file change, Docker restart or SSH-file write is performed. Installer, service and reboot
 behavior remain unmeasured. The remote fixture is not an extra network listener.
 
