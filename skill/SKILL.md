@@ -116,7 +116,7 @@ command reads a token from stdin or a hidden prompt. Never put a token in argv, 
 There is no secret proxy in a gVisor container: the token lives inside it and code there can read and send it out.
 Use `login.ts list NAME` and `login.ts logout NAME all` (or an agent and `--profile PROFILE`); the machine stays logged in.
 Guest imported profiles use `CLAUDE_CONFIG_DIR="$HOME/.claude-PROFILE"` or `CODEX_HOME="$HOME/.codex-PROFILE"`.
-The extension is unit-tested with fake transport; live imports and sandbox evals remain unverified.
+File-profile and `gh` imports were checked live once; the Claude Keychain path was not. No eval covers extensions.
 
 ## What you cannot do, by design
 

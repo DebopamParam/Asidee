@@ -38,6 +38,12 @@ manual action and can disclose private thread data.
 None for start/status/off beyond existing text `exec({name, argv, stdin?})`. Core-owned SSH access and T3 setup are
 prerequisites to using this with the desktop app; see the T3 extension. Core need not own the Python process.
 
-Unit coverage uses temporary homes and a fake Python watcher through fake exec. Real database compatibility,
-authentication checks, account switching, model preservation and stop/restart behavior inside gVisor are unverified.
-The unchanged upstream script can drift from future T3 releases. No sandbox or eval was run.
+Unit coverage uses temporary homes and a fake Python watcher through fake exec.
+
+Checked live on 2026-11-11 in one sandbox on the default image, after the T3 extension's setup and one `t3 serve` to
+create the database: status before any start reported off and wrote nothing. Starting `claude` ran one
+`rotate.py --watch --providers claude` process from a byte-identical copy and logged `watching`; switching to
+`claude,codex` through `paddock ext run` replaced it with one process; `off` left no process and removed its PID file.
+After a start, stopping and starting the sandbox left no process and status reported off for the stale PID.
+Not checked live: authentication checks, account switching and model preservation, which need two real authenticated
+accounts and a usage-limit failure. The unchanged upstream script can drift from future T3 releases.

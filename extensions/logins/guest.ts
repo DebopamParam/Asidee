@@ -171,7 +171,8 @@ function githubAccount(token) {
       let data = ""
       response.on("error", reject)
       response.on("data", (chunk) => { data += chunk; if (data.length > 1024 * 1024) response.destroy(new Error()) })
-      response.on("end", () => { try { const user = githubUser(JSON.parse(data).login); if (response.statusCode !== 200 || !user) throw new Error(); resolve(user) } catch { reject(new Error()) } })
+      // 77: GitHub answered and refused the token, as distinct from GitHub not answering.
+      response.on("end", () => { try { const user = githubUser(JSON.parse(data).login); if (response.statusCode !== 200 || !user) throw new Error(); resolve(user) } catch { reject(Object.assign(new Error(), { loginCode: response.statusCode === 401 ? 77 : 70 })) } })
     })
     request.setTimeout(15000, () => request.destroy(new Error())); request.on("error", reject)
   })

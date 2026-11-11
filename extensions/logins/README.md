@@ -97,5 +97,20 @@ Git helper installed. Logout never revokes tokens or logs this machine out.
 Mutations hold the guest's empty `~/.paddock-logins.lock` directory. If a process is killed and leaves it behind, check
 that no import or logout is running before removing that empty directory inside the guest and retrying.
 
-The unit tests execute the receiver with temporary homes and fake transport, HTTPS, and host tools. Live credential
-import, GitHub access, Linux process termination, and sandbox evals have not been run for this extension.
+The unit tests execute the receiver with temporary homes and fake transport, HTTPS, and host tools.
+
+Checked live on 2026-11-11 in one sandbox on the default image, with the extension installed in a temporary
+configuration directory. A stand-in `security` that always fails was placed first on PATH, so no Keychain was read:
+- `profiles` listed this machine's file-backed Claude and Codex profiles. Importing one of each (Claude with `--setup`)
+  and this machine's `gh` login, directly and through `paddock ext run`, worked. In the guest, each credential was mode
+  0600 with the same SHA-256 as the host file, `gh auth status` succeeded, Git's helper was `!gh auth git-credential`
+  with no token in Git config, and Claude's `settings.json` had an empty `env.ANTHROPIC_API_KEY`. `--setup` reported a
+  hook command missing in the guest.
+- A second import without `--replace` was refused; with it, it worked. A pasted token GitHub refused (HTTP 401) gives
+  "GitHub did not accept that token" and leaves the guest's login as it was.
+- `list` showed the three logins. Logout of one agent, of GitHub, and of `all` removed them, kept Claude's other setup,
+  and `list` then showed none.
+- While imports ran, `ps` on this machine was sampled about 200 times: no token appeared in any argument or environment.
+
+Not checked live: the Claude Keychain path (no prompt may be triggered), ending a running agent session at logout (the
+image has no Claude or Codex CLI), and whether an imported Claude or Codex login is accepted by its agent.

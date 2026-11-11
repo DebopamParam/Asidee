@@ -28,5 +28,10 @@ is required. The writer appends no extra guest measurements. Guest text and subp
 None beyond current `list`, `verify` and text `exec`. A future typed `workspace` field in the sandbox view would remove
 the need for the explicit workspace action field. It must identify a path, not introduce a host mount.
 
-Unit tests execute the writer in a temporary home/repository and feed simulated checklist JSON. Live checklist
-accuracy and writing inside gVisor are unverified. No sandbox or eval was run.
+Unit tests execute the writer in a temporary home/repository and feed simulated checklist JSON.
+
+Checked live on 2026-11-11 in one sandbox on the default image, directly and through `paddock ext run`: the document was
+written to `~/workspace/env_docs/SANDBOX.md` with mode 0600 in a 0700 folder; in a Git workspace `/env_docs/` was added
+to `.git/info/exclude` and `git status` stayed clean; a missing workspace and a symlinked `env_docs` were refused; a
+stopped sandbox was refused and left stopped. Not checked live: a verify that exits 6, a sandbox that verification
+stops, and a line-by-line comparison of the document with `paddock verify` output.

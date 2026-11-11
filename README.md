@@ -133,4 +133,5 @@ Run `bun extensions/logins/login.ts --help` with `paddock` on PATH, or install i
 It needs Bun on this machine and Node in an already running sandbox; GitHub also needs guest `gh` and `git`.
 Existing credentials require an explicit replace choice. **There is no secret proxy in a gVisor container: the token
 lives inside the sandbox and code there can read and send it out.** Logout leaves this machine logged in.
-This extension has unit coverage with fake transport and temporary homes; live login imports and evals are unverified.
+Imports of file-backed Claude and Codex profiles and of this machine's `gh` login were checked live in one sandbox; the
+Claude Keychain path and agents accepting an imported login were not. Its README lists what was checked.

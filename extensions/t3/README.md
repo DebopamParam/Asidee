@@ -45,6 +45,14 @@ A future login event such as `loginChanged({name, agent, profile, operation: "im
 providers and select the last imported profile automatically. Today use `sync` explicitly. This is client coordination,
 not a sandbox guarantee.
 
-Unit tests use fake transport, temporary homes and a loopback fake release server. Live release installation, desktop
-reuse of the runtime, provider authentication, and SSH are unverified. No sandbox
-or eval was run. These actions are not a completed migration stage until live checks and required evals are supplied.
+Unit tests use fake transport, temporary homes and a loopback fake release server.
+
+Checked live on 2026-11-11 in one arm64 sandbox on the default image, directly and through `paddock ext run`: setup
+installed this machine's version (`0.1.9-nightly.20261110.4478`) from its release in about 15 s, published
+`~/.t3/runtime/versions/VERSION/t3`, which reports that version, and `.install-complete` containing the version and a
+newline; a second setup reused it in under 2 s. `settings.json` and the sidecar were mode 0600. With placeholder
+credential files in the guest, sync selected a named Claude profile and the canonical Codex directory, skipped a
+symlinked credential file, set Claude's empty `ANTHROPIC_API_KEY`, removed the Codex instance after its file was
+deleted, kept a user-added instance and top-level key, and refused invalid settings without changing them.
+Not checked live: a checksum mismatch (unit tests only), provider authentication, the desktop app reusing the runtime,
+and connecting the app: the core has no SSH access yet.

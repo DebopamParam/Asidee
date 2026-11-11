@@ -36,6 +36,7 @@ export async function execute(runner: Runner, name: string, script: string, args
   catch { throw new Error("The sandbox login command could not run. Check paddock and that the sandbox is running with Node installed.") }
   if (result.exitCode === 67) throw new Error("A guest login already exists. Choose --replace explicitly to replace it.")
   if (result.exitCode === 68) throw new Error("No matching sandbox login was found. List its logins first.")
+  if (result.exitCode === 77) throw new Error("GitHub did not accept that token (HTTP 401). Nothing was written in the sandbox.")
   if (result.exitCode === 75) throw new Error("Another login operation holds ~/.paddock-logins.lock in the sandbox. If it was interrupted, remove that empty directory only after checking no login operation is running.")
   if (result.exitCode !== 0) throw new Error(`The sandbox login command failed (exit ${result.exitCode}). No subprocess output is shown because it may contain secrets. The image needs Node; GitHub also needs gh and git.`)
   try { return JSON.parse(result.stdout) } catch { throw new Error("The sandbox returned an invalid login response; contents withheld.") }

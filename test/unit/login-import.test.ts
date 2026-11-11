@@ -302,7 +302,7 @@ test("hidden token prompt never echoes input and restores terminal mode on compl
 test("GitHub rejects an invalid account token without storing it or returning response contents", async () => {
   const g = await home(), prefix = githubFixture.replace('res.statusCode = 200', 'res.statusCode = 401')
   const transport = guestRunner(g, prefix)
-  await expect(importGithub(transport.runner, "demo", { kind: "token", value: secret }, false)).rejects.toThrow("failed")
+  await expect(importGithub(transport.runner, "demo", { kind: "token", value: secret }, false)).rejects.toThrow("GitHub did not accept that token")
   expect(existsSync(join(g, ".config/gh/hosts.yml"))).toBe(false)
   expect(existsSync(join(g, ".paddock-logins.lock"))).toBe(false)
 })
