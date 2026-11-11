@@ -85,6 +85,22 @@ test("remote relay leases require the current sandbox and run and are revoked on
   await expect(paddock.openSession({ ...lease, kind: "dial" })).rejects.toThrow("run changed")
 })
 
+test("a remote lease ends on its own when the primary stops renewing it, and lasts while it renews", async () => {
+  const { provider } = fakeProvider(); const paddock = await core(provider); paddock.leaseTtlMs = 200
+  await paddock.create({ name: "demo" }); const target = await paddock.sessionTarget("demo")
+  const lease = { kind: "lease" as const, ...target, port: 3000, leaseId: "a".repeat(32) }
+  const renewed = await paddock.openSession(lease); let renewedEnd = ""
+  renewed.on("end", (exit) => { renewedEnd = exit.error ?? "ended" })
+  const timer = setInterval(() => renewed.write(new Uint8Array([1])), 50)
+  const silent = await paddock.openSession({ ...lease, leaseId: "b".repeat(32) }); let silentEnd = ""
+  silent.on("end", (exit) => { silentEnd = exit.error ?? "ended" })
+  await Bun.sleep(600); clearInterval(timer)
+  expect(silentEnd).toContain("did not renew")
+  expect(renewedEnd).toBe("")
+  await Bun.sleep(400)
+  expect(renewedEnd).toContain("did not renew")
+})
+
 test("a failed blocking check blocks; an unknown probe and a weak disk limit do not", () => {
   const results: CheckResult[] = [
     { id: "net-host", status: "unknown", evidence: "none", detail: "" }, { id: "net-peers", status: "fail", evidence: "probed", detail: "" },

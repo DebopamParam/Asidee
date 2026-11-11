@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events"
 import type { Server } from "node:net"
 import { blockers, CHECKLIST, complete, failures, titleOf } from "./checks"
 import { fieldValues, loadExtensions, runCommand } from "./extensions"
-import { boundPort, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
+import { boundPort, LEASE_TTL_MS, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
 import { OUTPUT_LIMIT } from "./run"
 import { addInclude, alias, editorKey, GUEST_SETUP, GUEST_SSH, includeLine, included, keyFingerprint, parseGuestSetup, userConfig, validPublicKey, writeClientFiles, type SshAccess } from "./ssh"
 import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSizes, validSpec, validTemplateName, writeManifest, type Dirs } from "./state"
@@ -45,6 +45,8 @@ export class Core {
   // Forwards by id. They live in this daemon only: a stop, restart or removal of their sandbox, or the daemon's exit,
   // ends them, and nothing brings one back.
   private readonly forwards = new Map<string, { view: Omit<ForwardView, "connections">; server: Server; connections: Set<Session>; watch: ReturnType<typeof setInterval> }>()
+  // A hosted forward's lease ends after this long without a renewal from the primary (core/forwards.ts).
+  leaseTtlMs = LEASE_TTL_MS
   constructor(private readonly providers: readonly Provider[], readonly dirs: Dirs, private readonly run: Runner, private readonly cliDir: string, readonly machineId = "") {}
 
   // One operation per sandbox at a time.
@@ -337,16 +339,18 @@ export class Core {
       if (this.leases.has(request.leaseId)) throw new PaddockError("conflict", "This relay lease already exists.")
       if (manifest.engine.capabilities?.loopbackRelay === false) throw new PaddockError("dependency", "This engine cannot relay sandbox loopback.")
       await provider.prepareLoopback(manifest)
-      const events = new EventEmitter(); let ended = false; let paused = false; let checking = false
+      const events = new EventEmitter(); let ended = false; let paused = false; let checking = false; let renewed = Date.now()
       const close = (reason = "The relay control stream ended.") => { if (ended) return; ended = true; clearInterval(watch); clearInterval(heartbeat); this.leases.delete(request.leaseId); for (const dial of lease.dials) dial.close(reason); events.emit("end", { error: reason }) }
-      const session: Session = Object.assign(events, { tty: false, write: () => true, end: () => close(), resize: async () => {}, pause: () => { paused = true }, resume: () => { paused = false }, close })
+      // Any byte from the primary renews the lease. Its silence ends it, however long SSH or TCP takes to notice a partition.
+      const session: Session = Object.assign(events, { tty: false, write: () => { renewed = Date.now(); return true }, end: () => close(), resize: async () => {}, pause: () => { paused = true }, resume: () => { paused = false }, close })
       const lease = { name: manifest.name, sandboxId: manifest.id, generation: request.generation, port: request.port, session, dials: new Set<Session>() }
       this.leases.set(request.leaseId, lease)
       const watch = setInterval(async () => {
         if (checking || ended) return
+        if (Date.now() - renewed >= this.leaseTtlMs) return close(`The primary did not renew this forward's lease for ${this.leaseTtlMs / 1000} seconds.`)
         checking = true
         try { if (await provider.generation(manifest).catch(() => undefined) !== request.generation) close("The forward's sandbox stopped or restarted.") } finally { checking = false }
-      }, 2000)
+      }, Math.min(2000, this.leaseTtlMs / 4))
       const heartbeat = setInterval(() => { if (!paused && !ended) events.emit("output", "stdout", Buffer.from([1])) }, 5000)
       watch.unref(); heartbeat.unref()
       this.trackSession(manifest.name, session)
@@ -444,7 +448,7 @@ export class Core {
   private forwardCheck(manifest: Manifest): CheckResult {
     const mine = [...this.forwards.values()].filter((forward) => forward.view.sandboxId === manifest.id)
     const leases = [...this.leases.entries()].filter(([, lease]) => lease.sandboxId === manifest.id)
-    if (leases.length) return { id: "forwards", status: "info", evidence: "inspected", detail: `${leases.map(([id, lease]) => `SSH lease ${id} to sandbox loopback port ${lease.port}`).join(", ")}. This daemon checked the sandbox run and port. The primary's loopback listener address and current reachability are unknown here; the primary owns that evidence. The lease ends with its control stream or sandbox run.` }
+    if (leases.length) return { id: "forwards", status: "info", evidence: "inspected", detail: `${leases.map(([id, lease]) => `SSH lease ${id} to sandbox loopback port ${lease.port}`).join(", ")}. This daemon checked the sandbox run and port. The primary's loopback listener address and current reachability are unknown here; \`paddock --host HOST forward list\` on the primary shows its listener. The lease ends with its control stream or sandbox run, or ${this.leaseTtlMs / 1000} seconds after the primary last renewed it.` }
     if (!mine.length) return { id: "forwards", status: "info", evidence: "inspected", detail: "None. A forward added with `paddock forward add` listens on 127.0.0.1 only and ends when the sandbox stops." }
     const listed = mine.map((forward) => { const address = forward.server.address(); return `${typeof address === "object" && address ? `${address.address}:${address.port}` : "not listening"} to port ${forward.view.port} (${forward.view.id})` })
     return { id: "forwards", status: "info", evidence: "inspected", detail: `${listed.join(", ")}. Any process on this machine can connect to these, and so can whatever the engine relays to its loopback: on OrbStack, the engine's host and its other containers, through host.docker.internal.` }
