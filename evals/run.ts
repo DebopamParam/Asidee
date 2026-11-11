@@ -34,7 +34,7 @@ const INNER = `${PREFIX}-inner`
 const DOCKER_IMAGE = "docker/sandbox-templates:shell-docker"
 
 type Sh = { code: number; out: string; err: string }
-async function sh(argv: string[], options: { stdin?: string; env?: Record<string, string>; timeoutMs?: number; cwd?: string } = {}): Promise<Sh> {
+async function sh(argv: string[], options: { stdin?: string | Uint8Array; env?: Record<string, string>; timeoutMs?: number; cwd?: string } = {}): Promise<Sh> {
   const child = Bun.spawn(argv, {
     stdin: options.stdin === undefined ? "ignore" : new Blob([options.stdin]), stdout: "pipe", stderr: "pipe", cwd: options.cwd,
     env: { ...process.env, ...options.env }, timeout: options.timeoutMs ?? 240_000,
@@ -2289,8 +2289,12 @@ ev("L03", "The task limit and CPUs change on a running sandbox: 300 sleeps fail 
 ev("L04", "Resize refuses, with clear exit codes, memory and tasks below what the sandbox uses (4), sizes below the minimums (2) and unknown sandboxes (3), and changes nothing", async () => {
   if ((await view(RS))?.spec.memoryGb !== 1 || (await view(RS))?.spec.pids !== 2048) await fresh(RS, { memoryGb: 1, pids: 2048 })
   await ensure(RS)
-  // gVisor keeps /dev/shm in memory, which the engine counts as the sandbox's.
-  await pdk(["exec", RS, "--", "sh", "-c", "head -c 314572800 /dev/zero > /dev/shm/hold"])
+  // A file in a tmpfs that gVisor keeps in memory, which the engine counts as the sandbox's. /dev/shm is only 64 MiB on
+  // Docker's default (native Linux), so the first tmpfs with room is used, and the write must succeed in full.
+  const hold = (await pdk(["exec", RS, "--", "sh", "-c", 'for d in /tmp /dev/shm; do grep -q " $d tmpfs " /proc/mounts && [ "$(df -Pk $d | awk \'NR==2{print $4}\')" -gt 330000 ] && { echo $d/hold; exit; }; done'])).out.trim()
+  if (!hold) skip("no tmpfs in the sandbox has 320 MiB free, so the engine cannot be shown 300 MiB in use")
+  const wrote = await pdk(["exec", RS, "--", "sh", "-c", `head -c 314572800 /dev/zero > ${hold} && stat -c %s ${hold}`])
+  expect(wrote.code === 0 && wrote.out.trim() === "314572800", `control: 300 MiB could not be written to ${hold}: exit ${wrote.code} ${wrote.out.trim()} ${wrote.err.trim()}`)
   const usage = (await docker(["stats", "--no-stream", "--format", "{{.MemUsage}}", containerOf(RS)])).out
   expect(/^\s*(\d+(\.\d+)?)MiB/.test(usage) && parseFloat(usage) >= 256, `control: the engine reports ${usage.trim()} in use, not over 256 MiB`)
   const before = (await inspect(RS)).HostConfig.Memory
@@ -2310,10 +2314,10 @@ ev("L04", "Resize refuses, with clear exit codes, memory and tasks below what th
   const fewer = await pdk(["resize", RS, "--pids", "256"])
   expect(fewer.code === 4 && (await inspect(RS)).HostConfig.PidsLimit === 2048 && await running(RS), `lowering tasks below use: exit ${fewer.code}, ${fewer.err.trim()}`)
   await pdk(["exec", RS, "--", "pkill", "-f", "sleep 60"])
-  await pdk(["exec", RS, "--", "rm", "/dev/shm/hold"])
+  await pdk(["exec", RS, "--", "rm", hold])
   const allowed = await resize(RS, ["--memory", "0.5"])
   expect(allowed.reply.ok, `control: lowering to 0.5 GB once the memory was freed failed: ${allowed.reply.error?.message}`)
-  return `refused at ${usage.trim()} in use and at ${tasks} tasks for a limit of 256; allowed once the memory was freed`
+  return `300 MiB held in ${hold}; refused at ${usage.trim()} in use and at ${tasks} tasks for a limit of 256; allowed once the memory was freed`
 })
 
 ev("L05", "Verify judges limits against the resized values: a limit changed behind Paddock's back fails it and stops the sandbox", async () => {
@@ -2553,6 +2557,10 @@ const remoteInspect = async (name: string) => {
   const result = await remoteDocker(["inspect", containerOf(name)])
   return result.code === 0 ? JSON.parse(result.out)[0] : undefined
 }
+const remoteWrite = async (file: string, contents: string) => {
+  const result = await remote(["sh", "-c", 'cat > "$1"; chmod 700 "$1"', "write", file], { stdin: contents })
+  expect(result.code === 0, `could not write ${file} on the fixture: ${result.err}`)
+}
 async function machineFixture() {
   if (!TEST_HOST) skip("no PADDOCK_EVAL_HOST supplied; a disposable Linux SSH fixture is opt-in")
   if (remoteReady) return
@@ -2587,12 +2595,60 @@ async function remoteSandbox(name = MS) {
     expect(made.reply.ok, `remote create failed: ${made.out}${made.err}`)
   } else if (!state.State.Running) expect((await hosted(["start", name])).reply.ok, "remote start failed")
 }
+// The registry entry of the run's host, changed for one measurement and always put back.
+async function withRecord<T>(change: Record<string, string>, run: () => Promise<T>): Promise<T> {
+  const registry = join(env.PADDOCK_CONFIG_DIR, "hosts.json"); const original = await readFile(registry, "utf8")
+  try {
+    const data = JSON.parse(original); Object.assign(data.hosts.find((host: { name: string }) => host.name === MH), change)
+    await writeFile(registry, JSON.stringify(data))
+    return await run()
+  } finally { await writeFile(registry, original) }
+}
+// What the fixture listens on (ss), and a listener of this run there: the positive control that ss and lsof see one.
+const remoteListening = async () => {
+  const run = await remote(["ss", "-ltnH"])
+  expect(run.code === 0, `ss is needed on the fixture to see its listeners: ${run.err}`)
+  return run.out.split("\n").map((line) => line.trim().split(/\s+/)[3]).filter((entry): entry is string => Boolean(entry)).sort()
+}
+async function remoteListener(): Promise<{ port: number; pid: number; close: () => Promise<void> }> {
+  const code = "import os,socket,sys\ns=socket.socket()\ns.bind(('127.0.0.1',0))\ns.listen()\nprint(s.getsockname()[1],os.getpid(),flush=True)\nsys.stdin.read()"
+  const child = Bun.spawn([...remoteArgs(), ["python3", "-c", code].map(word).join(" ")], { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
+  const reader = child.stdout.getReader(); let text = ""
+  for (const end = Date.now() + 15_000; !text.includes("\n") && Date.now() < end;) { const { value, done } = await reader.read(); if (done) break; text += new TextDecoder().decode(value) }
+  const [port, pid] = text.trim().split(/\s+/).map(Number)
+  if (!port || !pid) { child.kill(); expect(false, `the fixture's listener control did not start (python3 is needed): ${text}${await new Response(child.stderr).text()}`) }
+  return { port: port!, pid: pid!, close: async () => { child.kill(); await child.exited } }
+}
+// The fixture's relays for this run's daemon. [p] keeps pgrep's own command line from matching.
+const remoteRelays = async () => {
+  const run = await remote(["pgrep", "-fc", `${remoteDir}/[p]addock transport stdio`])
+  expect(run.code === 0 || run.code === 1, `pgrep is needed on the fixture: ${run.err}`)
+  return Number(run.out.trim())
+}
+// The remote daemon spoken to through its own transport, with bytes this run chooses. stdin stays open a moment so the
+// reply arrives before the relay ends.
+const rawArgv = (stream: boolean) => [...remoteArgs(), ["sh", "-c", `{ cat; sleep 2; } | env PADDOCK_STATE_DIR="$1/s" "$1/paddock" transport stdio --protocol 1${stream ? " --stream" : ""}`, "raw", remoteDir].map(word).join(" ")]
+const rawTransport = (stdin: string) => sh(rawArgv(false), { stdin })
+// Frames are bytes, so the stream's reply is read as bytes, not text.
+const rawStream = async (open: Uint8Array) => {
+  const child = Bun.spawn(rawArgv(true), { stdin: new Blob([open]), stdout: "pipe", stderr: "pipe", timeout: 30_000 })
+  const [out] = await Promise.all([new Response(child.stdout).arrayBuffer(), child.exited])
+  return new FrameReader().push(Buffer.from(out))
+}
+const rawCall = async (method: string, body: object, headers: Record<string, string> = {}) => {
+  const text = JSON.stringify(body)
+  const run = await rawTransport(`POST /api/${method} HTTP/1.1\r\nHost: paddock\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(text)}\r\nConnection: close\r\n${Object.entries(headers).map(([key, value]) => `${key}: ${value}\r\n`).join("")}\r\n${text}`)
+  try { return JSON.parse(run.out.slice(run.out.indexOf("\r\n\r\n") + 4)) as { ok: boolean; data?: any; error?: { code: string; message: string } } } catch { throw new Error(`the raw transport returned no JSON: ${run.out.slice(0, 300)} ${run.err.slice(0, 300)}`) }
+}
 
 ev("M01", "Identical sandbox names on two machines have distinct identities and only the selected machine is mutated", async () => {
   await remoteSandbox(); await ensure(MS)
   const local = await inspect(MS); const target = await remoteInspect(MS)
   expect(local?.State.Running && target?.State.Running, "both running controls are required")
   expect(local.Config.Labels["dev.paddock.id"] !== target.Config.Labels["dev.paddock.id"], "sandbox identities collided")
+  const primary = ((await pdkJson(["list"])).reply.data as Array<{ name: string; machineId: string }>).find((entry) => entry.name === MS)?.machineId
+  const record = ((await pdkJson(["host", "list"])).reply.data as Array<{ host: { name: string; machineId: string } }>).find((entry) => entry.host.name === MH)?.host.machineId
+  expect(primary && record && primary !== record, `the two machines' identities are missing or equal: ${primary} ${record}`)
   expect((await hosted(["stop", MS])).reply.ok && !(await remoteInspect(MS)).State.Running && await running(MS), "stop affected the wrong machine")
   expect((await hosted(["start", MS])).reply.ok, "remote start failed")
   const resized = await hosted(["resize", MS, "--memory", "2"])
@@ -2607,62 +2663,138 @@ ev("M01", "Identical sandbox names on two machines have distinct identities and 
   expect(saved.reply.ok && (await hosted(["template", "list"])).reply.data.some((entry: { name: string }) => entry.name === template), "remote template was not listed")
   expect(!(await pdkJson(["template", "list"])).reply.data.some((entry: { name: string }) => entry.name === template), "remote template appeared locally")
   expect((await hosted(["template", "remove", template])).reply.ok, "remote template cleanup failed")
-  const listed = await hosted(["list"])
-  expect(listed.reply.data.some((entry: { name: string; machineId: string }) => entry.name === MS && entry.machineId !== local.machineId), "selected list omitted the remote identity")
-  return `${TEST_HOST}; stop/start, resize, exec, verify, snapshot and template list/remove selected only the remote engine; both copies of ${MS} existed`
+  const listed = (await hosted(["list"])).reply.data as Array<{ name: string; machineId: string }>
+  expect(listed.some((entry) => entry.name === MS && entry.machineId === record), "the selected list did not carry the remote machine's identity")
+  return `${TEST_HOST}; the primary is ${primary!.slice(0, 8)}…, the host ${record!.slice(0, 8)}…; stop/start, resize, exec, verify, snapshot and template list/remove selected only the remote engine; both copies of ${MS} existed`
 })
 
-ev("M02", "An unreachable host retains unknown sandbox evidence while local actions work; unknown hosts never fall back locally", async () => {
+ev("M02", "A host that is unreachable (missing binary, unroutable address) or silent is offline within its deadline, keeps its sandboxes unknown while local actions work; unknown hosts never fall back", async () => {
   await remoteSandbox(); await ensure(MS)
   expect((await pdkJson(["host", "list"])).reply.data.some((entry: { state: string }) => entry.state === "online"), "healthy SSH control failed")
-  const registry = join(env.PADDOCK_CONFIG_DIR, "hosts.json"); const original = await readFile(registry, "utf8")
-  try {
-    const data = JSON.parse(original); data.hosts.find((host: { name: string }) => host.name === MH).binary = `${remoteDir}/missing`
-    await writeFile(registry, JSON.stringify(data))
+  const offlineIn = async () => {
+    const started = Date.now(); const listed = await pdkJson(["host", "list"]); const seconds = (Date.now() - started) / 1000
+    const entry = listed.reply.data?.find((item: { host: { name: string } }) => item.host.name === MH)
+    return { seconds, state: entry?.state as string, error: String(entry?.error ?? "") }
+  }
+  const notes: string[] = []
+  await withRecord({ binary: `${remoteDir}/missing` }, async () => {
     const failed = await hosted(["stop", MS])
     expect(failed.code === 7 && failed.reply.error?.code === "offline" && (await remoteInspect(MS)).State.Running && await running(MS), "unreachable host was absent, passing or affected a sandbox")
-    const offline = await pdkJson(["host", "list"])
-    expect(offline.reply.data.find((entry: { host: { name: string } }) => entry.host.name === MH).state === "offline", "host list hid the failed machine")
+    expect((await offlineIn()).state === "offline", "host list hid the failed machine")
     const fleet = (await pdkJson(["list", "--all"])).reply.data.machines.find((entry: { machine: { host: { name: string } } }) => entry.machine.host.name === MH)
     const cached = fleet?.cached?.sandboxes.find((entry: { name: string }) => entry.name === MS)
     expect(fleet?.stale && cached?.status === "unknown" && cached.lastVerify.results.every((check: { status: string }) => check.status === "unknown"), "cached green evidence survived the failed refresh")
     expect((await pdk(["exec", MS, "--", "true"])).code === 0, "failed host blocked a local action")
     const unknown = await pdkJson(["--host", "not-enrolled", "stop", MS])
     expect(unknown.code === 3 && await running(MS) && (await remoteInspect(MS)).State.Running, "unknown host fell back")
-  } finally { await writeFile(registry, original); await pdk(["host", "list"]) }
+    notes.push("missing binary: stop exit 7, nothing stopped")
+  })
+  // TEST-NET-1 (RFC 5737) is routed nowhere: the SSH connect timeout (5 s) is what ends the attempt.
+  const blackhole = await sh(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "192.0.2.1", "true"], { timeoutMs: 30_000 })
+  expect(/timed out/i.test(blackhole.err), `control: 192.0.2.1 is not a blackhole from here (${blackhole.err.trim()}), so the connect timeout cannot be measured`)
+  await withRecord({ ssh: "192.0.2.1" }, async () => {
+    const result = await offlineIn()
+    expect(result.state === "offline" && result.seconds < 12, `an unroutable host: ${result.state} after ${result.seconds} s (${result.error})`)
+    notes.push(`unroutable address: offline after ${result.seconds.toFixed(1)} s (${result.error.slice(0, 80)})`)
+  })
+  // A daemon that never answers: the handshake's ten-second deadline ends the call.
+  const silent = `${remoteDir}/silent-transport`
+  // Not exec: the shell keeps the wrapper's name in the process list, so pgrep can see it while it runs and after.
+  await remoteWrite(silent, "#!/bin/sh\ncat >/dev/null\n")
+  const silentCount = async () => Number((await remote(["pgrep", "-fc", `${remoteDir}/[s]ilent-transport`])).out.trim())
+  await withRecord({ binary: silent }, async () => {
+    const pending = offlineIn()
+    expect(await until(async () => await silentCount() >= 1, 8), "control: pgrep did not see the silent transport while the call waited")
+    const result = await pending
+    expect(result.state === "offline" && result.seconds >= 9 && result.seconds < 16 && /within 10 seconds/.test(result.error), `a silent daemon: ${result.state} after ${result.seconds} s (${result.error})`)
+    notes.push(`silent daemon: offline after ${result.seconds.toFixed(1)} s`)
+  })
+  await pdk(["host", "list"])
+  expect(await until(async () => await silentCount() === 0, 10), "the silent transport outlived its call on the fixture")
+  return notes.join("; ")
 })
 
-ev("M03", "Changed machine identity and daemon version are refused before a remote mutation, with a working-version control", async () => {
+// A gateway built from this source with one change; it replaces the run's primary daemon until the next pdk call.
+async function otherGateway(name: string, change: (dir: string) => Promise<void>) {
+  const next = join(tmp, name); await mkdir(next, { recursive: true })
+  for (const part of ["core", "cli", "ui", "package.json"]) await cp(join(ROOT, part), join(next, part), { recursive: true })
+  await change(next)
+  const binary = join(next, "paddock")
+  expect((await sh([BUN, "build", "--compile", "--outfile", binary, "cli/cli.ts"], { cwd: next })).code === 0, `could not build the ${name} gateway`)
+  return binary
+}
+ev("M03", "A changed machine identity, daemon version or source build is refused before a remote mutation, by the primary, the remote daemon and its stream socket, beside working controls", async () => {
   await remoteSandbox()
-  const registry = join(env.PADDOCK_CONFIG_DIR, "hosts.json"); const original = await readFile(registry, "utf8")
-  try {
-    const data = JSON.parse(original); data.hosts.find((host: { name: string }) => host.name === MH).machineId = "0".repeat(32)
-    await writeFile(registry, JSON.stringify(data))
+  await withRecord({ machineId: "0".repeat(32) }, async () => {
     const changed = await hosted(["stop", MS])
     expect(changed.code === 9 && changed.reply.error?.code === "identity-changed" && (await remoteInspect(MS)).State.Running, "changed identity was accepted")
-  } finally { await writeFile(registry, original) }
-  const next = join(tmp, "incompatible"); await mkdir(next, { recursive: true })
-  for (const part of ["core", "cli", "ui", "package.json"]) await cp(join(ROOT, part), join(next, part), { recursive: true })
-  const pkg = JSON.parse(await readFile(join(next, "package.json"), "utf8")); await writeFile(join(next, "package.json"), JSON.stringify({ ...pkg, version: `${pkg.version}-incompatible` }))
-  const binary = join(next, "paddock")
-  expect((await sh([BUN, "build", "--compile", "--outfile", binary, "cli/cli.ts"], { cwd: next })).code === 0, "could not build the incompatible gateway")
+  })
+  const older = await otherGateway("incompatible", async (dir) => {
+    const pkg = JSON.parse(await readFile(join(dir, "package.json"), "utf8")); await writeFile(join(dir, "package.json"), JSON.stringify({ ...pkg, version: `${pkg.version}-incompatible` }))
+  })
+  const same = await otherGateway("other-source", async (dir) => { await writeFile(join(dir, "core", "types.ts"), `${await readFile(join(dir, "core", "types.ts"), "utf8")}\n// another build of the same version\n`) })
   try {
-    const bad = await sh([binary, "--json", "--host", MH, "stop", MS], { env })
+    const bad = await sh([older, "--json", "--host", MH, "stop", MS], { env })
     expect(bad.code === 8 && JSON.parse(bad.out).error.code === "incompatible" && (await remoteInspect(MS)).State.Running, `version mismatch was accepted: ${bad.out}${bad.err}`)
+    const other = await sh([same, "--json", "--host", MH, "stop", MS], { env })
+    const message = JSON.parse(other.out).error?.message ?? ""
+    expect(other.code === 8 && /other source/.test(message) && /bun build --compile/.test(message) && (await remoteInspect(MS)).State.Running, `a build of the same version from other source was accepted: ${other.out}${other.err}`)
   } finally { await pdk(["list"]) }
   expect((await hosted(["exec", MS, "--", "true"])).code === 0, "matching-version control failed")
+  // The remote daemon's own check, with the gateway's headers as this run writes them.
+  const hello = await rawCall("hello", {})
+  expect(hello.ok && hello.data.machineId, `control: the raw transport did not reach the remote daemon: ${JSON.stringify(hello)}`)
+  const headers = { "x-paddock-machine": hello.data.machineId, "x-paddock-protocol": "1", "x-paddock-version": hello.data.version, "x-paddock-build": hello.data.sourceDigest }
+  expect((await rawCall("get", { name: MS }, headers)).ok, "control: the remote refused the gateway's own headers")
+  const refusals: string[] = []
+  for (const [header, value] of [["x-paddock-build", "0".repeat(64)], ["x-paddock-version", "0.0.0"], ["x-paddock-protocol", "2"]] as const) {
+    const reply = await rawCall("stop", { name: MS }, { ...headers, [header]: value })
+    if (reply.ok || reply.error?.code !== "incompatible") refusals.push(`${header} ${value}: ${JSON.stringify(reply).slice(0, 200)}`)
+  }
+  expect(refusals.length === 0 && (await remoteInspect(MS)).State.Running, `the remote daemon accepted a mismatched gateway: ${refusals.join("; ")}`)
+  // The remote stream socket: an open naming another boot of the daemon is refused, the current one opens.
+  const target = await rawCall("sessionTarget", { name: MS }, headers)
+  const first = async (bootId: string) => (await rawStream(frame("open", { kind: "exec", name: MS, argv: ["true"], tty: false, machineId: hello.data.machineId, bootId, protocol: 1, version: hello.data.version, build: hello.data.sourceDigest, sandboxId: target.data.sandboxId, generation: target.data.generation })))[0]
+  const good = await first(hello.data.bootId)
+  expect(good?.kind === "ready", `control: a stream open with the current boot ID did not open: ${good?.kind}`)
+  const stale = await first("0".repeat(32))
+  expect(stale?.kind === "error" && JSON.parse(stale.payload.toString()).code === "identity-changed", `a stream open for another boot was accepted: ${stale?.kind} ${stale?.payload.toString()}`)
+  return "the primary refused a changed identity (exit 9), another version and another source build of the same version (exit 8, saying how to update); the remote refused mismatched build, version and protocol headers and a stale boot ID on its stream socket; controls with the right values worked"
 })
 
-ev("M04", "Routing preserves the dashboard boundary and the remote daemon validates sandbox options itself", async () => {
+ev("M04", "Routing preserves the dashboard boundary, the remote daemon validates sandbox options itself, and it opens no TCP listener", async () => {
   await remoteSandbox()
   expect((await tcp("/api/list", { body: JSON.stringify({ host: MH }) })).status === 200, "control: routed dashboard list failed")
-  for (const method of ["hello", "shutdown", "sshSetup", "hostAttach", "hostRemove"]) expect((await tcp(`/api/${method}`, { body: JSON.stringify({ host: MH }) })).status === 403, `dashboard gained ${method} through SSH`)
+  for (const method of ["hello", "shutdown", "sshSetup", "sshPrepare", "sessionTarget", "hostAttach", "hostRemove"]) expect((await tcp(`/api/${method}`, { body: JSON.stringify({ host: MH }) })).status === 403, `dashboard gained ${method} through SSH`)
   for (const method of ["attach", "session", "hostApply", "constructor", "__proto__"]) expect((await tcp(`/api/${method}`, { body: JSON.stringify({ host: MH }) })).status === 404, `arbitrary routed method ${method} was accepted`)
-  const bad = await socket("create", { host: MH, name: "Bad", privileged: true, image: "alpine:latest" })
-  expect(bad.status === 400 && !(await remoteDocker(["ps", "-a", "--format", "{{.Names}}"])).out.split("\n").includes("paddock-Bad"), "remote validation was bypassed")
+  // A tee in front of the remote transport records what the primary forwarded, so the refusal is shown to be the remote's.
+  const log = `${remoteDir}/forwarded.log`; const tee = `${remoteDir}/tee-transport`
+  await remoteWrite(tee, `#!/bin/sh\ncase "$*" in *--stream*) exec ${word(`${remoteDir}/paddock`)} "$@";; esac\ntee -a ${word(log)} | ${word(`${remoteDir}/paddock`)} "$@"\n`)
+  const odd = `${PREFIX}-mval`; const plain = `${PREFIX}-mpriv`
+  let note = ""
+  await withRecord({ binary: tee }, async () => {
+    const bad = await socket("create", { host: MH, name: odd, cpus: 1000, privileged: true, image: "alpine:latest" })
+    const forwarded = (await remote(["cat", log])).out
+    expect(/\/api\/create/.test(forwarded) && /"cpus":1000/.test(forwarded) && /"privileged":true/.test(forwarded), `the primary did not forward the request as sent: ${forwarded.slice(-400)}`)
+    expect(bad.status === 400 && /cpu/i.test(bad.reply.error?.message ?? "") && !await remoteInspect(odd), `the remote daemon did not refuse 1000 CPUs itself: ${bad.status} ${JSON.stringify(bad.reply)}`)
+    const made = await socket("create", { host: MH, name: plain, cpus: 1, memoryGb: 1, diskGb: 1, privileged: true, image: "alpine:latest" })
+    try {
+      const state = await remoteInspect(plain)
+      expect(made.reply.ok && state && state.HostConfig.Privileged === false && state.HostConfig.Runtime !== "runc", `a forwarded privileged:true changed the remote sandbox: ${JSON.stringify(made.reply).slice(0, 200)}`)
+    } finally { await socket("remove", { host: MH, name: plain, confirm: plain }) }
+    note = `the remote refused cpus 1000 that the primary forwarded (${bad.reply.error?.message}); a forwarded privileged:true made an unprivileged gVisor sandbox`
+  })
   const daemon = JSON.parse((await remote(["cat", `${remoteDir}/s/daemon.json`])).out)
   expect(daemon.port === 0, "remote daemon opened a dashboard port")
-  expect((await remote(["lsof", "-nP", "-a", "-p", String(daemon.pid), "-iTCP", "-sTCP:LISTEN", "-Fn"])).out.trim() === "", "remote daemon has a TCP listener")
+  if ((await remote(["sh", "-c", "command -v lsof"])).code !== 0) skip(`lsof is not on the fixture, so its listeners cannot be read; ${note}`)
+  const control = await remoteListener()
+  try {
+    const seen = (await remote(["lsof", "-nP", "-a", "-p", String(control.pid), "-iTCP", "-sTCP:LISTEN", "-Fn"])).out
+    expect(seen.includes(`n127.0.0.1:${control.port}`), `control: lsof did not show the fixture listener of this run: ${seen}`)
+  } finally { await control.close() }
+  const own = await remote(["lsof", "-nP", "-a", "-p", String(daemon.pid), "-iTCP", "-sTCP:LISTEN", "-Fn"])
+  expect(own.out.split("\n").filter((line) => line.startsWith("n")).length === 0, `remote daemon has a TCP listener: ${own.out}`)
+  return `the 403s came from the primary's socket-only check before SSH; ${note}; lsof saw a control listener and none for the remote daemon`
 })
 
 ev("M05", "With the primary stopped, the remote daemon stops a weakened sandbox and keeps an untampered control running", async () => {
@@ -2705,11 +2837,13 @@ ev("M07", "A hosted forward binds only primary loopback, reaches remote sandbox 
   const port = 3123; const nonce = `${PREFIX}-remote-nonce`
   expect((await hostedNonce(port, nonce)).code === 0, "remote nonce service failed")
   expect((await remoteDocker(["exec", containerOf(MS), "nc", "-w", "2", "127.0.0.1", String(port)])).out.includes(nonce), "independent guest control failed")
-  const listeners = async () => (await remote(["sh", "-c", "ss -ltnH | awk '{print $4}' | sort"])).out
-  const before = await listeners(); const forward = await hostedForward(port)
+  const listenControl = await remoteListener()
+  try { expect((await remoteListening()).includes(`127.0.0.1:${listenControl.port}`), "control: ss did not show the fixture listener of this run") } finally { await listenControl.close() }
+  const before = await remoteListening(); const forward = await hostedForward(port)
   try {
     expect((await tcpRead("127.0.0.1", forward.localPort)).toString().includes(nonce), "primary loopback did not reach remote sandbox loopback")
-    expect(await listeners() === before, "forward added a listener on the remote host")
+    const after = await remoteListening()
+    expect(after.join() === before.join(), `forward added a listener on the remote host: ${after.filter((entry) => !before.includes(entry)).join(", ")}`)
     const owner = await daemonFile()
     expect((await listenersOf([owner.pid])).includes(`n127.0.0.1:${forward.localPort}`), "the primary daemon did not own its loopback listener")
     const control = await controlListener("0.0.0.0"); let tried = 0
@@ -2724,6 +2858,7 @@ ev("M07", "A hosted forward binds only primary loopback, reaches remote sandbox 
     expect(!data.HostConfig.PublishAllPorts && Object.keys(data.HostConfig.PortBindings ?? {}).length === 0, "remote engine published a port")
     const checks = (await hosted(["verify", MS])).reply.data.checks
     expect(/SSH lease/.test(checks.find((check: { id: string }) => check.id === "forwards").detail), "remote verification hid its relay lease")
+    return `the nonce came through 127.0.0.1:${forward.localPort}; ss on the fixture saw a control listener and the same ${before.length} listeners before and after; ${tried} non-loopback address(es) refused; no engine port; remote verify showed the lease`
   } finally { await hosted(["forward", "remove", forward.id]) }
 })
 
@@ -2731,7 +2866,10 @@ const sshStreamPids = async () => {
   const daemon = (await daemonFile()).pid
   return (await sh(["ps", "-axo", "pid=,ppid=,command="])).out.split("\n").filter((line) => Number(line.trim().split(/\s+/)[1]) === daemon && line.includes(remoteDir) && line.includes("--stream")).map((line) => Number(line.trim().split(/\s+/)[0]))
 }
-ev("M08", "Hosted forwards end on stop, run replacement, daemon exit and SSH loss; a silent control stream closes within seventeen seconds and is never recreated", async () => {
+const alive = (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } }
+// shutdown with keepSandboxes, posted to the remote daemon's own socket: the daemon exits, its sandboxes do not.
+const KEEP = "import socket,sys\ns=socket.socket(socket.AF_UNIX)\ns.connect(sys.argv[1])\nb=b'{\"keepSandboxes\":true}'\ns.sendall(b'POST /api/shutdown HTTP/1.1\\r\\nHost: paddock\\r\\nContent-Type: application/json\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n' % len(b) + b)\nprint(s.recv(4096).decode())"
+ev("M08", "Hosted forwards end on stop, run replacement, daemon exit (sandbox kept) and SSH loss, leaving no relay on the remote; each side ends a lease the other stops renewing within seventeen seconds", async () => {
   await remoteSandbox()
   const one = async (act: () => Promise<unknown>) => {
     await remotePdk(["list"]); await remoteSandbox()
@@ -2741,37 +2879,83 @@ ev("M08", "Hosted forwards end on stop, run replacement, daemon exit and SSH los
     expect(await until(() => refused(forward.localPort), 17), "hosted listener survived its ending condition")
     return forward
   }
+  const noRelays = async (when: string) => expect(await until(async () => await remoteRelays() === 0, 10), `a transport stdio relay stayed on the fixture after ${when}`)
+  const notes: string[] = []
   await one(() => hosted(["stop", MS]))
   await one(() => remoteDocker(["restart", "-t", "1", containerOf(MS)]))
-  await one(() => remotePdk(["daemon", "stop"]))
+  // An engine restart behind Paddock's back leaves the guest with the engine's resolver; a Paddock start puts it back.
+  await hosted(["stop", MS]); await remoteSandbox()
+  await one(async () => {
+    const said = await remote(["python3", "-c", KEEP, `${remoteDir}/s/daemon.sock`])
+    expect(/"stopping":true/.test(said.out), `the remote daemon did not accept shutdown: ${said.out}${said.err}`)
+  })
+  expect((await remoteInspect(MS)).State.Running, "the remote daemon's exit with keepSandboxes stopped the sandbox")
+  await noRelays("the remote daemon exited")
+  notes.push("stop, run replacement and remote daemon exit (sandbox still running) closed the listener")
   await remotePdk(["list"]); await remoteSandbox()
-  const control = await hostedForward(3123); const before = new Set(await sshStreamPids())
+  // Positive control for the relay count: one forward is one relay on the fixture.
+  const control = await hostedForward(3123)
+  expect(await remoteRelays() === 1, `control: one forward did not show as one relay (${await remoteRelays()})`)
+  const before = new Set(await sshStreamPids())
   let link = 0
   const lost = await hostedForward(3123)
   try {
     const pids = (await sshStreamPids()).filter((pid) => !before.has(pid)); expect(pids.length === 1, `expected one new SSH control stream, saw ${pids}`); link = pids[0]!
-    process.kill(link, "SIGSTOP")
+    process.kill(link, "SIGSTOP"); const stoppedAt = Date.now()
     expect(await until(() => refused(lost.localPort), 17), "silent SSH control survived 17 seconds")
+    notes.push(`a stopped control link closed its listener after ${((Date.now() - stoppedAt) / 1000).toFixed(0)} s`)
     expect(!await refused(control.localPort), "healthy control forward ended")
-    process.kill(link, "SIGCONT"); link = 0
-    await Bun.sleep(2000)
+    expect(await until(async () => !alive(link), 5), "the primary left its stopped ssh process running")
+    link = 0
     expect(await refused(lost.localPort), "SSH recovery recreated the old listener")
-  } finally { if (link) { try { process.kill(link, "SIGCONT"); process.kill(link) } catch {} }; await hosted(["forward", "remove", control.id]) }
+  } finally { if (link) { try { process.kill(link, "SIGCONT"); process.kill(link, "SIGKILL") } catch {} }; await hosted(["forward", "remove", control.id]) }
+  await noRelays("the stopped link and the removed control")
   const killedBefore = new Set(await sshStreamPids()); const killed = await hostedForward(3123)
   const pid = (await sshStreamPids()).find((pid) => !killedBefore.has(pid)); expect(pid, "no SSH process to kill"); process.kill(pid!, "SIGKILL")
   expect(await until(() => refused(killed.localPort), 10), "killed SSH link retained listener")
+  await noRelays("a killed SSH link")
+  // A partition: the primary daemon stopped (SIGSTOP), so it neither renews nor closes; its SSH links stay up.
+  const parted = await hostedForward(3123)
+  expect(await remoteRelays() === 1, "control: the forward's relay is not on the fixture")
+  const primary = (await daemonFile()).pid
+  process.kill(primary, "SIGSTOP"); const partedAt = Date.now(); let partedFor = 0
+  try {
+    expect(await until(async () => await remoteRelays() === 0, 30), "the remote kept the lease of a primary that stopped renewing it for 30 s")
+    partedFor = (Date.now() - partedAt) / 1000
+  } finally { process.kill(primary, "SIGCONT") }
+  expect(partedFor <= 20, `the remote ended the lease after ${partedFor} s, past fifteen seconds plus its two-second check and polling`)
+  expect(await until(() => refused(parted.localPort), 5), "the primary kept the listener of a lease the remote ended")
+  notes.push(`with the primary stopped, the remote ended the lease and its relay exited after ${partedFor.toFixed(0)} s`)
   await one(() => pdk(["daemon", "stop"]))
+  await noRelays("the primary exited")
   await remotePdk(["list"]); await remoteSandbox()
-  return "stop, engine run replacement, remote daemon exit, killed SSH and primary exit closed listeners; SIGSTOP of one control link closed only its listener within 17 s; healthy control stayed open; no automatic recreation"
+  return `${notes.join("; ")}; killed SSH and primary exit closed listeners; no relay was left on the fixture after any of them; a healthy control stayed open; nothing was recreated`
 })
 
-ev("M09", "A remote SSH alias uses the primary editor key and pinned machine/sandbox identity without host listeners; stopped and recreated sandboxes refuse it", async () => {
+ev("M09", "A remote SSH alias uses the primary editor key and pinned machine/sandbox identity without host listeners on either machine; stopped and recreated sandboxes refuse it", async () => {
   await remoteSandbox()
   const setup = await hosted(["ssh", "setup", MS, "--write-config"], { timeoutMs: 300_000 })
   expect(setup.reply.ok && setup.reply.data.alias === `${MS}.${MH}.paddock`, `hosted SSH setup failed: ${setup.out}${setup.err}`)
   const target = setup.reply.data.alias
   const oldConfig = join(tmp, "m09-old-config")
   await writeFile(oldConfig, await readFile(join(env.PADDOCK_STATE_DIR, "ssh", "config")))
+  // Listeners on both machines while a session is open, each beside a listener of this run that they must show.
+  const localListening = async () => (await sh(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-Fn"])).out.split("\n").filter((line) => line.startsWith("n")).sort()
+  const localBefore = await localListening(); const remoteBefore = await remoteListening()
+  const session = Bun.spawn(["ssh", ...sshArgs(), target, "echo up; sleep 8"], { stdout: "pipe", stderr: "pipe" })
+  const localControl = await controlListener("127.0.0.1"); const remoteControl = await remoteListener()
+  let localAdded: string[] = []; let remoteAdded: string[] = []
+  try {
+    const reader = session.stdout.getReader(); let said = ""
+    for (const end = Date.now() + 30_000; !said.includes("up") && Date.now() < end;) { const { value, done } = await reader.read(); if (done) break; said += new TextDecoder().decode(value) }
+    expect(said.includes("up"), `control: the SSH session did not open: ${await new Response(session.stderr).text()}`)
+    const localDuring = await localListening(); const remoteDuring = await remoteListening()
+    expect(localDuring.includes(`n127.0.0.1:${localControl.port}`), "control: lsof did not show this run's local listener")
+    expect(remoteDuring.includes(`127.0.0.1:${remoteControl.port}`), "control: ss did not show this run's fixture listener")
+    localAdded = localDuring.filter((entry) => !localBefore.includes(entry) && entry !== `n127.0.0.1:${localControl.port}`)
+    remoteAdded = remoteDuring.filter((entry) => !remoteBefore.includes(entry) && entry !== `127.0.0.1:${remoteControl.port}`)
+  } finally { localControl.close(); await remoteControl.close(); session.kill(); await session.exited }
+  expect(localAdded.length === 0 && remoteAdded.length === 0, `an open session added listeners: here ${localAdded.join(", ") || "none"}, on the fixture ${remoteAdded.join(", ") || "none"}`)
   const run = await sh(["ssh", ...sshArgs(), target, "id -un; echo $HOME"])
   expect(run.code === 0 && run.out === `${setup.reply.data.user}\n${setup.reply.data.home}\n`, `remote SSH failed: ${run.out}${run.err}`)
   const remoteFiles = await remote(["sh", "-c", 'test ! -e "$1/s/ssh/editor_ed25519" && test ! -e "$1/s/ssh/config"', "check", remoteDir])
@@ -2785,31 +2969,101 @@ ev("M09", "A remote SSH alias uses the primary editor key and pinned machine/san
   await hosted(["remove", MS, "--confirm", MS]); await remoteSandbox()
   const recreated = await sh(["ssh", ...sshArgs(oldConfig), target, "true"])
   expect(recreated.code === 255 && /recreated/.test(recreated.err) && (await remoteInspect(MS)).State.Running, `old alias was not refused by sandbox identity: ${recreated.err}`)
+  return "login and 64 KiB SFTP round trip through the alias; with a session open, lsof here and ss on the fixture each showed this run's control listener and no new one; no editor key on the fixture; stopped and recreated sandboxes refused"
 })
 
-ev("M10", "Malformed remote exit/error frames are rejected without crashing the primary, beside a valid-stream control", async () => {
+ev("M10", "Malformed, oversized and out-of-order remote stream frames and malformed or oversized remote replies are refused without crashing the primary, beside valid controls", async () => {
   await remoteSandbox()
   if ((await remote(["python3", "--version"])).code !== 0) skip("python3 is needed only for the hostile remote byte fixture")
-  const wrapper = `${remoteDir}/hostile-transport`; const script = `${remoteDir}/hostile.py`
-  const write = async (file: string, contents: string) => {
-    const result = await remote(["sh", "-c", 'cat > "$1"; chmod 700 "$1"', "write", file], { stdin: contents })
-    expect(result.code === 0, `could not write the hostile fixture: ${result.err}`)
-  }
-  await write(wrapper, `#!/bin/sh\ncase "$*" in *--stream*) exec python3 ${word(script)};; *) exec ${word(`${remoteDir}/paddock`)} "$@";; esac\n`)
-  const registry = join(env.PADDOCK_CONFIG_DIR, "hosts.json"); const original = await readFile(registry, "utf8"); const daemon = (await daemonFile()).pid
-  try {
-    const data = JSON.parse(original); data.hosts.find((host: { name: string }) => host.name === MH).binary = wrapper
-    await writeFile(registry, JSON.stringify(data))
-    for (const [kind, payload] of [[8, "{"], [9, "{"], [8, '{"code":100000000000000000000}']] as const) {
-      await write(script, `import sys,struct,json\nh=sys.stdin.buffer.read(5)\nn=struct.unpack('!I',h[1:])[0]\nsys.stdin.buffer.read(n)\ndef f(k,b): return bytes([k])+struct.pack('!I',len(b))+b\nsys.stdout.buffer.write(f(2,b'{"tty":false}')+f(${kind},${JSON.stringify(payload)}.encode()))\nsys.stdout.buffer.flush()\nsys.stdin.buffer.read()\n`)
-      const result = await pdk(["--host", MH, "exec", MS, "--stream", "--", "true"], { timeoutMs: 20_000 })
-      expect(result.code === 1 && /Malformed remote/.test(result.err), `malformed frame was not rejected: ${result.code} ${result.out}${result.err}`)
-      expect((await daemonFile()).pid === daemon && (await pdk(["list"])).code === 0, "malformed remote frame crashed or replaced the primary")
+  const wrapper = `${remoteDir}/hostile-transport`; const script = `${remoteDir}/hostile.py`; const relay = `${remoteDir}/relay.py`
+  const daemon = (await daemonFile()).pid
+  const primaryHolds = async (what: string) => expect((await daemonFile()).pid === daemon && (await pdk(["list"])).code === 0, `${what} crashed or replaced the primary`)
+  const head = (kind: number, size: number) => { const out = Buffer.alloc(5); out[0] = kind; out.writeUInt32BE(size, 1); return out }
+  const ready = frame("ready", { tty: false })
+  const streams: Array<[string, Buffer, RegExp]> = [
+    ["exit {", Buffer.concat([ready, frame("exit", "{")]), /Malformed remote/],
+    ["error {", Buffer.concat([ready, frame("error", "{")]), /Malformed remote/],
+    ["exit 1e20", Buffer.concat([ready, frame("exit", '{"code":100000000000000000000}')]), /Malformed remote/],
+    ["a 65,000-character error", Buffer.concat([ready, frame("error", { code: "runtime", message: `${"A".repeat(65_000)}` })]), /^paddock: A{100}/],
+    ["a 4 GiB length header", Buffer.concat([ready, head(4, 0xffffffff)]), /Malformed remote|at most 65536/],
+    ["kind byte 200", Buffer.concat([ready, head(200, 0)]), /Malformed remote|Not a paddock-stream/],
+    ["stdout before ready", Buffer.concat([frame("stdout", "early"), ready]), /did not send ready/],
+  ]
+  const results: string[] = []
+  await remoteWrite(wrapper, `#!/bin/sh\ncase "$*" in *--stream*) exec python3 ${word(script)};; *) exec ${word(`${remoteDir}/paddock`)} "$@";; esac\n`)
+  await withRecord({ binary: wrapper }, async () => {
+    for (const [what, bytes, pattern] of streams) {
+      await remoteWrite(script, `import sys,struct\nh=sys.stdin.buffer.read(5)\nn=struct.unpack('!I',h[1:])[0]\nsys.stdin.buffer.read(n)\nsys.stdout.buffer.write(bytes.fromhex('${bytes.toString("hex")}'))\nsys.stdout.buffer.flush()\nsys.stdin.buffer.read()\n`)
+      const started = Date.now(); const result = await pdk(["--host", MH, "exec", MS, "--stream", "--", "true"], { timeoutMs: 30_000 })
+      expect(result.code !== 0 && result.code !== 124 && pattern.test(result.err) && result.err.length < 4200, `${what} was not refused cleanly: exit ${result.code}, ${result.err.length} bytes: ${result.err.slice(0, 200)}`)
+      await primaryHolds(what)
+      results.push(`${what}: exit ${result.code} in ${((Date.now() - started) / 1000).toFixed(1)} s`)
     }
-  } finally { await writeFile(registry, original) }
+  })
+  // Replies: a relay answers the handshake from the real daemon and then the hostile reply itself.
+  await remoteWrite(relay, `import socket,sys
+mode,path=sys.argv[1],sys.argv[2]
+inp,out=sys.stdin.buffer,sys.stdout.buffer
+def request():
+  head=b''
+  while b'\\r\\n\\r\\n' not in head:
+    c=inp.read(1)
+    if not c: return None
+    head+=c
+  size=int(([l.split(b':')[1] for l in head.split(b'\\r\\n') if l.lower().startswith(b'content-length:')] or [b'0'])[0])
+  return head+inp.read(size)
+while True:
+  raw=request()
+  if raw is None: break
+  if raw.split(b' ')[1]==b'/api/hello':
+    s=socket.socket(socket.AF_UNIX); s.connect(path); s.sendall(raw); got=b''
+    while b'\\r\\n\\r\\n' not in got: got+=s.recv(65536)
+    head,_,body=got.partition(b'\\r\\n\\r\\n')
+    size=int([l.split(b':')[1] for l in head.split(b'\\r\\n') if l.lower().startswith(b'content-length:')][0])
+    while len(body)<size: body+=s.recv(65536)
+    s.close(); out.write(head+b'\\r\\n\\r\\n'+body); out.flush(); continue
+  body={'shape':b'{"ok":true,"data":[{"name":1}]}','json':b'{not json','big':b'{"ok":true,"data":"'+b'x'*(9*1024*1024)+b'"}'}[mode]
+  out.write(b'HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: %d\\r\\n\\r\\n' % len(body)+body); out.flush()
+`)
+  for (const mode of ["shape", "json", "big"]) {
+    await remoteWrite(wrapper, `#!/bin/sh\ncase "$*" in *--stream*) exec ${word(`${remoteDir}/paddock`)} "$@";; *) exec python3 ${word(relay)} ${mode} ${word(`${remoteDir}/s/daemon.sock`)};; esac\n`)
+    await withRecord({ binary: wrapper }, async () => {
+      const read = await pdkJson(["--host", MH, "template", "list"], { timeoutMs: 60_000 })
+      expect(read.code === 8 && read.reply.error?.code === "incompatible", `a ${mode} reply to a read was not refused as incompatible: exit ${read.code} ${read.out.slice(0, 200)}`)
+      const write = await pdkJson(["--host", MH, "stop", MS], { timeoutMs: 60_000 })
+      expect(write.code === 10 && write.reply.error?.code === "outcome-unknown", `a ${mode} reply to a mutation was not outcome-unknown: exit ${write.code} ${write.out.slice(0, 200)}`)
+      if (mode === "big") expect(/8 MiB/.test(read.reply.error!.message) && /8 MiB/.test(write.reply.error!.message), `the oversized replies did not say so: ${read.reply.error?.message} / ${write.reply.error?.message}`)
+      await primaryHolds(`a ${mode} reply`)
+      results.push(`${mode} reply: read exit 8, mutation exit 10`)
+    })
+  }
   const control = await pdk(["--host", MH, "exec", MS, "--stream", "--", "echo", "valid-stream"])
   expect(control.code === 0 && control.out === "valid-stream\n", "valid hosted stream control failed")
+  expect((await hosted(["template", "list"])).code === 0, "valid buffered control failed")
+  return `${results.join("; ")}; the same primary answered after each; valid stream and buffered controls worked`
 })
+
+ev("M11", "Stopping the primary while one of its SSH links is stopped (SIGSTOP) ends within seconds and still stops the local sandboxes whose disk limit it watches", async () => {
+  await remoteSandbox(); await ensure(MS)
+  const watched = engine!.capabilities?.diskLimit === "watched"
+  expect(await running(MS), "control: the local sandbox is not running")
+  const before = new Set(await sshStreamPids()); await hostedForward(3123)
+  const link = (await sshStreamPids()).find((pid) => !before.has(pid)); expect(link, "no SSH link to stop")
+  const primary = (await daemonFile()).pid
+  process.kill(link!, "SIGSTOP")
+  let seconds = 0
+  try {
+    const started = Date.now(); const stop = await pdk(["daemon", "stop"], { timeoutMs: 60_000 })
+    expect(stop.code === 0 && await until(async () => !alive(primary), 15), `daemon stop did not end the primary with a stopped SSH link: exit ${stop.code} ${stop.err}`)
+    seconds = (Date.now() - started) / 1000
+    expect(seconds <= 10, `the primary took ${seconds} s to stop`)
+    expect(!alive(link!), "the stopped ssh process outlived the primary")
+    if (watched) expect(!await running(MS), "a local sandbox whose disk limit only the daemon watches kept running unwatched")
+  } finally { if (alive(link!)) { try { process.kill(link!, "SIGCONT"); process.kill(link!, "SIGKILL") } catch {} }; await pdk(["list"]) }
+  await noRelaysLeft()
+  return `the primary stopped in ${seconds.toFixed(1)} s and killed the stopped ssh; ${watched ? "the local watched sandbox was stopped" : "this engine's disk limit is not watched, so no local sandbox had to stop"}; no relay was left on the fixture`
+})
+const noRelaysLeft = async () => expect(await until(async () => await remoteRelays() === 0, 10), "a transport stdio relay stayed on the fixture")
 
 ev("Z01", "Nothing is left on the engine or this machine when the run ends", async () => {
   // Control: the scan sees this run's daemon while it runs, so an empty scan after teardown means none is left.
