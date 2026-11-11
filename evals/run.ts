@@ -1624,7 +1624,11 @@ ev("W01", "A forward reaches a service on the sandbox's own loopback from this m
   const forward = await forwardAdd(A, NONCE_PORT)
   try {
     expect((await tcpRead("127.0.0.1", forward.localPort)).toString().includes(nonce), `127.0.0.1:${forward.localPort} did not return the sandbox's nonce`)
-    const added = [...await listening()].filter((address) => !before.has(address))
+    // Where the engine's host is this machine (native Linux), the daemon's own loopback listener is among them: a
+    // listener of this run shows whether that is so, and lsof below shows that socket is the daemon's.
+    const control = await controlListener("127.0.0.1")
+    const here = (await listening()).has(`127.0.0.1:${control.port}`); control.close()
+    const added = [...await listening()].filter((address) => !before.has(address) && !(here && address === `127.0.0.1:${forward.localPort}`))
     expect(added.length === 0, `new listeners on the engine's host: ${added.join(", ")}`)
     const engine = await inspect(A)
     const bound = Object.values(engine.NetworkSettings.Ports ?? {}).filter(Boolean)
@@ -1634,7 +1638,7 @@ ev("W01", "A forward reaches a service on the sandbox's own loopback from this m
     expect(own.length === 1 && own[0] === `n127.0.0.1:${forward.localPort}`, `the daemon listens for the forward on ${own.join(", ") || "nothing lsof can see"}`)
     const shown = ((await pdkJson(["verify", A])).reply.data?.checks as Array<{ id: string; status: string; detail: string }> | undefined)?.find((check) => check.id === "forwards")
     expect(shown?.status === "info" && shown.detail.includes(`127.0.0.1:${forward.localPort} to port ${NONCE_PORT} (${forward.id})`), `verify did not disclose the forward: ${shown?.detail}`)
-    return `the nonce came back on 127.0.0.1:${forward.localPort}, the daemon's only socket for it; no port bindings; ${before.size} listeners on the engine's host before and after; verify lists it`
+    return `the nonce came back on 127.0.0.1:${forward.localPort}, the daemon's only socket for it; no port bindings; ${before.size} listeners on the engine's host before and ${here ? "after, apart from the daemon's own, since that host is this machine" : "after"}; verify lists it`
   } finally { await pdk(["forward", "remove", forward.id]) }
 })
 
