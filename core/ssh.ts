@@ -141,7 +141,8 @@ export function parseSshSetup(value: unknown): SshSetup {
     || typeof setup.sshd !== "string" || !setup.sshd.startsWith("/") || /[\x00-\x1f]/.test(setup.sshd) || typeof setup.hostKey !== "string" || !validPublicKey(setup.hostKey)
     || typeof setup.editorKey !== "string" || !/^SHA256:[A-Za-z0-9+/]{43}$/.test(setup.editorKey) || typeof setup.unlocked !== "boolean" || typeof setup.at !== "string" || !Number.isFinite(Date.parse(setup.at))) throw new PaddockError("incompatible", "Invalid remote SSH setup.")
   if (setup.editorKeyOrigin !== undefined && setup.editorKeyOrigin !== "client") throw new PaddockError("incompatible", "Invalid editor key origin.")
-  return { user: setup.user, home: setup.home, sshd: setup.sshd, hostKey: setup.hostKey, editorKey: setup.editorKey, unlocked: setup.unlocked, at: setup.at, ...(setup.editorKeyOrigin === "client" ? { editorKeyOrigin: "client" } : {}) }
+  // Stored as validated: surrounding whitespace (a leading line break) would split its known_hosts line.
+  return { user: setup.user, home: setup.home, sshd: setup.sshd, hostKey: setup.hostKey.trim(), editorKey: setup.editorKey, unlocked: setup.unlocked, at: setup.at, ...(setup.editorKeyOrigin === "client" ? { editorKeyOrigin: "client" } : {}) }
 }
 export async function remoteAliases(dirs: Dirs): Promise<RemoteAlias[]> {
   let value: unknown

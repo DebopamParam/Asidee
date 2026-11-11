@@ -87,5 +87,10 @@ test("remote aliases pin both identities, keep the private key here, coexist wit
   expect(JSON.stringify(await remoteAliases(dirs))).not.toContain("PRIVATE KEY")
   await updateRemoteAlias(dirs, "build")
   expect((await remoteAliases(dirs)).map((entry) => entry.host)).toEqual(["other"])
+  // A key that arrives padded is stored trimmed, so its known_hosts line stays one valid line.
+  const padded = parseSshSetup({ ...setup, hostKey: `\n${KEY}\n` })
+  expect(padded.hostKey).toBe(KEY)
+  await updateRemoteAlias(dirs, "build", "demo", { ...entry, setup: padded })
+  expect((await readFile(join(dirs.state, "ssh", "known_hosts"), "utf8")).split("\n")).toContain(`paddock-${entry.machineId}-${entry.sandboxId} ${KEY}`)
   for (const bad of [{ ...setup, user: "root\nProxyCommand id" }, { ...setup, home: "/root\nBad" }, { ...setup, hostKey: "ssh-rsa AAAA" }]) expect(() => parseSshSetup(bad)).toThrow()
 })
