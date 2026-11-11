@@ -2,10 +2,10 @@
 
 Written by `bun evals/run.ts --write`. Do not edit by hand.
 
-- Paddock 0.3.0 at `e9983b0` plus uncommitted changes
+- Paddock 0.4.0 at `4810160` plus uncommitted changes
 - Engine: OrbStack 29.8.2 (context orbstack), runtime `runsc-sandbox`, disk limit watched
 - Run from darwin arm64 on 2026-11-11
-- **87 of 91 hold, 0 do not, 4 could not be measured here.**
+- **107 of 111 hold, 0 do not, 4 could not be measured here.**
 
 | | Id | Claim | Note |
 |---|---|---|---|
@@ -18,12 +18,12 @@ Written by `bun evals/run.ts --write`. Do not edit by hand.
 | ✓ | H06 | From inside a sandbox, cloud metadata and IPv6 do not answer | no control: nothing listens at these addresses on this machine |
 | ✓ | H07 | The engine object has no host folder, published port, privilege or host namespace |  |
 | ✓ | H08 | The process limit holds: a fork bomb ends at the limit, in failed forks or a killed sandbox, and the engine is unharmed | the sandbox was killed at its limit, and the list says so |
-| ✓ | H09 | The memory limit holds: a process that passes it is killed, not the engine | exit 128; the sandbox is stopped (Killed by the engine at 2026-11-11 01:12 UTC: it passed its memory limit of 1 GB.) |
+| ✓ | H09 | The memory limit holds: a process that passes it is killed, not the engine | exit 128; the sandbox is stopped (Killed by the engine at 2026-11-11 02:47 UTC: it passed its memory limit of 1 GB.) |
 | ✓ | H10 | A sandbox killed by its memory limit says so in the list |  |
 | ✓ | H11 | The disk limit is what the checklist says: a sandbox past it is stopped within a minute | watched: stopped 2 s after the write ended |
 | ✓ | H12 | The disclosures are true: internet access and the logins found inside |  |
 | ✓ | H14 | Two sandboxes verified at the same moment are both probed, not one of them waved through |  |
-| ✓ | I01 | NET_ADMIN and SYS_ADMIN are inclusion-minimal for copy-on-write pull, run, HTTPS and build | none: bridge creation denied; SYS_ADMIN: bridge creation denied; NET_ADMIN: overlayfs image extraction denied (ounts/containerd-mount2750775135: operation not permitted: failed to mount /var/lib/docker/containerd/daemon/tmpmounts/containerd-mount2750775135: mount source: "/var/lib/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/2/fs", target: "/var/lib/docker/containerd/daemon/tmpmounts/containerd-mount2750775135", fstype: bind, flags: 20480, data: "", err: operation not permitted); NET_ADMIN+SYS_ADMIN: overlayfs, pull, run, HTTPS, one-RUN build and its output passed. Relative to Docker's unchanged defaults, this image and engine; no other additions needed. |
+| ✓ | I01 | NET_ADMIN and SYS_ADMIN are inclusion-minimal for copy-on-write pull, run, HTTPS and build | none: bridge creation denied; SYS_ADMIN: bridge creation denied; NET_ADMIN: overlayfs image extraction denied (ounts/containerd-mount3715387422: operation not permitted: failed to mount /var/lib/docker/containerd/daemon/tmpmounts/containerd-mount3715387422: mount source: "/var/lib/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/2/fs", target: "/var/lib/docker/containerd/daemon/tmpmounts/containerd-mount3715387422", fstype: bind, flags: 20480, data: "", err: operation not permitted); NET_ADMIN+SYS_ADMIN: overlayfs, pull, run, HTTPS, one-RUN build and its output passed. Relative to Docker's unchanged defaults, this image and engine; no other additions needed. |
 | ✓ | I02 | An inner container runs a small image and reaches the internet over HTTPS |  |
 | ✓ | I03 | An inner container cannot reach the engine's host, with working controls | 192.168.148.1; the host reached every listener, and the same inner probes connected with the guard removed |
 | ✓ | I04 | An inner container cannot reach the other sandbox, with working controls | 192.168.147.2; the host reached every listener, and the same inner probes connected with the guard removed |
@@ -31,7 +31,7 @@ Written by `bun evals/run.ts --write`. Do not edit by hand.
 | ✓ | I06 | The checklist includes live network attempts from an inner container |  |
 | ✓ | I07 | Inner Docker survives stop/start, a daemon enforce pass, and a daemon restart; its death stops the sandbox |  |
 | ✓ | I08 | An inner container cannot exceed the sandbox's memory limit, even with its own privileged mode | bounded 16 MiB control passed; hog exit 128; outer OOMKilled=true under 1 GiB despite an inner 2 GiB limit |
-| ✓ | I09 | Inner image pulls and writes are measured outside the sandbox, and the disk watch stops excess use | image pull +6103040 B; inner write +1377808384 B; daemon stopped the 1 GiB sandbox for disk use |
+| ✓ | I09 | Inner image pulls and writes are measured outside the sandbox, and the disk watch stops excess use | image pull +6094848 B; inner write +1377820672 B; daemon stopped the 1 GiB sandbox for disk use |
 | ✓ | I10 | A Docker sandbox with an extra capability or privileged mode is refused at start and stopped if running |  |
 | ✓ | I11 | Without --docker, no capabilities are added and even root cannot start the inner daemon | no CapAdd (Docker mode adds exactly NET_ADMIN + SYS_ADMIN); Paddock's dockerd start command fails with a permission error even as root |
 | ✓ | I12 | The docker default is a strict boolean and cannot smuggle engine flags |  |
@@ -44,11 +44,11 @@ Written by `bun evals/run.ts --write`. Do not edit by hand.
 | ✓ | I19 | Verify removes a probe image it loaded and preserves a pre-existing probe image and user tags | absent before -> absent after; present before -> same image ID after; alpine:latest user tag preserved; all network probes passed in both cases |
 | ✓ | I20 | Verify on a nearly full sandbox reports unknown with a disk reason and loads no probe image | 1047920640 B used of 1 GiB; all four network results unknown with the 64 MiB headroom reason; no image loaded, no crash |
 | ✓ | I21 | Repeated start keeps one NAT rule, segmentation at one, and an inner HTTPS workload running | three starts: identical NAT rules (one masquerade), gso_max_segs=1, same inner StartedAt, HTTPS successes before and after without failure |
-| ✓ | I22 | Host daemon logs rotate within two 10 MiB files; a replacement with a larger cap fails the config check | max-size=1g control (writable layer unchanged): host log 37703419 -> 75405107 B after two 8 MiB writes, merged options {"max-file":"5","max-size":"1g"}; Paddock's sandbox: 15508829, 10916577 B after two 16 MiB writes; a 1g cap refused at start |
-| ✓ | I23 | A sandbox without Docker cannot grow its host log past two 10 MiB files by writing to its own output; a larger cap fails the config check | max-size=1g control (writable layer unchanged): host log 37703419 -> 75405107 B after two 8 MiB writes, merged options {"max-file":"5","max-size":"1g"}; a sandbox without Docker, as root through paddock exec: 15406185, 10814249 B after two 16 MiB writes; a 1g cap refused at start |
-| ✓ | I24 | Verify needs no registry: with the inner Docker cut off from Docker Hub, it probes from the engine's helper image, by that image's ID | registry blocked (pull: connection refused at 0.0.0.0:443; HTTPS from the sandbox: 200); all three network checks probed; 8 inner probe containers, all from sha256:1144603f73b4…, the engine's helper; loaded image removed afterwards; an impostor under the same name made the checks unknown and was kept |
+| ✓ | I22 | Host daemon logs rotate within two 10 MiB files; a replacement with a larger cap fails the config check | max-size=1g control (writable layer unchanged): host log 37703395 -> 75406529 B after two 8 MiB writes, merged options {"max-file":"5","max-size":"1g"}; Paddock's sandbox: 15513010, 10919712 B after two 16 MiB writes; a 1g cap refused at start |
+| ✓ | I23 | A sandbox without Docker cannot grow its host log past two 10 MiB files by writing to its own output; a larger cap fails the config check | max-size=1g control (writable layer unchanged): host log 37703395 -> 75406529 B after two 8 MiB writes, merged options {"max-file":"5","max-size":"1g"}; a sandbox without Docker, as root through paddock exec: 15405454, 10813114 B after two 16 MiB writes; a 1g cap refused at start |
+| ✓ | I24 | Verify needs no registry: with the inner Docker cut off from Docker Hub, it probes from the engine's helper image, by that image's ID | registry blocked (pull: connection refused at 0.0.0.0:443; HTTPS from the sandbox: 200); all three network checks probed; 8 inner probe containers, all from sha256:25c86c26a7a8…, the engine's helper; loaded image removed afterwards; an impostor under the same name made the checks unknown and was kept |
 | ✓ | T01 | The evals can see an open path: with the guard removed, the same attempts connect |  |
-| ✓ | T02 | A removed guard is noticed without anyone asking: the daemon stops the sandbox within a minute | stopped after 14 s |
+| ✓ | T02 | A removed guard is noticed without anyone asking: the daemon stops the sandbox within a minute | stopped after 13 s |
 | ✓ | T03 | Starting a sandbox puts the guard back, and the paths are closed again |  |
 | ✓ | T04 | A rule slipped in front of the guard's drops fails verify, with exit code 6, and stops the sandbox |  |
 | ✓ | T05 | A sandbox attached to a second network behind Paddock's back is stopped |  |
@@ -82,8 +82,28 @@ Written by `bun evals/run.ts --write`. Do not edit by hand.
 | ✓ | U08 | A state folder whose path is too long for a socket is refused with a message that says so |  |
 | ✓ | U09 | A sandbox is usable: names resolve, HTTPS works, files survive a stop and start, and a 31-character name is fine |  |
 | ✓ | U10 | exec carries large output and a non-zero exit through unchanged |  |
-| ✓ | U12 | exec output past 16 MiB is refused with an error that names the limit, the command is ended, and the daemon keeps answering | exactly 16 MiB returned whole; 16 MiB+ on stdout, on stderr, and 1 GiB on stdout each refused naming the limit; no flooding process left running; same daemon (pid 5954, 163 MiB resident) answered list |
+| ✓ | U12 | exec output past 16 MiB is refused with an error that names the limit, the command is ended, and the daemon keeps answering | exactly 16 MiB returned whole; 16 MiB+ on stdout, on stderr, and 1 GiB on stdout each refused naming the limit; no flooding process left running; same daemon (pid 15672, 165 MiB resident) answered list |
 | ✓ | U11 | The default image (no --image) makes a sandbox that passes every blocking check |  |
+| ✓ | S01 | exec --stream carries 256 MiB of random bytes each way unchanged, and the daemon's memory stays bounded | guest and host hashes match for 256 MiB each way; daemon 165 MiB before, 168 MiB at most |
+| ✓ | S02 | exec --stream keeps stderr apart, returns the exit code, and delivers end of input |  |
+| ✓ | S03 | `paddock shell` has a terminal of this one's size that follows resizes, Ctrl-C reaches the sandbox, and the terminal is restored | 30×100 inside, 40×120 after a resize; Ctrl-C ended sleep 600; exit 7 came through; icanon, isig and echo back on |
+| ✓ | S04 | A session ends when its sandbox is stopped, and a stopped sandbox is refused, not started | exec session ended 0.2 s after stop with "paddock: The session ended: evqw89-a was stopped."; the shell ended too, with its terminal restored; a new session was refused and the sandbox stayed stopped |
+| ✓ | S05 | Sessions are offered only on the daemon's private socket: the dashboard's port and token cannot open one | raw frames: ready on stream.sock (mode 600), none on 127.0.0.1:57465; six session-like paths 404 with the token; the daemon's only TCP listener is the dashboard's |
+| ✓ | S06 | A reader that stops reading holds the command in the sandbox back, not the daemon's memory | 1 GiB read at once in 20.0 s; with the reader asleep 61 s the command was still running 58 s in, and all 1 GiB came after; daemon 170 MiB before, 171 MiB at most |
+| ✓ | W01 | A forward reaches a service on the sandbox's own loopback from this machine's loopback, the engine publishes nothing, its host gets no new listener, and verify shows the forward | the nonce came back on 127.0.0.1:58678, the daemon's only socket for it; no port bindings; 3 listeners on the engine's host before and after; verify lists it |
+| ✓ | W02 | A forward answers on no other address: not this machine's others, not the engine host's, where a control listener does | refused at 192.168.0.7, 192.168.139.3, 100.109.134.80 on this machine (of 6) and 0.250.250.65, 192.168.139.2, 192.168.117.1, 192.168.107.1, 192.168.215.1, 192.168.97.1, 192.168.147.1, 192.168.148.1 on the engine's host, where the control listeners answered |
+| ✓ | W03 | Like any loopback service here, a forward is reachable from the engine's host through the engine's relay to this machine (OrbStack's host.docker.internal), and not from another sandbox | from the engine's host, 0.250.250.254 reached a loopback-only listener and the forward alike; a plain container reached the forward too; another sandbox reached neither |
+| ✓ | W04 | A forward ends when it is removed, when its sandbox stops or is restarted behind Paddock's back, and when the daemon exits | each listener was gone within 10 s and left forward list |
+| ✓ | W05 | A sandbox recreated under the same name does not inherit its forward | the old port refused and the list was empty after recreating; a new forward has a new sandbox id |
+| ✓ | W06 | An explicit local port that is in use is refused and nothing is recorded; once free, the same request binds it | 127.0.0.1:58740 in use: exit 4, "127.0.0.1:58740 is already in use on this machine. Choose another --local-port, or leave it out to get a free one."; free: bound |
+| ✓ | W07 | A forward carries 64 MiB of random bytes each way unchanged, and passes on end of input | 64 MiB in and back with the same hash, the echo ending only after end of input; daemon 54 MiB before, 85 MiB at most |
+| ✓ | W08 | A forward relays 50 connections at once, each with its own bytes, and leaves no relay running | 50 × 256 KiB echoed exactly in 3.3 s; afterwards no open connection and no relay process |
+| ✓ | A01 | After `paddock ssh setup`, `ssh NAME.paddock` logs in without asking anything, as exec's user, with no new listener here or on the engine's host | logged in as root, home /root, like exec; the Include was written only with --write-config, once, first; while a session was open, the engine host had the same 3 listeners, the daemon the same, ssh and its ProxyCommand none |
+| ✓ | A02 | Files go to and from a sandbox over scp and SFTP unchanged | 4 MiB of random bytes, in and out by scp and by SFTP, with the same hash here and inside |
+| ✓ | A03 | ssh -L reaches a service on the sandbox's loopback, and nothing else; no agent is forwarded | the nonce came through ssh -L; the sandbox's own 192.168.97.2, where it reaches the same service itself, was refused by sshd; a client asking to forward its agent got none |
+| ✓ | A04 | A client key other than this machine's editor key is refused | the editor key logged in; a new key with the same alias got "root@evqw89-a.paddock: Permission denied (publickey)." |
+| ✓ | A05 | A sandbox recreated under the same name is not trusted as the old one: an old alias fails, and its old host key fails verification after setup, until the new files are used | before setup the old alias was refused (not set up); after it, the old host key failed verification; the new files logged in |
+| ✓ | A06 | ssh to a stopped sandbox is refused and leaves it stopped | "paddock: evqw89-a is not running. Start it with `paddock start evqw89-a`."; still stopped 3 s later; sshAccess not ready |
 | ✓ | D01 | After the daemon is killed, the next command starts a new one that still knows every sandbox |  |
 | ✓ | D02 | Two creates of one name at the same moment: one succeeds, one is refused, and the list still answers |  |
 | ✓ | D03 | A second daemon refuses to run beside the first |  |

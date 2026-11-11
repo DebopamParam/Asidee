@@ -13,6 +13,7 @@ export const CHECKLIST: readonly ChecklistItem[] = [
   { id: "network-guard", title: "On a network of its own, with the guard loaded", stage: "config", blocking: true },
   { id: "inbound", title: "No engine-published ports; requested forwards are loopback-only", stage: "config", blocking: true },
   { id: "forwards", title: "Forwards to this machine's loopback", stage: "config", blocking: false },
+  { id: "ssh", title: "SSH access for editors", stage: "config", blocking: false },
   { id: "limits", title: "Memory, process and CPU limits are set", stage: "config", blocking: true },
   { id: "disk", title: "Disk use is limited", stage: "config", blocking: false },
   { id: "net-host", title: "Cannot reach the host", stage: "probe", blocking: true },

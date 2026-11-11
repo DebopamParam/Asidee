@@ -9,6 +9,7 @@ import type { SandboxView } from "../core/core"
 import { BUILD, readDaemonFile, runDaemon, VERSION } from "../core/daemon"
 import type { Extension } from "../core/extensions"
 import type { ForwardView } from "../core/forwards"
+import type { SshAccess } from "../core/ssh"
 import { checkSocketPath, defaultDirs, socketPath, streamSocketPath } from "../core/state"
 import { dataFrames, frame, FrameReader, type OpenRequest } from "../core/stream"
 import { PaddockError, type CheckResult, type Engine, type ErrorCode, type RunResult } from "../core/types"
@@ -27,6 +28,8 @@ const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, 
   paddock shell NAME [-- COMMAND…]
   paddock forward add NAME --port PORT [--local-port PORT]   127.0.0.1 here to PORT on the sandbox's loopback
   paddock forward list [NAME] | forward remove ID            a forward ends when its sandbox stops
+  paddock ssh setup NAME [--write-config]   sshd inside, reached as NAME.paddock through the daemon, no port
+  paddock ssh access NAME                   the alias, user and home an editor uses, and whether it is ready
   paddock remove NAME --confirm NAME
   paddock ext list
   paddock ext run EXTENSION ACTION [SANDBOX] [--set FIELD=VALUE]…
@@ -108,7 +111,8 @@ async function session(request: OpenRequest): Promise<never> {
     if (message) process.stderr.write(`${raw ? "\r\n" : ""}paddock: ${message}\n`)
     process.exit(code)
   }
-  for (const signal of ["SIGTERM", "SIGHUP"] as const) process.on(signal, () => void leave(129, "the session was interrupted."))
+  // ssh ends its ProxyCommand with a hangup once it is done, which is not worth a word.
+  for (const signal of ["SIGTERM", "SIGHUP"] as const) process.on(signal, () => void leave(129, request.kind === "ssh" ? undefined : "the session was interrupted."))
   const out = (stream: NodeJS.WriteStream, bytes: Uint8Array) => {
     wrote = new Promise((resolve) => { if (!stream.write(bytes, resolve)) { socket.pause(); stream.once("drain", () => socket.resume()) } })
   }
@@ -261,6 +265,22 @@ async function main(argv: string[]): Promise<void> {
           return out(closed, () => console.log(`Closed forward ${closed.closed}.`))
         }
         throw new PaddockError("usage", "Use `paddock forward add NAME --port PORT`, `paddock forward list [NAME]` or `paddock forward remove ID`.")
+      }
+      case "ssh": {
+        const { values, positionals } = parse({ "write-config": { type: "boolean" } }, rest.slice(1))
+        // The ProxyCommand an alias runs; ssh speaks through this process's stdin and stdout.
+        if (rest[0] === "proxy") return await session({ kind: "ssh", name: need(positionals[0], "a name") })
+        if (rest[0] === "setup") {
+          const done = await call<SshAccess & { config: string; include: string; included: boolean; editorKey: string; keyFile: string }>("sshSetup", { name: need(positionals[0], "a name"), writeConfig: values["write-config"] === true }, positionals[0])
+          return out(done, () => console.log(done.included
+            ? `\`ssh ${done.alias}\` logs in as ${done.user} with the key ${done.editorKey} (${done.keyFile}).`
+            : `Set up. Add this line at the top of ${done.config}, or run again with --write-config:\n  ${done.include}\nThen \`ssh ${done.alias}\` logs in as ${done.user} with the key ${done.editorKey}.`))
+        }
+        if (rest[0] === "access") {
+          const access = await call<SshAccess>("sshAccess", { name: need(positionals[0], "a name") })
+          return out(access, () => console.log(`${access.alias}: ${access.user ? `${access.user}, home ${access.home}` : "not set up"}; ${access.batchReady ? "ready" : "not ready"}`))
+        }
+        throw new PaddockError("usage", "Use `paddock ssh setup NAME [--write-config]` or `paddock ssh access NAME`.")
       }
       case "ext": {
         if (rest[0] === "list" || rest[0] === undefined) {

@@ -29,6 +29,7 @@ out as "could not be checked", never as a pass.
 | Own network, guard loaded | yes | before start | Engine configuration, and the loaded firewall rules compared rule for rule with the shipped ones. |
 | No engine-published ports; requested forwards are loopback-only | yes | before start | Engine configuration. Forwards are the daemon's, not the engine's. |
 | Forwards to this machine's loopback | no | before start | Checked by the core: each active forward's address, its port inside, and its id; a disclosure. |
+| SSH access for editors | no | before start | Checked by the core: whether `paddock ssh setup` was run for this sandbox, its user, and the editor key's fingerprint; a disclosure. |
 | Memory, process, CPU limits | yes | before start | Engine configuration, including json-file host log rotation (10 MiB, two files) for every sandbox. |
 | Disk limit | no | before start | The engine's capability: hard, watched or none. Watched needs a runtime with `--overlay2=none`. |
 | Cannot reach the host | yes | verify | Live probe with controls. |
@@ -188,12 +189,42 @@ ending condition, an engine restart included. W05: a recreated name had no forwa
 was refused with exit 4 and nothing recorded. W07: 64 MiB of random bytes each way came back with the same hash. W08:
 50 connections at once each got their own 256 KiB back, and no relay process was left.
 
+### SSH for editors
+
+`paddock ssh setup NAME` runs a script as root inside the running sandbox (`GUEST_SETUP` in `core/ssh.ts`). It
+installs OpenSSH's server with apk, apt-get or dnf when the image has none, makes a new Ed25519 host key in
+`/.paddock/ssh`, and writes a configuration there that accepts only this machine's editor key, for exec's user
+only, with no password, keyboard-interactive, agent, X11, tunnel, remote or Unix-socket forwarding, and local
+forwarding only to the sandbox's own `127.0.0.1` and `localhost`. The user's own `~/.ssh` inside is not read. sshd
+refuses an account whose password is locked, so a leading `!` is replaced by `*` (still no password), and the
+checklist says so. The editor key pair is made once with `ssh-keygen` in the state folder's `ssh/` (mode 0700) and
+only its public half leaves it. The core then writes `ssh/config`, an alias per set-up sandbox, and `ssh/known_hosts`,
+its host key under `HostKeyAlias paddock-ID`, where ID is the sandbox's own id. The alias has
+`StrictHostKeyChecking yes`, `IdentitiesOnly yes`, `IdentityAgent none`, `ForwardAgent no` and `GatewayPorts no`
+(an `ssh -L` listens on this machine's loopback only), and its ProxyCommand
+is this executable by absolute path, `ssh proxy NAME`, with the state and config folders set. That command opens an
+`ssh` session on `stream.sock`, and the daemon runs `sshd -i` as root in the sandbox for that one connection; a
+stopped sandbox is refused and not started. `--write-config` puts `Include` and the file's path first in
+`~/.ssh/config` (`PADDOCK_SSH_CONFIG` names another file), once; without it the line is printed. A link there is
+refused rather than replaced. Removing a sandbox removes its alias and host key. `sshAccess` reports the alias, the
+user and home, and `batchReady` (set up, running, and included). A01: `ssh NAME.paddock` logged in as exec's user
+and home, without a prompt; while a session was open the engine's host, the daemon, ssh and its ProxyCommand had no
+new listener. A02: 4 MiB went in and out by scp and by SFTP with the same hash. A03: `ssh -L` reached a service on
+the sandbox's loopback; a tunnel to the sandbox's own network address, where the sandbox reached the same kind of
+service itself, was refused by sshd; a client asking to forward its agent got none. A04: another key with the same
+alias was refused. A05: after removing and recreating the name, the old alias was refused before setup and failed host
+key verification after it; the new files logged in. A06: SSH to a stopped sandbox failed and it stayed stopped.
+
 ## Where the guarantee ends
 
 - **A forward is open to this machine.** It listens on loopback, which every process of every user here can connect
   to, as can anything the engine relays to this machine's loopback. On OrbStack, `host.docker.internal` from the
   engine's host and from ordinary containers arrives at this machine's 127.0.0.1, so they reach a forward as they
   reach any loopback service (W03). Sandboxes do not: their guard blocks that address.
+- **The editor key logs in.** Anything that can read `ssh/editor_ed25519` in the state folder, which is anything
+  running as you, can log in to every sandbox set up for SSH as its user, run any command there, copy files in and out,
+  and reach the sandbox's loopback with `ssh -L`. It cannot reach this machine or other addresses through sshd. The
+  sandbox's own limits and guard still apply to what it runs.
 
 - **Something with your rights on this machine can change Paddock itself.** An agent running outside a sandbox, or an
   extension's command, runs as you. It could edit the core or call the engine directly. The checks catch a
@@ -228,10 +259,11 @@ and networks an interrupted verify left behind. A daemon that is stopping refuse
 finish, so a second daemon never runs beside it. It listens on:
 
 - a Unix socket in the state folder (mode 0600), used by the CLI;
-- a second one, `stream.sock` (mode 0600), for sessions only;
+- a second one, `stream.sock` (mode 0600), for sessions only, including the ones `ssh NAME.paddock` opens;
 - `127.0.0.1` at each forward's port, relayed to the sandbox and nothing else;
 - `127.0.0.1` on port 7717 (or a free port), used by the dashboard. Requests need the token from `paddock ui` and a
-  `Host` header naming this server. `shutdown` and sessions are not available here.
+  `Host` header naming this server. `shutdown`, `sshSetup` (it can change `~/.ssh/config`) and sessions are not
+  available here.
 
 State is in `~/.local/state/paddock`, configuration in `~/.config/paddock` (`PADDOCK_STATE_DIR`, `PADDOCK_CONFIG_DIR`).
 

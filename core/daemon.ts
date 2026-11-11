@@ -48,6 +48,9 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     forwardAdd: { run: (body) => core.forwardAdd(String(body.name), body.port, body.localPort) },
     forwardList: { run: async (body) => core.forwardList(body.name) },
     forwardRemove: { run: async (body) => core.forwardRemove(body.id) },
+    sshAccess: { run: (body) => core.sshAccess(String(body.name)) },
+    // It writes to the user's SSH configuration, so a web page cannot ask for it.
+    sshSetup: { run: (body) => core.sshSetup(String(body.name), body.writeConfig === true), socketOnly: true },
     shutdown: { run: async (body) => { setTimeout(() => shutdown(body.keepSandboxes === true), 50); return { stopping: true } }, socketOnly: true },
   }
 }

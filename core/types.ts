@@ -38,7 +38,7 @@ export type Engine = {
 }
 
 export type CheckId =
-  | "kernel" | "hardening" | "mounts" | "network-guard" | "inbound" | "forwards" | "limits" | "disk" | "docker"
+  | "kernel" | "hardening" | "mounts" | "network-guard" | "inbound" | "forwards" | "ssh" | "limits" | "disk" | "docker"
   | "net-host" | "net-peers" | "net-private" | "egress" | "credentials"
 
 // pass: holds. weak: holds in a weaker form than the title says (the detail says how). fail: does not hold.
@@ -61,7 +61,13 @@ export type Manifest = {
   createdAt: string
   lastVerify?: { at: string; results: CheckResult[] }
   stopReason?: string
+  // Set by `paddock ssh setup` for this sandbox; a sandbox recreated under the name starts without it.
+  ssh?: SshSetup
 }
+// user and home: the login, the same as exec's. unlocked: its locked password was replaced by * (still no password),
+// since sshd refuses a locked account even with a key. hostKey: the public half of the key made inside. editorKey: the
+// fingerprint of the key this machine's editors log in with.
+export type SshSetup = { user: string; home: string; unlocked: boolean; sshd: string; hostKey: string; editorKey: string; at: string }
 
 // overflow: the command printed more than its output limit on that stream, was killed, and its output was discarded.
 // raw: stdout's bytes, when asked for with `binary`.

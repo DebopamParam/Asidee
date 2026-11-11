@@ -22,6 +22,8 @@ paddock exec NAME --stream -- COMMAND ARG…  # raw bytes in and out, no size li
 paddock start NAME | paddock stop NAME
 paddock forward add NAME --port P [--local-port L]  # 127.0.0.1:L here to 127.0.0.1:P in the sandbox
 paddock forward list [NAME] | paddock forward remove ID
+paddock ssh setup NAME [--write-config]     # then `ssh NAME.paddock`; ask the user before --write-config
+paddock ssh access NAME                     # alias, user, home, and whether ssh would log in now
 paddock verify NAME                         # exit 6 if a blocking check failed
 paddock remove NAME --confirm NAME          # deletes everything in it; ask the user first
 ```
@@ -57,6 +59,11 @@ Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing depende
   is removed, when the sandbox stops, restarts or is removed, and when the daemon stops; add it again after a restart.
   Any process on this machine can connect to it, and on OrbStack so can the engine's host and its other containers.
   Remove a forward when you are done with it.
+- `paddock ssh setup NAME` is for editors and tools that speak SSH. It installs OpenSSH's server from the image's
+  package manager when it has none (the sandbox needs internet for that), and opens no port. `ssh NAME.paddock` logs in
+  as exec's user and allows `ssh -L` only to the sandbox's loopback. Running setup again makes a new host key. The
+  `--write-config` flag changes the user's `~/.ssh/config` (one `Include` line at the top), so ask first. A stopped
+  sandbox refuses SSH and is not started by it.
 
 ## Customizing Paddock
 
@@ -98,7 +105,7 @@ Copy the built-in page (`ui/index.html` in the Paddock source) to `~/.config/pad
 Other files in that folder are served next to it. The page calls `POST /api/METHOD` with a JSON body and the header
 `Authorization: Bearer TOKEN`; it reads the token from the `#token=` part of the link `paddock ui` prints. Methods:
 `checklist`, `engines`, `list`, `get`, `create`, `start`, `stop`, `remove`, `verify`, `exec`, `forwardAdd`, `forwardList`,
-`forwardRemove`, `extensions`, `action`.
+`forwardRemove`, `sshAccess`, `extensions`, `action`.
 
 Keep showing each check's status and detail as the API returns them.
 

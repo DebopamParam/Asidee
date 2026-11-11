@@ -35,13 +35,17 @@ There is still a race between that check and rename; eliminating it requires coo
 No credentials or subprocess diagnostics are printed. The sidecar records both generations before settings
 publication so retries recover ownership after an interrupted update. No extension metadata is added to T3 settings.
 
-## Needs from the core
+## SSH access
 
-Setup can prepare files today. Connecting the desktop app still needs a core-owned SSH API, for example
-`sshAccess({name}) -> {alias: string, user: string, home: string, batchReady: boolean, loopbackForwarding: boolean}`.
-The alias must connect noninteractively without agent forwarding, use the same guest user/HOME as `exec`, and allow
-SSH local forwarding to guest loopback for `t3 serve`. Forwarding must bind the client side to loopback. The core
-must own the access lifecycle and its checklist evidence. This extension neither creates an alias nor publishes a port.
+The core owns it: `paddock ssh setup NAME` prepares it, `--write-config` adds its `Include` line to `~/.ssh/config`,
+and the checklist discloses it. Setup's result carries the core's `sshAccess`, and `bun extensions/t3/t3.ts ssh NAME`
+(or the dashboard's "Show SSH access for T3") prints it alone: `{alias, user, home, batchReady, loopbackForwarding}`,
+each field checked. Connect the desktop app to `alias` once `batchReady` is true. The alias logs in without a prompt
+and without agent forwarding, as the same user and HOME as `exec`, and allows `ssh -L` to the sandbox's loopback for
+`t3 serve`; its `GatewayPorts no` keeps the client side on loopback. This extension neither creates an alias nor
+publishes a port.
+
+## Needs from the core
 
 A future login event such as `loginChanged({name, agent, profile, operation: "import"|"logout"})` would let clients refresh
 providers and select the last imported profile automatically. Today use `sync` explicitly. This is client coordination,
@@ -57,4 +61,5 @@ credential files in the guest, sync selected a named Claude profile and the cano
 symlinked credential file, set Claude's empty `ANTHROPIC_API_KEY`, removed the Codex instance after its file was
 deleted, kept a user-added instance and top-level key, and refused invalid settings without changing them.
 Not checked live: a checksum mismatch (unit tests only), provider authentication, the desktop app reusing the runtime,
-and connecting the app: the core has no SSH access yet.
+and connecting the app over the alias. The alias itself was checked with ssh, scp, SFTP and `ssh -L` (the core's A
+evals), and `t3.ts ssh` printed its access for a sandbox on the default image.

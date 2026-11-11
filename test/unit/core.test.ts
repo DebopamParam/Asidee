@@ -47,7 +47,7 @@ async function core(provider: Provider) {
 
 test("a check the provider does not report is unknown, never a pass", () => {
   const results = complete([pass("hardening")], ["config"])
-  expect(results.map((entry) => entry.id)).toEqual(["hardening", "mounts", "network-guard", "inbound", "forwards", "limits", "disk"])
+  expect(results.map((entry) => entry.id)).toEqual(["hardening", "mounts", "network-guard", "inbound", "forwards", "ssh", "limits", "disk"])
   expect(results.find((entry) => entry.id === "mounts")!.status).toBe("unknown")
   expect(blockers(results).map((entry) => entry.id)).toEqual(["mounts", "network-guard", "inbound", "limits"])
 })

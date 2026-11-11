@@ -4,6 +4,7 @@ import { blockers, complete, failures, titleOf } from "./checks"
 import { fieldValues, loadExtensions, runCommand } from "./extensions"
 import { boundPort, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
 import { OUTPUT_LIMIT } from "./run"
+import { addInclude, alias, editorKey, GUEST_SETUP, GUEST_SSH, includeLine, included, parseGuestSetup, userConfig, writeClientFiles, type SshAccess } from "./ssh"
 import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSpec, writeManifest, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
 import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage } from "./types"
@@ -11,7 +12,7 @@ import { PaddockError, type CheckResult, type Engine, type Manifest, type Provid
 // A running sandbox is stopped when a blocking check could not be made this many timer passes in a row.
 export const UNCHECKED_PASSES = 4
 // Checks the core answers from what it holds itself; a provider's answer for them is ignored.
-const CORE_CHECKS = new Set<CheckResult["id"]>(["forwards"])
+const CORE_CHECKS = new Set<CheckResult["id"]>(["forwards", "ssh"])
 
 export type SandboxView = {
   // damaged: its state file cannot be read; stopReason says what is wrong with it.
@@ -76,7 +77,7 @@ export class Core {
       if (stage !== "config" && !running) continue
       results.push(...(await provider.checks(manifest, stage)).filter((result) => !CORE_CHECKS.has(result.id)))
     }
-    if (stages.includes("config")) results.push(this.forwardCheck(manifest))
+    if (stages.includes("config")) results.push(this.forwardCheck(manifest), this.sshCheck(manifest))
     return complete(results, stages, running ? undefined : "Not checked: the sandbox is not running.")
   }
 
@@ -182,6 +183,7 @@ export class Core {
       this.activity.set(name, "Removing")
       this.endSessions(name, `The session ended: ${name} was removed.`)
       await this.provider(manifest).remove(manifest); await deleteManifest(this.dirs, name)
+      if (manifest.ssh) await writeClientFiles(this.dirs, await listManifests(this.dirs))
       return { removed: name }
     })
   }
@@ -208,8 +210,10 @@ export class Core {
     const manifest = await readManifest(this.dirs, request.name); const provider = this.provider(manifest)
     if (manifest.engine.capabilities?.execStream === false) throw new PaddockError("dependency", `${manifest.engine.label} cannot relay a session's bytes.`)
     if ((await provider.status(manifest)) !== "running") throw new PaddockError("conflict", `${request.name} is not running. Start it with \`paddock start ${request.name}\`.`)
-    if (request.kind !== "exec") throw new PaddockError("usage", `${request.kind} sessions are not available.`)
-    const session = await provider.openExec(manifest, request.argv, request)
+    // sshd in inetd mode serves this one connection; -e sends its complaints to the client's stderr.
+    if (request.kind === "ssh" && !manifest.ssh) throw new PaddockError("conflict", `SSH is not set up for ${request.name}. Run \`paddock ssh setup ${request.name}\`.`)
+    const session = request.kind === "ssh" ? await provider.openExec(manifest, [manifest.ssh!.sshd, "-i", "-e", "-f", `${GUEST_SSH}/sshd_config`], { user: "0", tty: false })
+      : await provider.openExec(manifest, request.argv, request)
     const open = this.sessions.get(request.name) ?? new Set<Session>()
     this.sessions.set(request.name, open.add(session))
     session.on("end", () => open.delete(session))
@@ -282,6 +286,45 @@ export class Core {
     if (!mine.length) return { id: "forwards", status: "info", evidence: "inspected", detail: "None. A forward added with `paddock forward add` listens on 127.0.0.1 only and ends when the sandbox stops." }
     const listed = mine.map((forward) => { const address = forward.server.address(); return `${typeof address === "object" && address ? `${address.address}:${address.port}` : "not listening"} to port ${forward.view.port} (${forward.view.id})` })
     return { id: "forwards", status: "info", evidence: "inspected", detail: `${listed.join(", ")}. Any process on this machine can connect to these, and so can whatever the engine relays to its loopback: on OrbStack, the engine's host and its other containers, through host.docker.internal.` }
+  }
+
+  // Prepares sshd inside, trusts only this machine's editor key there, and writes the alias and its host key here. Run
+  // again, it makes a new host key; the old one stops being trusted.
+  sshSetup(name: string, writeConfig = false): Promise<SshAccess & { config: string; include: string; included: boolean; editorKey: string; keyFile: string }> {
+    return this.exclusive(validName(name), async () => {
+      const manifest = await readManifest(this.dirs, name); const provider = this.provider(manifest)
+      if (manifest.engine.capabilities?.execStream === false) throw new PaddockError("dependency", `${manifest.engine.label} cannot relay a session's bytes, which SSH needs.`)
+      if ((await provider.status(manifest)) !== "running") throw new PaddockError("conflict", `${name} is not running. Start it with \`paddock start ${name}\`, then set up SSH.`)
+      const key = await editorKey(this.dirs)
+      this.activity.set(name, "Preparing SSH")
+      try {
+        const who = await provider.exec(manifest, ["id", "-un"])
+        const user = who.stdout.trim()
+        if (who.exitCode !== 0 || !/^[a-z_][a-z0-9_.-]{0,31}$/i.test(user)) throw new PaddockError("runtime", `Could not tell which user exec runs as in ${name}: ${who.stderr.trim() || user}`)
+        const done = await provider.exec(manifest, ["sh", "-c", GUEST_SETUP, "sh", user, key.publicKey], { user: "0" })
+        if (done.exitCode !== 0) throw new PaddockError(done.exitCode === 4 ? "dependency" : "runtime", `Could not prepare sshd in ${name}: ${done.stderr.trim().split("\n").slice(-3).join(" ")}`)
+        // A second setup finds the password already unlocked; the first one's word for it is kept.
+        const guest = parseGuestSetup(done.stdout)
+        manifest.ssh = { user, ...guest, unlocked: guest.unlocked || Boolean(manifest.ssh?.unlocked), editorKey: key.fingerprint, at: new Date().toISOString() }
+        await writeManifest(this.dirs, manifest)
+        await writeClientFiles(this.dirs, await listManifests(this.dirs))
+      } finally { this.activity.delete(name) }
+      if (writeConfig) await addInclude(this.dirs)
+      return { ...await this.sshAccessOf(manifest), config: userConfig(), include: includeLine(this.dirs), included: await included(this.dirs), editorKey: key.fingerprint, keyFile: key.path }
+    })
+  }
+
+  async sshAccess(name: string): Promise<SshAccess> { return this.sshAccessOf(await readManifest(this.dirs, validName(name))) }
+
+  // batchReady: `ssh ALIAS` would log in now without asking anything: set up for this sandbox, running, and included.
+  private async sshAccessOf(manifest: Manifest): Promise<SshAccess> {
+    const ready = Boolean(manifest.ssh) && (await this.provider(manifest).status(manifest)) === "running" && await included(this.dirs)
+    return { alias: alias(manifest.name), user: manifest.ssh?.user ?? "", home: manifest.ssh?.home ?? "", batchReady: ready, loopbackForwarding: Boolean(manifest.ssh) }
+  }
+
+  private sshCheck(manifest: Manifest): CheckResult {
+    if (!manifest.ssh) return { id: "ssh", status: "info", evidence: "inspected", detail: "Not set up. `paddock ssh setup` opens no port; it reaches sshd through the daemon." }
+    return { id: "ssh", status: "info", evidence: "inspected", detail: `Set up ${manifest.ssh.at.slice(0, 10)} for ${manifest.ssh.user} (${manifest.ssh.home}) with this machine's editor key ${manifest.ssh.editorKey}, kept in Paddock's state folder. Anything that can read that key can log in as ${manifest.ssh.user} and forward to the sandbox's loopback; no agent forwarding, no other key.${manifest.ssh.unlocked ? ` Setup replaced ${manifest.ssh.user}'s locked password with * (still no password) because sshd refuses a locked account.` : ""}` }
   }
 
   extensions() { return loadExtensions(this.dirs) }

@@ -50,7 +50,8 @@ const until = async (condition: () => Promise<boolean>, seconds: number) => {
 
 // ---- the run's own Paddock: a temporary state and config folder, a port of its own
 const tmp = await mkdtemp(join(tmpdir(), "pdk-"))
-const env = { PADDOCK_STATE_DIR: join(tmp, "s"), PADDOCK_CONFIG_DIR: join(tmp, "c"), PADDOCK_PORT: "0" }
+// PADDOCK_SSH_CONFIG: what `paddock ssh setup --write-config` changes instead of ~/.ssh/config.
+const env = { PADDOCK_STATE_DIR: join(tmp, "s"), PADDOCK_CONFIG_DIR: join(tmp, "c"), PADDOCK_PORT: "0", PADDOCK_SSH_CONFIG: join(tmp, "home", ".ssh", "config") }
 let BIN = join(ROOT, "dist", "paddock")
 const pdk = (argv: string[], options: Parameters<typeof sh>[1] = {}) => sh([BIN, ...argv], { ...options, env: { ...env, ...options.env } })
 const pdkJson = async (argv: string[], options: Parameters<typeof sh>[1] = {}) => {
@@ -1032,7 +1033,7 @@ ev("R04", "The dashboard's port refuses a missing token, a foreign Host, CLI-onl
   expect((await tcp("/api/list", { token: "0".repeat(48) })).status === 401, "a wrong token was accepted")
   expect((await tcp("/api/list")).status === 200, "the right token was refused")
   expect((await tcp("/api/list", { host: "evil.example" })).status === 403, "a foreign Host header was accepted")
-  for (const method of ["shutdown"]) expect((await tcp(`/api/${method}`)).status === 403, `${method} is available on the port`)
+  for (const method of ["shutdown", "sshSetup"]) expect((await tcp(`/api/${method}`)).status === 403, `${method} is available on the port`)
   expect((await tcp("/api/list", { method: "GET", body: undefined })).status === 404, "GET reached a method")
   const page = await tcp("/", { method: "GET", body: undefined, token: null })
   expect(page.status === 200 && page.headers.get("x-frame-options") === "DENY", "the page is missing or can be framed")
@@ -1734,6 +1735,145 @@ ev("W08", "A forward relays 50 connections at once, each with its own bytes, and
   } finally { await pdk(["forward", "remove", forward.id]) }
 })
 
+// A: SSH for editors. Every ssh here reads only this run's configuration (-F), never ~/.ssh.
+const SSH_CONFIG = env.PADDOCK_SSH_CONFIG
+const sshArgs = (config = SSH_CONFIG) => ["-F", config, "-o", "BatchMode=yes", "-o", "ConnectTimeout=30"]
+const sshTo = (name: string, argv: string[], options: { config?: string; extra?: string[] } = {}) => sh(["ssh", ...sshArgs(options.config), ...(options.extra ?? []), `${name}.paddock`, ...argv], { timeoutMs: 120_000 })
+// Sets SSH up for a sandbox unless it is ready, so each eval can also run alone.
+async function sshReady(name: string): Promise<void> {
+  await ensure(name)
+  if ((await pdkJson(["ssh", "access", name])).reply.data?.batchReady) return
+  const done = await pdkJson(["ssh", "setup", name, "--write-config"], { timeoutMs: 300_000 })
+  expect(done.reply.ok, `ssh setup failed: ${done.reply.error?.message}`)
+}
+// A free port on this machine's loopback, for an ssh -L of this run.
+const freePort = async () => { const probe = await controlListener("127.0.0.1"); probe.close(); return probe.port }
+// TCP listeners of these processes, as lsof names them.
+const listenersOf = async (pids: number[]) => (await sh(["lsof", "-nP", "-a", "-p", pids.join(","), "-iTCP", "-sTCP:LISTEN", "-Fn"])).out.split("\n").filter((line) => line.startsWith("n")).sort()
+
+ev("A01", "After `paddock ssh setup`, `ssh NAME.paddock` logs in without asking anything, as exec's user, with no new listener here or on the engine's host", async () => {
+  await ensure(A)
+  const hostListeners = async () => (await asRoot("ss -ltnH")).out.split("\n").map((line) => line.trim().split(/\s+/)[3]).filter(Boolean).sort().join(" ")
+  const daemon = (await daemonFile()).pid
+  const [hostBefore, daemonBefore] = [await hostListeners(), await listenersOf([daemon])]
+  await rm(SSH_CONFIG, { force: true })
+  const plain = await pdkJson(["ssh", "setup", A], { timeoutMs: 300_000 })
+  expect(plain.reply.ok, `ssh setup failed: ${plain.reply.error?.message}`)
+  expect(!(await Bun.file(SSH_CONFIG).exists()) && plain.reply.data.included === false && plain.reply.data.batchReady === false && /^Include "/.test(plain.reply.data.include), "setup without --write-config changed the SSH configuration or claimed to be ready")
+  await mkdir(dirname(SSH_CONFIG), { recursive: true }); await writeFile(SSH_CONFIG, "Host *\n  ServerAliveInterval 30\n")
+  const written = await pdkJson(["ssh", "setup", A, "--write-config"], { timeoutMs: 300_000 }); await pdkJson(["ssh", "setup", A, "--write-config"], { timeoutMs: 300_000 })
+  const lines = (await readFile(SSH_CONFIG, "utf8")).split("\n")
+  expect(lines[0] === written.reply.data.include && lines.filter((line) => line.startsWith("Include")).length === 1 && lines[1] === "Host *", `the Include line is not there once and first: ${lines.slice(0, 3).join(" | ")}`)
+  // A session held open while the listeners are counted.
+  const held = Bun.spawn(["ssh", ...sshArgs(), `${A}.paddock`, "sleep 8"], { stdout: "ignore", stderr: "ignore" })
+  await Bun.sleep(4000)
+  const proxies = (await sh(["pgrep", "-f", `ssh proxy ${A}`])).out.trim().split("\n").filter(Boolean).map(Number)
+  const [hostDuring, daemonDuring, clientDuring] = [await hostListeners(), await listenersOf([daemon]), await listenersOf([held.pid, ...proxies])]
+  expect(await held.exited === 0, "the held ssh session failed")
+  expect(proxies.length > 0, "control: no ProxyCommand was seen while the session was open")
+  expect(hostDuring === hostBefore && daemonDuring.join() === daemonBefore.join() && clientDuring.length === 0, `new listeners: engine host ${hostDuring}, daemon ${daemonDuring}, ssh ${clientDuring}`)
+  const viaSsh = await sshTo(A, ["id -un; echo $HOME"]); const viaExec = await pdk(["exec", A, "--", "sh", "-c", "id -un; echo $HOME"])
+  expect(viaSsh.code === 0 && viaSsh.out === viaExec.out, `ssh: exit ${viaSsh.code} ${viaSsh.out}${viaSsh.err}; exec: ${viaExec.out}`)
+  const access = (await pdkJson(["ssh", "access", A])).reply.data
+  expect(access.alias === `${A}.paddock` && access.batchReady === true && access.loopbackForwarding === true && `${access.user}\n${access.home}\n` === viaExec.out, `sshAccess: ${JSON.stringify(access)}`)
+  const shown = ((await pdkJson(["verify", A])).reply.data?.checks as Array<{ id: string; status: string; detail: string }>).find((check) => check.id === "ssh")
+  expect(shown?.status === "info" && shown.detail.includes(written.reply.data.editorKey), `verify did not disclose the key: ${shown?.detail}`)
+  return `logged in as ${viaSsh.out.trim().replace("\n", ", home ")}, like exec; the Include was written only with --write-config, once, first; while a session was open, the engine host had the same ${hostBefore.split(" ").length} listeners, the daemon the same, ssh and its ProxyCommand none`
+})
+
+ev("A02", "Files go to and from a sandbox over scp and SFTP unchanged", async () => {
+  await sshReady(A)
+  const data = new Uint8Array(4 * 1048576); for (let at = 0; at < data.length; at += 65536) crypto.getRandomValues(data.subarray(at, at + 65536))
+  const local = join(tmp, "a02.bin"); await writeFile(local, data)
+  const hash = async (path: string) => new Bun.CryptoHasher("sha256").update(await readFile(path)).digest("hex")
+  const up = await sh(["scp", "-q", ...sshArgs(), local, `${A}.paddock:/tmp/a02.bin`], { timeoutMs: 120_000 })
+  const down = await sh(["scp", "-q", ...sshArgs(), `${A}.paddock:/tmp/a02.bin`, `${local}.scp`], { timeoutMs: 120_000 })
+  const sftp = await sh(["sftp", "-q", ...sshArgs(), "-b", "-", `${A}.paddock`], { stdin: `put ${local} /tmp/a02s.bin\nget /tmp/a02s.bin ${local}.sftp\n`, timeoutMs: 120_000 })
+  expect(up.code === 0 && down.code === 0 && sftp.code === 0, `scp ${up.code}/${down.code} ${up.err}${down.err}, sftp ${sftp.code} ${sftp.err}`)
+  const want = await hash(local)
+  expect(await hash(`${local}.scp`) === want && await hash(`${local}.sftp`) === want, "a file came back changed")
+  const inside = (await pdk(["exec", A, "--", "sha256sum", "/tmp/a02.bin", "/tmp/a02s.bin"])).out
+  expect(inside.split("\n").filter((line) => line.startsWith(want)).length === 2, "the copies inside differ")
+  return "4 MiB of random bytes, in and out by scp and by SFTP, with the same hash here and inside"
+})
+
+ev("A03", "ssh -L reaches a service on the sandbox's loopback, and nothing else; no agent is forwarded", async () => {
+  await sshReady(A)
+  const nonce = `${PREFIX}-a03-nonce`
+  await nonceService(A, nonce, NONCE_PORT + 4)
+  const tunnel = async (target: string) => {
+    const port = await freePort(); const log = join(tmp, `a03-${port}.log`)
+    const child = Bun.spawn(["ssh", ...sshArgs(), "-N", "-E", log, "-o", "ExitOnForwardFailure=yes", "-L", `127.0.0.1:${port}:${target}`, `${A}.paddock`], { stdout: "ignore", stderr: "ignore" })
+    await until(async () => !(await refused(port)), 20)
+    const got = (await tcpRead("127.0.0.1", port, "HEAD / HTTP/1.0\r\n\r\n", 5)).toString()
+    child.kill(); await child.exited
+    return { got, log: await readFile(log, "utf8").catch(() => "") }
+  }
+  const loopback = await tunnel(`127.0.0.1:${NONCE_PORT + 4}`)
+  expect(loopback.got.includes(nonce), `the tunnel to the sandbox's loopback did not return the nonce: ${loopback.log}`)
+  // The same kind of service on the sandbox's own network address. Control: the sandbox reaches it there itself, so a
+  // refusal is sshd's, not the network's.
+  const ip = await sandboxIp(A); const wide = `${PREFIX}-a03-wide`
+  await pdk(["exec", A, "--", "sh", "-c", `(nc -lk -p ${NONCE_PORT + 5} -e echo ${wide} </dev/null >/dev/null 2>&1 &)`])
+  expect((await pdk(["exec", A, "--", "nc", "-w", "2", ip, String(NONCE_PORT + 5)])).out.includes(wide), `control: the sandbox does not reach its own ${ip}:${NONCE_PORT + 5}`)
+  const outside = await tunnel(`${ip}:${NONCE_PORT + 5}`)
+  expect(!outside.got.includes(wide) && /administratively prohibited/.test(outside.log), `a tunnel to ${ip} was not refused: ${outside.got.slice(0, 80)} ${outside.log}`)
+  const agentSocket = join(tmp, "a03-agent.sock")
+  const agent = await sh(["ssh-agent", "-a", agentSocket])
+  try {
+    const forwarded = await sshTo(A, ["echo ${SSH_AUTH_SOCK:-none}"], { extra: ["-o", "ForwardAgent=yes", "-o", `IdentityAgent=${agentSocket}`] })
+    expect(agent.code === 0 && forwarded.code === 0 && forwarded.out.trim() === "none", `with an agent asked for: exit ${forwarded.code}, SSH_AUTH_SOCK ${forwarded.out.trim()}`)
+  } finally { const pid = /SSH_AGENT_PID=(\d+)/.exec(agent.out)?.[1]; if (pid) process.kill(Number(pid)) }
+  return `the nonce came through ssh -L; the sandbox's own ${ip}, where it reaches the same service itself, was refused by sshd; a client asking to forward its agent got none`
+})
+
+ev("A04", "A client key other than this machine's editor key is refused", async () => {
+  await sshReady(A)
+  const key = join(tmp, "a04-key"); await sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key])
+  const config = join(tmp, "a04-config")
+  await writeFile(config, (await readFile(join(env.PADDOCK_STATE_DIR, "ssh", "config"), "utf8")).replace(/^ {2}IdentityFile .*$/gm, `  IdentityFile "${key}"`))
+  const wrong = await sshTo(A, ["true"], { config }); const right = await sshTo(A, ["true"])
+  expect(right.code === 0, `control: the editor key did not log in: ${right.err}`)
+  expect(wrong.code === 255 && wrong.err.includes("Permission denied"), `another key: exit ${wrong.code}, ${wrong.err.trim()}`)
+  return `the editor key logged in; a new key with the same alias got "${wrong.err.trim().split("\n").at(-1)}"`
+})
+
+ev("A05", "A sandbox recreated under the same name is not trusted as the old one: an old alias fails, and its old host key fails verification after setup, until the new files are used", async () => {
+  const name = `${PREFIX}-s`
+  await sshReady(name)
+  try {
+    expect((await sshTo(name, ["true"])).code === 0, "control: the first sandbox did not log in")
+    const old = join(tmp, "a05"); await mkdir(old, { recursive: true })
+    const state = join(env.PADDOCK_STATE_DIR, "ssh")
+    await writeFile(join(old, "known_hosts"), await readFile(join(state, "known_hosts")))
+    await writeFile(join(old, "config"), (await readFile(join(state, "config"), "utf8")).replace(`"${join(state, "known_hosts")}"`, `"${join(old, "known_hosts")}"`))
+    expect((await pdk(["remove", name, "--confirm", name])).code === 0, "remove failed")
+    expect(!(await readFile(join(state, "config"), "utf8")).includes(`Host ${name}.paddock`), "the removed sandbox kept its alias")
+    await ensure(name)
+    const before = await sshTo(name, ["true"], { config: join(old, "config") })
+    expect(before.code === 255 && before.err.includes("not set up"), `an old alias before setup: exit ${before.code}, ${before.err.trim()}`)
+    await sshReady(name)
+    const stale = await sshTo(name, ["true"], { config: join(old, "config") })
+    expect(stale.code === 255 && /Host key verification failed/.test(stale.err), `the old host key after setup: exit ${stale.code}, ${stale.err.trim().split("\n").at(-1)}`)
+    expect((await sshTo(name, ["true"])).code === 0, "the new files did not log in")
+    return `before setup the old alias was refused (not set up); after it, the old host key failed verification; the new files logged in`
+  } finally { await pdk(["remove", name, "--confirm", name]) }
+})
+
+ev("A06", "ssh to a stopped sandbox is refused and leaves it stopped", async () => {
+  await sshReady(A)
+  expect((await pdk(["stop", A])).code === 0, "stop failed")
+  try {
+    const tried = await sshTo(A, ["true"])
+    await Bun.sleep(3000)
+    const state = (await inspect(A))?.State
+    expect(tried.code === 255 && tried.err.includes("not running"), `exit ${tried.code}: ${tried.err.trim()}`)
+    expect(state && !state.Running, "the sandbox is running after an ssh attempt")
+    expect((await pdkJson(["ssh", "access", A])).reply.data?.batchReady === false, "sshAccess says ready while stopped")
+    return `"${tried.err.trim().split("\n")[0]}"; still stopped 3 s later; sshAccess not ready`
+  } finally { await ensure(A) }
+})
+
 // D: the daemon keeps its promises through crashes, races and upgrades.
 ev("D01", "After the daemon is killed, the next command starts a new one that still knows every sandbox", async () => {
   await ensure(A)
@@ -1869,7 +2009,7 @@ ev("P02", "The Linux binary, run on Linux, creates a sandbox that passes every b
 
 ev("P03", "The core has no code that only works on one operating system", async () => {
   const offenders: string[] = []
-  for (const file of ["core/core.ts", "core/daemon.ts", "core/state.ts", "core/run.ts", "core/stream.ts", "core/extensions.ts", "core/checks.ts", "core/providers/gvisor.ts", "cli/cli.ts"]) {
+  for (const file of ["core/core.ts", "core/daemon.ts", "core/state.ts", "core/run.ts", "core/stream.ts", "core/forwards.ts", "core/ssh.ts", "core/extensions.ts", "core/checks.ts", "core/providers/gvisor.ts", "cli/cli.ts"]) {
     const text = (await readFile(join(ROOT, file), "utf8")).replace(/\/\/.*$/gm, "")
     for (const word of ["osascript", "pbcopy", "launchctl", "/opt/homebrew", "security find-", "vm_stat"]) if (text.includes(word)) offenders.push(`${file}: ${word}`)
     // Every platform branch must name Windows as well as macOS, or name neither.

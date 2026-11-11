@@ -42,6 +42,7 @@ confirmed against the quota from here.
 | U | Can a person or an agent use it without reading the source? |
 | S | Do exec and shell sessions carry raw bytes both ways, bounded, only over this machine's socket? |
 | W | Does a forward reach the sandbox's loopback from this machine's loopback, and nothing else, for one run of it? |
+| A | Does `ssh NAME.paddock` reach only that sandbox, with only this machine's editor key, through the daemon, without a port? |
 | D | Does the daemon keep its promises through crashes, races and upgrades? |
 | P | Does it build and run on other platforms, as far as this machine can show? |
 | E | What has nobody measured? |

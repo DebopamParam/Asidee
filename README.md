@@ -2,7 +2,7 @@
 
 Sandboxes for coding agents, on the engine you already have, that are checked instead of assumed.
 
-"Paddock" is a working name. This is an early alpha (0.3.0): the structure is in place and one engine works end to end.
+"Paddock" is a working name. This is an early alpha (0.4.0): the structure is in place and one engine works end to end.
 
 ## What it does
 
@@ -43,12 +43,16 @@ Works, and was run on OrbStack on an Apple Silicon Mac:
 - Port forwards: `paddock forward add demo --port 3000` listens on this machine's 127.0.0.1 and relays each connection
   to port 3000 on the sandbox's own loopback through a daemon session, so the engine publishes no port. A forward
   belongs to one run of one sandbox and ends when it stops, restarts or is removed, or when the daemon stops.
+- SSH for editors: `paddock ssh setup demo` prepares sshd inside and an alias, `demo.paddock`, whose ProxyCommand
+  runs sshd in inetd mode through a daemon session, so no port is opened anywhere. It trusts only a key made for this
+  machine's editors and the host key made inside that sandbox; scp, SFTP and `ssh -L` to the sandbox's loopback work.
+  `--write-config` adds one `Include` line to `~/.ssh/config`; without it the line is printed.
 - The daemon, the CLI with `--json`, a web dashboard, and extensions.
 
 Not built yet:
 
 - Docker Sandboxes (microVM) support. It is detected and reported as not supported.
-- SSH access for editors, importing agent logins, templates.
+- Importing agent logins in the core, templates.
 - A hard disk cap, Linux and Windows hosts (nothing was run there), remote engines, a desktop app, installers.
 - A license. Nothing here is published.
 

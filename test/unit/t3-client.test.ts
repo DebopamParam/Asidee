@@ -3,7 +3,7 @@ import { chmod, lstat, readFile, rm, symlink } from "node:fs/promises"
 import { createHash } from "node:crypto"
 import { arch } from "node:os"
 import { join } from "node:path"
-import { hostVersion, setup, syncProviders } from "../../extensions/t3/t3"
+import { hostVersion, setup, sshAccess, syncProviders } from "../../extensions/t3/t3"
 import { fixture, fakeExec, local, must, ok, put } from "./client-feature-fixtures"
 
 const version = "0.1.1-nightly.20261020.3401"
@@ -13,15 +13,24 @@ test("T3 reads only the exact CLI version, falling back to the fake desktop laun
   expect(calls).toEqual([["t3", "--version"], [join(home, ".t3/bin/t3"), "--version"]])
   await expect(hostVersion(async () => ok("version 1.2.3; injected"), home)).rejects.toThrow("No exact T3 version")
 })
+const access = { alias: "demo.paddock", user: "agent", home: "/home/agent", batchReady: true, loopbackForwarding: true }
+test("SSH access is read from the core and checked field by field", async () => {
+  expect(await sshAccess(async () => ok(JSON.stringify({ ok: true, data: { ...access, extra: "dropped" } })), "demo")).toEqual(access)
+  for (const reply of [{ ok: false, error: { code: "not-found", message: "x" } }, { ok: true, data: { ...access, alias: "other.paddock" } }, { ok: true, data: { ...access, batchReady: "yes" } }, { ok: true, data: { ...access, home: 1 } }])
+    await expect(sshAccess(async () => ok(JSON.stringify(reply)), "demo")).rejects.toThrow("Invalid SSH access response")
+  await expect(sshAccess(async () => ok("{}"), "../x")).rejects.toThrow("lowercase")
+})
 test("T3 setup only execs its installer and provider sync after resolving the host version", async () => {
   const home = await fixture(), calls: string[][] = []
   const ready = await setup(async argv => {
     calls.push(argv)
     if (argv[0] === "t3") return ok(`t3 ${version}`)
+    if (argv[1] === "ssh") return ok(JSON.stringify({ ok: true, data: access }))
     return ok(argv.at(-1) === "https://github.com/pingdotgg/t3code/releases/download" ? "installed\n" : '{"claude":0,"codex":0}')
   }, "demo", home)
-  expect(ready).toEqual({ version, runtime: "installed", claude: 0, codex: 0 })
-  expect(calls.slice(1).every(argv => argv.slice(0, 3).join(" ") === "paddock exec demo")).toBe(true)
+  expect(ready).toEqual({ version, runtime: "installed", claude: 0, codex: 0, ssh: access })
+  expect(calls.slice(1, -1).every(argv => argv.slice(0, 3).join(" ") === "paddock exec demo")).toBe(true)
+  expect(calls.at(-1)).toEqual(["paddock", "ssh", "access", "demo", "--json"])
   await expect(setup(async () => { throw new Error("token-secret") }, "demo", home)).rejects.not.toThrow("token-secret")
 })
 test("guest install verifies the matching release before execution and publishes the app marker", async () => {
