@@ -1,5 +1,5 @@
 const fs = require("fs"), path = require("path"), os = require("os"), cp = require("child_process"), crypto = require("crypto")
-const LIMIT = 8 * 1024 * 1024
+const LIMIT = 128 * 1024 * 1024
 function fail() { throw new Error() }
 function git(work, args) {
   const result = cp.spawnSync("git", ["-c", "core.hooksPath=/dev/null", "-C", work, ...args], { encoding: "utf8", maxBuffer: 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } })
@@ -48,10 +48,14 @@ async function main() {
     git(work, ["bundle", "create", file, ref])
     const size = fs.statSync(file).size
     if (size > LIMIT) { process.exitCode = 73; return { tooLarge: true, limit: LIMIT } }
-    const data = fs.readFileSync(file)
-    return { branch, tip, ref, size, sha256: crypto.createHash("sha256").update(data).digest("hex"), data: data.toString("base64") }
+    const hash = crypto.createHash("sha256")
+    for await (const chunk of fs.createReadStream(file)) hash.update(chunk)
+    // One header line, then the raw bundle: `paddock exec --stream` carries bytes unchanged.
+    process.stdout.write(JSON.stringify({ branch, tip, ref, size, sha256: hash.digest("hex") }) + "\n")
+    for await (const chunk of fs.createReadStream(file)) if (!process.stdout.write(chunk)) await new Promise(done => process.stdout.once("drain", done))
+    return undefined
   } finally {
     try { git(work, ["update-ref", "-d", ref, tip]) } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
   }
 }
-main().then(result => process.stdout.write(JSON.stringify(result) + "\n")).catch(() => { process.stderr.write("Repository operation failed; output withheld. Clone needs a new path; save needs a committed branch and Git.\n"); process.exitCode = 1 })
+main().then(result => { if (result !== undefined) process.stdout.write(JSON.stringify(result) + "\n") }).catch(() => { process.stderr.write("Repository operation failed; output withheld. Clone needs a new path; save needs a committed branch and Git.\n"); process.exitCode = 1 })

@@ -26,9 +26,9 @@ creation, so a moving source branch cannot silently change the export. Only that
 cross the boundary; dirty files, index changes, untracked files, other branches and tags are excluded. **Secrets that
 were committed in that history are included.** This is source selection, not secret scanning. Nothing is pushed.
 
-The guest creates a Git bundle and sends a JSON envelope containing its size, SHA-256 and base64 through `paddock exec`
-stdout. Base64 is necessary because the current API decodes stdin/stdout as text; raw binary would corrupt Git objects.
-The client rejects noncanonical base64, size/checksum mismatches and unexpected advertised refs, runs Git bundle
+The guest creates a Git bundle and writes one JSON header line (branch, tip, ref, size, SHA-256) followed by the raw
+bundle to `paddock exec --stream` stdout, which carries bytes unchanged. The client rejects a malformed header,
+size/checksum mismatches and unexpected advertised refs, runs Git bundle
 verification and object checks, and fetches into a unique `saved/NAME/UUID` branch. It never checks out guest files,
 updates existing branches, changes a host worktree, or executes repository hooks. Committed history remains untrusted
 input to host Git, so use a maintained Git installation before reviewing it. Before host Git reads anything, the client
@@ -48,24 +48,16 @@ or files. A failed import may leave an empty bare destination or Git objects; no
 
 ## Needs from the core
 
-Text exec buffers input and output in the provider, daemon, CLI and client. The core returns at most 16 MiB per output
-stream from one exec and refuses more with an error that names the limit, never a cut-off result. This implementation
-imposes an **8 MiB maximum binary bundle size**, about **10.67 MiB base64** plus JSON, which fits under that limit. It
-checks the file size in the guest before encoding; oversized exports fail, never truncate, and are not split to evade a
-transport limit. Bundle creation itself can still use guest disk, memory and CPU before that check. The client
-separately caps each subprocess output stream at 16 MiB. A raw SHA-256 checksum detects corruption, not a dishonest
-guest.
+Clone uses text exec. Save uses `paddock exec NAME --stream`, the binary-safe session with separate stderr and the
+guest's exit status. This implementation imposes a **128 MiB maximum binary bundle size**, which matches the bundle
+parser's 128 MiB inflated limit. The guest checks the file size before sending and exits 73 for an oversized export;
+it never truncates or splits one. The client reads at most the header and 128 MiB of stdout, discards stderr, and
+holds the bundle in memory for the checks above. Bundle creation itself can still use guest disk, memory and CPU before
+that check. A raw SHA-256 checksum detects corruption, not a dishonest guest.
 
-Larger repositories require a binary-safe, bounded streaming API, for example
-`execStream({name, argv: string[], user?: string}, stdin: AsyncIterable<Uint8Array>) ->
-{stdout: AsyncIterable<Uint8Array>, stderr: AsyncIterable<Uint8Array>, exit: Promise<{code: number}>, cancel(): void}`,
-with backpressure, cancellation, a distinct exit status, and no UTF-8 decoding or JSON buffering of data chunks.
-The CLI equivalent should be `paddock exec NAME --binary-stdin --binary-stdout -- COMMAND...`, keeping stderr separate.
-This client does not implement or simulate that API. A future sandbox-view workspace field could supply the checkout
-path; today it is an explicit client argument. No core changes are otherwise needed for bounded exports.
-
-Unit tests use a fake exec runner, temporary homes and real local Git repositories to prove binary committed contents
-round-trip and dirty/index/untracked/other-branch data do not cross.
+Unit tests use a fake exec runner and stream, temporary homes and real local Git repositories to prove binary committed
+contents round-trip (including a 24 MiB random history, beyond text exec's 16 MiB) and dirty/index/untracked/other-branch
+data do not cross.
 
 Checked live on 2026-11-11 in one sandbox on the default image with public repositories, directly and through
 `paddock ext run`: clone worked with the guest's GitHub login and anonymously after logout, and refused an existing
@@ -73,6 +65,7 @@ path and a URL. Save to the default destination, to a new `--target` and to an e
 `saved/bx/UUID` branch with the committed tip; the working clone's checked-out branch and files did not change. The
 saved tree held only committed files: a modified tracked file, a staged file and an untracked file did not cross. The
 guest kept no `refs/paddock-export` ref or bundle file. Detached HEAD was refused without `--branch` and saved with it.
-An empty workspace, a relative target, a subfolder of a repository and a target under a symlink were refused. A
-commit with 7.5 MiB of random data saved whole (same blob ID on both sides); one with 9 MiB was refused. Not checked
-live: private repositories and exports killed midway.
+An empty workspace, a relative target, a subfolder of a repository and a target under a symlink were refused. Through
+the stream (Paddock 0.4.0, Alpine guest with apk Node and Git), a commit with 100 MiB of random data in four files saved
+whole in about 11 s (same blob IDs on both sides); with 150 MiB the guest exited 73, no target was created, and no
+export ref or bundle file stayed in the guest. Not checked live: private repositories and exports killed midway.

@@ -10,7 +10,7 @@ import { OUTPUT_LIMIT, systemRunner } from "../../core/run"
 import { readConfig, validSpec } from "../../core/state"
 import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type Stage } from "../../core/types"
 
-const engine: Engine = { id: "fake:1", provider: "fake", label: "Fake engine", ready: true, problems: [], data: { context: "fake", runtime: "runsc" }, capabilities: { kernelIsolation: "gvisor", diskLimit: "watched", networkGuard: true, docker: true } }
+const engine: Engine = { id: "fake:1", provider: "fake", label: "Fake engine", ready: true, problems: [], data: { context: "fake", runtime: "runsc" }, capabilities: { kernelIsolation: "gvisor", diskLimit: "watched", networkGuard: true, docker: true, execStream: true } }
 const pass = (id: CheckResult["id"]): CheckResult => ({ id, status: "pass", evidence: "inspected", detail: "ok" })
 const allPass = (stage: Stage) => CHECKLIST.filter((item) => item.stage === stage).map((item) => pass(item.id))
 
@@ -27,7 +27,7 @@ function fakeProvider(overrides: Partial<Record<Stage, CheckResult[]>> = {}) {
     remove: async () => { state.exists = false; state.running = false },
     status: async () => !state.exists ? "missing" : state.running ? "running" : "stopped",
     exec: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
-    attachArgv: () => [],
+    openExec: async () => { throw new PaddockError("dependency", "no sessions in the fake") },
     checks: async (_manifest, stage) => state.overrides[stage] ?? allPass(stage),
     diskUsedBytes: async () => 0,
     stoppedWhy: async () => undefined,
@@ -357,4 +357,22 @@ test("a setup hook runs after the sandbox is free, so it can call back into it",
   const made = await Promise.race([paddock.create({ name: "demo" }), Bun.sleep(2000).then(() => "stuck" as const)])
   expect(made).not.toBe("stuck")
   expect((made as Awaited<ReturnType<Core["create"]>>).hooks).toEqual([{ extension: "setup", exitCode: 0, output: "true" }])
+})
+
+test("a session is refused on a stopped sandbox without starting it, and ends when its sandbox stops or goes", async () => {
+  const { provider, state } = fakeProvider(); const closed: string[] = []
+  provider.openExec = async () => ({ tty: false, write: () => true, end: () => {}, resize: async () => {}, pause: () => {}, resume: () => {}, close: (reason?: string) => { closed.push(reason ?? "") }, on: () => {} }) as never
+  const paddock = await core(provider)
+  await paddock.create({ name: "demo" })
+  await paddock.stop("demo")
+  const starts = state.starts
+  await expect(paddock.openSession({ kind: "exec", name: "demo", argv: ["sh"], tty: false })).rejects.toMatchObject({ code: "conflict" })
+  expect(state.starts).toBe(starts); expect(state.running).toBe(false)
+  await paddock.start("demo")
+  await paddock.openSession({ kind: "exec", name: "demo", argv: ["sh"], tty: false })
+  await paddock.stop("demo")
+  expect(closed).toEqual(["The session ended: demo was stopped."])
+  await paddock.start("demo"); await paddock.openSession({ kind: "exec", name: "demo", argv: ["sh"], tty: false })
+  await paddock.remove("demo", "demo")
+  expect(closed[1]).toBe("The session ended: demo was removed.")
 })

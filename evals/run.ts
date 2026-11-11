@@ -11,11 +11,13 @@
 //   bun evals/run.ts --write         also rewrite evals/SCORECARD.md
 
 import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
+import { connect } from "node:net"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { CHECKLIST } from "../core/checks"
 import { DOCKER_CAPABILITIES, DOCKER_DRIVER, DOCKER_START, HELPER_IMAGE } from "../core/providers/gvisor"
 import { OUTPUT_LIMIT } from "../core/run"
+import { FrameReader, frame } from "../core/stream"
 import HELPER_DOCKERFILE from "../core/providers/helper.Dockerfile" with { type: "text" }
 
 const ROOT = join(dirname(Bun.main), "..")
@@ -1030,7 +1032,7 @@ ev("R04", "The dashboard's port refuses a missing token, a foreign Host, CLI-onl
   expect((await tcp("/api/list", { token: "0".repeat(48) })).status === 401, "a wrong token was accepted")
   expect((await tcp("/api/list")).status === 200, "the right token was refused")
   expect((await tcp("/api/list", { host: "evil.example" })).status === 403, "a foreign Host header was accepted")
-  for (const method of ["attach", "shutdown"]) expect((await tcp(`/api/${method}`)).status === 403, `${method} is available on the port`)
+  for (const method of ["shutdown"]) expect((await tcp(`/api/${method}`)).status === 403, `${method} is available on the port`)
   expect((await tcp("/api/list", { method: "GET", body: undefined })).status === 404, "GET reached a method")
   const page = await tcp("/", { method: "GET", body: undefined, token: null })
   expect(page.status === 200 && page.headers.get("x-frame-options") === "DENY", "the page is missing or can be framed")
@@ -1393,6 +1395,161 @@ ev("U11", "The default image (no --image) makes a sandbox that passes every bloc
   } finally { await socket("remove", { name, confirm: name }) }
 })
 
+// S: exec and shell sessions are daemon streams: raw bytes both ways, bounded, only on this machine's socket.
+// A session from outside, through the CLI: a file goes in raw, stdout is hashed as it arrives (and kept when small),
+// stderr stays apart. `stall` holds the reader back first, the way a slow consumer would.
+async function streamed(argv: string[], options: { input?: string; stall?: () => Promise<void> } = {}) {
+  const child = Bun.spawn([BIN, ...argv], { stdin: options.input ? Bun.file(options.input) : "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, ...env } })
+  const hash = new Bun.CryptoHasher("sha256"); let bytes = 0; let out = ""
+  const reading = (async () => {
+    await options.stall?.()
+    for await (const chunk of child.stdout) { hash.update(chunk); bytes += chunk.length; if (out.length < 4096) out += Buffer.from(chunk).toString("latin1") }
+  })()
+  const [err, code] = await Promise.all([new Response(child.stderr).text(), child.exited, reading])
+  return { code, sha: hash.digest("hex"), bytes, out: out.slice(0, 4096), err }
+}
+// The daemon's resident memory, sampled until `work` settles.
+async function daemonMemory<T>(work: Promise<T>): Promise<{ value: T; before: number; peak: number }> {
+  const pid = (await daemonFile()).pid
+  const rss = async () => Number((await sh(["ps", "-o", "rss=", "-p", String(pid)])).out.trim()) * 1024
+  const before = await rss(); let peak = before; let settled = false
+  void work.then(() => { settled = true }, () => { settled = true })
+  while (!settled) { peak = Math.max(peak, await rss()); await Bun.sleep(200) }
+  return { value: await work, before, peak }
+}
+const mib = (bytes: number) => `${Math.round(bytes / 1048576)} MiB`
+const guestProcesses = async (name: string, marker: string) => (await pdk(["exec", name, "--", "ps", "-o", "args"])).out.split("\n").filter((line) => line.includes(marker))
+// A terminal session driven by evals/terminal_steps.py, wrapped so the terminal's settings are printed after Paddock exits.
+const onTerminal = (argv: string[], steps: unknown[]) =>
+  sh(["python3", join(ROOT, "evals/terminal_steps.py"), "sh", "-c", `"$0" "$@"; echo "code=$?"; stty -a`, BIN, ...argv], { stdin: JSON.stringify(steps), env, timeoutMs: 60_000 })
+const restored = (shown: string) => ["icanon", "isig", "echo"].every((flag) => new RegExp(`(^|\\s)${flag}(\\s|$)`, "m").test(shown))
+
+ev("S01", "exec --stream carries 256 MiB of random bytes each way unchanged, and the daemon's memory stays bounded", async () => {
+  await ensure(A)
+  const file = join(tmp, "random.bin"); const size = 256 * 1048576
+  expect((await sh(["sh", "-c", `head -c ${size} /dev/urandom > "$0"`, file])).code === 0, "could not write the test file")
+  const hash = new Bun.CryptoHasher("sha256"); for await (const chunk of Bun.file(file).stream()) hash.update(chunk)
+  const want = hash.digest("hex")
+  try {
+    const { value: [up, down], before, peak } = await daemonMemory((async () => {
+      const up = await streamed(["exec", A, "--stream", "--", "sh", "-c", "cat > /root/stream.bin && sha256sum /root/stream.bin"], { input: file })
+      return [up, await streamed(["exec", A, "--stream", "--", "cat", "/root/stream.bin"])] as const
+    })())
+    // The guest hashes what arrived and this machine hashes what came back, so each direction is checked on its own.
+    expect(up.code === 0 && up.out.startsWith(`${want} `), `the upload arrived as ${up.out.slice(0, 64) || "nothing"} (exit ${up.code}): ${up.err.slice(0, 200)}`)
+    expect(down.code === 0 && down.bytes === size && down.sha === want, `the download came back as ${down.bytes} bytes, ${down.sha === want ? "same" : "different"} hash (exit ${down.code})`)
+    expect(peak - before < 64 * 1048576, `the daemon grew from ${mib(before)} to ${mib(peak)}`)
+    return `guest and host hashes match for ${mib(size)} each way; daemon ${mib(before)} before, ${mib(peak)} at most`
+  } finally { await pdk(["exec", A, "--", "rm", "-f", "/root/stream.bin"]); await rm(file, { force: true }) }
+})
+
+ev("S02", "exec --stream keeps stderr apart, returns the exit code, and delivers end of input", async () => {
+  await ensure(A)
+  const run = await pdk(["exec", A, "--stream", "--", "sh", "-c", "printf out; printf err >&2; exit 5"])
+  expect(run.out === "out" && run.err === "err" && run.code === 5, `stdout ${JSON.stringify(run.out)}, stderr ${JSON.stringify(run.err)}, exit ${run.code}`)
+  // The command finishes only if its input ends, and still writes after that.
+  const eof = await pdk(["exec", A, "--stream", "--", "sh", "-c", "wc -c; echo after-eof"], { stdin: "x".repeat(100_000), timeoutMs: 30_000 })
+  expect(eof.code === 0 && eof.out.trim() === "100000\nafter-eof", `with input: ${JSON.stringify(eof.out)} exit ${eof.code}`)
+  const none = await pdk(["exec", A, "--stream", "--", "cat"], { timeoutMs: 30_000 })
+  expect(none.code === 0 && none.out === "", `cat without input: exit ${none.code}`)
+  const zero = await pdk(["exec", A, "--stream", "--", "true"])
+  expect(zero.code === 0, `true exited ${zero.code}`)
+})
+
+ev("S03", "`paddock shell` has a terminal of this one's size that follows resizes, Ctrl-C reaches the sandbox, and the terminal is restored", async () => {
+  await ensure(A)
+  if ((await sh(["python3", "-c", "import pty"])).code !== 0) skip("python3 is needed to give the command a terminal")
+  // `echo m-$((N))` shows m-N only when the sandbox's shell runs it, never as the typed echo.
+  const run = await onTerminal(["shell", A], [["size", 30, 100], ["type", "echo m-$((0+1))\r"], ["wait", "m-1"],
+    ["type", "stty size; echo m-$((1+1))\r"], ["wait", "m-2"], ["size", 40, 120], ["pause", 1],
+    ["type", "stty size; echo m-$((2+1))\r"], ["wait", "m-3"],
+    ["type", "sleep 600\r"], ["pause", 2], ["type", "\u0003"], ["pause", 1], ["type", "echo m-$((3+1))\r"], ["wait", "m-4"],
+    ["type", "exit 7\r"], ["wait", "code="]])
+  const shown = run.out.replace(/\r/g, "")
+  expect(run.code !== 124, `the session did not finish (Ctrl-C did not end sleep?): ${shown.slice(-400)}`)
+  expect(/\n30 100\n/.test(shown) && /\n40 120\n/.test(shown), `stty size inside did not show 30 100 then 40 120: ${shown.slice(-600)}`)
+  expect(shown.includes("code=7"), `the shell's exit code was lost: ${shown.slice(-300)}`)
+  expect(restored(shown.slice(shown.indexOf("code=7"))), `the terminal was not restored: ${shown.slice(shown.indexOf("code=7"), shown.indexOf("code=7") + 400)}`)
+  // Control: the same check reads a raw terminal as not restored.
+  const raw = await onTerminal(["shell", A, "--", "true"], [])
+  expect(raw.out.includes("code=0") && restored(raw.out.slice(raw.out.indexOf("code="))), "a one-off command left the terminal raw")
+  const control = await sh(["python3", join(ROOT, "evals/terminal_steps.py"), "sh", "-c", "stty raw -echo; stty -a"], { stdin: "[]", timeoutMs: 20_000 })
+  expect(!restored(control.out), "the check cannot tell a raw terminal from a restored one")
+  return "30×100 inside, 40×120 after a resize; Ctrl-C ended sleep 600; exit 7 came through; icanon, isig and echo back on"
+})
+
+ev("S04", "A session ends when its sandbox is stopped, and a stopped sandbox is refused, not started", async () => {
+  await ensure(A)
+  const marker = "sleep 6123"
+  const plain = Bun.spawn([BIN, "exec", A, "--stream", "--", "sleep", "6123"], { stdout: "pipe", stderr: "pipe", env: { ...process.env, ...env } })
+  const terminal = (await sh(["python3", "-c", "import pty"])).code === 0 ? onTerminal(["shell", A], [["type", "echo m-$((0+1))\r"], ["wait", "m-1"], ["type", `${marker}\r`], ["wait", "code="]]) : undefined
+  try {
+    expect(await until(async () => (await guestProcesses(A, marker)).length === (terminal ? 2 : 1), 20), "the sessions did not start")
+    const stopped = Date.now()
+    expect((await pdk(["stop", A])).code === 0, "stop failed")
+    const ended = await Promise.race([plain.exited, Bun.sleep(15_000).then(() => undefined)])
+    const err = await new Response(plain.stderr).text()
+    expect(ended !== undefined && ended !== 0 && /stopped/.test(err), `the exec session ${ended === undefined ? "was still open 15 s after stop" : `exited ${ended}: ${err.trim()}`}`)
+    let note = `exec session ended ${((Date.now() - stopped) / 1000).toFixed(1)} s after stop with "${err.trim()}"`
+    if (terminal) {
+      const shown = (await terminal).out.replace(/\r/g, "")
+      expect(/code=[1-9]/.test(shown) && restored(shown.slice(shown.indexOf("code="))), `the shell session ended as: ${shown.slice(-400)}`)
+      note += "; the shell ended too, with its terminal restored"
+    }
+    const refused = await pdk(["exec", A, "--stream", "--", "true"])
+    expect(refused.code !== 0 && /not running/.test(refused.err), `a session on a stopped sandbox: exit ${refused.code}, ${refused.err.trim()}`)
+    expect(!(await running(A)), "opening a session started the sandbox")
+    return `${note}; a new session was refused and the sandbox stayed stopped`
+  } finally { plain.kill(); await ensure(A) }
+})
+
+ev("S05", "Sessions are offered only on the daemon's private socket: the dashboard's port and token cannot open one", async () => {
+  await ensure(A)
+  const daemon = await daemonFile()
+  const open = frame("open", { kind: "exec", name: A, argv: ["echo", "session-opened"], tty: false })
+  // Raw bytes to a socket, and whatever comes back before it closes or 5 s pass.
+  const exchange = (target: { path: string } | { host: string; port: number }, bytes: Uint8Array) => new Promise<Buffer>((resolve) => {
+    const chunks: Buffer[] = []; const client = connect(target as { path: string }, () => client.write(bytes))
+    client.on("data", (chunk: Buffer) => chunks.push(chunk)); client.on("error", () => {}); client.on("close", () => resolve(Buffer.concat(chunks)))
+    setTimeout(() => client.destroy(), 5000)
+  })
+  const kinds = (bytes: Buffer) => { try { return new FrameReader().push(bytes).map((piece) => piece.kind) } catch { return [] } }
+  const control = await exchange({ path: join(env.PADDOCK_STATE_DIR, "stream.sock") }, open)
+  expect(kinds(control).includes("ready") && control.includes("session-opened"), "control: the same frames on the private socket did not open a session")
+  const overTcp = await exchange({ host: "127.0.0.1", port: daemon.port }, open)
+  expect(!kinds(overTcp).includes("ready") && !overTcp.includes("session-opened"), "the dashboard's port opened a session from raw frames")
+  expect((await tcp("/api/list")).status === 200, "control: the token was refused for list")
+  for (const path of ["/api/session", "/api/stream", "/api/attach", "/api/exec-stream", "/stream", "/session"]) {
+    const reply = await tcp(path); const text = await reply.text()
+    expect(reply.status === 404 && !text.includes("session-opened"), `${path} answered ${reply.status} with the token`)
+  }
+  const mode = (await stat(join(env.PADDOCK_STATE_DIR, "stream.sock"))).mode & 0o777
+  expect(mode === 0o600, `stream.sock has mode ${mode.toString(8)}`)
+  const listening = (await sh(["lsof", "-nP", "-a", "-p", String(daemon.pid), "-iTCP", "-sTCP:LISTEN", "-Fn"])).out.split("\n").filter((line) => line.startsWith("n"))
+  expect(listening.length === 1 && listening[0] === `n127.0.0.1:${daemon.port}`, `the daemon listens on ${listening.join(", ") || "nothing lsof can see"}`)
+  return `raw frames: ready on stream.sock (mode 600), none on 127.0.0.1:${daemon.port}; six session-like paths 404 with the token; the daemon's only TCP listener is the dashboard's`
+})
+
+ev("S06", "A reader that stops reading holds the command in the sandbox back, not the daemon's memory", async () => {
+  await ensure(A)
+  const size = 1024 * 1048576; const marker = "paddock-slow-reader"
+  const command = [BIN, "exec", A, "--stream", "--", "sh", "-c", `head -c ${size} /dev/zero; : ${marker}`]
+  // A shell pipe, so the reader that sleeps is a real one: a child's pipe read by this process would be read ahead.
+  const piped = (reader: string) => sh(["sh", "-c", `"$0" "$@" | { ${reader} wc -c; }`, ...command], { env, timeoutMs: 300_000 })
+  // Control: read at once, the same output is done in this long.
+  const start = Date.now(); const fast = await piped(""); const fastSeconds = (Date.now() - start) / 1000
+  expect(fast.code === 0 && fast.out.trim() === String(size), `the control read ${fast.out.trim()} bytes (exit ${fast.code})`)
+  const stallSeconds = Math.max(10, Math.ceil(fastSeconds * 3))
+  const memory = daemonMemory(piped(`sleep ${stallSeconds};`))
+  await Bun.sleep((stallSeconds - 3) * 1000)
+  const held = (await guestProcesses(A, marker)).length > 0
+  const { value: slow, before, peak } = await memory
+  expect(held, `the command finished while nobody read, though it needs ${fastSeconds.toFixed(1)} s when read at once`)
+  expect(slow.code === 0 && slow.out.trim() === String(size), `after the stall ${slow.out.trim()} bytes came back (exit ${slow.code})`)
+  expect(peak - before < 64 * 1048576, `the daemon grew from ${mib(before)} to ${mib(peak)}`)
+  return `1 GiB read at once in ${fastSeconds.toFixed(1)} s; with the reader asleep ${stallSeconds} s the command was still running ${stallSeconds - 3} s in, and all 1 GiB came after; daemon ${mib(before)} before, ${mib(peak)} at most`
+})
+
 // D: the daemon keeps its promises through crashes, races and upgrades.
 ev("D01", "After the daemon is killed, the next command starts a new one that still knows every sandbox", async () => {
   await ensure(A)
@@ -1528,7 +1685,7 @@ ev("P02", "The Linux binary, run on Linux, creates a sandbox that passes every b
 
 ev("P03", "The core has no code that only works on one operating system", async () => {
   const offenders: string[] = []
-  for (const file of ["core/core.ts", "core/daemon.ts", "core/state.ts", "core/run.ts", "core/extensions.ts", "core/checks.ts", "core/providers/gvisor.ts", "cli/cli.ts"]) {
+  for (const file of ["core/core.ts", "core/daemon.ts", "core/state.ts", "core/run.ts", "core/stream.ts", "core/extensions.ts", "core/checks.ts", "core/providers/gvisor.ts", "cli/cli.ts"]) {
     const text = (await readFile(join(ROOT, file), "utf8")).replace(/\/\/.*$/gm, "")
     for (const word of ["osascript", "pbcopy", "launchctl", "/opt/homebrew", "security find-", "vm_stat"]) if (text.includes(word)) offenders.push(`${file}: ${word}`)
     // Every platform branch must name Windows as well as macOS, or name neither.

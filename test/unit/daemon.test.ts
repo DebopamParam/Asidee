@@ -11,7 +11,7 @@ async function handler() {
   const table = {
     list: { run: async () => ["demo"] },
     echo: { run: async (body: Record<string, unknown>) => body },
-    attach: { run: async () => ({ argv: ["docker"] }), socketOnly: true },
+    shutdown: { run: async () => ({ stopping: true }), socketOnly: true },
     missing: { run: async () => { throw new PaddockError("not-found", "There is no sandbox named x.") } },
   }
   return { config, handle: createHandler(table, TOKEN, config) }
@@ -31,8 +31,8 @@ test("the loopback port needs the token and this server's Host; the socket needs
 
 test("methods for the CLI only are refused on the loopback port", async () => {
   const { handle } = await handler()
-  expect((await handle(post("attach", auth), false, 7717)).status).toBe(403)
-  expect((await handle(post("attach"), true, 0)).status).toBe(200)
+  expect((await handle(post("shutdown", auth), false, 7717)).status).toBe(403)
+  expect((await handle(post("shutdown"), true, 0)).status).toBe(200)
 })
 
 test("unknown methods, inherited names and bad bodies are refused cleanly", async () => {

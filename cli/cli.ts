@@ -1,13 +1,15 @@
 #!/usr/bin/env bun
 import { spawn } from "node:child_process"
 import { mkdirSync, openSync } from "node:fs"
+import { connect } from "node:net"
 import { dirname, join } from "node:path"
 import { parseArgs } from "node:util"
 import { CHECKLIST } from "../core/checks"
 import type { SandboxView } from "../core/core"
 import { BUILD, readDaemonFile, runDaemon, VERSION } from "../core/daemon"
 import type { Extension } from "../core/extensions"
-import { checkSocketPath, defaultDirs, socketPath } from "../core/state"
+import { checkSocketPath, defaultDirs, socketPath, streamSocketPath } from "../core/state"
+import { dataFrames, frame, FrameReader, type OpenRequest } from "../core/stream"
 import { PaddockError, type CheckResult, type Engine, type ErrorCode, type RunResult } from "../core/types"
 
 // A thin client: every command is one call to the daemon, which is started on first use.
@@ -20,7 +22,8 @@ const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, 
   paddock start NAME | stop NAME
   paddock verify NAME                    run every check against the sandbox
   paddock exec NAME [--user USER] [--stdin] -- COMMAND…   --stdin sends this command's input (text)
-  paddock shell NAME
+  paddock exec NAME --stream [--user USER] -- COMMAND…    bytes in and out as they come, any size
+  paddock shell NAME [-- COMMAND…]
   paddock remove NAME --confirm NAME
   paddock ext list
   paddock ext run EXTENSION ACTION [SANDBOX] [--set FIELD=VALUE]…
@@ -83,6 +86,59 @@ async function call<T>(method: string, body: object = {}, watch?: string): Promi
     if (view?.activity && view.activity !== last) { last = view.activity; console.error(`  … ${last}`) }
   }, 400)
   try { return await request<T>(method, body) } finally { clearInterval(timer) }
+}
+
+// A session on the daemon's stream socket (core/stream.ts). This process only moves bytes between its own stdio and the
+// socket, and waits whenever the other side has not taken what it was given. On a terminal the session gets one too:
+// keystrokes, Ctrl-C included, go to the sandbox, and the terminal's settings are put back however the session ends.
+async function session(request: OpenRequest): Promise<never> {
+  await ensureDaemon()
+  const socket = connect(streamSocketPath(dirs))
+  const raw = request.kind === "exec" && request.tty && process.stdin.isTTY
+  let restored = !raw
+  const restore = () => { if (!restored) { restored = true; try { process.stdin.setRawMode(false) } catch {} } }
+  process.on("exit", restore)
+  let wrote: Promise<unknown> = Promise.resolve()
+  const leave = async (code: number, message?: string): Promise<never> => {
+    await wrote
+    restore()
+    if (message) process.stderr.write(`${raw ? "\r\n" : ""}paddock: ${message}\n`)
+    process.exit(code)
+  }
+  for (const signal of ["SIGTERM", "SIGHUP"] as const) process.on(signal, () => void leave(129, "the session was interrupted."))
+  const out = (stream: NodeJS.WriteStream, bytes: Uint8Array) => {
+    wrote = new Promise((resolve) => { if (!stream.write(bytes, resolve)) { socket.pause(); stream.once("drain", () => socket.resume()) } })
+  }
+  const reader = new FrameReader()
+  let ready = false
+  socket.on("connect", () => socket.write(frame("open", request)))
+  socket.on("error", (error) => void leave(1, `could not reach the daemon's session socket: ${error.message}`))
+  socket.on("close", () => void leave(1, ready ? "the session was lost before the command ended." : "the daemon closed the session."))
+  socket.on("data", (chunk: Buffer) => {
+    for (const { kind, payload } of reader.push(chunk)) {
+      if (kind === "stdout") out(process.stdout, payload)
+      else if (kind === "stderr") out(process.stderr, payload)
+      else if (kind === "exit") { socket.removeAllListeners("close"); void leave(Number(JSON.parse(payload.toString()).code)) }
+      else if (kind === "error") {
+        socket.removeAllListeners("close")
+        const error = JSON.parse(payload.toString()) as { code: ErrorCode; message: string }
+        void leave(EXIT[error.code] ?? 1, error.message)
+      } else if (kind === "ready" && !ready) {
+        ready = true
+        if (raw) {
+          process.stdin.setRawMode(true); restored = false
+          // A terminal that reports no size (0 by 0) keeps the sandbox's default.
+          const resize = () => { if (process.stdout.columns > 0 && process.stdout.rows > 0) socket.write(frame("resize", { cols: process.stdout.columns, rows: process.stdout.rows })) }
+          process.on("SIGWINCH", resize); resize()
+        }
+        process.stdin.on("data", (bytes: Buffer) => { if (!dataFrames("stdin", bytes).map((piece) => socket.write(piece)).at(-1)) process.stdin.pause() })
+        socket.on("drain", () => process.stdin.resume())
+        process.stdin.on("end", () => socket.write(frame("eof")))
+        process.stdin.resume()
+      }
+    }
+  })
+  return new Promise<never>(() => {})
 }
 
 const MARK: Record<CheckResult["status"], string> = { pass: "✓", weak: "~", fail: "✗", unsupported: "–", unknown: "?", info: "i" }
@@ -172,14 +228,17 @@ async function main(argv: string[]): Promise<void> {
         return out(removed, () => console.log(`Removed ${removed.removed}.`))
       }
       case "exec": {
-        const { values, positionals } = parse({ user: { type: "string" }, stdin: { type: "boolean" } })
+        const { values, positionals } = parse({ user: { type: "string" }, stdin: { type: "boolean" }, stream: { type: "boolean" } })
         if (!tail.length) throw new PaddockError("usage", "Give the command after --, as in `paddock exec NAME -- ls -la`.")
+        if (values.stream && (asJson || values.stdin)) throw new PaddockError("usage", "--stream passes bytes through as they come, so it takes neither --json nor --stdin (its input is always this command's).")
+        if (values.stream) return await session({ kind: "exec", name: need(positionals[0], "a name"), argv: tail, tty: false, ...(typeof values.user === "string" ? { user: values.user } : {}) })
         const output = await call<RunResult>("exec", { name: need(positionals[0], "a name"), argv: tail, user: values.user, stdin: values.stdin ? await Bun.stdin.text() : undefined })
         return printRun(output, asJson)
       }
       case "shell": {
-        const { argv: attach } = await call<{ argv: string[] }>("attach", { name: need(rest[0], "a name"), argv: tail.length ? tail : undefined })
-        process.exit(await Bun.spawn(attach, { stdio: ["inherit", "inherit", "inherit"] }).exited)
+        const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY)
+        return await session({ kind: "exec", name: need(rest[0], "a name"), argv: tail.length ? tail : ["sh", "-c", "command -v bash >/dev/null && exec bash -l || exec sh -l"], tty,
+          ...(tty && process.stdout.columns > 0 && process.stdout.rows > 0 ? { cols: process.stdout.columns, rows: process.stdout.rows } : {}) })
       }
       case "ext": {
         if (rest[0] === "list" || rest[0] === undefined) {

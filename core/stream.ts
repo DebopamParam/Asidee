@@ -1,0 +1,128 @@
+import type { Socket } from "node:net"
+import { validName } from "./state"
+import { PaddockError, type ErrorCode, type Session } from "./types"
+
+// paddock-stream/1, spoken only on the daemon's second Unix socket (stream.sock). Each frame is one kind byte, a
+// four-byte big-endian length and at most 64 KiB of payload, so stdout and stderr stay apart and nothing is decoded.
+// The client sends `open` and waits for `ready` (or `error`); then stdin, eof and resize go one way, and stdout, stderr
+// and a last exit or error the other.
+export const KINDS = ["open", "ready", "stdin", "stdout", "stderr", "eof", "resize", "exit", "error"] as const
+export type Kind = typeof KINDS[number]
+export type Frame = { kind: Kind; payload: Buffer }
+export const MAX_PAYLOAD = 64 * 1024
+const HEADER = 5
+
+export function frame(kind: Kind, payload: Uint8Array | string | object = new Uint8Array()): Buffer {
+  const body = typeof payload === "string" ? Buffer.from(payload) : payload instanceof Uint8Array ? payload : Buffer.from(JSON.stringify(payload))
+  if (body.byteLength > MAX_PAYLOAD) throw new RangeError(`A frame carries at most ${MAX_PAYLOAD} bytes.`)
+  const out = Buffer.allocUnsafe(HEADER + body.byteLength)
+  out[0] = KINDS.indexOf(kind) + 1; out.writeUInt32BE(body.byteLength, 1); out.set(body, HEADER)
+  return out
+}
+
+// Data of any size, as frames of at most 64 KiB.
+export function dataFrames(kind: "stdin" | "stdout" | "stderr", bytes: Uint8Array): Buffer[] {
+  const out: Buffer[] = []
+  for (let at = 0; at < bytes.byteLength; at += MAX_PAYLOAD) out.push(frame(kind, bytes.subarray(at, at + MAX_PAYLOAD)))
+  return out
+}
+
+// Splits bytes into frames. It holds at most one unfinished frame, so a peer cannot make it buffer more than 64 KiB.
+export class FrameReader {
+  private pending = Buffer.alloc(0)
+  push(chunk: Uint8Array): Frame[] {
+    this.pending = this.pending.length ? Buffer.concat([this.pending, chunk]) : Buffer.from(chunk)
+    const frames: Frame[] = []
+    while (this.pending.length >= HEADER) {
+      const kind = KINDS[this.pending[0]! - 1]
+      if (!kind) throw new PaddockError("usage", "Not a paddock-stream/1 frame.")
+      const size = this.pending.readUInt32BE(1)
+      if (size > MAX_PAYLOAD) throw new PaddockError("usage", `A frame carries at most ${MAX_PAYLOAD} bytes.`)
+      if (this.pending.length < HEADER + size) break
+      frames.push({ kind, payload: this.pending.subarray(HEADER, HEADER + size) })
+      this.pending = this.pending.subarray(HEADER + size)
+    }
+    return frames
+  }
+}
+
+export type OpenRequest =
+  | { kind: "exec"; name: string; argv: string[]; user?: string; tty: boolean; cols?: number; rows?: number }
+  | { kind: "ssh"; name: string }
+
+const USER = /^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}$/
+const size = (value: unknown, what: string) => {
+  if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > 10_000) throw new PaddockError("usage", `${what} must be a whole number from 1 to 10000.`)
+  return value as number
+}
+const record = (value: unknown): Record<string, unknown> => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new PaddockError("usage", "A session request is a JSON object.")
+  return value as Record<string, unknown>
+}
+
+// The only way a session request is read. Unknown fields are dropped, as in a spec.
+export function parseOpen(value: unknown): OpenRequest {
+  const body = record(value)
+  const name = validName(body.name)
+  if (body.kind === "ssh") return { kind: "ssh", name }
+  if (body.kind !== "exec") throw new PaddockError("usage", "A session is an exec or an ssh session.")
+  const argv = body.argv
+  if (!Array.isArray(argv) || argv.length === 0 || !argv.every((part) => typeof part === "string" && !part.includes("\0"))) throw new PaddockError("usage", "exec needs a command.")
+  if (body.user !== undefined && (typeof body.user !== "string" || !USER.test(body.user))) throw new PaddockError("usage", "The user must be a user name or id.")
+  if (body.tty !== undefined && typeof body.tty !== "boolean") throw new PaddockError("usage", "tty must be true or false.")
+  const tty = body.tty === true
+  return { kind: "exec", name, argv: argv as string[], tty, ...(body.user === undefined ? {} : { user: body.user as string }),
+    ...(tty && body.cols !== undefined ? { cols: size(body.cols, "cols") } : {}), ...(tty && body.rows !== undefined ? { rows: size(body.rows, "rows") } : {}) }
+}
+
+export function parseSize(payload: Uint8Array): { cols: number; rows: number } {
+  let body: Record<string, unknown>
+  try { body = record(JSON.parse(Buffer.from(payload).toString("utf8"))) } catch { throw new PaddockError("usage", "A resize is {cols, rows}.") }
+  return { cols: size(body.cols, "cols"), rows: size(body.rows, "rows") }
+}
+
+// Relays one client connection to the session it asks for. Each direction waits for the other side to take what it
+// was given (pause, then resume on drain), so the daemon holds at most a socket buffer and one frame per direction.
+export function serveStream(socket: Socket, open: (request: OpenRequest) => Promise<Session>): void {
+  const reader = new FrameReader()
+  let session: Session | undefined; let opening = false; let done = false
+  let inputWaits = false; let outputWaits = false
+  const finish = (last: Buffer) => { if (done) return; done = true; clearTimeout(timer); socket.end(last) }
+  const fail = (message: string, code: ErrorCode = "runtime") => { finish(frame("error", { code, message: message.slice(0, 4000) })); session?.close() }
+  const timer = setTimeout(() => fail("No session was asked for.", "usage"), 10_000)
+  socket.on("error", () => {})
+  socket.on("close", () => { clearTimeout(timer); if (!done) { done = true; session?.close() } })
+  socket.on("drain", () => { if (outputWaits) { outputWaits = false; session?.resume() } })
+  socket.on("data", (chunk: Buffer) => {
+    let frames: Frame[]
+    try { frames = reader.push(chunk) } catch (error) { return fail((error as Error).message, "usage") }
+    for (const { kind, payload } of frames) {
+      if (done) return
+      if (!session) {
+        if (opening || kind !== "open") return fail(opening ? "Wait for ready before sending." : "The first frame must open a session.", "usage")
+        opening = true; clearTimeout(timer); socket.pause()
+        let request: OpenRequest
+        try { request = parseOpen(JSON.parse(payload.toString("utf8"))) } catch (error) { return fail(error instanceof SyntaxError ? "The session request is not JSON." : (error as Error).message, "usage") }
+        open(request).then((opened) => {
+          if (done) return opened.close()
+          session = opened
+          opened.on("output", (stream, bytes) => {
+            for (const piece of dataFrames(stream, bytes)) if (!socket.write(piece)) outputWaits = true
+            if (outputWaits) opened.pause()
+          })
+          opened.on("drain", () => { if (inputWaits) { inputWaits = false; socket.resume() } })
+          opened.on("end", (exit) => finish(exit.error === undefined ? frame("exit", { code: exit.code ?? -1 }) : frame("error", { code: "runtime", message: exit.error })))
+          socket.write(frame("ready", { tty: opened.tty }))
+          socket.resume()
+        }, (error) => fail((error as Error).message, error instanceof PaddockError ? error.code : "runtime"))
+        continue
+      }
+      try {
+        if (kind === "stdin") { if (!session.write(payload) && !inputWaits) { inputWaits = true; socket.pause() } }
+        else if (kind === "eof") session.end()
+        else if (kind === "resize") { const { cols, rows } = parseSize(payload); void session.resize(cols, rows).catch(() => {}) }
+        else return fail(`A client does not send ${kind} frames.`, "usage")
+      } catch (error) { return fail((error as Error).message, "usage") }
+    }
+  })
+}

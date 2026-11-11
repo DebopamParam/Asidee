@@ -11,6 +11,8 @@ export function defaultDirs(env: Record<string, string | undefined> = process.en
   }
 }
 export const socketPath = (dirs: Dirs) => join(dirs.state, "daemon.sock")
+// Sessions (core/stream.ts). Its path is shorter than the API socket's, so the length check below covers it.
+export const streamSocketPath = (dirs: Dirs) => join(dirs.state, "stream.sock")
 // The operating system limits a socket's path (104 bytes on macOS, 108 on Linux). Past it the daemon cannot listen.
 export function checkSocketPath(dirs: Dirs): void {
   if (Buffer.byteLength(socketPath(dirs)) > 100) throw new PaddockError("usage", `The state folder's path is too long for the daemon's socket (${socketPath(dirs)}). Set PADDOCK_STATE_DIR to a shorter path.`)

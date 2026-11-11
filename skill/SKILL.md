@@ -18,6 +18,7 @@ paddock doctor                              # engines and what each needs
 paddock create NAME [--docker] [--image IMAGE] [--cpus N] [--memory GB] [--disk GB]
 paddock list
 paddock exec NAME [--stdin] -- COMMAND ARG… # exit code, stdout and stderr are the command's
+paddock exec NAME --stream -- COMMAND ARG…  # raw bytes in and out, no size limit
 paddock start NAME | paddock stop NAME
 paddock verify NAME                         # exit 6 if a blocking check failed
 paddock remove NAME --confirm NAME          # deletes everything in it; ask the user first
@@ -32,10 +33,10 @@ Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing depende
   by the engine when it passes its memory or task limit.
   `paddock list` shows the reason. Report it; start the sandbox again only if the reason is gone.
 - Long operations print progress lines starting with `…` on stderr. Stdout stays the result.
-- A sandbox has no host folders. Send a text file in with `paddock exec NAME --stdin -- sh -c 'cat > FILE' < local-file`,
-  and read one out with `paddock exec NAME -- cat FILE`. Binary files are not supported this way yet. One exec returns
-  at most 16 MiB on each of stdout and stderr; past that it fails with an error naming the limit and the command is
-  ended. Read large files in parts (`split`, `head -c`, `tail -c`).
+- A sandbox has no host folders. Send a file in with `paddock exec NAME --stream -- sh -c 'cat > FILE' < local-file`,
+  and read one out with `paddock exec NAME --stream -- cat FILE > local-file`. `--stream` carries any bytes of any size
+  and keeps stderr apart. Without it, one exec returns at most 16 MiB on each of stdout and stderr; past that it fails
+  with an error naming the limit and the command is ended.
 - To run containers inside, create with `--docker` and the default image. Then use
   `paddock exec NAME -- docker run --rm alpine:latest echo inner-ok`. This private daemon adds exactly `NET_ADMIN`
   and `SYS_ADMIN` inside gVisor. Its containers use the sandbox's guarded network and share its outer limits.

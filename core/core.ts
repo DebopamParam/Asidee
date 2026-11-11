@@ -3,7 +3,8 @@ import { blockers, complete, failures, titleOf } from "./checks"
 import { fieldValues, loadExtensions, runCommand } from "./extensions"
 import { OUTPUT_LIMIT } from "./run"
 import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSpec, writeManifest, type Dirs } from "./state"
-import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type RunResult, type Runner, type Stage } from "./types"
+import type { OpenRequest } from "./stream"
+import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage } from "./types"
 
 // A running sandbox is stopped when a blocking check could not be made this many timer passes in a row.
 export const UNCHECKED_PASSES = 4
@@ -23,6 +24,8 @@ export class Core {
   private readonly activity = new Map<string, string>()
   // Passes in a row in which a blocking check of a running sandbox could not be made.
   private readonly unchecked = new Map<string, number>()
+  // Open sessions per sandbox name, closed when it stops or is removed.
+  private readonly sessions = new Map<string, Set<Session>>()
   constructor(private readonly providers: readonly Provider[], readonly dirs: Dirs, private readonly run: Runner, private readonly cliDir: string) {}
 
   // One operation per sandbox at a time.
@@ -73,7 +76,14 @@ export class Core {
     throw new PaddockError("check-failed", `${name} ${consequence}: ${failed.map((entry) => `${titleOf(entry.id)} (${entry.detail})`).join("; ")}`, failed)
   }
 
+  // Before the engine stops it, so each client is told why its session ended.
+  private endSessions(name: string, reason: string): void {
+    for (const session of this.sessions.get(name) ?? []) session.close(reason)
+    this.sessions.delete(name)
+  }
+
   private async stopBecause(manifest: Manifest, reason: string): Promise<void> {
+    this.endSessions(manifest.name, `The session ended: ${manifest.name} was stopped. ${reason}`)
     await this.provider(manifest).stop(manifest)
     manifest.stopReason = reason; await writeManifest(this.dirs, manifest)
   }
@@ -150,6 +160,7 @@ export class Core {
     return this.exclusive(validName(name), async () => {
       const manifest = await readManifest(this.dirs, name)
       this.activity.set(name, "Stopping")
+      this.endSessions(name, `The session ended: ${name} was stopped.`)
       await this.provider(manifest).stop(manifest); return this.view(manifest)
     })
   }
@@ -160,6 +171,7 @@ export class Core {
       const manifest = await readManifest(this.dirs, name)
       if (confirm !== name) throw new PaddockError("usage", `Removing ${name} deletes everything in it. Confirm by repeating its name.`)
       this.activity.set(name, "Removing")
+      this.endSessions(name, `The session ended: ${name} was removed.`)
       await this.provider(manifest).remove(manifest); await deleteManifest(this.dirs, name)
       return { removed: name }
     })
@@ -181,12 +193,21 @@ export class Core {
     return result
   }
 
-  async attach(name: string, argv: unknown): Promise<{ argv: string[] }> {
-    const manifest = await readManifest(this.dirs, name); const provider = this.provider(manifest)
-    if ((await provider.status(manifest)) !== "running") throw new PaddockError("conflict", `${name} is not running. Start it first.`)
-    const command = Array.isArray(argv) && argv.length && argv.every((part) => typeof part === "string") ? argv as string[] : ["sh", "-c", "command -v bash >/dev/null && exec bash -l || exec sh -l"]
-    return { argv: provider.attachArgv(manifest, command) }
+  // A session on the stream socket. It never starts a sandbox: a client that reconnects on its own (an editor) must not
+  // undo a stop.
+  async openSession(request: OpenRequest): Promise<Session> {
+    const manifest = await readManifest(this.dirs, request.name); const provider = this.provider(manifest)
+    if (manifest.engine.capabilities?.execStream === false) throw new PaddockError("dependency", `${manifest.engine.label} cannot relay a session's bytes.`)
+    if ((await provider.status(manifest)) !== "running") throw new PaddockError("conflict", `${request.name} is not running. Start it with \`paddock start ${request.name}\`.`)
+    if (request.kind !== "exec") throw new PaddockError("usage", `${request.kind} sessions are not available.`)
+    const session = await provider.openExec(manifest, request.argv, request)
+    const open = this.sessions.get(request.name) ?? new Set<Session>()
+    this.sessions.set(request.name, open.add(session))
+    session.on("end", () => open.delete(session))
+    return session
   }
+
+  closeSessions(): void { for (const name of [...this.sessions.keys()]) this.endSessions(name, "The session ended: the Paddock daemon stopped.") }
 
   extensions() { return loadExtensions(this.dirs) }
 

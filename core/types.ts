@@ -18,6 +18,8 @@ export type Capabilities = {
   diskLimit: "hard" | "watched" | "none"
   networkGuard: boolean
   docker: boolean
+  // The daemon can relay a command's bytes as they come (shell, exec --stream).
+  execStream: boolean
 }
 
 // One place sandboxes can run: a provider plus the engine it found (a Docker context, for example).
@@ -66,6 +68,25 @@ export type RunOptions = { stdin?: string | Uint8Array; timeoutMs?: number; env?
 // Every external command goes through a Runner, so tests run without an engine.
 export type Runner = (argv: readonly string[], options?: RunOptions) => Promise<RunResult>
 
+// A command running in a sandbox whose bytes are passed on, never collected. While paused, the provider stops reading
+// from the engine, so a slow reader slows the command down instead of filling the daemon's memory. `end` arrives once,
+// after the last output: with the command's exit code, or with an error when it was cut off (the sandbox stopped).
+export interface Session {
+  readonly tty: boolean
+  // false: wait for "drain" before writing more.
+  write(bytes: Uint8Array): boolean
+  // Closes the command's input; its output goes on. Ignored on a terminal, where input is keystrokes.
+  end(): void
+  resize(cols: number, rows: number): Promise<void>
+  pause(): void
+  resume(): void
+  // Ends the session and, as far as the provider can, the command's processes.
+  close(reason?: string): void
+  on(event: "output", listener: (stream: "stdout" | "stderr", bytes: Uint8Array) => void): this
+  on(event: "drain", listener: () => void): this
+  on(event: "end", listener: (exit: { code?: number; error?: string }) => void): this
+}
+
 export interface Provider {
   id: string
   detect(): Promise<Engine[]>
@@ -77,8 +98,8 @@ export interface Provider {
   remove(manifest: Manifest): Promise<void>
   status(manifest: Manifest): Promise<"running" | "stopped" | "missing">
   exec(manifest: Manifest, argv: readonly string[], options?: { user?: string; stdin?: string }): Promise<RunResult>
-  // The command a terminal runs for an interactive session.
-  attachArgv(manifest: Manifest, argv: readonly string[]): string[]
+  // A command whose bytes are relayed as they come, for shells, binary exec and anything long-lived.
+  openExec(manifest: Manifest, argv: readonly string[], options: { user?: string; tty: boolean; cols?: number; rows?: number }): Promise<Session>
   checks(manifest: Manifest, stage: Stage): Promise<CheckResult[]>
   diskUsedBytes(manifest: Manifest): Promise<number | undefined>
   // Why the engine stopped a sandbox that nobody asked to stop (it ran out of memory, for example), if it knows.

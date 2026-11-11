@@ -151,6 +151,23 @@ restarts, because `sleep`, its main process, does not reap them; they count agai
 16 MiB comes back whole; more on stdout, on stderr, and 1 GiB on stdout are each refused with the limit named, no
 flooding process is left running, and the same daemon answers afterwards.
 
+### Sessions
+
+`paddock exec --stream` and `paddock shell` are sessions. The daemon relays them on a second Unix socket in the state
+folder, `stream.sock` (mode 0600), and on nothing else: the dashboard's port cannot open one, with or without its
+token (S05). The protocol, paddock-stream/1 in `core/stream.ts`, is frames of a kind byte, a four-byte length and at
+most 64 KiB of payload. The client sends `open` and waits for `ready`; then it sends input, end of input and terminal
+sizes, and the daemon sends stdout and stderr apart and last the exit code or an error. The provider runs the command
+through the engine's API (an exec whose start is upgraded to a raw stream on the engine's Unix socket), not through the
+engine's CLI, and a closed session's processes are ended by their `PADDOCK_EXEC` tag as above. Each direction waits
+for the other side to take what it was given, so nothing is buffered beyond a socket buffer and a frame. A session
+ends with an error when its sandbox is stopped or removed or the daemon stops, and a stopped sandbox is refused, never
+started. Buffered `exec` keeps its 16 MiB limit. S01: 256 MiB of random bytes went in and came back with the same
+hash on both sides, the daemon grew by at most 5 MiB. S02: stderr stayed apart, exit 5 and end of input came through.
+S03: a shell saw this terminal's size and a resize, Ctrl-C ended a `sleep` inside, and the terminal was restored. S04:
+a session ended within a second of `paddock stop`. S06: a reader asleep for longer than the whole transfer takes held
+the command in the sandbox back.
+
 ## Where the guarantee ends
 
 - **Something with your rights on this machine can change Paddock itself.** An agent running outside a sandbox, or an
@@ -186,8 +203,9 @@ and networks an interrupted verify left behind. A daemon that is stopping refuse
 finish, so a second daemon never runs beside it. It listens on:
 
 - a Unix socket in the state folder (mode 0600), used by the CLI;
+- a second one, `stream.sock` (mode 0600), for sessions only;
 - `127.0.0.1` on port 7717 (or a free port), used by the dashboard. Requests need the token from `paddock ui` and a
-  `Host` header naming this server. `attach` and `shutdown` are not available here.
+  `Host` header naming this server. `shutdown` and sessions are not available here.
 
 State is in `~/.local/state/paddock`, configuration in `~/.config/paddock` (`PADDOCK_STATE_DIR`, `PADDOCK_CONFIG_DIR`).
 

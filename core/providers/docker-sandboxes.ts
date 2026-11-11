@@ -23,7 +23,7 @@ export class DockerSandboxesProvider implements Provider {
   remove() { return this.unsupported() }
   status() { return this.unsupported() }
   exec() { return this.unsupported() }
-  attachArgv() { return this.unsupported() }
+  openExec() { return this.unsupported() }
   checks() { return this.unsupported() }
   diskUsedBytes() { return this.unsupported() }
   stoppedWhy() { return this.unsupported() }

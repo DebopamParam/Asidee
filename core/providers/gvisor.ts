@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from "node:crypto"
+import { EventEmitter } from "node:events"
+import { connect, type Socket } from "node:net"
 import { must } from "../run"
-import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type RunOptions, type RunResult, type Runner, type Stage } from "../types"
+import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type RunOptions, type RunResult, type Runner, type Session, type Stage } from "../types"
 import GUARD_RULES from "./guard.nft" with { type: "text" }
 import HELPER_DOCKERFILE from "./helper.Dockerfile" with { type: "text" }
 
@@ -94,6 +96,7 @@ for pass in 1 2 3; do pids=$(marked "$1"); [ -z "$pids" ] && exit 0; kill -9 $pi
 const CREDENTIAL_FILES = [".claude*/.credentials.json", ".codex*/auth.json", ".config/gh/hosts.yml", ".git-credentials", ".ssh/id_ed25519", ".ssh/id_rsa", ".aws/credentials", ".netrc"]
 
 type Inspect = {
+  Id?: string
   State: { Running: boolean; OOMKilled?: boolean; ExitCode?: number; FinishedAt?: string }
   Config: { Labels: Record<string, string> | null }
   HostConfig: {
@@ -227,7 +230,7 @@ export class GvisorProvider implements Provider {
       const measurable = seesWrites(chosen[1].runtimeArgs)
       engines.push({ ...base, label, ready: true, data: { context: context.Name, runtime: chosen[0] },
         problems: measurable ? [] : [`Sandboxes here have no disk limit: the runtime ${chosen[0]} lacks --overlay2=none, without which Paddock cannot measure what a sandbox writes.`],
-        capabilities: { kernelIsolation: "gvisor", diskLimit: measurable ? "watched" : "none", networkGuard: true, docker: measurable && hasRawNetwork(chosen[1].runtimeArgs) } })
+        capabilities: { kernelIsolation: "gvisor", diskLimit: measurable ? "watched" : "none", networkGuard: true, docker: measurable && hasRawNetwork(chosen[1].runtimeArgs), execStream: true } })
     }
     return engines
   }
@@ -364,8 +367,39 @@ export class GvisorProvider implements Provider {
     return { ...ran, stderr: ended.exitCode === 0 ? "Its processes inside the sandbox were ended." : `Its processes inside the sandbox could not all be ended (${ended.stderr.trim() || `exit ${ended.exitCode}`}); look for them with ps.` }
   }
 
-  attachArgv(manifest: Manifest, argv: readonly string[]): string[] {
-    return ["docker", "--context", manifest.engine.data.context!, "exec", "-it", container(manifest.name), ...argv]
+  // The engine's own socket, for the exec API: the docker client has no way to hand over a session's bytes as they come,
+  // separate stderr without a terminal, or resize one.
+  private readonly endpoints = new Map<string, Promise<string>>()
+  private endpoint(engine: Engine): Promise<string> {
+    const known = this.endpoints.get(engine.id)
+    if (known) return known
+    const found = (async () => {
+      const host = (await this.docker(engine, ["context", "inspect", "--format", "{{.Endpoints.docker.Host}}", engine.data.context!])).stdout.trim()
+      if (!host.startsWith("unix://")) throw new PaddockError("dependency", `Sessions need an engine on a Unix socket; ${engine.label} is at ${host || "an unknown address"}.`)
+      return host.slice("unix://".length)
+    })()
+    found.catch(() => this.endpoints.delete(engine.id))
+    this.endpoints.set(engine.id, found)
+    return found
+  }
+
+  async openExec(manifest: Manifest, argv: readonly string[], options: { user?: string; tty: boolean; cols?: number; rows?: number }): Promise<Session> {
+    const inspect = await this.inspect(manifest)
+    if (!inspect?.State.Running || !inspect.Id) throw new PaddockError("conflict", `${manifest.name} is not running. Start it first.`)
+    const socket = await this.endpoint(manifest.engine)
+    const tag = randomBytes(8).toString("hex")
+    // By the container's id, which inspect has just tied to this sandbox's label.
+    const created = await engineApi(socket, "POST", `/containers/${inspect.Id}/exec`, {
+      AttachStdin: true, AttachStdout: true, AttachStderr: true, Tty: options.tty, Cmd: argv, Env: [`PADDOCK_EXEC=${tag}`],
+      ...(options.user ? { User: options.user } : {}), ...(options.tty && options.cols && options.rows ? { ConsoleSize: [options.rows, options.cols] } : {}),
+    })
+    if (created.status !== 201 || typeof created.body?.Id !== "string") throw new PaddockError("runtime", `The engine did not start the command: ${created.body?.message ?? `HTTP ${created.status}`}`)
+    const session = new EngineSession(socket, created.body.Id as string, options.tty, () => {
+      void this.docker(manifest.engine, ["exec", ...(options.user ? ["-u", options.user] : []), container(manifest.name), "sh", "-c", END_EXEC, "end", tag], { timeoutMs: 30_000 })
+    })
+    await session.started
+    if (options.tty && options.cols && options.rows) await session.resize(options.cols, options.rows).catch(() => {})
+    return session
   }
 
   async diskUsedBytes(manifest: Manifest): Promise<number | undefined> {
@@ -572,6 +606,97 @@ export class GvisorProvider implements Provider {
       : files.length ? result("credentials", "info", "probed", `Found ${files.join(", ")}. An agent in the sandbox can read these and send them out.`)
       : result("credentials", "info", "probed", "None of the usual login files (Claude, Codex, GitHub, git, SSH keys, AWS, netrc) are present."))
     return out
+  }
+}
+
+// One request to the engine's API on its Unix socket.
+async function engineApi(socket: string, method: string, path: string, body?: unknown): Promise<{ status: number; body?: Record<string, any> }> {
+  const response = await fetch(`http://engine${path}`, { unix: socket, method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) } as RequestInit)
+  const text = await response.text()
+  try { return { status: response.status, body: text ? JSON.parse(text) : undefined } } catch { return { status: response.status, body: { message: text.slice(0, 500) } } }
+}
+
+// An exec started through the engine's API, its connection taken over for the command's bytes. Without a terminal the
+// engine sends 8-byte headers (stream, 0, 0, 0, length) before each piece of output; they are removed here as the bytes
+// arrive, without collecting a whole piece.
+class EngineSession extends EventEmitter implements Session {
+  readonly started: Promise<void>
+  private readonly connection: Socket
+  private ended = false
+  private header = Buffer.alloc(0); private remaining = 0; private stream: "stdout" | "stderr" = "stdout"
+  constructor(private readonly socket: string, private readonly id: string, readonly tty: boolean, private readonly endProcesses: () => void) {
+    super()
+    this.connection = connect(socket)
+    const body = JSON.stringify({ Detach: false, Tty: tty })
+    this.started = new Promise((resolve, reject) => {
+      let head = Buffer.alloc(0)
+      const onData = (chunk: Buffer) => {
+        head = Buffer.concat([head, chunk])
+        const end = head.indexOf("\r\n\r\n")
+        if (end < 0) { if (head.length > 16_384) fail(new Error("The engine's reply has no end of headers.")); return }
+        const status = /^HTTP\/1\.[01] (\d{3})/.exec(head.subarray(0, end).toString("latin1"))?.[1]
+        if (status !== "101" && status !== "200") return fail(new Error(`The engine refused the session: ${head.subarray(end + 4).toString("utf8").trim().slice(0, 300) || `HTTP ${status}`}`))
+        this.connection.off("data", onData); this.connection.off("error", fail)
+        this.connection.on("data", (data: Buffer) => this.take(data))
+        this.connection.on("drain", () => this.emit("drain"))
+        this.connection.on("end", () => void this.finish())
+        this.connection.on("close", () => void this.finish())
+        this.connection.on("error", () => {})
+        resolve()
+        const rest = head.subarray(end + 4)
+        if (rest.length) this.take(rest)
+      }
+      const fail = (error: Error) => { this.connection.destroy(); reject(new PaddockError("runtime", error.message)) }
+      this.connection.on("data", onData); this.connection.on("error", fail)
+      this.connection.write(`POST /exec/${id}/start HTTP/1.1\r\nHost: engine\r\nContent-Type: application/json\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`)
+    })
+  }
+
+  private take(data: Buffer): void {
+    if (this.tty) { this.emit("output", "stdout", data); return }
+    let at = 0
+    while (at < data.length) {
+      if (this.remaining === 0) {
+        const need = 8 - this.header.length
+        this.header = Buffer.concat([this.header, data.subarray(at, at + need)]); at += need
+        if (this.header.length < 8) return
+        this.stream = this.header[0] === 2 ? "stderr" : "stdout"; this.remaining = this.header.readUInt32BE(4); this.header = Buffer.alloc(0)
+        continue
+      }
+      const piece = data.subarray(at, at + this.remaining)
+      at += piece.length; this.remaining -= piece.length
+      this.emit("output", this.stream, piece)
+    }
+  }
+
+  // The connection ends after the command's last output; the exit code is asked for afterwards.
+  private async finish(): Promise<void> {
+    if (this.ended) return
+    this.ended = true
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const state = await engineApi(this.socket, "GET", `/exec/${this.id}/json`).catch(() => undefined)
+      if (!state || state.status !== 200) break
+      if (state.body?.Running === false && typeof state.body.ExitCode === "number") { this.emit("end", { code: state.body.ExitCode }); return }
+      await Bun.sleep(50)
+    }
+    this.emit("end", { error: "The session ended without an exit status (the sandbox may have stopped)." })
+  }
+
+  write(bytes: Uint8Array): boolean { return this.connection.write(bytes) }
+  // A terminal's input is keystrokes; closing it would end the session.
+  end(): void { if (!this.tty) this.connection.end() }
+  pause(): void { this.connection.pause() }
+  resume(): void { this.connection.resume() }
+  async resize(cols: number, rows: number): Promise<void> {
+    const reply = await engineApi(this.socket, "POST", `/exec/${this.id}/resize?h=${rows}&w=${cols}`)
+    if (reply.status !== 200 && reply.status !== 201) throw new PaddockError("runtime", `The engine did not resize the terminal: HTTP ${reply.status}`)
+  }
+  close(reason = "The session was closed."): void {
+    if (this.ended) { this.connection.destroy(); return }
+    this.ended = true
+    this.connection.destroy()
+    this.endProcesses()
+    this.emit("end", { error: reason })
   }
 }
 

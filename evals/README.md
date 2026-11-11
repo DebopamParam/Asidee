@@ -40,6 +40,7 @@ confirmed against the quota from here.
 | R | Can any client ask the core for an unsafe sandbox? |
 | F | Can everything outside the core be changed without touching it? |
 | U | Can a person or an agent use it without reading the source? |
+| S | Do exec and shell sessions carry raw bytes both ways, bounded, only over this machine's socket? |
 | D | Does the daemon keep its promises through crashes, races and upgrades? |
 | P | Does it build and run on other platforms, as far as this machine can show? |
 | E | What has nobody measured? |

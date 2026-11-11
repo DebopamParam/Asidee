@@ -2,13 +2,15 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { statSync } from "node:fs"
 import { hostname } from "node:os"
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { createServer } from "node:net"
 import { join, normalize } from "node:path"
 import { CHECKLIST } from "./checks"
 import { Core } from "./core"
 import { DockerSandboxesProvider } from "./providers/docker-sandboxes"
 import { GvisorProvider } from "./providers/gvisor"
 import { systemRunner } from "./run"
-import { checkSocketPath, daemonFile, socketPath, type Dirs } from "./state"
+import { checkSocketPath, daemonFile, socketPath, streamSocketPath, type Dirs } from "./state"
+import { serveStream } from "./stream"
 import { PaddockError, type ErrorCode } from "./types"
 import builtInUi from "../ui/index.html" with { type: "text" }
 import pkg from "../package.json"
@@ -41,7 +43,6 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     remove: { run: (body) => core.remove(String(body.name), body.confirm) },
     verify: { run: (body) => core.verify(String(body.name)) },
     exec: { run: (body) => core.exec(String(body.name), body.argv, { user: typeof body.user === "string" ? body.user : undefined, stdin: typeof body.stdin === "string" ? body.stdin : undefined }) },
-    attach: { run: (body) => core.attach(String(body.name), body.argv), socketOnly: true },
     extensions: { run: () => core.extensions() },
     action: { run: (body) => core.runAction(body.extension, body.action, body.sandbox, body.values) },
     shutdown: { run: async (body) => { setTimeout(() => shutdown(body.keepSandboxes === true), 50); return { stopping: true } }, socketOnly: true },
@@ -92,7 +93,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   const socket = socketPath(dirs)
   const alive = await fetch("http://paddock/api/version", { unix: socket, method: "POST", body: "{}" } as RequestInit).then(() => true, () => false)
   if (alive) throw new PaddockError("conflict", "A Paddock daemon is already running.")
-  await rm(socket, { force: true })
+  await rm(socket, { force: true }); await rm(streamSocketPath(dirs), { force: true })
 
   const core = new Core([new GvisorProvider(systemRunner, createHash("sha256").update(`${hostname()}\0${dirs.state}`).digest("hex").slice(0, 10)), new DockerSandboxesProvider(systemRunner)], dirs, systemRunner, cliDir)
   const token = randomBytes(24).toString("hex")
@@ -110,6 +111,15 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   // after 10 s. Its types do not list the option for a Unix socket.
   const unix = Bun.serve({ unix: socket, idleTimeout: 0, fetch: (request: Request) => handle(request, true, 0) } as unknown as Parameters<typeof Bun.serve>[0])
   await chmod(socket, 0o600)
+  // Sessions (shell, exec --stream) have a Unix socket of their own and no TCP listener at all, so neither the
+  // dashboard's port nor its token can reach them. It is a raw socket because a slow reader must slow the command
+  // down: each side pauses until the other has taken what it was given.
+  const streams = createServer({ allowHalfOpen: true }, (connection) => {
+    if (stopping) return connection.destroy()
+    serveStream(connection, (request) => core.openSession(request))
+  })
+  await new Promise<void>((resolve, reject) => { streams.once("error", reject); streams.listen(streamSocketPath(dirs), () => resolve()) })
+  await chmod(streamSocketPath(dirs), 0o600)
   const wanted = Number(process.env.PADDOCK_PORT ?? DEFAULT_PORT)
   let tcpPort = 0
   const serveTcp = (port: number) => Bun.serve({ hostname: "127.0.0.1", port, idleTimeout: 0, fetch: (request: Request): Promise<Response> => handle(request, false, tcpPort) })
@@ -129,9 +139,11 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   })
   stopping = true
   clearInterval(timer)
+  core.closeSessions()
   if (!keepSandboxes) await core.stopWatched()
+  streams.close()
   await Promise.all([unix.stop(true), tcp.stop(true)])
-  await rm(socket, { force: true }); await rm(daemonFile(dirs), { force: true })
+  await rm(socket, { force: true }); await rm(streamSocketPath(dirs), { force: true }); await rm(daemonFile(dirs), { force: true })
 }
 
 export async function readDaemonFile(dirs: Dirs): Promise<{ pid: number; port: number; token: string; version: string } | undefined> {

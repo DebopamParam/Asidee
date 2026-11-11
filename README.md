@@ -84,7 +84,9 @@ disk headroom it reports unknown network evidence with the disk reason.
 What a sandbox's main process prints (dockerd's log, or anything written to `/proc/1/fd/1`, which a sandbox without
 Docker can do too) is stored on the engine's host, outside the watched limit, so every sandbox's log rotates at 10 MiB
 with two files, which the checklist verifies. `exec` returns at most 16 MiB on each of stdout and stderr: past that,
-Paddock ends the command and reports an error that names the limit instead of a cut-off result.
+Paddock ends the command and reports an error that names the limit instead of a cut-off result. `exec --stream` and
+`shell` have no such limit: they are sessions the daemon relays as raw bytes, with backpressure, over a second socket
+in the state folder that only this user can open (see [Sessions](docs/architecture.md#sessions)).
 
 Stopping the daemon (`paddock daemon stop`) stops the sandboxes whose disk limit it watches, because nothing would
 enforce the limit afterwards. Their contents stay; `paddock start` brings them back.
