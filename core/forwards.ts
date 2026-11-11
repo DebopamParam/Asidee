@@ -8,6 +8,12 @@ export type ForwardView = {
   localAddress: "127.0.0.1"; localPort: number; port: number; connections: number; createdAt: string
 }
 
+// A hosted forward's lease, on both of its ends. The primary renews it every LEASE_RENEW_MS on the control stream and the
+// remote daemon sends a byte as often; either end that hears nothing for LEASE_TTL_MS ends it, so a silent or
+// partitioned link cannot keep a lease (or the remote `transport stdio` that carries it) open.
+export const LEASE_RENEW_MS = 5000
+export const LEASE_TTL_MS = 15_000
+
 export function validPort(value: unknown, what: string): number {
   const port = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value
   if (!Number.isInteger(port) || (port as number) < 1 || (port as number) > 65_535) throw new PaddockError("usage", `${what} must be a whole number from 1 to 65535.`)

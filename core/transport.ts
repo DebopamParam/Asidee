@@ -3,11 +3,16 @@ import { Agent, request } from "node:http"
 import { connect } from "node:net"
 import { Duplex } from "node:stream"
 import { EventEmitter } from "node:events"
-import { dataFrames, frame, FrameReader, type Frame, type OpenRequest } from "./stream"
+import { dataFrames, frame, FrameReader, MAX_MESSAGE, type Frame, type OpenRequest } from "./stream"
 import { PaddockError, type ErrorCode, type Session } from "./types"
 
 export const PROTOCOL = 1
 export const MAX_REPLY = 8 * 1024 ** 2
+// A mutation can download an image or install sshd, but never waits for ever: past this its outcome is unknown.
+export const MUTATION_DEADLINE_MS = 45 * 60_000
+// How long a closing SSH process gets after SIGTERM, and then after SIGKILL, before its close is given up on. A stopped
+// or wedged ssh must not hold a daemon's shutdown, which stops the sandboxes only that daemon watches.
+export const KILL_GRACE_MS = 1500
 export const ERROR_CODES: readonly ErrorCode[] = ["usage", "not-found", "conflict", "dependency", "check-failed", "runtime", "offline", "incompatible", "identity-changed", "outcome-unknown"]
 export const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
 export const shellQuote = (word: string) => `'${word.replaceAll("'", "'\\''")}'`
@@ -42,10 +47,16 @@ export function sshConnection(host: Endpoint, stream = false) {
   let diagnostic = ""
   child.stderr.on("data", (bytes: Buffer) => { if (diagnostic.length < 4000) diagnostic += bytes.toString().slice(0, 4000 - diagnostic.length) })
   child.on("error", (error) => wire.destroy(error))
-  const exited = new Promise<void>((resolve) => child.once("close", () => { wire.destroy(); resolve() }))
+  let done = false
+  const exited = new Promise<void>((resolve) => child.once("close", () => { done = true; wire.destroy(); resolve() }))
   wire.on("error", () => {})
-  return { wire, diagnostic: () => diagnostic.trim(), async close() { wire.destroy(); child.kill(); await exited } }
+  const settled = (ms: number) => Promise.race([exited, Bun.sleep(ms)]).then(() => done)
+  return { wire, pid: child.pid, diagnostic: () => diagnostic.trim(), async close() {
+    wire.destroy(); child.kill()
+    if (!await settled(KILL_GRACE_MS)) { child.kill("SIGKILL"); await settled(KILL_GRACE_MS) }
+  } }
 }
+export type Connection = Pick<ReturnType<typeof sshConnection>, "wire" | "diagnostic" | "close"> & { pid?: number }
 
 class RemoteFailure extends PaddockError {}
 export function parseReply(value: unknown): unknown {
@@ -54,27 +65,29 @@ export function parseReply(value: unknown): unknown {
   const error = value.error
   if (!object(error) || typeof error.code !== "string" || !ERROR_CODES.some((code) => code === error.code) || typeof error.message !== "string") throw new PaddockError("incompatible", "The remote daemon returned a malformed error.")
   const code = ERROR_CODES.find((code) => code === error.code)!
-  throw new RemoteFailure(code, error.message, error.details)
+  throw new RemoteFailure(code, error.message.slice(0, MAX_MESSAGE), error.details)
 }
 
 // hello and the operation use the same daemon connection. A reconnect never replays a mutation.
 export class HttpPeer {
   private readonly agent = new Agent({ keepAlive: true, maxSockets: 1 })
-  private readonly connection: ReturnType<typeof sshConnection>
-  constructor(readonly endpoint: Endpoint, connection?: ReturnType<typeof sshConnection>) {
+  private readonly connection: Connection
+  // Why the connection was closed under a call in flight (its client went away, the host was removed).
+  private ended?: string
+  constructor(readonly endpoint: Endpoint, connection?: Connection) {
     this.connection = connection ?? sshConnection(endpoint)
     this.agent.createConnection = () => this.connection.wire
     // SSH owns keepalives and connection lifetime; the HTTP agent must not apply TCP operations to its byte pipe.
     this.agent.keepSocketAlive = () => true
     this.agent.reuseSocket = () => {}
   }
-  async call(method: string, body: object = {}, options: { timeoutMs?: number; mutation?: boolean; machineId?: string; version?: string } = {}): Promise<unknown> {
+  async call(method: string, body: object = {}, options: { timeoutMs?: number; mutation?: boolean; machineId?: string; version?: string; build?: string } = {}): Promise<unknown> {
     let dispatched = false
     try {
       const value = await new Promise<unknown>((resolve, reject) => {
         const bytes = Buffer.from(JSON.stringify(body))
         const req = request({ host: "paddock", path: `/api/${method}`, method: "POST", agent: this.agent, headers: { "content-type": "application/json", "content-length": bytes.length,
-          ...(options.machineId ? { "x-paddock-machine": options.machineId, "x-paddock-protocol": String(PROTOCOL), "x-paddock-version": options.version ?? "" } : {}) } }, (res) => {
+          ...(options.machineId ? { "x-paddock-machine": options.machineId, "x-paddock-protocol": String(PROTOCOL), "x-paddock-version": options.version ?? "", "x-paddock-build": options.build ?? "" } : {}) } }, (res) => {
           let size = 0; const chunks: Buffer[] = []
           res.on("data", (chunk: Buffer) => { size += chunk.length; if (size > MAX_REPLY) { req.destroy(new PaddockError("incompatible", "The remote JSON reply exceeded 8 MiB; use a stream for large output.")); return }; chunks.push(chunk) })
           res.on("error", reject)
@@ -82,20 +95,36 @@ export class HttpPeer {
         })
         req.on("error", reject)
         req.once("finish", () => { dispatched = true })
-        const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => req.destroy(new Error("The remote request timed out.")), options.timeoutMs)
+        const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => req.destroy(new Error(`No reply came within ${Math.round(options.timeoutMs! / 1000)} seconds.`)), options.timeoutMs)
         req.once("close", () => clearTimeout(timer))
         req.end(bytes)
       })
       return parseReply(value)
     } catch (error) {
       if (error instanceof RemoteFailure) throw error
-      if (error instanceof PaddockError && !(options.mutation && dispatched)) throw error
-      throw new PaddockError(options.mutation && dispatched ? "outcome-unknown" : "offline", options.mutation && dispatched
-        ? `The SSH link to ${this.endpoint.ssh} ended after sending ${method}; its outcome is unknown. It was not retried. Reconcile with get before acting again.`
-        : `${this.endpoint.ssh} is unreachable: ${this.connection.diagnostic() || (error as Error).message}`)
+      // Said as it happened: a reply that was unusable is not a lost link, and a cancelled request is neither.
+      const cause = this.ended ?? (error instanceof PaddockError ? error.message : `The SSH link to ${this.endpoint.ssh} ended: ${this.connection.diagnostic() || (error as Error).message}`)
+      if (options.mutation && dispatched) throw new PaddockError("outcome-unknown", `${cause} ${method} had been sent to ${this.endpoint.ssh}, so its outcome is unknown. It was not retried. Reconcile with get before acting again.`)
+      if (error instanceof PaddockError) throw error
+      throw new PaddockError("offline", this.ended ?? `${this.endpoint.ssh} is unreachable: ${this.connection.diagnostic() || (error as Error).message}`)
     }
   }
-  async close(): Promise<void> { this.agent.destroy(); await this.connection.close() }
+  async close(reason?: string): Promise<void> { this.ended ??= reason; this.agent.destroy(); await this.connection.close() }
+}
+
+// The account and outer host key SSH really uses for a destination, from ssh itself: `ssh -G` resolves the user from the
+// user's own configuration, and a verbose connection names the host key it verified. Recorded when a host is attached.
+export async function sshIdentity(endpoint: Endpoint): Promise<{ user: string; hostKey: string }> {
+  const config = Bun.spawn(["ssh", "-G", sshDestination(endpoint.ssh)], { stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+  const [resolved, settings] = await Promise.all([config.exited, new Response(config.stdout).text()])
+  const user = settings.match(/^user ([A-Za-z0-9_][A-Za-z0-9_.-]{0,63})$/m)?.[1]
+  // The fixed transport command again, with stdin closed: it reaches the daemon socket and ends at once.
+  const argv = sshArgv(endpoint.ssh, transportCommand(endpoint))
+  const probe = Bun.spawn([argv[0]!, "-v", ...argv.slice(1)], { stdin: "ignore", stdout: "ignore", stderr: "pipe", timeout: 20_000 })
+  const [, log] = await Promise.all([probe.exited, new Response(probe.stderr).text()])
+  const hostKey = log.match(/Server host key: \S+ (SHA256:[A-Za-z0-9+/]{43})/)?.[1]
+  if (resolved !== 0 || !user || !hostKey) throw new PaddockError("dependency", `SSH did not report the user and host key it uses for ${endpoint.ssh}, so nothing was registered.`)
+  return { user, hostKey }
 }
 
 // This mode relays only to an existing private socket. It never starts or replaces a daemon.
@@ -114,7 +143,7 @@ export async function transportStdio(path: string): Promise<void> {
 export class RemoteSession extends EventEmitter implements Session {
   readonly tty: boolean
   linkLost = false
-  private readonly connection: ReturnType<typeof sshConnection>
+  private readonly connection: Connection
   private readonly reader = new FrameReader()
   private pending: Frame[] = []
   private paused = true
@@ -124,7 +153,7 @@ export class RemoteSession extends EventEmitter implements Session {
   readonly closed: Promise<void>
   private closedResolve: () => void = () => {}
   private readonly timer: ReturnType<typeof setTimeout>
-  private constructor(host: Endpoint, request: OpenRequest, connection?: ReturnType<typeof sshConnection>) {
+  private constructor(host: Endpoint, request: OpenRequest, connection?: Connection) {
     super(); this.tty = request.kind === "exec" && request.tty
     this.connection = connection ?? sshConnection(host, true)
     this.closed = new Promise((resolve) => { this.closedResolve = resolve })
@@ -148,7 +177,7 @@ export class RemoteSession extends EventEmitter implements Session {
     this.timer = setTimeout(() => { this.opened(new PaddockError("offline", "The remote stream did not become ready in 10 seconds.")); this.finish({ error: "The remote stream timed out." }) }, 10_000)
     wire.write(frame("open", request))
   }
-  static async open(host: Endpoint, request: OpenRequest, connection?: ReturnType<typeof sshConnection>): Promise<RemoteSession> {
+  static async open(host: Endpoint, request: OpenRequest, connection?: Connection): Promise<RemoteSession> {
     const session = new RemoteSession(host, request, connection)
     await new Promise<void>((resolve, reject) => { session.opened = (error) => error ? reject(error) : resolve() })
     return session
@@ -156,7 +185,7 @@ export class RemoteSession extends EventEmitter implements Session {
   private error(payload: Buffer): PaddockError {
     const value: unknown = JSON.parse(payload.toString())
     if (!object(value) || typeof value.message !== "string" || !ERROR_CODES.some((code) => code === value.code)) return new PaddockError("incompatible", "Malformed remote stream error.")
-    return new PaddockError(ERROR_CODES.find((code) => code === value.code)!, value.message)
+    return new PaddockError(ERROR_CODES.find((code) => code === value.code)!, value.message.slice(0, MAX_MESSAGE))
   }
   private flush(): void {
     try {
@@ -176,9 +205,11 @@ export class RemoteSession extends EventEmitter implements Session {
     if (this.done) return
     this.done = true; clearTimeout(this.timer)
     this.pending = []
-    if (!this.ready) this.opened(new PaddockError("offline", exit.error ?? "The remote stream ended before ready."))
-    this.emit("end", exit)
-    void this.connection.close().finally(() => this.closedResolve())
+    // The SSH process is closed whatever a listener does with the end, so `closed` always settles.
+    try {
+      if (!this.ready) this.opened(new PaddockError("offline", exit.error ?? "The remote stream ended before ready."))
+      this.emit("end", exit)
+    } finally { void this.connection.close().finally(() => this.closedResolve()) }
   }
   write(bytes: Uint8Array): boolean { let writable = true; for (const piece of dataFrames("stdin", bytes)) if (!this.connection.wire.write(piece)) writable = false; return writable }
   end(): void { this.connection.wire.write(frame("eof")) }

@@ -3,11 +3,11 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { Server } from "node:net"
 import type { SandboxView } from "./core"
-import { boundPort, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
+import { boundPort, LEASE_RENEW_MS, LEASE_TTL_MS, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
 import { validName, validSpec, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
 import { addInclude, alias, editorKey, included, includeLine, parseSshSetup, remoteAliases, updateRemoteAlias, userConfig } from "./ssh"
-import { absolutePath, HttpPeer, object, PROTOCOL, RemoteSession, sshDestination, type Endpoint } from "./transport"
+import { absolutePath, HttpPeer, KILL_GRACE_MS, MUTATION_DEADLINE_MS, object, PROTOCOL, RemoteSession, sshDestination, sshIdentity, type Endpoint } from "./transport"
 import { PaddockError, type CheckResult } from "./types"
 
 export const CATALOG = {
@@ -26,9 +26,16 @@ export type MethodName = keyof typeof CATALOG
 export const isMethod = (method: string): method is MethodName => Object.hasOwn(CATALOG, method)
 export const mutates = (method: MethodName) => CATALOG[method][1] === "write"
 
-export type Hello = { machineId: string; bootId: string; version: string; buildDigest: string; protocols: number[]; methods: string[]; features: string[] }
-export type HostRecord = Endpoint & { name: string; machineId: string; addedAt: string; diskPolicy: "watched"; service: "prepared" }
+// sourceDigest names the source a build was made from, the same for every platform's binary; buildDigest is this
+// artifact's own SHA-256. listener and service say how the daemon runs, for `host list`.
+export type Hello = { machineId: string; bootId: string; version: string; buildDigest: string; sourceDigest: string; protocols: number[]; methods: string[]; features: string[]
+  listener?: "socket-only" | "dashboard"; service?: "systemd" | "none" }
+// sshUser and hostKey: the account and outer host-key fingerprint SSH used when the host was attached.
+export type HostRecord = Endpoint & { name: string; machineId: string; addedAt: string; diskPolicy: "watched"; service: "prepared"; sshUser?: string; hostKey?: string }
+// A record this Paddock cannot use: written by a newer one, or damaged. It is shown, and only it is refused.
+export type UnknownHost = { name: string; error: string; ssh?: string; machineId?: string }
 export type HostView = { host: HostRecord; state: "connecting" | "online" | "offline" | "incompatible" | "identity-changed"; receivedAt?: string; hello?: Hello; error?: string }
+  | { host: UnknownHost; state: "unknown-record"; error: string }
 export type MachineSummary = { hello: Hello; sandboxes: SandboxView[]; checkedAt: string }
 export type FleetView = { machines: Array<{ machine: HostView | { host: { name: "local"; machineId: string }; state: "online" }; cached?: MachineSummary; stale: boolean }> }
 
@@ -53,6 +60,7 @@ export function hostOption(argv: string[]): { host?: string; argv: string[] } {
 }
 
 const id = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{32}$/.test(value)
+const digest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)
 export async function machineIdentity(dirs: Dirs): Promise<string> {
   const path = join(dirs.state, "machine-id")
   await mkdir(dirs.state, { recursive: true, mode: 0o700 })
@@ -64,182 +72,297 @@ export async function machineIdentity(dirs: Dirs): Promise<string> {
 }
 
 export function parseHello(value: unknown): Hello {
-  if (!object(value) || !id(value.machineId) || !id(value.bootId) || typeof value.version !== "string" || typeof value.buildDigest !== "string" || !/^[a-f0-9]{64}$/.test(value.buildDigest)
+  if (!object(value) || !id(value.machineId) || !id(value.bootId) || typeof value.version !== "string" || value.version.length > 64 || !digest(value.buildDigest) || !digest(value.sourceDigest)
     || !Array.isArray(value.protocols) || !value.protocols.every(Number.isSafeInteger) || !Array.isArray(value.methods) || !value.methods.every((entry) => typeof entry === "string")
-    || !Array.isArray(value.features) || !value.features.every((entry) => typeof entry === "string")) throw new PaddockError("incompatible", "The remote daemon has no valid Machines handshake.")
-  return { machineId: value.machineId, bootId: value.bootId, version: value.version, buildDigest: value.buildDigest, protocols: value.protocols, methods: value.methods, features: value.features }
+    || !Array.isArray(value.features) || !value.features.every((entry) => typeof entry === "string")
+    || (value.listener !== undefined && value.listener !== "socket-only" && value.listener !== "dashboard") || (value.service !== undefined && value.service !== "systemd" && value.service !== "none"))
+    throw new PaddockError("incompatible", "The remote daemon has no valid Machines handshake.")
+  return { machineId: value.machineId, bootId: value.bootId, version: value.version, buildDigest: value.buildDigest, sourceDigest: value.sourceDigest, protocols: value.protocols, methods: value.methods, features: value.features,
+    ...(value.listener ? { listener: value.listener } : {}), ...(value.service ? { service: value.service } : {}) }
 }
 
-export function compatible(hello: Hello, version: string, expected?: string): void {
-  if (hello.version !== version || !hello.protocols.includes(PROTOCOL)) throw new PaddockError("incompatible", `Remote Paddock ${hello.version} (protocols ${hello.protocols.join(", ")}) is incompatible with ${version}, protocol ${PROTOCOL}. Review an explicit host upgrade; nothing was replaced.`)
+// Exactly one build talks to another: the same version, protocol and source. There is no negotiation down to an older
+// protocol and no upgrade; a mismatch is refused before anything is sent.
+export function compatible(hello: Hello, local: Pick<Hello, "version" | "sourceDigest">, expected?: string, binary?: string): void {
+  const update = `Build Paddock for that machine from this machine's source (bun build --compile --target=bun-linux-x64 or bun-linux-arm64 --outfile paddock cli/cli.ts), put it in place of ${binary ?? "the binary its host record names"}, and restart its daemon. Nothing was sent; nothing was replaced.`
+  if (hello.version !== local.version || !hello.protocols.includes(PROTOCOL)) throw new PaddockError("incompatible", `Remote Paddock ${hello.version} (protocols ${hello.protocols.join(", ")}) is incompatible with ${local.version}, protocol ${PROTOCOL}. ${update}`)
+  if (hello.sourceDigest !== local.sourceDigest) throw new PaddockError("incompatible", `Remote Paddock ${hello.version} was built from other source (${hello.sourceDigest.slice(0, 12)}) than this one (${local.sourceDigest.slice(0, 12)}); two builds of one version are not mixed. ${update}`)
   if (expected && expected !== hello.machineId) throw new PaddockError("identity-changed", `The machine identity changed from ${expected} to ${hello.machineId}. Nothing was sent to its sandboxes. Remove and enroll it explicitly.`)
 }
 
-export function parseHosts(value: unknown): HostRecord[] {
+// Each record is read on its own: one this Paddock does not know (a later `host add` kind) or a damaged one is shown and
+// refused, and every other host keeps working. Unknown records are written back as they were.
+export type Registry = { hosts: HostRecord[]; unknown: UnknownHost[]; entries: unknown[] }
+export function parseHosts(value: unknown): Registry {
   if (!object(value) || value.version !== 1 || !Array.isArray(value.hosts)) throw new PaddockError("usage", "hosts.json must contain {version:1, hosts:[…]}.")
-  const seen = new Set<string>(); const identities = new Set<string>()
-  return value.hosts.map((entry): HostRecord => {
-    if (!object(entry) || !id(entry.machineId) || typeof entry.addedAt !== "string" || !Number.isFinite(Date.parse(entry.addedAt)) || entry.diskPolicy !== "watched" || entry.service !== "prepared") throw new PaddockError("usage", "hosts.json contains an invalid host record.")
-    const name = hostName(entry.name)
-    if (seen.has(name) || identities.has(entry.machineId)) throw new PaddockError("usage", "hosts.json repeats a host alias or machine identity.")
-    seen.add(name); identities.add(entry.machineId)
-    return { name, ssh: sshDestination(entry.ssh), binary: absolutePath(entry.binary), stateDir: absolutePath(entry.stateDir), machineId: entry.machineId, addedAt: entry.addedAt, diskPolicy: "watched", service: "prepared" }
+  const registry: Registry = { hosts: [], unknown: [], entries: value.hosts }; const names = new Set<string>(); const identities = new Set<string>()
+  value.hosts.forEach((entry: unknown, index) => {
+    const name = recordName(entry, index)
+    try {
+      if (!object(entry)) throw new PaddockError("usage", "it is not an object")
+      if (names.has(hostName(entry.name)) || identities.has(String(entry.machineId))) throw new PaddockError("usage", "it repeats another record's alias or machine identity")
+      if (entry.diskPolicy !== "watched" || entry.service !== "prepared") throw new PaddockError("incompatible", `it is a host with service ${JSON.stringify(entry.service)} and disk policy ${JSON.stringify(entry.diskPolicy)}, which this Paddock does not know; use the Paddock that wrote it`)
+      if (!id(entry.machineId) || typeof entry.addedAt !== "string" || !Number.isFinite(Date.parse(entry.addedAt))) throw new PaddockError("usage", "its machine identity or date is invalid")
+      if (entry.sshUser !== undefined && (typeof entry.sshUser !== "string" || !/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/.test(entry.sshUser))) throw new PaddockError("usage", "its SSH user is invalid")
+      if (entry.hostKey !== undefined && (typeof entry.hostKey !== "string" || !/^SHA256:[A-Za-z0-9+/]{43}$/.test(entry.hostKey))) throw new PaddockError("usage", "its host-key fingerprint is invalid")
+      registry.hosts.push({ name: hostName(entry.name), ssh: sshDestination(entry.ssh), binary: absolutePath(entry.binary), stateDir: absolutePath(entry.stateDir), machineId: entry.machineId, addedAt: entry.addedAt, diskPolicy: "watched", service: "prepared",
+        ...(entry.sshUser ? { sshUser: entry.sshUser as string } : {}), ...(entry.hostKey ? { hostKey: entry.hostKey as string } : {}) })
+    } catch (error) {
+      registry.unknown.push({ name, error: `hosts.json record ${index + 1} cannot be used: ${(error as Error).message.replace(/\.$/, "")}. Other hosts are unaffected; \`paddock host remove ${name} --confirm ${name}\` forgets it.`,
+        ...(object(entry) && typeof entry.ssh === "string" ? { ssh: entry.ssh.slice(0, 256) } : {}), ...(object(entry) && id(entry.machineId) ? { machineId: entry.machineId } : {}) })
+    }
+    names.add(name); if (object(entry) && id(entry.machineId)) identities.add(entry.machineId)
   })
+  return registry
 }
 
-export async function readHosts(dirs: Dirs): Promise<HostRecord[]> {
+const recordName = (entry: unknown, index: number) => object(entry) && typeof entry.name === "string" && /^[a-z0-9][a-z0-9-]{0,30}$/.test(entry.name) ? entry.name : `record-${index + 1}`
+
+export async function readHosts(dirs: Dirs): Promise<Registry> {
   const path = join(dirs.config, "hosts.json")
   try { return parseHosts(JSON.parse(await readFile(path, "utf8"))) } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { hosts: [], unknown: [], entries: [] }
     throw new PaddockError("usage", `${path} could not be read: ${(error as Error).message}`)
   }
 }
-async function writeHosts(dirs: Dirs, hosts: HostRecord[]): Promise<void> {
+async function writeHosts(dirs: Dirs, entries: unknown[]): Promise<void> {
   await mkdir(dirs.config, { recursive: true, mode: 0o700 })
   const file = join(dirs.config, "hosts.json"); const temp = `${file}.tmp-${process.pid}`
-  await writeFile(temp, `${JSON.stringify({ version: 1, hosts }, null, 2)}\n`, { mode: 0o600 }); await chmod(temp, 0o600); await rename(temp, file)
+  await writeFile(temp, `${JSON.stringify({ version: 1, hosts: entries }, null, 2)}\n`, { mode: 0o600 }); await chmod(temp, 0o600); await rename(temp, file)
 }
+
+// ---- replies from another machine, validated before the primary or a client relies on them
+
+type Shape = "string" | "number" | "boolean" | "object" | ((value: unknown) => boolean) | readonly [Shape] | { readonly [key: string]: Shape }
+const oneOf = (...values: readonly unknown[]) => (value: unknown) => values.includes(value)
+export function fits(value: unknown, shape: Shape): boolean {
+  if (shape === "object") return object(value)
+  if (typeof shape === "string") return typeof value === shape && (shape !== "number" || Number.isFinite(value))
+  if (typeof shape === "function") return shape(value)
+  if (Array.isArray(shape)) return Array.isArray(value) && value.every((item) => fits(item, shape[0]))
+  return object(value) && Object.entries(shape as Record<string, Shape>).every(([key, inner]) => key.endsWith("?") ? value[key.slice(0, -1)] === undefined || fits(value[key.slice(0, -1)], inner) : fits(value[key], inner))
+}
+const CHECK = { id: "string", status: oneOf("pass", "weak", "fail", "unsupported", "unknown", "info"), evidence: oneOf("probed", "inspected", "none"), detail: "string" } as const
+const TEMPLATE = { name: "string", engine: "string", imageId: "string", source: "string", sourceImage: "string", createdAt: "string", sizeBytes: "number", loginsRemoved: ["string"], dependants: ["string"] } as const
+const RUN = { exitCode: "number", stdout: "string", stderr: "string" } as const
+const ENGINE = { id: "string", provider: "string", label: "string", ready: "boolean", problems: ["string"], "fix?": "string", "capabilities?": { kernelIsolation: "string", networkGuard: "boolean", diskLimit: "string", docker: "boolean" } } as const
+const CHANGE = { limit: oneOf("cpus", "memoryGb", "pids", "diskGb"), from: "number", to: "number", applies: oneOf("now", "next start", "unchanged", "not enforced"), "note?": "string" } as const
+const shaped = (shape: Shape) => (value: unknown) => { if (!fits(value, shape)) throw new Error("its shape"); return value }
+
+// One sandbox row. Only an identity that is not this machine's rejects the whole reply; any other problem turns the row
+// into a damaged one that says so, so one odd sandbox cannot hide a machine's inventory or mark it offline.
+export function parseRow(entry: unknown, hello: Hello, index = 0): SandboxView {
+  if (!object(entry) || entry.machineId !== hello.machineId) throw new PaddockError("incompatible", "The remote daemon reported a sandbox of another machine.")
+  const name = typeof entry.name === "string" && /^[a-z0-9][a-z0-9-]{0,30}$/.test(entry.name) ? entry.name : `unreadable-${index + 1}`
+  try {
+    if (!["running", "stopped", "missing", "damaged"].includes(String(entry.status)) || typeof entry.engine !== "string" || typeof entry.createdAt !== "string"
+      || (entry.status !== "damaged" && !id(entry.sandboxId)) || !object(entry.spec)) throw new Error("its status, engine, identity or spec")
+    if (validName(entry.name) && entry.spec.name !== name) throw new Error("its spec names another sandbox")
+    let lastVerify: SandboxView["lastVerify"]
+    if (entry.lastVerify !== undefined) {
+      // The checklist catalog can grow independently. Unknown check IDs stay visible with their evidence.
+      if (!fits(entry.lastVerify, { at: "string", results: [CHECK] })) throw new Error("its last checks")
+      lastVerify = entry.lastVerify as SandboxView["lastVerify"]
+    }
+    for (const key of ["stopReason", "activity"]) if (entry[key] !== undefined && typeof entry[key] !== "string") throw new Error(`its ${key}`)
+    const spec = entry.status === "damaged" ? damagedSpec(name) : validSpec(entry.spec.template ? { ...entry.spec, image: undefined } : entry.spec)
+    if (entry.status !== "damaged" && entry.spec.template && typeof entry.spec.image === "string") spec.image = entry.spec.image
+    return { name, status: entry.status as SandboxView["status"], machineId: hello.machineId, ...(id(entry.sandboxId) ? { sandboxId: entry.sandboxId } : {}), engine: entry.engine, createdAt: entry.createdAt, spec,
+      lastVerify, ...(typeof entry.stopReason === "string" ? { stopReason: entry.stopReason } : {}), ...(typeof entry.activity === "string" ? { activity: entry.activity } : {}) }
+  } catch (error) {
+    return { name, status: "damaged", machineId: hello.machineId, ...(id(entry.sandboxId) ? { sandboxId: entry.sandboxId } : {}), engine: typeof entry.engine === "string" ? entry.engine : "", createdAt: "", spec: damagedSpec(name),
+      stopReason: `The remote daemon reported this sandbox in a form this Paddock cannot read (${(error as Error).message}). See it with that machine's own Paddock.` }
+  }
+}
+const damagedSpec = (name: string): SandboxView["spec"] => ({ name, image: "", cpus: 0, memoryGb: 0, pids: 0, diskGb: 0, docker: false })
 
 // Validate the summary at the remote boundary before it can replace any cached evidence.
 export function parseSummary(value: unknown, hello: Hello): MachineSummary {
   const invalid = (): never => { throw new PaddockError("incompatible", "The remote daemon returned a malformed machine summary.") }
-  if (!object(value) || !Array.isArray(value.sandboxes) || typeof value.checkedAt !== "string" || !Number.isFinite(Date.parse(value.checkedAt))) return invalid()
-  const reported = parseHello(value.hello)
-  if (reported.machineId !== hello.machineId || reported.bootId !== hello.bootId || reported.buildDigest !== hello.buildDigest) return invalid()
-  const sandboxes = value.sandboxes.map((entry): SandboxView => {
-    if (!object(entry) || typeof entry.name !== "string" || !["running", "stopped", "missing", "damaged"].includes(String(entry.status)) || typeof entry.engine !== "string" || typeof entry.createdAt !== "string"
-      || entry.machineId !== hello.machineId || (entry.status !== "damaged" && !id(entry.sandboxId)) || !object(entry.spec)) return invalid()
-    const name = validName(entry.name)
-    if (entry.spec.name !== name) return invalid()
-    let lastVerify: SandboxView["lastVerify"]
-    if (entry.lastVerify !== undefined) {
-      if (!object(entry.lastVerify) || typeof entry.lastVerify.at !== "string" || !Array.isArray(entry.lastVerify.results)) return invalid()
-      const results = entry.lastVerify.results.map((check): CheckResult => {
-        if (!object(check) || typeof check.id !== "string" || !["pass", "weak", "fail", "unsupported", "unknown", "info"].includes(String(check.status))
-          || !["probed", "inspected", "none"].includes(String(check.evidence)) || typeof check.detail !== "string") return invalid()
-        // The checklist catalog can grow independently. Keep unknown check IDs and their evidence visible.
-        return check as CheckResult
-      })
-      lastVerify = { at: entry.lastVerify.at, results }
-    }
-    const spec = entry.status === "damaged" ? entry.spec as SandboxView["spec"] : validSpec(entry.spec.template ? { ...entry.spec, image: undefined } : entry.spec)
-    if (entry.spec.template && typeof entry.spec.image === "string") spec.image = entry.spec.image
-    for (const key of ["stopReason", "activity"]) if (entry[key] !== undefined && typeof entry[key] !== "string") return invalid()
-    return { name, status: entry.status as SandboxView["status"], machineId: hello.machineId, ...(id(entry.sandboxId) ? { sandboxId: entry.sandboxId } : {}), engine: entry.engine, createdAt: entry.createdAt, spec,
-      lastVerify, ...(typeof entry.stopReason === "string" ? { stopReason: entry.stopReason } : {}), ...(typeof entry.activity === "string" ? { activity: entry.activity } : {}) }
-  })
-  return { hello: reported, sandboxes, checkedAt: value.checkedAt }
+  try {
+    if (!object(value) || !Array.isArray(value.sandboxes) || typeof value.checkedAt !== "string" || !Number.isFinite(Date.parse(value.checkedAt))) return invalid()
+    const reported = parseHello(value.hello)
+    if (reported.machineId !== hello.machineId || reported.bootId !== hello.bootId || reported.buildDigest !== hello.buildDigest) return invalid()
+    return { hello: reported, sandboxes: value.sandboxes.map((entry, index) => parseRow(entry, hello, index)), checkedAt: value.checkedAt }
+  } catch (error) { throw error instanceof PaddockError && error.code === "incompatible" ? error : new PaddockError("incompatible", `The remote daemon returned a malformed machine summary: ${(error as Error).message}`) }
+}
+
+// Every method a remote daemon may answer, with what its answer must look like. A method without one is not routed.
+const withRow = (shape: Shape) => (value: unknown, hello: Hello) => { shaped(shape)(value); return { ...(value as object), sandbox: parseRow((value as { sandbox: unknown }).sandbox, hello) } }
+const REPLIES: Partial<Record<MethodName, (value: unknown, hello: Hello) => unknown>> = {
+  version: shaped({ version: "string" }), hello: (value) => parseHello(value), checklist: shaped([{ id: "string", title: "string" }]), summary: (value, hello) => parseSummary(value, hello),
+  engines: shaped([ENGINE]), list: (value, hello) => { if (!Array.isArray(value)) throw new Error("its shape"); return value.map((entry, index) => parseRow(entry, hello, index)) },
+  get: (value, hello) => parseRow(value, hello), start: (value, hello) => parseRow(value, hello), stop: (value, hello) => parseRow(value, hello),
+  create: withRow({ sandbox: "object", checks: [CHECK], hooks: [{ extension: "string", exitCode: "number", output: "string" }] }), remove: shaped({ removed: "string" }),
+  verify: withRow({ sandbox: "object", checks: [CHECK], ok: "boolean" }), resize: withRow({ sandbox: "object", changes: [CHANGE], checks: [CHECK] }),
+  snapshot: shaped({ template: TEMPLATE, contents: "string" }), templateList: shaped([TEMPLATE]), templateRemove: shaped({ removed: "string", imageId: "string", dependants: ["string"], note: "string" }),
+  exec: shaped(RUN), action: shaped(RUN), extensions: shaped({ extensions: [{ id: "string", name: "string", "description?": "string", actions: [{ id: "string", label: "string", fields: [{ id: "string" }] }] }], errors: ["string"] }),
+  shutdown: shaped({ stopping: "boolean" }), sessionTarget: shaped({ name: "string", machineId: id, sandboxId: id, generation: "string" }),
+  sshPrepare: (value) => { shaped({ sandboxId: id, setup: "object" })(value); parseSshSetup((value as { setup: unknown }).setup); return value },
+}
+export function parseRouted(method: MethodName, value: unknown, hello: Hello): unknown {
+  const parse = REPLIES[method]
+  try {
+    if (!parse) throw new Error("no reply schema")
+    return parse(value, hello)
+  } catch (error) {
+    if (error instanceof PaddockError && error.code !== "usage") throw mutates(method) ? new PaddockError("outcome-unknown", `${error.message} ${method} had been sent, so its outcome is unknown. It was not retried. Reconcile with get before acting again.`) : error
+    const message = `The remote daemon's reply to ${method} is malformed (${(error as Error).message}).`
+    throw mutates(method) ? new PaddockError("outcome-unknown", `${message} ${method} had been sent, so its outcome is unknown. It was not retried. Reconcile with get before acting again.`) : new PaddockError("incompatible", message)
+  }
 }
 
 export const staleSummary = (summary: MachineSummary): MachineSummary => ({ ...summary, sandboxes: summary.sandboxes.map((sandbox) => ({ ...sandbox, status: "unknown",
   lastVerify: sandbox.lastVerify && { ...sandbox.lastVerify, results: sandbox.lastVerify.results.map((check) => ({ ...check, status: "unknown", evidence: "none", detail: `Last contact lost. Previous result at ${sandbox.lastVerify!.at}: ${check.detail}` })) } })) })
 
-type Cached = { view: HostView; summary?: MachineSummary; pending?: Promise<void>; failures: number; retryAt: number }
+type Peer = Pick<HttpPeer, "call" | "close">
+// How the primary reaches another machine: a buffered call, a stream, and SSH's own word for the account and host key.
+export type MachineIo = {
+  connectPeer: (endpoint: Endpoint) => Peer
+  openStream: (endpoint: Endpoint, request: OpenRequest) => Promise<RemoteSession>
+  sshIdentity: (endpoint: Endpoint) => Promise<{ user: string; hostKey: string }>
+}
+type Cached = { view: HostView & { host: HostRecord }; summary?: MachineSummary; pending?: Promise<void>; failures: number; retryAt: number }
+type Forward = { host: string; view: ForwardView & { host: string; machineId: string }; server: Server; lease: RemoteSession; connections: Set<RemoteSession>; timers: Array<ReturnType<typeof setInterval>> }
 export class Machines {
   private readonly cache = new Map<string, Cached>()
   private registryWrite: Promise<unknown> = Promise.resolve()
-  private readonly forwards = new Map<string, { host: string; view: ForwardView & { host: string; machineId: string }; server: Server; lease: RemoteSession; connections: Set<RemoteSession>; timer: ReturnType<typeof setInterval> }>()
-  private readonly sessions = new Set<RemoteSession>()
-  constructor(readonly dirs: Dirs, readonly hello: Hello, private readonly localSummary: () => Promise<MachineSummary>, private readonly connectPeer: (endpoint: Endpoint) => Pick<HttpPeer, "call" | "close"> = (endpoint) => new HttpPeer(endpoint)) {}
+  private readonly forwards = new Map<string, Forward>()
+  // Open streams and calls in flight, by host alias, so removing a host or stopping the daemon ends them.
+  private readonly sessions = new Map<RemoteSession, string>()
+  private readonly peers = new Set<Peer>()
+  // Bumped when a host is removed: a stream or forward that was opening for it is ended instead of kept.
+  private readonly epochs = new Map<string, number>()
+  private closing = false
+  private readonly io: MachineIo
+  renewMs = LEASE_RENEW_MS
+  constructor(readonly dirs: Dirs, readonly hello: Hello, private readonly localSummary: () => Promise<MachineSummary>, io: Partial<MachineIo> = {}) {
+    this.io = { connectPeer: (endpoint) => new HttpPeer(endpoint), openStream: (endpoint, request) => RemoteSession.open(endpoint, request), sshIdentity, ...io }
+  }
 
   async resolve(host: unknown): Promise<HostRecord> {
     const name = hostName(host)
-    const found = (await readHosts(this.dirs)).find((entry) => entry.name === name)
-    if (!found) throw new PaddockError("not-found", `There is no host ${name}. See \`paddock host list\`. No local fallback was attempted.`)
-    return found
+    const registry = await readHosts(this.dirs)
+    const found = registry.hosts.find((entry) => entry.name === name)
+    if (found) return found
+    const unknown = registry.unknown.find((entry) => entry.name === name)
+    if (unknown) throw new PaddockError("incompatible", unknown.error)
+    throw new PaddockError("not-found", `There is no host ${name}. See \`paddock host list\`. No local fallback was attempted.`)
   }
 
-  private async peer<T>(host: Endpoint & { machineId?: string }, run: (peer: Pick<HttpPeer, "call" | "close">, hello: Hello) => Promise<T>): Promise<T> {
-    const peer = this.connectPeer(host)
+  private epoch(name: string): number { return this.epochs.get(name) ?? 0 }
+
+  // signal: the client's request. When it goes away, the SSH connection is closed and a sent mutation is outcome-unknown.
+  private async peer<T>(host: Endpoint & { machineId?: string }, run: (peer: Peer, hello: Hello) => Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (this.closing) throw new PaddockError("conflict", "The daemon is stopping.")
+    const peer = this.io.connectPeer(host); this.peers.add(peer)
+    const cancel = () => void peer.close("The request was cancelled by its client, and its SSH connection closed.")
+    signal?.addEventListener("abort", cancel, { once: true })
     try {
       const hello = parseHello(await peer.call("hello", {}, { timeoutMs: 10_000 }))
-      compatible(hello, this.hello.version, host.machineId)
+      compatible(hello, this.hello, host.machineId, host.binary)
       return await run(peer, hello)
-    } finally { await peer.close() }
+    } finally { signal?.removeEventListener("abort", cancel); this.peers.delete(peer); await peer.close() }
+  }
+  private options(host: HostRecord, method: MethodName) {
+    return { mutation: mutates(method), machineId: host.machineId, version: this.hello.version, build: this.hello.sourceDigest, timeoutMs: mutates(method) ? MUTATION_DEADLINE_MS : 10_000 }
   }
 
-  async route(method: MethodName, body: Record<string, unknown>): Promise<unknown> {
+  async route(method: MethodName, body: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
     const { host: selected, ...payload } = body
     if (selected === undefined || selected === "local") return undefined
     const host = await this.resolve(selected)
-    if (method === "forwardAdd") return this.forwardAdd(host, body)
+    if (body.machineId !== undefined && body.machineId !== host.machineId) throw new PaddockError("identity-changed", `${host.name} is machine ${host.machineId}, not the ${String(body.machineId)} the request names. Nothing was sent.`)
+    if (method === "forwardAdd") return this.forwardAdd(host, body, signal)
     if (method === "forwardList") return this.forwardList(host.name, body.name)
     if (method === "forwardRemove") return this.forwardRemove(body.id, host.name)
-    if (method === "sshSetup") return this.sshSetup(host, body)
-    if (method === "sshAccess") return this.sshAccess(host, body.name)
+    if (method === "sshSetup") return this.sshSetup(host, body, signal)
+    if (method === "sshAccess") return this.sshAccess(host, body.name, signal)
     if (CATALOG[method][1] === "primary") throw new PaddockError("dependency", `${method} has no remote implementation yet.`)
     return this.peer(host, async (peer, hello) => {
       if (!hello.methods.includes(method)) throw new PaddockError("incompatible", `The daemon on ${host.name} does not offer ${method}.`)
-      const result = await peer.call(method, payload, { mutation: mutates(method), machineId: host.machineId, version: this.hello.version, ...(!mutates(method) ? { timeoutMs: 10_000 } : {}) })
-      if (method === "remove") await updateRemoteAlias(this.dirs, host.name, validName(body.name))
+      const result = parseRouted(method, await peer.call(method, payload, this.options(host, method)), hello)
+      if (method !== "remove") return result
+      // The removal happened there; a failure to tidy this machine's alias is reported beside it, not instead of it.
+      try { await updateRemoteAlias(this.dirs, host.name, validName(body.name)) } catch (error) {
+        return { ...(result as object), warning: `Removed on ${host.name}, but this machine's SSH alias for it could not be updated: ${(error as Error).message}` }
+      }
       return result
-    })
+    }, signal)
   }
 
-  private async sshSetup(host: HostRecord, body: Record<string, unknown>) {
+  private async sshSetup(host: HostRecord, body: Record<string, unknown>, signal?: AbortSignal) {
     const name = validName(body.name); const key = await editorKey(this.dirs)
-    const result = await this.peer(host, async (peer) => peer.call("sshPrepare", { name, publicKey: key.publicKey }, { mutation: true, machineId: host.machineId, version: this.hello.version }))
-    if (!object(result) || !id(result.sandboxId)) throw new PaddockError("incompatible", "Invalid remote SSH identity.")
+    const result = await this.peer(host, async (peer, hello) => parseRouted("sshPrepare", await peer.call("sshPrepare", { name, publicKey: key.publicKey }, this.options(host, "sshPrepare")), hello), signal) as { sandboxId: string; setup: unknown }
     const setup = parseSshSetup(result.setup)
     if (setup.editorKey !== key.fingerprint) throw new PaddockError("incompatible", "The remote daemon prepared another editor key.")
     await updateRemoteAlias(this.dirs, host.name, name, { host: host.name, name, machineId: host.machineId, sandboxId: result.sandboxId, setup })
     if (body.writeConfig === true) await addInclude(this.dirs)
-    return { ...await this.sshAccess(host, name), config: userConfig(), include: includeLine(this.dirs), included: await included(this.dirs), editorKey: key.fingerprint, keyFile: key.path }
+    return { ...await this.sshAccess(host, name, signal), config: userConfig(), include: includeLine(this.dirs), included: await included(this.dirs), editorKey: key.fingerprint, keyFile: key.path }
   }
-  private async sshAccess(host: HostRecord, input: unknown) {
+  private async sshAccess(host: HostRecord, input: unknown, signal?: AbortSignal) {
     const name = validName(input); const setup = (await remoteAliases(this.dirs)).find((entry) => entry.host === host.name && entry.machineId === host.machineId && entry.name === name)
-    const current = await this.peer(host, (peer) => peer.call("get", { name }, { timeoutMs: 10_000, machineId: host.machineId, version: this.hello.version }))
-    const same = object(current) && current.sandboxId === setup?.sandboxId
+    const current = await this.peer(host, async (peer, hello) => parseRow(await peer.call("get", { name }, this.options(host, "get")), hello), signal)
+    const same = current.sandboxId === setup?.sandboxId
     return { alias: alias(name, host.name), user: same ? setup?.setup.user ?? "" : "", home: same ? setup?.setup.home ?? "" : "", loopbackForwarding: Boolean(same && setup),
       batchReady: Boolean(same && setup && current.status === "running" && await included(this.dirs)) }
   }
 
-  private async target(peer: Pick<HttpPeer, "call">, host: HostRecord, name: unknown) {
-    const value = await peer.call("sessionTarget", { name: validName(name) }, { timeoutMs: 10_000, machineId: host.machineId, version: this.hello.version })
-    if (!object(value) || value.name !== name || value.machineId !== host.machineId || !id(value.sandboxId) || typeof value.generation !== "string" || value.generation.length > 128) throw new PaddockError("incompatible", "Invalid remote sandbox identity.")
+  private async target(peer: Peer, host: HostRecord, name: unknown) {
+    const value = await peer.call("sessionTarget", { name: validName(name) }, this.options(host, "sessionTarget"))
+    if (!object(value) || value.name !== name || value.machineId !== host.machineId || !id(value.sandboxId) || typeof value.generation !== "string" || value.generation.length > 128 || /[\x00-\x1f\x7f]/.test(value.generation)) throw new PaddockError("incompatible", "Invalid remote sandbox identity.")
     return { name: validName(name), machineId: host.machineId, sandboxId: value.sandboxId, generation: value.generation }
   }
 
-  private async remoteSession(host: HostRecord, hello: Hello, request: OpenRequest): Promise<RemoteSession> {
-    const session = await RemoteSession.open(host, { ...request, host: undefined, machineId: host.machineId, bootId: hello.bootId, protocol: PROTOCOL, version: this.hello.version })
-    this.sessions.add(session); void session.closed.finally(() => this.sessions.delete(session))
+  private async remoteSession(host: HostRecord, hello: Hello, request: OpenRequest, epoch: number): Promise<RemoteSession> {
+    const session = await this.io.openStream(host, { ...request, host: undefined, machineId: host.machineId, bootId: hello.bootId, protocol: PROTOCOL, version: this.hello.version, build: this.hello.sourceDigest })
+    if (this.closing || this.epoch(host.name) !== epoch) {
+      session.close("The host was removed, or the daemon is stopping."); await session.closed
+      throw new PaddockError("conflict", `${host.name} was removed, or this daemon began stopping, while the session opened. It was closed.`)
+    }
+    this.sessions.set(session, host.name); void session.closed.finally(() => this.sessions.delete(session))
     return session
   }
 
   async openSession(request: OpenRequest, local: (request: OpenRequest) => Promise<import("./types").Session>): Promise<import("./types").Session> {
     if (request.host === undefined || request.host === "local") {
       if (request.bootId !== undefined && request.bootId !== this.hello.bootId) throw new PaddockError("identity-changed", "The daemon restarted before this session opened.")
-      if (request.protocol !== undefined && (request.protocol !== PROTOCOL || request.version !== this.hello.version)) throw new PaddockError("incompatible", "The stream protocol or daemon version differs.")
+      if (request.protocol !== undefined && (request.protocol !== PROTOCOL || request.version !== this.hello.version || request.build !== this.hello.sourceDigest)) throw new PaddockError("incompatible", "The stream protocol, daemon version or build differs.")
       return local(request)
     }
-    const host = await this.resolve(request.host)
+    const host = await this.resolve(request.host); const epoch = this.epoch(host.name)
+    if (request.machineId !== undefined && request.machineId !== host.machineId) throw new PaddockError("identity-changed", `${host.name} is machine ${host.machineId}, not the ${request.machineId} the session names. Nothing was opened.`)
     return this.peer(host, async (peer, hello) => {
       if (!hello.features.includes("remote-streams")) throw new PaddockError("dependency", "The remote daemon does not offer hosted streams.")
       const target = await this.target(peer, host, request.name)
       if (request.sandboxId && request.sandboxId !== target.sandboxId) throw new PaddockError("identity-changed", "The sandbox was recreated; set up its alias again.")
-      return this.remoteSession(host, hello, { ...request, ...target })
+      return this.remoteSession(host, hello, { ...request, ...target }, epoch)
     })
   }
 
-  private async forwardAdd(host: HostRecord, body: Record<string, unknown>): Promise<ForwardView> {
-    const port = validPort(body.port, "The port"); const local = body.localPort === undefined ? undefined : validPort(body.localPort, "The local port")
+  private async forwardAdd(host: HostRecord, body: Record<string, unknown>, signal?: AbortSignal): Promise<ForwardView> {
+    const port = validPort(body.port, "The port"); const local = body.localPort === undefined ? undefined : validPort(body.localPort, "The local port"); const epoch = this.epoch(host.name)
     return this.peer(host, async (peer, hello) => {
       if (!hello.features.includes("remote-forwards")) throw new PaddockError("dependency", "The remote daemon does not offer hosted forwards.")
       const target = await this.target(peer, host, body.name); const leaseId = randomBytes(16).toString("hex")
-      const lease = await this.remoteSession(host, hello, { kind: "lease", ...target, port, leaseId })
+      const lease = await this.remoteSession(host, hello, { kind: "lease", ...target, port, leaseId }, epoch)
       let server: Server
       try { server = await listenLoopback(local) } catch (error) { lease.close(); await lease.closed; throw error }
+      // The registry may have changed while this waited; nothing is registered for a host that was removed meanwhile.
+      if (this.closing || this.epoch(host.name) !== epoch) { server.close(); lease.close("The host was removed."); throw new PaddockError("conflict", `${host.name} was removed while the forward was being added. Nothing is listening.`) }
       const forwardId = randomBytes(4).toString("hex"); let heard = Date.now()
-      const forward = { host: host.name, view: { id: forwardId, ...target, host: host.name, localAddress: "127.0.0.1" as const, localPort: boundPort(server), port, createdAt: new Date().toISOString(), connections: 0 }, server, lease, connections: new Set<RemoteSession>(),
-        timer: setInterval(() => { if (Date.now() - heard >= 15_000) this.endForward(forwardId, "The SSH control stream was silent for 15 seconds; add a new forward explicitly.") }, 1000) }
-      forward.timer.unref()
+      const forward: Forward = { host: host.name, view: { id: forwardId, ...target, host: host.name, localAddress: "127.0.0.1" as const, localPort: boundPort(server), port, createdAt: new Date().toISOString(), connections: 0 }, server, lease, connections: new Set<RemoteSession>(),
+        timers: [setInterval(() => { if (Date.now() - heard >= LEASE_TTL_MS) this.endForward(forwardId, `The SSH control stream was silent for ${LEASE_TTL_MS / 1000} seconds; add a new forward explicitly.`) }, 1000),
+          // The renewal the remote daemon waits for: without it the remote lease ends on its own.
+          setInterval(() => { lease.write(Buffer.from([1])) }, this.renewMs)] }
+      for (const timer of forward.timers) timer.unref()
       this.forwards.set(forwardId, forward)
       lease.on("output", () => { heard = Date.now() }); lease.on("end", () => this.endForward(forwardId, "The remote daemon, sandbox run or SSH control link ended.")); lease.resume()
       server.on("connection", async (socket) => {
         socket.on("error", () => {})
-        if (!this.forwards.has(forwardId) || Date.now() - heard >= 15_000) { this.endForward(forwardId, "The SSH control stream expired."); return socket.destroy() }
+        if (!this.forwards.has(forwardId) || Date.now() - heard >= LEASE_TTL_MS) { this.endForward(forwardId, "The SSH control stream expired."); return socket.destroy() }
         let session: RemoteSession
-        try { session = await this.remoteSession(host, hello, { kind: "dial", ...target, port, leaseId }) } catch { return socket.destroy() }
+        try { session = await this.remoteSession(host, hello, { kind: "dial", ...target, port, leaseId }, epoch) } catch { return socket.destroy() }
         if (!this.forwards.has(forwardId) || socket.destroyed) { session.close(); socket.destroy(); return }
         forward.connections.add(session)
         // A service closing normally ends only that connection. Transport failure ends the listener as well.
@@ -247,13 +370,13 @@ export class Machines {
         relay(socket, session); session.resume()
       })
       return forward.view
-    })
+    }, signal)
   }
 
   private endForward(id: string, reason: string): void {
     const forward = this.forwards.get(id)
     if (!forward) return
-    this.forwards.delete(id); clearInterval(forward.timer); forward.server.close(); forward.lease.close(reason)
+    this.forwards.delete(id); for (const timer of forward.timers) clearInterval(timer); forward.server.close(); forward.lease.close(reason)
     for (const session of forward.connections) session.close(reason)
   }
   forwardList(host: string, name?: unknown): ForwardView[] {
@@ -267,10 +390,19 @@ export class Machines {
     }
     this.endForward(id, "The forward was removed."); return { closed: id }
   }
+  private endHost(name: string, reason: string): void {
+    this.epochs.set(name, this.epoch(name) + 1)
+    for (const [id, forward] of this.forwards) if (forward.host === name) this.endForward(id, reason)
+    for (const [session, host] of this.sessions) if (host === name) session.close(reason)
+  }
+  // Bounded: each SSH process gets SIGTERM, then SIGKILL, and nothing here waits longer than that. The daemon stops the
+  // sandboxes only it watches right after, so a stopped or wedged ssh cannot leave them running unwatched.
   async close(): Promise<void> {
+    this.closing = true
     for (const id of [...this.forwards.keys()]) this.endForward(id, "The primary daemon stopped.")
-    const sessions = [...this.sessions]; for (const session of sessions) session.close("The primary daemon stopped.")
-    await Promise.all(sessions.map((session) => session.closed))
+    const sessions = [...this.sessions.keys()]; for (const session of sessions) session.close("The primary daemon stopped.")
+    const peers = [...this.peers].map((peer) => peer.close("The primary daemon stopped.").catch(() => {}))
+    await Promise.race([Promise.all([...sessions.map((session) => session.closed), ...peers]), Bun.sleep(3 * KILL_GRACE_MS)])
   }
 
   // Serializes only registry writes; a slow or unreachable machine never holds another machine's refresh.
@@ -279,23 +411,25 @@ export class Machines {
   }
   attach(body: Record<string, unknown>): Promise<HostRecord> {
     return this.edit(async () => {
-      const name = hostName(body.name); const hosts = await readHosts(this.dirs)
-      if (hosts.some((host) => host.name === name)) throw new PaddockError("conflict", `${name} is already registered. Remove it explicitly before enrolling another machine.`)
+      const name = hostName(body.name); const registry = await readHosts(this.dirs)
+      if ([...registry.hosts, ...registry.unknown].some((host) => host.name === name)) throw new PaddockError("conflict", `${name} is already registered. Remove it explicitly before enrolling another machine.`)
       const endpoint = { ssh: sshDestination(body.ssh), binary: absolutePath(body.binary), stateDir: absolutePath(body.stateDir) }
       const hello = await this.peer(endpoint, async (_peer, hello) => hello)
-      if (hello.machineId === this.hello.machineId || hosts.some((host) => host.machineId === hello.machineId)) throw new PaddockError("conflict", "This machine identity is already registered.")
-      const host: HostRecord = { name, ...endpoint, machineId: hello.machineId, addedAt: new Date().toISOString(), diskPolicy: "watched", service: "prepared" }
-      await writeHosts(this.dirs, [...hosts, host]); return host
+      if (hello.machineId === this.hello.machineId || [...registry.hosts, ...registry.unknown].some((host) => host.machineId === hello.machineId)) throw new PaddockError("conflict", "This machine identity is already registered.")
+      const ssh = await this.io.sshIdentity(endpoint)
+      const host: HostRecord = { name, ...endpoint, machineId: hello.machineId, addedAt: new Date().toISOString(), diskPolicy: "watched", service: "prepared", sshUser: ssh.user, hostKey: ssh.hostKey }
+      await writeHosts(this.dirs, [...registry.entries, host]); return host
     })
   }
   remove(body: Record<string, unknown>): Promise<{ removed: string; remoteRetained: true }> {
     return this.edit(async () => {
-      const host = await this.resolve(body.name)
-      if (body.confirm !== host.name) throw new PaddockError("usage", "Confirm removal with --confirm NAME. A prepared daemon and all remote data are retained.")
-      for (const [id, forward] of this.forwards) if (forward.host === host.name) this.endForward(id, "The host was removed.")
-      await writeHosts(this.dirs, (await readHosts(this.dirs)).filter((entry) => entry.name !== host.name))
-      await updateRemoteAlias(this.dirs, host.name)
-      this.cache.delete(host.name); return { removed: host.name, remoteRetained: true }
+      const name = hostName(body.name); const registry = await readHosts(this.dirs)
+      if (![...registry.hosts, ...registry.unknown].some((host) => host.name === name)) throw new PaddockError("not-found", `There is no host ${name}. See \`paddock host list\`.`)
+      if (body.confirm !== name) throw new PaddockError("usage", "Confirm removal with --confirm NAME. A prepared daemon and all remote data are retained.")
+      this.endHost(name, "The host was removed.")
+      await writeHosts(this.dirs, registry.entries.filter((entry, index) => recordName(entry, index) !== name))
+      await updateRemoteAlias(this.dirs, name)
+      this.cache.delete(name); return { removed: name, remoteRetained: true }
     })
   }
 
@@ -304,7 +438,7 @@ export class Machines {
     this.cache.set(host.name, cache)
     if (cache.pending) return cache.pending
     cache.pending = this.peer(host, async (peer, hello) => {
-      const summary = parseSummary(await peer.call("summary", {}, { timeoutMs: 10_000, machineId: host.machineId, version: this.hello.version }), hello)
+      const summary = parseSummary(await peer.call("summary", {}, this.options(host, "summary")), hello)
       cache.summary = summary; cache.view = { host, state: "online", hello, receivedAt: new Date().toISOString() }; cache.failures = 0; cache.retryAt = Date.now() + 5000
     }).catch((error) => {
       cache.view = { ...cache.view, state: error instanceof PaddockError && (error.code === "incompatible" || error.code === "identity-changed") ? error.code : "offline", error: (error as Error).message }
@@ -313,19 +447,25 @@ export class Machines {
     return cache.pending
   }
 
+  // A host removed while these wait is left out, not reported as a failure of the whole call.
   async list(): Promise<HostView[]> {
-    const hosts = await readHosts(this.dirs)
-    await Promise.all(hosts.map((host) => this.refresh(host)))
-    return hosts.map((host) => this.cache.get(host.name)!.view)
+    const registry = await readHosts(this.dirs)
+    await Promise.all(registry.hosts.map((host) => this.refresh(host)))
+    return [...registry.hosts.flatMap((host) => { const view = this.cache.get(host.name)?.view; return view ? [view] : [] }),
+      ...registry.unknown.map((host): HostView => ({ host, state: "unknown-record", error: host.error }))]
   }
   async fleet(refresh?: unknown): Promise<FleetView> {
-    const hosts = await readHosts(this.dirs)
+    const registry = await readHosts(this.dirs); const hosts = registry.hosts
     if (refresh !== undefined && (typeof refresh !== "string" || !hosts.some((host) => host.name === refresh))) throw new PaddockError("not-found", "No such host to refresh.")
     for (const host of hosts) if (host.name === refresh || Date.now() >= (this.cache.get(host.name)?.retryAt ?? 0)) void this.refresh(host)
-    return { machines: [{ machine: { host: { name: "local", machineId: this.hello.machineId }, state: "online" }, cached: await this.localSummary(), stale: false },
-      ...hosts.map((host) => {
-        const cache = this.cache.get(host.name)!; const stale = cache.view.state !== "online" || Date.now() - Date.parse(cache.view.receivedAt ?? "") > 15_000
-        return { machine: cache.view, ...(cache.summary ? { cached: stale ? staleSummary(cache.summary) : cache.summary } : {}), stale }
-      })] }
+    const local = await this.localSummary()
+    return { machines: [{ machine: { host: { name: "local", machineId: this.hello.machineId }, state: "online" }, cached: local, stale: false },
+      ...hosts.flatMap((host) => {
+        const cache = this.cache.get(host.name)
+        if (!cache) return []
+        const stale = cache.view.state !== "online" || Date.now() - Date.parse(cache.view.receivedAt ?? "") > 15_000
+        return [{ machine: cache.view, ...(cache.summary ? { cached: stale ? staleSummary(cache.summary) : cache.summary } : {}), stale }]
+      }),
+      ...registry.unknown.map((host) => ({ machine: { host, state: "unknown-record" as const, error: host.error }, stale: true }))] }
   }
 }

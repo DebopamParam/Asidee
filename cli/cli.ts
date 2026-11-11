@@ -50,6 +50,11 @@ const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, 
   --json   print {"ok":true,"data":…} or {"ok":false,"error":{code,message}}
 Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown.`
 
+// Text from a daemon, which may be another machine's, on its way to a terminal: without control characters (an escape
+// sequence can redraw the screen or forge a check mark) and line breaks (a forged line), and bounded. lines keeps breaks
+// for output that is several lines by nature, such as an extension's.
+const shown = (value: unknown, lines = false) => String(value ?? "").replace(lines ? /[\x00-\x09\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g : /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, lines ? 64_000 : 4000)
+
 const EXIT: Record<ErrorCode, number> = { runtime: 1, usage: 2, "not-found": 3, conflict: 4, dependency: 5, "check-failed": 6, offline: 7, incompatible: 8, "identity-changed": 9, "outcome-unknown": 10 }
 let selectedHost: string | undefined
 const dirs = defaultDirs()
@@ -142,7 +147,7 @@ async function session(request: OpenRequest): Promise<never> {
       else if (kind === "error") {
         socket.removeAllListeners("close")
         const error = JSON.parse(payload.toString()) as { code: ErrorCode; message: string }
-        void leave(EXIT[error.code] ?? 1, error.message)
+        void leave(EXIT[error.code] ?? 1, shown(error.message))
       } else if (kind === "ready" && !ready) {
         ready = true
         if (raw) {
@@ -167,15 +172,15 @@ const MARK: Record<CheckResult["status"], string> = { pass: "✓", weak: "~", fa
 function printChecks(checks: CheckResult[]): void {
   for (const check of checks) {
     const item = CHECKLIST.find((entry) => entry.id === check.id)
-    console.log(`  ${MARK[check.status]} ${item?.title ?? check.id}${check.status === "pass" || check.status === "info" ? "" : ` [${check.status}]`}\n      ${check.detail}${check.evidence === "none" ? "" : ` (${check.evidence})`}`)
+    console.log(`  ${MARK[check.status] ?? "?"} ${item?.title ?? shown(check.id)}${check.status === "pass" || check.status === "info" ? "" : ` [${shown(check.status)}]`}\n      ${shown(check.detail)}${check.evidence === "none" ? "" : ` (${shown(check.evidence)})`}`)
   }
   console.log("\n  ✓ holds   ~ holds in a weaker form   ✗ does not hold   – not available on this engine   ? could not be checked   i for your information")
 }
 
 function printSandbox(view: SandboxView): void {
-  console.log(`${displayName(view.name)}: ${view.status} on ${view.engine}${view.stopReason ? `\n  ${view.stopReason}` : ""}`)
+  console.log(`${displayName(view.name)}: ${shown(view.status)} on ${shown(view.engine)}${view.stopReason ? `\n  ${shown(view.stopReason)}` : ""}`)
 }
-const displayName = (name: string) => selectedHost && selectedHost !== "local" ? `${selectedHost}/${name}` : name
+const displayName = (name: string) => shown(selectedHost && selectedHost !== "local" ? `${selectedHost}/${name}` : name)
 
 // Waits for the output to be written before exiting: into a pipe, an exit right after a write loses what did not fit.
 async function printRun(output: RunResult, asJson = false): Promise<never> {
@@ -213,10 +218,10 @@ async function main(argv: string[]): Promise<void> {
         return out(engines, () => {
           if (!engines.length) console.log("No engine found. Paddock needs Docker (OrbStack, a Linux host, Colima, …) with a gVisor runtime.")
           for (const engine of engines) {
-            console.log(`${engine.ready ? "✓" : "✗"} ${engine.label}  [${engine.id}]`)
-            if (engine.capabilities) console.log(`    kernel isolation: ${engine.capabilities.kernelIsolation}; network guard: ${engine.capabilities.networkGuard ? "yes" : "no"}; disk limit: ${engine.capabilities.diskLimit}; inner Docker: ${engine.capabilities.docker ? "yes" : "no"}`)
-            for (const problem of engine.problems) console.log(`    ${problem}`)
-            if (engine.fix) console.log(`    Fix: ${engine.fix}`)
+            console.log(`${engine.ready ? "✓" : "✗"} ${shown(engine.label)}  [${shown(engine.id)}]`)
+            if (engine.capabilities) console.log(`    kernel isolation: ${shown(engine.capabilities.kernelIsolation)}; network guard: ${engine.capabilities.networkGuard ? "yes" : "no"}; disk limit: ${shown(engine.capabilities.diskLimit)}; inner Docker: ${engine.capabilities.docker ? "yes" : "no"}`)
+            for (const problem of engine.problems) console.log(`    ${shown(problem)}`)
+            if (engine.fix) console.log(`    Fix: ${shown(engine.fix)}`)
           }
         })
       }
@@ -227,7 +232,7 @@ async function main(argv: string[]): Promise<void> {
           { name, docker: values.docker, image: values.image, template: values.template, cpus: values.cpus, memoryGb: values.memory, diskGb: values.disk, pids: values.pids, engine: values.engine }, watching(name))
         return out(made, () => {
           printSandbox(made.sandbox); printChecks(made.checks)
-          for (const hook of made.hooks) console.log(`\n  ${hook.extension} (after create): ${hook.exitCode === 0 ? "done" : `failed with exit ${hook.exitCode}`}${hook.output ? `\n${hook.output}` : ""}`)
+          for (const hook of made.hooks) console.log(`\n  ${shown(hook.extension)} (after create): ${hook.exitCode === 0 ? "done" : `failed with exit ${hook.exitCode}`}${hook.output ? `\n${shown(hook.output, true)}` : ""}`)
         })
       }
       case "list": case "ls": {
@@ -237,8 +242,8 @@ async function main(argv: string[]): Promise<void> {
           const fleet = await call<FleetView>("fleet")
           return out(fleet, () => {
             for (const row of fleet.machines) {
-              console.log(`${row.machine.host.name}: ${row.machine.state}${"error" in row.machine && row.machine.error ? ` (${row.machine.error})` : ""}${row.stale ? "; sandboxes unknown" : ""}`)
-              for (const sandbox of row.cached?.sandboxes ?? []) console.log(`  ${row.machine.host.name}/${sandbox.name}: ${sandbox.status}${row.stale ? ` (last checked ${row.cached?.checkedAt})` : ""}`)
+              console.log(`${shown(row.machine.host.name)}: ${shown(row.machine.state)}${"error" in row.machine && row.machine.error ? ` (${shown(row.machine.error)})` : ""}${row.stale ? "; sandboxes unknown" : ""}`)
+              for (const sandbox of row.cached?.sandboxes ?? []) console.log(`  ${shown(row.machine.host.name)}/${shown(sandbox.name)}: ${shown(sandbox.status)}${row.stale ? ` (last checked ${shown(row.cached?.checkedAt)})` : ""}${sandbox.status === "damaged" ? `\n    ${shown(sandbox.stopReason)}` : ""}`)
             }
           })
         }
@@ -246,9 +251,9 @@ async function main(argv: string[]): Promise<void> {
         return out(list, () => {
           if (!list.length) console.log("No sandboxes. Create one with `paddock create NAME`.")
           for (const view of list) {
-            const verified = view.lastVerify ? `verified ${view.lastVerify.at.slice(0, 16).replace("T", " ")} UTC, ${view.lastVerify.results.filter((check) => check.status === "fail").length} failed` : "never verified"
-            if (view.status === "damaged") { console.log(`${displayName(view.name).padEnd(24)} damaged\n    ${view.stopReason}`); continue }
-            console.log(`${displayName(view.name).padEnd(24)} ${view.status.padEnd(8)} ${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  ${view.engine}${view.template ? `  template ${view.template.name}` : ""}  (${verified})${view.stopReason ? `\n    ${view.stopReason}` : ""}`)
+            const verified = view.lastVerify ? `verified ${shown(view.lastVerify.at.slice(0, 16).replace("T", " "))} UTC, ${view.lastVerify.results.filter((check) => check.status === "fail").length} failed` : "never verified"
+            if (view.status === "damaged") { console.log(`${displayName(view.name).padEnd(24)} damaged\n    ${shown(view.stopReason)}`); continue }
+            console.log(`${displayName(view.name).padEnd(24)} ${shown(view.status).padEnd(8)} ${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  ${shown(view.engine)}${view.template ? `  template ${shown(view.template.name)}` : ""}  (${verified})${view.stopReason ? `\n    ${shown(view.stopReason)}` : ""}`)
           }
         })
       }
@@ -268,7 +273,7 @@ async function main(argv: string[]): Promise<void> {
         const resized = await call<{ sandbox: SandboxView; changes: ResizeChange[]; checks: CheckResult[] }>("resize", { name, cpus: values.cpus, memoryGb: values.memory, pids: values.pids, diskGb: values.disk }, watching(name))
         return out(resized, () => {
           printSandbox(resized.sandbox)
-          for (const change of resized.changes) console.log(`  ${LIMIT[change.limit]}: ${change.from === change.to ? change.to : `${change.from} -> ${change.to}`}, ${APPLIES[change.applies]}${change.note ? `\n      ${change.note}` : ""}`)
+          for (const change of resized.changes) console.log(`  ${LIMIT[change.limit]}: ${change.from === change.to ? change.to : `${change.from} -> ${change.to}`}, ${APPLIES[change.applies]}${change.note ? `\n      ${shown(change.note)}` : ""}`)
           console.log(""); printChecks(resized.checks)
         })
       }
@@ -277,9 +282,9 @@ async function main(argv: string[]): Promise<void> {
         const name = need(positionals[0], "a name")
         const saved = await call<{ template: Template; contents: string }>("snapshot", { name, as: need(values.as, "--as TEMPLATE") }, watching(name))
         return out(saved, () => {
-          console.log(`Saved ${name} as template ${saved.template.name} (${(saved.template.sizeBytes / 1024 ** 2).toFixed(0)} MB). Use it with \`paddock create NAME --template ${saved.template.name}\`.`)
-          console.log(`  Login files left out: ${saved.template.loginsRemoved.join(", ") || "none were present"}.`)
-          console.log(`  ${saved.contents}`)
+          console.log(`Saved ${name} as template ${shown(saved.template.name)} (${(saved.template.sizeBytes / 1024 ** 2).toFixed(0)} MB). Use it with \`paddock create NAME --template ${shown(saved.template.name)}\`.`)
+          console.log(`  Login files left out: ${shown(saved.template.loginsRemoved.join(", ")) || "none were present"}.`)
+          console.log(`  ${shown(saved.contents)}`)
         })
       }
       case "template": case "templates": {
@@ -288,19 +293,19 @@ async function main(argv: string[]): Promise<void> {
           const list = await call<Template[]>("templateList")
           return out(list, () => {
             if (!list.length) console.log("No templates. Save one with `paddock snapshot NAME --as TEMPLATE`.")
-            for (const template of list) console.log(`${template.name.padEnd(24)} from ${template.source} (${template.sourceImage}), ${template.createdAt.slice(0, 16).replace("T", " ")} UTC, ${(template.sizeBytes / 1024 ** 2).toFixed(0)} MB, ${template.engine}${template.dependants.length ? `\n    used by ${template.dependants.join(", ")}` : ""}`)
+            for (const template of list) console.log(`${shown(template.name).padEnd(24)} from ${shown(template.source)} (${shown(template.sourceImage)}), ${shown(template.createdAt.slice(0, 16).replace("T", " "))} UTC, ${(template.sizeBytes / 1024 ** 2).toFixed(0)} MB, ${shown(template.engine)}${template.dependants.length ? `\n    used by ${shown(template.dependants.join(", "))}` : ""}`)
           })
         }
         if (rest[0] === "remove" || rest[0] === "rm") {
           const removed = await call<{ removed: string; note: string }>("templateRemove", { name: need(positionals[0], "a template name"), engine: values.engine })
-          return out(removed, () => console.log(`Removed template ${removed.removed}. ${removed.note}`))
+          return out(removed, () => console.log(`Removed template ${shown(removed.removed)}. ${shown(removed.note)}`))
         }
         throw new PaddockError("usage", "Use `paddock template list` or `paddock template remove TEMPLATE`.")
       }
       case "remove": case "rm": {
         const { values, positionals } = parse({ confirm: { type: "string" } })
-        const removed = await call<{ removed: string }>("remove", { name: need(positionals[0], "a name"), confirm: values.confirm })
-        return out(removed, () => console.log(`Removed ${removed.removed}.`))
+        const removed = await call<{ removed: string; warning?: string }>("remove", { name: need(positionals[0], "a name"), confirm: values.confirm })
+        return out(removed, () => { console.log(`Removed ${shown(removed.removed)}.`); if (removed.warning) console.error(`paddock: ${shown(removed.warning)}`) })
       }
       case "exec": {
         const { values, positionals } = parse({ user: { type: "string" }, stdin: { type: "boolean" }, stream: { type: "boolean" } })
@@ -319,13 +324,13 @@ async function main(argv: string[]): Promise<void> {
         const { values, positionals } = parse({ port: { type: "string" }, "local-port": { type: "string" } }, rest.slice(1))
         if (rest[0] === "add") {
           const made = await call<ForwardView>("forwardAdd", { name: need(positionals[0], "a name"), port: need(values.port, "--port"), localPort: values["local-port"] })
-          return out(made, () => console.log(`Forwarding 127.0.0.1:${made.localPort} to port ${made.port} in ${selectedHost && selectedHost !== "local" ? `${selectedHost}/` : ""}${made.name} (forward ${made.id}). It ends when the sandbox run, either daemon or the SSH link ends; a silent control link closes it after 15 seconds without a heartbeat. Then add it again.`))
+          return out(made, () => console.log(`Forwarding 127.0.0.1:${made.localPort} to port ${made.port} in ${displayName(made.name)} (forward ${shown(made.id)}). It ends when the sandbox run, either daemon or the SSH link ends; a silent control link closes it after 15 seconds without a heartbeat. Then add it again.`))
         }
         if (rest[0] === "list" || rest[0] === undefined) {
           const list = await call<ForwardView[]>("forwardList", { name: positionals[0] })
           return out(list, () => {
             if (!list.length) console.log("No forwards. Add one with `paddock forward add NAME --port PORT`.")
-            for (const forward of list) console.log(`${forward.id}  127.0.0.1:${forward.localPort} -> ${forward.name}:${forward.port}  ${forward.connections} open, since ${forward.createdAt.slice(0, 16).replace("T", " ")} UTC`)
+            for (const forward of list) console.log(`${shown(forward.id)}  127.0.0.1:${forward.localPort} -> ${shown(forward.name)}:${forward.port}  ${forward.connections} open, since ${shown(forward.createdAt.slice(0, 16).replace("T", " "))} UTC`)
           })
         }
         if (rest[0] === "remove" || rest[0] === "rm") {
@@ -341,12 +346,12 @@ async function main(argv: string[]): Promise<void> {
         if (rest[0] === "setup") {
           const done = await call<SshAccess & { config: string; include: string; included: boolean; editorKey: string; keyFile: string }>("sshSetup", { name: need(positionals[0], "a name"), writeConfig: values["write-config"] === true }, positionals[0])
           return out(done, () => console.log(done.included
-            ? `\`ssh ${done.alias}\` logs in as ${done.user} with the key ${done.editorKey} (${done.keyFile}).`
-            : `Set up. Add this line at the top of ${done.config}, or run again with --write-config:\n  ${done.include}\nThen \`ssh ${done.alias}\` logs in as ${done.user} with the key ${done.editorKey}.`))
+            ? `\`ssh ${shown(done.alias)}\` logs in as ${shown(done.user)} with the key ${shown(done.editorKey)} (${done.keyFile}).`
+            : `Set up. Add this line at the top of ${done.config}, or run again with --write-config:\n  ${done.include}\nThen \`ssh ${shown(done.alias)}\` logs in as ${shown(done.user)} with the key ${shown(done.editorKey)}.`))
         }
         if (rest[0] === "access") {
           const access = await call<SshAccess>("sshAccess", { name: need(positionals[0], "a name") })
-          return out(access, () => console.log(`${access.alias}: ${access.user ? `${access.user}, home ${access.home}` : "not set up"}; ${access.batchReady ? "ready" : "not ready"}`))
+          return out(access, () => console.log(`${shown(access.alias)}: ${access.user ? `${shown(access.user)}, home ${shown(access.home)}` : "not set up"}; ${access.batchReady ? "ready" : "not ready"}`))
         }
         throw new PaddockError("usage", "Use `paddock ssh setup NAME [--write-config]` or `paddock ssh access NAME`.")
       }
@@ -356,10 +361,10 @@ async function main(argv: string[]): Promise<void> {
           return out(loaded, () => {
             if (!loaded.extensions.length) console.log(`No extensions. Put one in ${join(dirs.config, "extensions")}.`)
             for (const extension of loaded.extensions) {
-              console.log(`${extension.id}: ${extension.name}${extension.description ? ` (${extension.description})` : ""}`)
-              for (const action of extension.actions) console.log(`  ${action.id}: ${action.label}${action.fields.length ? `  [${action.fields.map((field) => field.id).join(", ")}]` : ""}`)
+              console.log(`${shown(extension.id)}: ${shown(extension.name)}${extension.description ? ` (${shown(extension.description)})` : ""}`)
+              for (const action of extension.actions) console.log(`  ${shown(action.id)}: ${shown(action.label)}${action.fields.length ? `  [${shown(action.fields.map((field) => field.id).join(", "))}]` : ""}`)
             }
-            for (const error of loaded.errors) console.log(`! ${error}`)
+            for (const error of loaded.errors) console.log(`! ${shown(error)}`)
           })
         }
         if (rest[0] !== "run") throw new PaddockError("usage", "Use `paddock ext list` or `paddock ext run EXTENSION ACTION [SANDBOX]`.")
@@ -404,12 +409,17 @@ async function main(argv: string[]): Promise<void> {
           const hosts = await call<HostView[]>("hostList")
           return out(hosts, () => {
             if (!hosts.length) console.log("No registered hosts. Attach an already prepared daemon with `paddock host attach`.")
-            for (const { host, state, receivedAt, hello, error } of hosts) console.log(`${host.name}: ${state} (${host.ssh}), machine ${host.machineId}, ${hello?.version ?? "version unknown"}, ${host.service}, disk ${host.diskPolicy}${receivedAt ? `, last contact ${receivedAt}` : ""}${error ? `\n  ${error}` : ""}`)
+            for (const view of hosts) {
+              if (view.state === "unknown-record") { console.log(`${shown(view.host.name)}: unknown record${view.host.ssh ? ` (${shown(view.host.ssh)})` : ""}\n  ${shown(view.error)}`); continue }
+              const { host, state, receivedAt, hello, error } = view
+              const runs = hello ? `${hello.listener === "socket-only" ? "socket-only" : hello.listener === "dashboard" ? "dashboard listener open on its loopback" : "listener unknown"}, ${hello.service === "systemd" ? "a systemd service" : hello.service === "none" ? "not a service" : "service unknown"}` : "listener and service unknown"
+              console.log(`${shown(host.name)}: ${shown(state)} (${shown(host.ssh)} as ${shown(host.sshUser ?? "an unrecorded user")}, host key ${shown(host.hostKey ?? "not recorded")}), machine ${shown(host.machineId)}, ${shown(hello?.version ?? "version unknown")}, ${runs}, prepared, disk ${shown(host.diskPolicy)}${receivedAt ? `, last contact ${shown(receivedAt)}` : ""}${error ? `\n  ${shown(error)}` : ""}`)
+            }
           })
         }
         if (rest[0] === "attach") {
-          const host = await call("hostAttach", { name: need(positionals[0], "a host name"), ssh: need(values.ssh, "--ssh DEST"), binary: need(values.binary, "--binary PATH"), stateDir: need(values["state-dir"], "--state-dir PATH") })
-          return out(host, () => console.log(`Registered prepared daemon ${positionals[0]}. No remote files or services were installed.`))
+          const host = await call<{ sshUser: string; hostKey: string }>("hostAttach", { name: need(positionals[0], "a host name"), ssh: need(values.ssh, "--ssh DEST"), binary: need(values.binary, "--binary PATH"), stateDir: need(values["state-dir"], "--state-dir PATH") })
+          return out(host, () => console.log(`Registered prepared daemon ${positionals[0]}, reached as ${shown(host.sshUser)} with host key ${shown(host.hostKey)}. No remote files or services were installed.`))
         }
         if (rest[0] === "remove") {
           const removed = await call<{ removed: string }>("hostRemove", { name: need(positionals[0], "a host name"), confirm: values.confirm })
@@ -420,7 +430,11 @@ async function main(argv: string[]): Promise<void> {
       case "transport": {
         const { values } = parse({ protocol: { type: "string" }, stream: { type: "boolean" } }, rest.slice(1))
         if (selectedHost || asJson || rest[0] !== "stdio" || values.protocol !== String(PROTOCOL)) throw new PaddockError("incompatible", "Use `paddock transport stdio --protocol 1` on the target machine.")
-        return await transportStdio(values.stream ? streamSocketPath(dirs) : socketPath(dirs))
+        await transportStdio(values.stream ? streamSocketPath(dirs) : socketPath(dirs))
+        // Exits as soon as the daemon's side is closed (a lease ended, say), after the last bytes are handed to SSH,
+        // rather than waiting for SSH to close stdin, which a partitioned link may never do.
+        await new Promise((resolve) => process.stdout.write("", resolve))
+        process.exit(0)
       }
       default: throw new PaddockError("usage", `Unknown command ${command}. See \`paddock help\`.`)
     }
@@ -429,9 +443,9 @@ async function main(argv: string[]): Promise<void> {
     const message = (error as Error).message
     if (asJson) console.log(JSON.stringify({ ok: false, error: { code, message, details: error instanceof PaddockError ? error.details : undefined } }))
     else if (code === "check-failed" && error instanceof PaddockError && Array.isArray(error.details)) {
-      console.error(`paddock: ${message.split(": ")[0]}. These checks did not hold:`)
-      for (const check of error.details as CheckResult[]) console.error(`  ${MARK[check.status]} ${CHECKLIST.find((entry) => entry.id === check.id)?.title ?? check.id}\n      ${check.detail}`)
-    } else console.error(`paddock: ${message}`)
+      console.error(`paddock: ${shown(message.split(": ")[0])}. These checks did not hold:`)
+      for (const check of error.details as CheckResult[]) console.error(`  ${MARK[check.status] ?? "?"} ${CHECKLIST.find((entry) => entry.id === check.id)?.title ?? shown(check.id)}\n      ${shown(check.detail)}`)
+    } else console.error(`paddock: ${shown(message)}`)
     process.exit(EXIT[code])
   }
 }

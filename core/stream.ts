@@ -11,6 +11,8 @@ export const KINDS = ["open", "ready", "stdin", "stdout", "stderr", "eof", "resi
 export type Kind = typeof KINDS[number]
 export type Frame = { kind: Kind; payload: Buffer }
 export const MAX_PAYLOAD = 64 * 1024
+// Error messages in a frame are cut to this many characters (at most six bytes each in JSON), well under a payload.
+export const MAX_MESSAGE = 4000
 const HEADER = 5
 
 export function frame(kind: Kind, payload: Uint8Array | string | object = new Uint8Array()): Buffer {
@@ -53,7 +55,7 @@ type SessionRequest =
   | { kind: "ssh"; name: string }
   | ({ kind: "lease" } & RelayRequest)
   | ({ kind: "dial" } & RelayRequest)
-export type OpenRequest = SessionRequest & { host?: string; machineId?: string; bootId?: string; protocol?: number; version?: string; sandboxId?: string; generation?: string }
+export type OpenRequest = SessionRequest & { host?: string; machineId?: string; bootId?: string; protocol?: number; version?: string; build?: string; sandboxId?: string; generation?: string }
 
 const USER = /^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}$/
 const size = (value: unknown, what: string) => {
@@ -69,14 +71,14 @@ const record = (value: unknown): Record<string, unknown> => {
 export function parseOpen(value: unknown): OpenRequest {
   const body = record(value)
   const name = validName(body.name)
-  const route: Pick<OpenRequest, "host" | "machineId" | "bootId" | "protocol" | "version" | "sandboxId" | "generation"> = {}
+  const route: Pick<OpenRequest, "host" | "machineId" | "bootId" | "protocol" | "version" | "build" | "sandboxId" | "generation"> = {}
   if (body.host !== undefined) route.host = validName(body.host)
   for (const key of ["machineId", "bootId", "sandboxId"] as const) if (body[key] !== undefined) {
     if (typeof body[key] !== "string" || !/^[a-f0-9]{32}$/.test(body[key])) throw new PaddockError("usage", `${key} must be an identity.`)
     route[key] = body[key]
   }
   if (body.protocol !== undefined) { if (!Number.isSafeInteger(body.protocol)) throw new PaddockError("usage", "protocol must be an integer."); route.protocol = body.protocol as number }
-  for (const key of ["version", "generation"] as const) if (body[key] !== undefined) {
+  for (const key of ["version", "build", "generation"] as const) if (body[key] !== undefined) {
     if (typeof body[key] !== "string" || body[key].length > 128 || /[\x00-\x1f]/.test(body[key])) throw new PaddockError("usage", `${key} must be bounded text.`)
     route[key] = body[key]
   }
@@ -108,7 +110,9 @@ export function serveStream(socket: Socket, open: (request: OpenRequest) => Prom
   let session: Session | undefined; let opening = false; let done = false
   let inputWaits = false; let outputWaits = false
   const finish = (last: Buffer) => { if (done) return; done = true; clearTimeout(timer); socket.end(last) }
-  const fail = (message: string, code: ErrorCode = "runtime") => { finish(frame("error", { code, message: message.slice(0, 4000) })); session?.close() }
+  // Bounded, so a long message (a remote daemon's, relayed) still fits one frame.
+  const failure = (message: string, code: ErrorCode) => frame("error", { code, message: message.slice(0, MAX_MESSAGE) })
+  const fail = (message: string, code: ErrorCode = "runtime") => { finish(failure(message, code)); session?.close() }
   const timer = setTimeout(() => fail("No session was asked for.", "usage"), 10_000)
   socket.on("error", () => {})
   socket.on("end", () => socket.destroy())
@@ -132,7 +136,7 @@ export function serveStream(socket: Socket, open: (request: OpenRequest) => Prom
             if (outputWaits) opened.pause()
           })
           opened.on("drain", () => { if (inputWaits) { inputWaits = false; socket.resume() } })
-          opened.on("end", (exit) => finish(exit.error === undefined ? frame("exit", { code: exit.code ?? -1 }) : frame("error", { code: "runtime", message: exit.error })))
+          opened.on("end", (exit) => finish(exit.error === undefined ? frame("exit", { code: exit.code ?? -1 }) : failure(exit.error, "runtime")))
           socket.write(frame("ready", { tty: opened.tty }))
           opened.resume()
           socket.resume()

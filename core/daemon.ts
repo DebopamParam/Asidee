@@ -12,6 +12,7 @@ import { DockerSandboxesProvider } from "./providers/docker-sandboxes"
 import { GvisorProvider } from "./providers/gvisor"
 import { systemRunner } from "./run"
 import { checkSocketPath, daemonFile, socketPath, streamSocketPath, type Dirs } from "./state"
+import { sourceDigest } from "./source" with { type: "macro" }
 import { serveStream } from "./stream"
 import { PaddockError, type ErrorCode } from "./types"
 import builtInUi from "../ui/index.html" with { type: "text" }
@@ -24,6 +25,8 @@ export const VERSION: string = pkg.version
 // The version plus when this program file was written. A daemon left running by an older build of the same version
 // (a rebuild during development) has another one, and the CLI replaces it.
 export const BUILD: string = (() => { try { return `${VERSION}+${Math.round(statSync(Bun.main.startsWith("/$bunfs/") ? process.execPath : Bun.main).mtimeMs)}` } catch { return VERSION } })()
+// What this program was built from: two machines talk only when it is the same (core/machines.ts, compatible).
+export const SOURCE: string = sourceDigest()
 const DEFAULT_PORT = 7717
 const ENFORCE_MS = 30_000
 
@@ -97,12 +100,13 @@ export function createHandler(table: Record<string, Method>, token: string, conf
         if (machines) {
           const expected = request.headers.get("x-paddock-machine")
           if (expected && expected !== machines.hello.machineId) throw new PaddockError("identity-changed", "The daemon's machine identity differs from the selected machine.")
-          if (expected && (request.headers.get("x-paddock-protocol") !== String(PROTOCOL) || request.headers.get("x-paddock-version") !== VERSION)) throw new PaddockError("incompatible", "The daemon version or wire protocol differs from the gateway's.")
+          if (expected && (request.headers.get("x-paddock-protocol") !== String(PROTOCOL) || request.headers.get("x-paddock-version") !== VERSION || request.headers.get("x-paddock-build") !== machines.hello.sourceDigest))
+            throw new PaddockError("incompatible", `This daemon is Paddock ${VERSION}, protocol ${PROTOCOL}, built from source ${machines.hello.sourceDigest.slice(0, 12)}; the gateway's request differs. Nothing was done.`)
           const name = url.pathname.slice(5)
           if (isMethod(name) && !viaSocket && CATALOG[name][0] !== "dashboard") return refuse(403, "This method is only available to the CLI.")
           if (payload.host !== undefined && payload.host !== "local") {
             if (!isMethod(name)) throw new PaddockError("usage", "This method cannot be routed.")
-            return json(200, { ok: true, data: await machines.route(name, payload) })
+            return json(200, { ok: true, data: await machines.route(name, payload, request.signal) })
           }
           if (payload.machineId !== undefined && payload.machineId !== machines.hello.machineId) throw new PaddockError("identity-changed", "The request names another machine identity.")
         } else if (payload.host !== undefined && payload.host !== "local") throw new PaddockError("dependency", "Machine routing is unavailable.")
@@ -134,7 +138,9 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   const digest = new Bun.CryptoHasher("sha256")
   for await (const bytes of Bun.file(Bun.main.startsWith("/$bunfs/") ? process.execPath : Bun.main).stream()) digest.update(bytes)
   const core = new Core([new GvisorProvider(systemRunner, createHash("sha256").update(`${hostname()}\0${dirs.state}`).digest("hex").slice(0, 10)), new DockerSandboxesProvider(systemRunner)], dirs, systemRunner, cliDir, identity)
-  const hello: Hello = { machineId: identity, bootId: randomBytes(16).toString("hex"), version: VERSION, buildDigest: digest.digest("hex"), protocols: [PROTOCOL], methods: Object.keys(CATALOG), features: ["machines", "remote-streams", "remote-forwards", "ssh"] }
+  // service: systemd sets INVOCATION_ID for each unit it starts; a daemon started by hand or by the CLI has none.
+  const hello: Hello = { machineId: identity, bootId: randomBytes(16).toString("hex"), version: VERSION, buildDigest: digest.digest("hex"), sourceDigest: SOURCE, protocols: [PROTOCOL], methods: Object.keys(CATALOG),
+    features: ["machines", "remote-streams", "remote-forwards", "ssh", "lease-renewal"], listener: process.env.PADDOCK_SOCKET_ONLY === "1" ? "socket-only" : "dashboard", service: process.env.INVOCATION_ID ? "systemd" : "none" }
   const machines = new Machines(dirs, hello, async () => ({ hello, sandboxes: await core.list(), checkedAt: new Date().toISOString() }))
   const token = randomBytes(24).toString("hex")
   let stop: (keepSandboxes: boolean) => void = () => {}
@@ -182,7 +188,8 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   stopping = true
   clearInterval(timer)
   core.closeSessions()
-  await machines.close()
+  // Bounded (Machines.close), and never a reason to skip the next line.
+  await machines.close().catch(() => {})
   if (!keepSandboxes) await core.stopWatched()
   streams.close()
   await Promise.all([unix.stop(true), tcp?.stop(true)])
