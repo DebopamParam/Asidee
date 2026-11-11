@@ -60,7 +60,8 @@ Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing depende
   Any process on this machine can connect to it. On OrbStack, `host.docker.internal` relays to this machine's
   loopback, so the engine host and ordinary containers can reach the forward too. Guarded sandboxes cannot.
   Remove a forward when you are done with it.
-  A client FIN allows two seconds for a response to drain, then ends that connection's relay process.
+  A closed connection ends its relay process. A client that only finishes sending (FIN) keeps the relay while the
+  port answers; after ten minutes of silence the relay is ended.
 - `paddock ssh setup NAME` is for editors and tools that speak SSH. It installs OpenSSH's server from the image's
   package manager when it has none (the sandbox needs internet for that), and opens no port. `ssh NAME.paddock` logs in
   as exec's user and allows `ssh -L` only to the sandbox's loopback. Running setup again makes a new host key. The

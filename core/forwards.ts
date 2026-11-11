@@ -30,22 +30,27 @@ export const boundPort = (server: Server) => (server.address() as AddressInfo).p
 // Moves bytes between a connection and a session until both sides are done. Each direction waits for the other side to
 // take what it was given, and end of input is passed on as a half-close. The sandbox's stderr is not part of the
 // connection's bytes and is dropped.
-export function relay(socket: Socket, session: Session): void {
+// How long a connection whose client has sent FIN may wait for the port's next byte.
+export const FIN_QUIET_MS = 10 * 60_000
+export function relay(socket: Socket, session: Session, quietAfterFinMs = FIN_QUIET_MS): void {
   let socketWaits = false; let sessionWaits = false
-  let ending: ReturnType<typeof setTimeout> | undefined
+  let quiet: ReturnType<typeof setTimeout> | undefined
+  // After a client's FIN nothing more can show that it is still there: one that has gone looks the same as one waiting
+  // for a slow answer, until something is written to it. So the relay stays while the port keeps answering, and goes
+  // once it has been silent this long.
+  const waitQuietly = () => { clearTimeout(quiet); quiet = setTimeout(() => { session.close(); socket.destroy() }, quietAfterFinMs); quiet.unref() }
   socket.on("error", () => session.close())
   socket.on("data", (chunk: Buffer) => { if (!session.write(chunk) && !socketWaits) { socketWaits = true; socket.pause() } })
   session.on("drain", () => { if (socketWaits) { socketWaits = false; socket.resume() } })
-  socket.on("end", () => {
-    // TCP EOF still allows a response, but cannot leave an unresponsive relay alive indefinitely.
-    ending = setTimeout(() => { session.close(); socket.destroy() }, 2000)
-    ending.unref()
-    session.end()
+  socket.on("end", () => { waitQuietly(); session.end() })
+  socket.on("close", () => { clearTimeout(quiet); session.close() })
+  session.on("output", (stream, bytes) => {
+    if (stream !== "stdout") return
+    if (quiet) waitQuietly()
+    if (!socket.write(bytes) && !sessionWaits) { sessionWaits = true; session.pause() }
   })
-  socket.on("close", () => { clearTimeout(ending); session.close() })
-  session.on("output", (stream, bytes) => { if (stream === "stdout" && !socket.write(bytes) && !sessionWaits) { sessionWaits = true; session.pause() } })
   socket.on("drain", () => { if (sessionWaits) { sessionWaits = false; session.resume() } })
   // A relay that could not reach the port, or was ended, resets the connection instead of ending it cleanly.
-  session.on("end", (exit) => { clearTimeout(ending); if (exit.error === undefined && exit.code === 0) socket.end(); else socket.destroy() })
+  session.on("end", (exit) => { clearTimeout(quiet); if (exit.error === undefined && exit.code === 0) socket.end(); else socket.destroy() })
   socket.resume()
 }

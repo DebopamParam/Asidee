@@ -181,8 +181,9 @@ system picks (no port is probed and assumed free; one in use is refused). Each c
 that runs a relay on the sandbox's own loopback: `nc 127.0.0.1 P` from a static BusyBox the core copies into the
 sandbox at `/.paddock/busybox` through the engine's archive API, because the image may have no `nc`, `socat` or
 interpreter of its own. The relay gets the port as a number and nothing else. The engine publishes nothing and gets no
-listener on its host. Each direction waits for the other side. End of input passes on as a half-close, with up to two
-seconds for the response to drain before the connection and guest relay are closed. W09 keeps a control connected
+listener on its host. Each direction waits for the other side. End of input passes on as a half-close: the relay
+stays while the port answers and is ended after ten minutes of silence, since a client that has gone after its FIN
+looks the same as one still waiting. W09 keeps a control connected
 while dropping another connection and checks that its `nc` process ends within five seconds. A forward
 belongs to one run of one sandbox (its id and the engine's start time): it ends on `forward remove`, when the sandbox
 stops or is removed through Paddock, within two seconds when the engine restarts or stops it behind Paddock's back

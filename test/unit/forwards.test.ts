@@ -51,14 +51,19 @@ test("a relay that is closed, or whose command failed, resets the connection", a
   expect(got.toString()).toBe("y")
 })
 
-test("a relay whose client sends FIN ends a guest that ignores EOF within three seconds", async () => {
-  const session = new Echo(); let closed = false
-  session.end = () => {}; session.close = () => { closed = true; session.emit("end", { error: "closed" }) }
-  const server = await listenLoopback(); server.on("connection", (socket) => relay(socket, session))
-  const client = connect(boundPort(server), "127.0.0.1", () => client.end())
-  client.on("error", () => {})
+test("after a client's FIN the relay stays while the port answers, and goes once it has been silent for the allowed time", async () => {
+  const session = new Echo(); let ended = false; let closed = false
+  session.end = () => { ended = true }; session.close = () => { closed = true; session.emit("end", { error: "closed" }) }
+  const server = await listenLoopback(); server.on("connection", (socket) => relay(socket, session, 600))
+  const got: Buffer[] = []
+  const client = connect({ port: boundPort(server), host: "127.0.0.1", allowHalfOpen: true }, () => client.end())
+  client.on("error", () => {}); client.on("data", (chunk: Buffer) => got.push(chunk))
   try {
+    for (let i = 0; i < 60 && !ended; i++) await Bun.sleep(50)
+    expect(ended).toBe(true)
+    // An answer every 300 ms for 1.5 s: longer than the allowed silence, and never silent that long.
+    for (let i = 0; i < 5; i++) { await Bun.sleep(300); expect(closed).toBe(false); session.emit("output", "stdout", Buffer.from("late")) }
     for (let i = 0; i < 60 && !closed; i++) await Bun.sleep(50)
-    expect(closed).toBe(true)
+    expect(closed).toBe(true); expect(Buffer.concat(got).toString()).toBe("late".repeat(5))
   } finally { client.destroy(); server.close() }
 })
