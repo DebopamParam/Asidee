@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test"
-import { lstat, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises"
+import { afterAll, expect, test } from "bun:test"
+import { lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { addInclude, editorKey, hostBlock, includeLine, included, parseGuestSetup, shellWord, validPublicKey, writeClientFiles } from "../../core/ssh"
@@ -8,7 +8,9 @@ import type { Manifest } from "../../core/types"
 const KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
 const manifest = (name: string, id: string, ssh = true) => ({ version: 1, name, id, engine: {} as Manifest["engine"], spec: {} as Manifest["spec"], createdAt: "",
   ...(ssh ? { ssh: { user: "root", home: "/root", unlocked: false, sshd: "/usr/sbin/sshd", hostKey: KEY, editorKey: "SHA256:x", at: "" } } : {}) }) as Manifest
-const dirsIn = async (name = "pdk ssh-") => { const root = await mkdtemp(join(tmpdir(), name)); return { state: join(root, "s"), config: join(root, "c"), root } }
+const roots: string[] = []
+afterAll(() => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))))
+const dirsIn = async (name = "pdk ssh-") => { const root = await mkdtemp(join(tmpdir(), name)); roots.push(root); return { state: join(root, "s"), config: join(root, "c"), root } }
 
 test("a ProxyCommand word survives the shell and ssh's % tokens", async () => {
   expect(shellWord("/a b/it's 100%")).toBe(`'/a b/it'\\''s 100%%'`)

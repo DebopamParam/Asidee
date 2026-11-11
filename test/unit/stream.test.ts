@@ -1,6 +1,6 @@
-import { expect, test } from "bun:test"
+import { afterAll, expect, test } from "bun:test"
 import { EventEmitter } from "node:events"
-import { mkdtemp } from "node:fs/promises"
+import { mkdtemp, rm } from "node:fs/promises"
 import { connect, createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -56,8 +56,11 @@ class Echo extends EventEmitter implements Session {
   pause() {} resume() {}
   close(reason?: string) { this.closed = reason ?? "closed" }
 }
+const roots: string[] = []
+afterAll(() => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))))
 async function served(open: (request: OpenRequest) => Promise<Session>) {
-  const path = join(await mkdtemp(join(tmpdir(), "pdk-stream-")), "s.sock")
+  const root = await mkdtemp(join(tmpdir(), "pdk-stream-")); roots.push(root)
+  const path = join(root, "s.sock")
   const server = createServer({ allowHalfOpen: true }, (socket) => serveStream(socket, open))
   await new Promise<void>((resolve) => server.listen(path, resolve))
   // Sends the first frame and, after ready, the rest; collects what comes back until the server closes the connection.
