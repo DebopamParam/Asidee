@@ -32,14 +32,20 @@ export const boundPort = (server: Server) => (server.address() as AddressInfo).p
 // connection's bytes and is dropped.
 export function relay(socket: Socket, session: Session): void {
   let socketWaits = false; let sessionWaits = false
+  let ending: ReturnType<typeof setTimeout> | undefined
   socket.on("error", () => session.close())
   socket.on("data", (chunk: Buffer) => { if (!session.write(chunk) && !socketWaits) { socketWaits = true; socket.pause() } })
   session.on("drain", () => { if (socketWaits) { socketWaits = false; socket.resume() } })
-  socket.on("end", () => session.end())
-  socket.on("close", () => session.close())
+  socket.on("end", () => {
+    // TCP EOF still allows a response, but cannot leave an unresponsive relay alive indefinitely.
+    ending = setTimeout(() => { session.close(); socket.destroy() }, 2000)
+    ending.unref()
+    session.end()
+  })
+  socket.on("close", () => { clearTimeout(ending); session.close() })
   session.on("output", (stream, bytes) => { if (stream === "stdout" && !socket.write(bytes) && !sessionWaits) { sessionWaits = true; session.pause() } })
   socket.on("drain", () => { if (sessionWaits) { sessionWaits = false; session.resume() } })
   // A relay that could not reach the port, or was ended, resets the connection instead of ending it cleanly.
-  session.on("end", (exit) => { if (exit.error === undefined && exit.code === 0) socket.end(); else socket.destroy() })
+  session.on("end", (exit) => { clearTimeout(ending); if (exit.error === undefined && exit.code === 0) socket.end(); else socket.destroy() })
   socket.resume()
 }

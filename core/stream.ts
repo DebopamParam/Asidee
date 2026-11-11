@@ -91,6 +91,7 @@ export function serveStream(socket: Socket, open: (request: OpenRequest) => Prom
   const fail = (message: string, code: ErrorCode = "runtime") => { finish(frame("error", { code, message: message.slice(0, 4000) })); session?.close() }
   const timer = setTimeout(() => fail("No session was asked for.", "usage"), 10_000)
   socket.on("error", () => {})
+  socket.on("end", () => socket.destroy())
   socket.on("close", () => { clearTimeout(timer); if (!done) { done = true; session?.close() } })
   socket.on("drain", () => { if (outputWaits) { outputWaits = false; session?.resume() } })
   socket.on("data", (chunk: Buffer) => {

@@ -50,3 +50,15 @@ test("a relay that is closed, or whose command failed, resets the connection", a
   const got = await through(closing, (client) => { client.write("y"); setTimeout(() => closing.close(), 50) })
   expect(got.toString()).toBe("y")
 })
+
+test("a relay whose client sends FIN ends a guest that ignores EOF within three seconds", async () => {
+  const session = new Echo(); let closed = false
+  session.end = () => {}; session.close = () => { closed = true; session.emit("end", { error: "closed" }) }
+  const server = await listenLoopback(); server.on("connection", (socket) => relay(socket, session))
+  const client = connect(boundPort(server), "127.0.0.1", () => client.end())
+  client.on("error", () => {})
+  try {
+    for (let i = 0; i < 60 && !closed; i++) await Bun.sleep(50)
+    expect(closed).toBe(true)
+  } finally { client.destroy(); server.close() }
+})

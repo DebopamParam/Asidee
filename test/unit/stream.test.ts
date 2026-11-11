@@ -110,3 +110,17 @@ test("a client that goes away closes its session", async () => {
   await Bun.sleep(50); close()
   expect(session.closed).toBe("closed")
 })
+
+test("a client FIN closes the session even while its read side remains open", async () => {
+  const session = new Echo()
+  const root = await mkdtemp(join(tmpdir(), "pdk-stream-")); roots.push(root)
+  const path = join(root, "fin.sock")
+  const server = createServer({ allowHalfOpen: true }, (socket) => serveStream(socket, async () => session))
+  await new Promise<void>((resolve) => server.listen(path, resolve))
+  const client = connect(path, () => client.write(frame("open", { kind: "exec", name: "demo", argv: ["sleep", "9"] })))
+  try {
+    await new Promise<void>((resolve) => client.once("data", () => { client.end(); resolve() }))
+    for (let i = 0; i < 50 && !session.closed; i++) await Bun.sleep(10)
+    expect(session.closed).toBe("closed")
+  } finally { client.destroy(); server.close() }
+})

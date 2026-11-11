@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events"
 import { connect, type Socket } from "node:net"
 import { must } from "../run"
 import { PaddockError, type CheckResult, type Engine, type Manifest, type Provider, type RunOptions, type RunResult, type Runner, type Session, type Stage } from "../types"
+import { probeCleanupScript, WAIT_FOR_PROBE_ROUTES } from "./probe"
 import GUARD_RULES from "./guard.nft" with { type: "text" }
 import HELPER_DOCKERFILE from "./helper.Dockerfile" with { type: "text" }
 
@@ -77,11 +78,13 @@ const FAR_RANGES = [["10.255.255.25", "10.0.0.0/8"], ["172.31.255.25", "172.16.0
 // Runs on the engine's host: a listener on the sandbox's gateway address, then the far listeners. A range whose address
 // the host already routes somewhere specific is left alone and reported as not probed. Everything here lives in the
 // helper's container and goes with it.
-const hostProbeScript = (tag: string, gateway: string, port: string) => `nc -lk -p ${port} -s ${gateway} -e echo ${PROBE_REPLY} &
+const hostProbeScript = (tag: string, gateway: string, port: string) => `${WAIT_FOR_PROBE_ROUTES}
+nc -lk -p ${port} -s ${gateway} -e echo ${PROBE_REPLY} &
 ( set -e
   ip netns add far; ip link add pv${tag}a type veth peer name pv${tag}b; ip link set pv${tag}b netns far; ip link set pv${tag}a up
   ip netns exec far ip link set lo up; ip netns exec far ip link set pv${tag}b up
   for a in ${FAR_RANGES.map(([address]) => address).join(" ")}; do
+    wait_probe_routes \${a}4 || { echo "teardown-timeout \${a}4"; exit 1; }
     [ -n "$(ip route show match \${a}4 | grep -v '^default')" ] && continue
     ip addr add \${a}3/30 dev pv${tag}a; ip netns exec far ip addr add \${a}4/30 dev pv${tag}b
     ip netns exec far ip route add default via \${a}3 2>/dev/null || true
@@ -538,8 +541,8 @@ export class GvisorProvider implements Provider {
       if (attempt.exitCode !== 0 && attempt.exitCode !== 1) throw new Error(`The inner probe could not run (exit ${attempt.exitCode}): ${attempt.stderr.trim()}`)
       return attempt
     }
-    const retry = async (attempt: () => Promise<boolean>) => {
-      for (let i = 0; i < 8; i++) { if (await attempt()) return true; await Bun.sleep(400) }
+    const retry = async (attempt: () => Promise<boolean>, attempts = 8) => {
+      for (let i = 0; i < attempts; i++) { if (await attempt()) return true; await Bun.sleep(400) }
       return false
     }
     const out: CheckResult[] = []
@@ -580,8 +583,10 @@ export class GvisorProvider implements Provider {
       must(await runHelper(probeC, engine.data.runtime!, network(name), listen(PROBE_PORT)), "Starting the probe")
       const [peerIp, probeIp] = [await address(peerC), await address(probeC)]
       const hostLog = async () => (await this.docker(engine, ["logs", hostC])).stdout
-      await retry(async () => (await hostLog()).includes("ready"))
-      const far = (await hostLog()).split("\n").filter((line) => line.startsWith("far ")).map((line) => line.slice(4).trim())
+      if (!await retry(async () => (await hostLog()).includes("ready"), 40)) throw new Error("The host listener did not get ready.")
+      const log = await hostLog()
+      if (log.includes("teardown-timeout")) throw new Error("A previous Paddock probe has not finished tearing down its routes; no weaker evidence was substituted.")
+      const far = log.split("\n").filter((line) => line.startsWith("far ")).map((line) => line.slice(4).trim())
 
       const probeAlive = await retry(() => reaches(hostC, probeIp, PROBE_PORT))
       const innerOnline = !manifest.spec.docker || (await inner("1.1.1.1", "443")).exitCode === 0
@@ -601,20 +606,21 @@ export class GvisorProvider implements Provider {
       const guard = await this.guardState(engine)
       const metadata = probeAlive && (await connects(probeC, "169.254.169.254", "80") || Boolean(manifest.spec.docker && (await inner("169.254.169.254", "80")).exitCode === 0))
       // Each far listener counts only if the host reached it first.
-      const tried: string[] = []; const reached: string[] = []
+      const tried: string[] = []; const reached: string[] = []; const failedControls: string[] = []
       for (const ip of probeAlive && innerOnline ? far : []) {
-        if (!await retry(() => reaches(hostC, ip, PROBE_PORT))) continue
+        if (!await retry(() => reaches(hostC, ip, PROBE_PORT))) { failedControls.push(ip); continue }
         tried.push(ip)
         if (await anyReaches(ip, PROBE_PORT)) reached.push(ip)
       }
       const rangeOf = (ip: string) => FAR_RANGES.find(([address]) => ip.startsWith(address))![1]
-      const untried = FAR_RANGES.filter(([address]) => !tried.some((ip) => ip.startsWith(address))).map(([, range]) => range)
-      const rest = `${untried.length ? ` Not probed, because the engine's host already uses the stand-in address: ${untried.join("; ")}.` : ""} The metadata address did not answer. IPv6 is dropped by the same rules and was not probed. No device on your own LAN or tailnet was contacted.`
+      const untried = FAR_RANGES.filter(([address]) => !far.some((ip) => ip.startsWith(address))).map(([, range]) => range)
+      const rest = `${untried.length ? ` Not probed, because the engine's host already uses the stand-in address: ${untried.join("; ")}.` : ""}${failedControls.length ? ` Not probed, because the host control did not answer (not an address collision): ${failedControls.join(", ")}.` : ""} The metadata address did not answer. IPv6 is dropped by the same rules and was not probed. No device on your own LAN or tailnet was contacted.`
       out.push(guard === "missing" || guard === "changed" ? result("net-private", "fail", "inspected", `The guard rules on the engine's host are ${guard}, so nothing is known to drop these destinations.`)
         : reached.length ? result("net-private", "fail", "probed", `A connection from the sandbox's network reached ${reached.map((ip) => `${ip} (in ${rangeOf(ip)})`).join(", ")}.`)
         : metadata ? result("net-private", "fail", "probed", "The cloud metadata address answered from the sandbox's network.")
         : guard === "unknown" ? result("net-private", "unknown", "none", "The guard rules on the engine's host could not be read.")
         : !innerOnline ? result("net-private", "unknown", "none", "The inner container did not reach the internet control, so its blocked attempts would prove nothing.")
+        : !probeAlive || (far.length > 0 && !tried.length) ? result("net-private", "unknown", "none", noControl("the stand-in listeners") + rest)
         : tried.length ? result("net-private", "pass", "probed", `Stand-in listeners at ${tried.map((ip) => `${ip} (in ${rangeOf(ip)})`).join(", ")} answered the host and were unreachable from ${where}.${rest}`)
         : result("net-private", "pass", "inspected", `The loaded rules match Paddock's, which drop private, tailnet, link-local and IPv6 destinations. No stand-in listener could be set up on the engine's host, so none of them was probed.`))
 
@@ -627,6 +633,14 @@ export class GvisorProvider implements Provider {
     } finally {
       await this.docker(engine, ["rm", "-f", hostC, peerC, probeC])
       await this.docker(engine, ["network", "rm", peerNet])
+      const cleaned = await this.docker(engine, ["run", "--rm", "--runtime", "runc", "--privileged", "--network", "host", HELPER_IMAGE, "sh", "-c", probeCleanupScript(tag)], { timeoutMs: 30_000 })
+      if (cleaned.exitCode !== 0) {
+        const detail = `The probe's links and routes did not finish tearing down: ${cleaned.stderr.trim()}`
+        for (const check of out) {
+          if (check.status === "fail") check.detail += ` ${detail}`
+          else Object.assign(check, { status: "unknown", evidence: "none", detail })
+        }
+      }
       if (removeProbeImage) {
         const removed = await innerDocker(["image", "rm", HELPER_IMAGE])
         if (removed.exitCode !== 0 && !/No such image/i.test(removed.stderr)) {
