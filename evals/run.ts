@@ -1216,7 +1216,8 @@ ev("F09", "An extension's action shows up in the dashboard as a form, and its ou
 ev("F06", "Every command prints one line of JSON with --json, for results and for errors", async () => {
   await ensure(A)
   const commands = [["doctor"], ["list"], ["start", A], ["verify", A], ["exec", A, "--", "true"], ["ext", "list"], ["ui"], ["daemon", "status"], ["version"], ["help"],
-    ["start", "nope-nope"], ["create", "UPPER"], ["remove", A], ["frobnicate"], ["exec", A], ["ext", "run", "nope", "nope"], ["ext", "run", "x", "y", "--bogus"], ["create", "x", "--bogus"], ["stop"]]
+    ["start", "nope-nope"], ["create", "UPPER"], ["remove", A], ["frobnicate"], ["exec", A], ["ext", "run", "nope", "nope"], ["ext", "run", "x", "y", "--bogus"], ["create", "x", "--bogus"], ["stop"],
+    ["template", "list"], ["resize", "nope-nope", "--memory", "1"], ["resize", A], ["snapshot", A], ["template", "remove", "nope-nope"]]
   const wrong: string[] = []
   for (const command of commands) {
     const run = await pdk(["--json", ...command])
@@ -1275,7 +1276,8 @@ ev("F08", "The README and architecture notes name only commands, files and check
 ev("U01", "Exit codes tell the kinds of failure apart, as the help says", async () => {
   await ensure(A)
   const cases: Array<[string[], number]> = [[["list"], 0], [["create", "UPPER"], 2], [["create"], 2], [["frobnicate"], 2], [["start", "nope-nope"], 3], [["verify", "nope-nope"], 3], [["exec", "nope-nope", "--", "id"], 3],
-    [["remove", "nope-nope", "--confirm", "nope-nope"], 3], [["create", A], 4], [["create", `${PREFIX}-x`, "--engine", "gvisor:nope"], 5], [["exec", A, "--", "sh", "-c", "exit 7"], 7], [["ext", "run", "nope", "nope"], 3]]
+    [["remove", "nope-nope", "--confirm", "nope-nope"], 3], [["create", A], 4], [["create", `${PREFIX}-x`, "--engine", "gvisor:nope"], 5], [["exec", A, "--", "sh", "-c", "exit 7"], 7], [["ext", "run", "nope", "nope"], 3],
+    [["resize", "nope-nope", "--memory", "1"], 3], [["resize", A], 2], [["snapshot", A], 2], [["snapshot", "nope-nope", "--as", "x"], 3], [["template", "remove", "nope-nope"], 3], [["create", `${PREFIX}-x`, "--template", "nope-nope"], 3]]
   const wrong: string[] = []
   for (const [command, code] of cases) { const run = await pdk(command); if (run.code !== code) wrong.push(`${command.join(" ")} exited ${run.code}, expected ${code}`) }
   await socket("stop", { name: A })
@@ -2187,6 +2189,354 @@ ev("A07", "Killing an SSH proxy client leaves no sshd -i within five seconds, wh
   } finally { control.kill(); dropped?.kill(); await Promise.all([control.exited, dropped?.exited]) }
 })
 
+// L: resized limits hold where resize says they do. Allocations and processes are tried inside; the limits are read
+// from the sandbox's cgroup on the engine's host, not from Paddock.
+const RS = `${PREFIX}-rs`
+const MB700 = 734_003_200
+// Holds the given number of bytes in one process (tail keeps the last line, and zeros have no line break).
+const hog = (name: string, bytes = MB700) => pdk(["exec", name, "--", "sh", "-c", `head -c ${bytes} /dev/zero | tail -n 1 | wc -c`], { timeoutMs: 120_000 })
+const held = (run: Sh, bytes = MB700) => run.code === 0 && run.out.trim() === String(bytes)
+async function fresh(name: string, spec: Record<string, unknown> = {}): Promise<void> {
+  if (await view(name)) await pdk(["remove", name, "--confirm", name])
+  const made = await socket("create", { name, image: "alpine:latest", cpus: 1, memoryGb: 1, diskGb: 1, ...spec })
+  expect(made.reply.ok, `could not create ${name}: ${made.reply.error?.message}`)
+}
+const hostLimits = async (name: string) => {
+  const id = (await inspect(name))?.Id as string
+  const read = await docker(["run", "--rm", "--privileged", "--cgroupns", "host", "--network", "none", "--runtime", "runc", "-u", "0", HELPER_IMAGE, "sh", "-c",
+    `d=$(find /sys/fs/cgroup -maxdepth 4 -type d -name "*${id}*" | head -n 1); [ -n "$d" ] && cat "$d/memory.max" "$d/pids.max" "$d/cpu.max"`])
+  expect(read.code === 0, `the sandbox's cgroup could not be read on the engine's host: ${read.err}`)
+  const [memory, pids, cpu] = read.out.trim().split("\n")
+  return { memory: Number(memory), pids: Number(pids), cpu: cpu! }
+}
+const resize = (name: string, flags: string[]) => pdkJson(["resize", name, ...flags])
+const applies = (run: Awaited<ReturnType<typeof resize>>, limit: string) => (run.reply.data?.changes as Array<{ limit: string; applies: string }> | undefined)?.find((change) => change.limit === limit)?.applies
+
+ev("L01", "Resize raises a running sandbox's memory at once: 700 MB that a 0.5 GB sandbox is killed for completes after a resize to 1 GB", async () => {
+  await fresh(RS, { memoryGb: 0.5, pids: 512 })
+  const control = await hog(RS)
+  expect(!held(control), "control failed: 700 MB completed under a 0.5 GB limit, so a raise cannot be told apart")
+  await ensure(RS)
+  const memTotal = async () => Number(/MemTotal:\s+(\d+)/.exec((await pdk(["exec", RS, "--", "cat", "/proc/meminfo"])).out)?.[1]) * 1024
+  const insideBefore = await memTotal()
+  const raised = await resize(RS, ["--memory", "1"])
+  expect(raised.reply.ok, `resize failed: ${raised.reply.error?.message}`)
+  expect(applies(raised, "memoryGb") === "now", `resize said the new memory applies ${applies(raised, "memoryGb")}`)
+  const host = await hostLimits(RS)
+  expect(host.memory === 1024 ** 3, `the engine's host has memory.max ${host.memory}, not 1 GiB`)
+  // What the docs tell users not to rely on: gVisor's own view keeps the start value.
+  const inside = await memTotal()
+  expect(inside > 0 && inside === insideBefore, `inside, /proc/meminfo showed ${insideBefore} bytes before the resize and ${inside} after, so the docs' warning is wrong`)
+  const after = await hog(RS)
+  expect(held(after) && await running(RS), `700 MB under the new 1 GB limit: exit ${after.code}, ${after.out.trim()}${await running(RS) ? "" : "; the sandbox is not running"}`)
+  return `control: killed at 0.5 GB (exit ${control.code}); after resize, memory.max is 1 GiB on the engine's host and 700 MB completed, while /proc/meminfo inside still shows ${(inside / 1024 ** 2).toFixed(0)} MiB`
+})
+
+ev("L02", "Lowering a running sandbox's memory takes effect at once, and a stopped sandbox gets new limits at its next start", async () => {
+  if ((await view(RS))?.spec.memoryGb !== 1) await fresh(RS, { memoryGb: 1, pids: 512 })
+  await ensure(RS)
+  expect(held(await hog(RS)), "control failed: 700 MB did not complete under 1 GB")
+  const lowered = await resize(RS, ["--memory", "0.5"])
+  expect(lowered.reply.ok && applies(lowered, "memoryGb") === "now", `lowering to 0.5 GB: ${lowered.reply.error?.message ?? applies(lowered, "memoryGb")}`)
+  expect((await hostLimits(RS)).memory === 512 * 1024 ** 2, "the engine's host does not have memory.max at 512 MiB")
+  expect(!held(await hog(RS)), "700 MB still completed after the limit was lowered to 0.5 GB")
+  if (await running(RS)) await socket("stop", { name: RS })
+  const stopped = await resize(RS, ["--memory", "1", "--pids", "1024"])
+  expect(stopped.reply.ok && applies(stopped, "memoryGb") === "next start" && applies(stopped, "pids") === "next start", `a stopped sandbox's resize said: ${JSON.stringify(stopped.reply.data?.changes ?? stopped.reply.error)}`)
+  const data = await inspect(RS)
+  expect(data.HostConfig.Memory === 1024 ** 3 && data.HostConfig.PidsLimit === 1024, `the engine holds ${data.HostConfig.Memory} bytes and ${data.HostConfig.PidsLimit} tasks for the next start`)
+  expect((await socket("start", { name: RS })).reply.ok, "the resized sandbox did not start")
+  const host = await hostLimits(RS)
+  expect(host.memory === 1024 ** 3 && host.pids === 1024, `after the start the engine's host has memory.max ${host.memory} and pids.max ${host.pids}`)
+  const limits = (await socket("verify", { name: RS })).reply.data.checks.find((check: { id: string }) => check.id === "limits")
+  expect(limits.status === "pass" && limits.detail.includes("1 GB memory, 1024 tasks"), `verify's limits check: ${limits.status} ${limits.detail}`)
+  return "0.5 GB took effect on a running sandbox; 1 GB and 1024 tasks set while stopped held after the start"
+})
+
+ev("L03", "The task limit and CPUs change on a running sandbox: 300 sleeps fail under 256 tasks and run after a resize to 2048; busy loops get about one CPU, then two", async () => {
+  await fresh(RS, { memoryGb: 1, pids: 256, cpus: 1 })
+  const cpu = async () => {
+    const loops = pdk(["exec", RS, "--", "sh", "-c", 'for i in 1 2 3; do timeout 10 sh -c "while :; do :; done" & done; wait'], { timeoutMs: 60_000 })
+    await Bun.sleep(4000)
+    const stats = await docker(["stats", "--no-stream", "--format", "{{.CPUPerc}}", containerOf(RS)])
+    await loops
+    return parseFloat(stats.out)
+  }
+  const nprocBefore = (await pdk(["exec", RS, "--", "nproc"])).out.trim()
+  const one = await cpu()
+  expect(one > 50 && one < 150, `control: three busy loops under 1 CPU used ${one}%`)
+  const cpus = await resize(RS, ["--cpus", "2"])
+  expect(applies(cpus, "cpus") === "now", `resize said the CPUs apply ${applies(cpus, "cpus")}`)
+  const two = await cpu()
+  expect(two > 160, `three busy loops after a resize to 2 CPUs used ${two}%`)
+  const nproc = (await pdk(["exec", RS, "--", "nproc"])).out.trim()
+  expect(nproc === nprocBefore, `inside, nproc said ${nprocBefore} before the resize to 2 CPUs and ${nproc} after, so the docs' warning is wrong`)
+  const sleeps = 'i=0; while [ $i -lt 300 ]; do sleep 60 & i=$((i+1)); done 2>/dev/null; ps -o args | grep -cx "sleep 60"'
+  const control = await pdk(["exec", RS, "--", "sh", "-c", sleeps], { timeoutMs: 60_000 })
+  const ranBefore = await running(RS) ? Number(control.out.trim().split("\n").pop()) : 0
+  expect(ranBefore < 300, `control: ${ranBefore} of 300 sleeps ran under 256 tasks`)
+  if (await running(RS)) await pdk(["exec", RS, "--", "pkill", "-f", "sleep 60"])
+  await ensure(RS)
+  const raised = await resize(RS, ["--pids", "2048"])
+  expect(applies(raised, "pids") === "now" && (await hostLimits(RS)).pids === 2048, `the task limit: ${applies(raised, "pids")}, pids.max ${(await hostLimits(RS)).pids}`)
+  const after = await pdk(["exec", RS, "--", "sh", "-c", sleeps], { timeoutMs: 60_000 })
+  const ran = Number(after.out.trim().split("\n").pop())
+  await pdk(["exec", RS, "--", "pkill", "-f", "sleep 60"])
+  expect(ran === 300 && await running(RS), `${ran} of 300 sleeps ran after the resize to 2048`)
+  return `CPU ${one.toFixed(0)}% under 1, ${two.toFixed(0)}% under 2 (nproc inside ${nprocBefore} before and after); ${ranBefore} of 300 sleeps under 256 tasks${ranBefore === 0 ? " (the sandbox ended)" : ""}, 300 under 2048`
+})
+
+ev("L04", "Resize refuses, with clear exit codes, memory and tasks below what the sandbox uses (4), sizes below the minimums (2) and unknown sandboxes (3), and changes nothing", async () => {
+  if ((await view(RS))?.spec.memoryGb !== 1 || (await view(RS))?.spec.pids !== 2048) await fresh(RS, { memoryGb: 1, pids: 2048 })
+  await ensure(RS)
+  // gVisor keeps /dev/shm in memory, which the engine counts as the sandbox's.
+  await pdk(["exec", RS, "--", "sh", "-c", "head -c 314572800 /dev/zero > /dev/shm/hold"])
+  const usage = (await docker(["stats", "--no-stream", "--format", "{{.MemUsage}}", containerOf(RS)])).out
+  expect(/^\s*(\d+(\.\d+)?)MiB/.test(usage) && parseFloat(usage) >= 256, `control: the engine reports ${usage.trim()} in use, not over 256 MiB`)
+  const before = (await inspect(RS)).HostConfig.Memory
+  const refused = await pdk(["resize", RS, "--memory", "0.25"])
+  expect(refused.code === 4 && /uses/.test(refused.err), `lowering memory below use: exit ${refused.code}, ${refused.err.trim()}`)
+  expect((await inspect(RS)).HostConfig.Memory === before && (await view(RS))?.spec.memoryGb === 1 && await running(RS), "a refused resize changed the sandbox")
+  const wrong: string[] = []
+  for (const [flags, code] of [[["--memory", "0.1"], 2], [["--pids", "10"], 2], [["--cpus", "0"], 2], [["--disk", "0"], 2], [[], 2]] as Array<[string[], number]>) {
+    const run = await pdk(["resize", RS, ...flags]); if (run.code !== code) wrong.push(`resize ${flags.join(" ")} exited ${run.code}`)
+  }
+  const unknown = await pdk(["resize", `${PREFIX}-nope`, "--memory", "1"]); if (unknown.code !== 3) wrong.push(`an unknown sandbox exited ${unknown.code}`)
+  expect(wrong.length === 0, wrong.join("; "))
+  // Tasks as the engine counts them, gVisor's own threads included.
+  await pdk(["exec", RS, "--", "sh", "-c", 'i=0; while [ $i -lt 300 ]; do sleep 600 >/dev/null 2>&1 & i=$((i+1)); done'], { timeoutMs: 60_000 })
+  const tasks = Number((await docker(["stats", "--no-stream", "--format", "{{.PIDs}}", containerOf(RS)])).out.trim())
+  expect(tasks > 256, `control: the engine counts ${tasks} tasks, not over 256`)
+  const fewer = await pdk(["resize", RS, "--pids", "256"])
+  expect(fewer.code === 4 && (await inspect(RS)).HostConfig.PidsLimit === 2048 && await running(RS), `lowering tasks below use: exit ${fewer.code}, ${fewer.err.trim()}`)
+  await pdk(["exec", RS, "--", "pkill", "-f", "sleep 60"])
+  await pdk(["exec", RS, "--", "rm", "/dev/shm/hold"])
+  const allowed = await resize(RS, ["--memory", "0.5"])
+  expect(allowed.reply.ok, `control: lowering to 0.5 GB once the memory was freed failed: ${allowed.reply.error?.message}`)
+  return `refused at ${usage.trim()} in use and at ${tasks} tasks for a limit of 256; allowed once the memory was freed`
+})
+
+ev("L05", "Verify judges limits against the resized values: a limit changed behind Paddock's back fails it and stops the sandbox", async () => {
+  await ensure(RS)
+  const control = (await socket("verify", { name: RS })).reply.data.checks.find((check: { id: string }) => check.id === "limits")
+  expect(control.status === "pass", `control: verify's limits check did not pass before the change: ${control.detail}`)
+  expect((await docker(["update", "--memory", "2g", "--memory-swap", "2g", containerOf(RS)])).code === 0, "docker update failed")
+  const run = await pdk(["verify", RS])
+  const stopped = !await running(RS)
+  await pdk(["remove", RS, "--confirm", RS])
+  expect(run.code === 6 && run.out.includes("not the ones Paddock set") && stopped, `verify exited ${run.code}${stopped ? "" : " and left the sandbox running"}`)
+})
+
+ev("L06", "A lowered disk limit is watched from the next pass: 1.3 GB runs under 2 GB, is refused as a 1 GB limit, and once freed and rewritten is stopped under 1 GB", async () => {
+  await fresh(RS, { diskGb: 2, pids: 256 })
+  if ((await socket("verify", { name: RS })).reply.data.checks.find((check: { id: string }) => check.id === "disk").status !== "weak") skip("this engine's disk limit is not watched")
+  const write = () => pdk(["exec", RS, "--", "dd", "if=/dev/zero", "of=/big", "bs=1M", "count=1300"], { timeoutMs: 120_000 })
+  try {
+    expect((await write()).code === 0, "control: 1.3 GB could not be written under 2 GB")
+    // Two passes of the watch, so a stop would have come.
+    await Bun.sleep(65_000)
+    expect(await running(RS), "control: 1.3 GB under a 2 GB limit was stopped")
+    const refused = await pdk(["resize", RS, "--disk", "1"])
+    expect(refused.code === 4 && (await view(RS))?.spec.diskGb === 2, `a 1 GB limit under 1.3 GB in use: exit ${refused.code}, ${refused.err.trim()}`)
+    await pdk(["exec", RS, "--", "rm", "/big"])
+    const lowered = await resize(RS, ["--disk", "1"])
+    expect(lowered.reply.ok && applies(lowered, "diskGb") === "now", `resize --disk 1 after freeing: ${lowered.reply.error?.message ?? applies(lowered, "diskGb")}`)
+    await write()
+    const started = Date.now()
+    expect(await until(async () => (await view(RS))?.status === "stopped", 75), "the sandbox still ran 75 s after passing its new 1 GB limit")
+    expect(/disk watch/i.test((await view(RS))?.stopReason ?? ""), "it stopped without saying it was the disk watch")
+    return `refused while 1.3 GB was in use; after the resize, 1.3 GB was stopped ${Math.round((Date.now() - started) / 1000)} s after the write ended`
+  } finally { await pdk(["remove", RS, "--confirm", RS]) }
+})
+
+// C: templates. Files are looked for inside the new sandbox and, for what must be gone, in the image from the engine.
+const TS = `${PREFIX}-ts`; const TC = `${PREFIX}-tc`; const TD = `${PREFIX}-td`
+const TPL = `${PREFIX}-tpl`; const TPL2 = `${PREFIX}-tpl2`; const TPLD = `${PREFIX}-tpld`
+const LOGINS = ["/root/.ssh/id_rsa", "/root/.claude-work/.credentials.json", "/home/dev/.git-credentials"]
+let templateOwner = ""; let templateScanSaw = 0
+let snapshotWindow: { events: string[]; startedAt: string; tmpInMemory: boolean } | undefined
+// Every image carrying a template label whose source is one of this run's sandboxes, tagged or not.
+async function templateImages(): Promise<Array<{ id: string; tags: string[]; source: string }>> {
+  const ids = [...new Set((await docker(["image", "ls", "-a", "-q", "--no-trunc", "--filter", "label=dev.paddock.template"])).out.split("\n").filter(Boolean))]
+  if (!ids.length) return []
+  const images = JSON.parse((await docker(["image", "inspect", ...ids])).out || "[]") as Array<{ Id: string; RepoTags?: string[]; Config?: { Labels?: Record<string, string> } }>
+  return images.map((image) => ({ id: image.Id, tags: image.RepoTags ?? [], source: image.Config?.Labels?.["dev.paddock.template.source"] ?? "" })).filter((image) => image.source.startsWith(PREFIX))
+}
+const imageExists = async (id: string) => (await docker(["image", "inspect", id])).code === 0
+const templateOf = async (name: string) => ((await pdkJson(["template", "list"])).reply.data as Array<{ name: string; imageId: string; dependants: string[] }>).find((entry) => entry.name === name)
+
+ev("C01", "A sandbox made from a template has the files its source had when saved, home folders included; /dev/shm and an in-memory /tmp do not carry", async () => {
+  await fresh(TS)
+  const planted = await pdk(["exec", TS, "--", "sh", "-c", `echo carried > /root/marker; mkdir -p /home/dev /opt/app && echo dev > /home/dev/notes && echo app > /opt/app/marker
+echo shm > /dev/shm/marker; echo tmp > /tmp/marker; echo token > /root/.npmrc
+for f in ${LOGINS.join(" ")}; do mkdir -p "\${f%/*}"; echo secret > "$f"; done
+for f in /etc/hosts /etc/hostname /etc/resolv.conf; do echo "# ${PREFIX}-planted" >> "$f"; done
+grep -q " /tmp tmpfs" /proc/mounts && echo tmp-in-memory; sleep 600 >/dev/null 2>&1 &`])
+  expect(planted.code === 0, `planting files failed: ${planted.err}`)
+  // Control: gVisor's writes reach the engine's layer at once, and the in-memory ones are there inside. A forward puts
+  // Paddock's relay in the source, which the template must not carry (C02).
+  expect((await docker(["cp", `${containerOf(TS)}:/root/marker`, "-"])).code === 0, "control: the engine cannot see a file written in the source")
+  const forward = await pdkJson(["forward", "add", TS, "--port", "8080"])
+  expect(forward.reply.ok && (await docker(["cp", `${containerOf(TS)}:/.paddock/busybox`, "-"])).code === 0, "control: a forward did not put the relay in the source")
+  await pdk(["forward", "remove", forward.reply.data.id])
+  expect((await pdk(["exec", TS, "--", "cat", "/dev/shm/marker", "/tmp/marker"])).out.includes("shm"), "control: the source cannot read its own /dev/shm")
+  const etc = ["/etc/hosts", "/etc/hostname", "/etc/resolv.conf"]
+  const planted_ = (await pdk(["exec", TS, "--", "grep", "-l", `${PREFIX}-planted`, ...etc])).out.trim().split("\n")
+  expect(planted_.length === 3, `control: the source's engine files do not have the planted line: ${planted_.join(", ")}`)
+  const { Id: sourceId, State: { StartedAt: startedAt } } = await inspect(TS)
+  // Recorded as they happen: the engine keeps only its latest events, and later evals make many.
+  const watch = Bun.spawn(["docker", "--context", context, "events", "--filter", `container=${sourceId}`, "--format", "{{.Action}}"], { stdout: "pipe", stderr: "ignore" })
+  await Bun.sleep(1000)
+  const saved = await pdkJson(["snapshot", TS, "--as", TPL], { timeoutMs: 600_000 })
+  await Bun.sleep(1000); watch.kill()
+  const events = (await new Response(watch.stdout).text()).split("\n").filter(Boolean)
+  expect(saved.reply.ok, `snapshot failed: ${saved.reply.error?.message}`)
+  snapshotWindow = { events, startedAt, tmpInMemory: planted.out.includes("tmp-in-memory") }
+  const images = await templateImages()
+  const image = images.find((entry) => entry.tags.some((tag) => tag.endsWith(`:${TPL}`)))
+  expect(image && image.id === saved.reply.data.template.imageId, `the engine has no image tagged ${TPL} with the id snapshot reported`)
+  templateScanSaw = images.length; templateOwner = image!.tags.find((tag) => tag.endsWith(`:${TPL}`))!.split(":")[0]!.replace(/^paddock-template-/, "")
+  const made = await pdkJson(["create", TC, "--template", TPL])
+  expect(made.reply.ok, `create --template failed: ${made.reply.error?.message}`)
+  expect((await inspect(TC)).Image === image!.id, "the new sandbox's container does not run the template's image")
+  const read = await pdk(["exec", TC, "--", "sh", "-c", "cat /root/marker /home/dev/notes /opt/app/marker; ls /dev/shm/marker /tmp/marker 2>&1"])
+  for (const word of ["carried", "dev", "app"]) expect(read.out.includes(word), `a file written before the snapshot is missing: ${read.out}`)
+  expect(/\/dev\/shm\/marker: No such file/.test(read.out), "/dev/shm carried into the template")
+  const carried = (await pdk(["exec", TC, "--", "grep", "-l", `${PREFIX}-planted`, ...etc])).out.trim()
+  expect(!carried, `the engine's files carried into the template: ${carried}`)
+  if (snapshotWindow.tmpInMemory) expect(/\/tmp\/marker: No such file/.test(read.out), "an in-memory /tmp carried into the template")
+  else expect(!/\/tmp\/marker: No such file/.test(read.out), "/tmp was on the layer, yet did not carry")
+  const check = made.reply.data.checks.find((entry: { id: string }) => entry.id === "template")
+  expect(check.status === "info" && check.detail.includes(`Template ${TPL}`) && made.reply.data.sandbox.template?.name === TPL, `the template check says: ${check.status} ${check.detail}`)
+  return `/root, /home and /opt carried; /dev/shm did not; /tmp was ${snapshotWindow.tmpInMemory ? "in memory and did not" : "on the layer and did"}`
+})
+
+ev("C02", "Login files are left out of a template, as seen from the engine; other files with secrets, such as .npmrc, are carried, as the snapshot says", async () => {
+  if (!await view(TC)) skip("C01 did not make a template sandbox")
+  const source = (await socket("verify", { name: TS })).reply.data.checks.find((check: { id: string }) => check.id === "credentials")
+  for (const file of LOGINS) expect(source.detail.includes(file), `control: the source's credentials check does not list ${file}`)
+  const template = await templateOf(TPL)
+  expect(template, "the template is not listed")
+  const listed = ((await pdkJson(["template", "list"])).reply.data as Array<{ name: string; loginsRemoved: string[] }>).find((entry) => entry.name === TPL)!
+  for (const file of LOGINS) expect(listed.loginsRemoved.includes(file), `the template does not say it left out ${file}`)
+  // Straight from the image, with the engine's own copy: no Paddock code reads it.
+  const peek = `${PREFIX}-peek`
+  expect((await docker(["create", "--name", peek, "--network", "none", template!.imageId, "true"])).code === 0, "a container of the template's image could not be made")
+  try {
+    expect((await docker(["cp", `${peek}:/root/marker`, "-"])).code === 0, "control: the engine cannot copy a carried file out of the image")
+    for (const file of LOGINS) expect((await docker(["cp", `${peek}:${file}`, "-"])).code !== 0, `${file} is in the template's image`)
+    expect((await docker(["cp", `${peek}:/root/.npmrc`, "-"])).code === 0, "the snapshot says other secret files are carried, yet /root/.npmrc was not")
+    const files = (await docker(["export", peek], { timeoutMs: 120_000 })).out
+    expect(!/\.paddock\/busybox|\.paddock-snapshot-[0-9a-f]+\//.test(files), "Paddock's relay or the snapshot's busybox is in the template's image")
+  } finally { await docker(["rm", "-f", peek]) }
+  const inside = (await socket("verify", { name: TC })).reply.data.checks.find((check: { id: string }) => check.id === "credentials")
+  expect(inside.detail.startsWith("None"), `the template sandbox's credentials check says: ${inside.detail}`)
+  const saidContents = (await readFile(join(ROOT, "core/core.ts"), "utf8")).includes(".env files, package-manager tokens")
+  expect(saidContents, "the snapshot no longer says loudly what else is inside")
+})
+
+ev("C03", "Saving a running sandbox pauses it for the save and leaves it running, with its processes", async () => {
+  if (!snapshotWindow) skip("C01 did not take a snapshot")
+  const { events } = snapshotWindow!
+  expect(events.includes("commit"), `control: the engine's events for the source during the snapshot do not include its commit: ${events.join(", ") || "none"}`)
+  expect(events.includes("pause") && events.includes("unpause"), `the engine's events for the source during the snapshot: ${events.join(", ")}`)
+  expect(await running(TS) && (await inspect(TS)).State.StartedAt === snapshotWindow!.startedAt, "the source was restarted or stopped by the snapshot")
+  const sleeper = await pdk(["exec", TS, "--", "pgrep", "-f", "sleep 600"])
+  expect(sleeper.code === 0, "a process started before the snapshot is gone")
+  return `events: ${events.join(", ")}`
+})
+
+ev("C04", "A sandbox made from a template passes every blocking check, and the host does not answer it", async () => {
+  if (!await view(TC)) skip("C01 did not make a template sandbox")
+  await ensure(TC)
+  // The evals' own listeners take the stand-in addresses verify probes, as in H14.
+  await docker(["rm", "-f", HOST])
+  expect(await until(async () => !(await asRoot("ip -br link")).out.includes(`${PREFIX}a`), 15), "the evals' own listeners did not go away")
+  const report = await socket("verify", { name: TC })
+  expect(report.reply.data.ok, `verify: ${report.reply.data.checks.filter((check: { status: string }) => check.status === "fail").map((check: { id: string }) => check.id).join(", ")}`)
+  const weak = (report.reply.data.checks as Array<{ id: string; status: string; evidence: string }>).filter((check) => ["net-host", "net-peers", "net-private"].includes(check.id) && !(check.status === "pass" && check.evidence === "probed"))
+  expect(weak.length === 0, `not probed: ${weak.map((check) => `${check.id} (${check.status}, ${check.evidence})`).join(", ")}`)
+  await hostHelper()
+  expect(/gvisor/i.test((await pdk(["exec", TC, "--", "cat", "/proc/version"])).out), "the template sandbox does not run on gVisor")
+  const gateway = await gatewayOf(TC)
+  expect(await fromHost(gateway, HOST_PORT), "control: the host listener did not answer the host")
+  expect(!await fromSandbox(TC, gateway, HOST_PORT), "the template sandbox reached the engine's host")
+  const data = await inspect(TC)
+  expect(!data.HostConfig.Privileged && !(data.HostConfig.CapAdd ?? []).length && data.HostConfig.NetworkMode === `paddock-net-${TC}`, "the template sandbox's container is not set up as Paddock sets up any other")
+})
+
+ev("C05", "Inner Docker's images are not in a template: a Docker sandbox made from one has the source's files, its own Docker, and none of the source's inner images", async () => {
+  await ensureInner()
+  const tmpInMemory = (await pdk(["exec", INNER, "--", "sh", "-c", 'echo inner > /root/inner-marker; echo tmp > /tmp/inner-marker; grep -q " /tmp tmpfs" /proc/mounts && echo tmp-in-memory'])).out.includes("tmp-in-memory")
+  expect((await innerDocker(INNER, ["image", "inspect", "alpine:latest"])).code === 0, "control: the source's inner Docker has no alpine image")
+  const saved = await pdkJson(["snapshot", INNER, "--as", TPLD], { timeoutMs: 600_000 })
+  expect(saved.reply.ok, `snapshot of a Docker sandbox failed: ${saved.reply.error?.message}`)
+  try {
+    const made = await pdkJson(["create", TD, "--docker", "--template", TPLD, "--cpus", "1", "--memory", "1", "--disk", "4"], { timeoutMs: 600_000 })
+    expect(made.reply.ok, `create --docker --template failed: ${made.reply.error?.message}`)
+    expect((await pdk(["exec", TD, "--", "cat", "/root/inner-marker"])).out.includes("inner"), "a file from the Docker sandbox did not carry")
+    const tmp = (await pdk(["exec", TD, "--", "cat", "/tmp/inner-marker"])).out.includes("tmp")
+    expect(tmp === !tmpInMemory, `/tmp was ${tmpInMemory ? "in memory" : "on the layer"} in the source, yet it ${tmp ? "did" : "did not"} carry`)
+    const image = await innerDocker(TD, ["image", "inspect", "alpine:latest"])
+    expect(image.code !== 0 && /No such image/i.test(image.err), "an inner image of the source is in the template sandbox's Docker")
+    expect(await dockerVolumeName(TD) !== await dockerVolumeName(INNER), "the template sandbox shares the source's Docker volume")
+  } finally {
+    await pdk(["remove", TD, "--confirm", TD])
+    await pdk(["template", "remove", TPLD])
+  }
+  expect(!await imageExists(saved.reply.data.template.imageId), "a template that no sandbox used kept its image after removal")
+  return `the inner image stayed with the source; /tmp was ${tmpInMemory ? "in memory and did not carry" : "on the layer and carried"}; the unused template's image was deleted with it`
+})
+
+ev("C06", "Templates are Paddock's own: names in its template space are refused as images, unknown and foreign templates are not found, a name in use is refused", async () => {
+  if (!templateOwner) skip("C01 did not make a template, so this daemon's template space is unknown")
+  const ours = `paddock-template-${templateOwner}:${PREFIX}-fake`; const theirs = `paddock-template-0000000000:${PREFIX}-other`
+  await docker(["tag", "alpine:latest", ours]); await docker(["tag", "alpine:latest", theirs])
+  try {
+    const wrong: string[] = []
+    for (const [argv, code] of [[["create", `${PREFIX}-x`, "--image", ours], 2], [["create", `${PREFIX}-x`, "--image", `paddock-snapshot-${templateOwner}:x`], 2],
+      [["create", `${PREFIX}-x`, "--template", `${PREFIX}-fake`], 3], [["create", `${PREFIX}-x`, "--template", `${PREFIX}-other`], 3], [["create", `${PREFIX}-x`, "--template", "nope-nope"], 3],
+      [["create", `${PREFIX}-x`, "--template", TPL, "--image", "alpine:latest"], 2], [["snapshot", TS, "--as", TPL], 4], [["snapshot", TS, "--as", "Bad"], 2], [["snapshot", `${PREFIX}-nope`, "--as", "x"], 3],
+      [["template", "remove", `${PREFIX}-fake`], 3]] as Array<[string[], number]>) {
+      const run = await pdk(argv); if (run.code !== code) wrong.push(`${argv.join(" ")} exited ${run.code}, expected ${code}`)
+    }
+    const names = ((await pdkJson(["template", "list"])).reply.data as Array<{ name: string }>).map((entry) => entry.name)
+    if (names.some((name) => name.endsWith("-fake") || name.endsWith("-other"))) wrong.push(`template list shows images Paddock did not make: ${names.join(", ")}`)
+    expect(wrong.length === 0, wrong.join("; "))
+    expect(!await view(`${PREFIX}-x`), "a refused create left a sandbox")
+  } finally { await docker(["rmi", ours, theirs]) }
+  // An image given by its ID is not refused, so the checklist says whose it is.
+  const template = await templateOf(TPL)
+  const plain = await pdkJson(["create", `${PREFIX}-x`, "--image", template!.imageId])
+  const check = plain.reply.data?.checks?.find((entry: { id: string }) => entry.id === "template")
+  await pdk(["remove", `${PREFIX}-x`, "--confirm", `${PREFIX}-x`])
+  expect(check?.detail.includes(`Paddock template ${TPL}'s`), `a template's image given by its ID is not disclosed: ${check?.detail ?? plain.reply.error?.message}`)
+})
+
+ev("C07", "Removing a template leaves the sandboxes made from it running and restartable; its image goes with the last of them, and a stopped sandbox can be saved", async () => {
+  if (!await view(TC)) skip("C01 did not make a template sandbox")
+  await ensure(TC)
+  const template = await templateOf(TPL)
+  expect(template?.dependants.includes(TC), `the template does not list ${TC} as using it`)
+  const removed = await pdkJson(["template", "remove", TPL])
+  expect(removed.reply.ok && removed.reply.data.dependants.includes(TC), `template remove: ${removed.reply.error?.message ?? JSON.stringify(removed.reply.data)}`)
+  expect(!await templateOf(TPL), "the removed template is still listed")
+  expect(await imageExists(template!.imageId), "the image was deleted while a sandbox used it")
+  expect(await running(TC), "the dependant stopped")
+  await socket("stop", { name: TC })
+  expect((await socket("start", { name: TC })).reply.ok, "the dependant did not start again after its template was removed")
+  const check = (await socket("verify", { name: TC })).reply.data.checks.find((entry: { id: string }) => entry.id === "template")
+  expect(check.detail.includes("removed since"), `the template check does not say the template was removed: ${check.detail}`)
+  await pdk(["remove", TC, "--confirm", TC])
+  expect(!await imageExists(template!.imageId), "the removed template's image stayed after its last sandbox was removed")
+  // A stopped source: saved without starting it.
+  await socket("stop", { name: TS })
+  const saved = await pdkJson(["snapshot", TS, "--as", TPL2], { timeoutMs: 600_000 })
+  expect(saved.reply.ok && !await running(TS), `snapshot of a stopped sandbox: ${saved.reply.error?.message ?? "it was started"}`)
+  await pdk(["template", "remove", TPL2]); await pdk(["remove", TS, "--confirm", TS])
+  expect(!await imageExists(saved.reply.data.template.imageId), "a template no sandbox used kept its image after removal")
+})
+
 ev("Z01", "Nothing is left on the engine or this machine when the run ends", async () => {
   // Control: the scan sees this run's daemon while it runs, so an empty scan after teardown means none is left.
   await pdk(["list"])
@@ -2200,7 +2550,12 @@ ev("Z01", "Nothing is left on the engine or this machine when the run ends", asy
   await until(async () => (await leftLinks()).length === 0, 15)
   const links = await leftLinks()
   const processes = [(await sh(["pgrep", "-fl", tmp])).out.trim(), ...(await evalDaemons()).map((pid) => `paddock daemon run (pid ${pid})`)].filter(Boolean)
-  expect(!containers.length && !networks.length && !links.length && !processes.length, `left behind: ${[...containers, ...networks, ...links, ...processes].join(", ")}`)
+  // Templates: the same scan found this run's template images while they existed (C01).
+  const images = [...(await templateImages()).map((image) => `template image ${image.tags.join(",") || image.id}`),
+    ...(templateOwner ? (await docker(["image", "ls", "--format", "{{.Repository}}:{{.Tag}}"])).out.split("\n").filter((line) => line.startsWith(`paddock-snapshot-${templateOwner}`) || line.startsWith(`paddock-template-${templateOwner}:${PREFIX}`) || line.includes(`${PREFIX}-other`)) : []),
+    ...(await docker(["ps", "-a", "--format", "{{.Names}}"])).out.split("\n").filter((line) => templateOwner && line.startsWith(`paddock-snapshot-${templateOwner}-`))]
+  expect(!containers.length && !networks.length && !links.length && !processes.length && !images.length, `left behind: ${[...containers, ...networks, ...links, ...processes, ...images].join(", ")}`)
+  return templateScanSaw ? `the template scan saw ${templateScanSaw} image(s) during the run and none after it` : "no template was made in this run"
 })
 
 // A daemon's command line is only `paddock daemon run`; its state folder is in its environment, which ps shows for the
@@ -2216,7 +2571,9 @@ async function teardown(): Promise<void> {
   if (tornDown) return
   tornDown = true
   for (const sandbox of ((await pdkJson(["list"]).catch(() => undefined))?.reply.data ?? []) as Array<{ name: string }>) await pdk(["remove", sandbox.name, "--confirm", sandbox.name])
+  for (const template of ((await pdkJson(["template", "list"]).catch(() => undefined))?.reply.data ?? []) as Array<{ name: string }>) await pdk(["template", "remove", template.name])
   await pdk(["daemon", "stop"])
+  for (const image of await templateImages().catch(() => [])) await docker(["rmi", "-f", ...image.tags, image.id])
   await docker(["rm", "-f", HOST])
   for (const line of (await docker(["ps", "-a", "--format", "{{.Names}}"])).out.split("\n").filter((name) => name.includes(PREFIX))) await docker(["rm", "-f", "-v", line])
   for (const line of (await docker(["network", "ls", "--format", "{{.Name}}"])).out.split("\n").filter((name) => name.includes(PREFIX))) await docker(["network", "rm", line])
