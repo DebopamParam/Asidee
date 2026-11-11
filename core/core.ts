@@ -23,7 +23,8 @@ export type ResizeChange = { limit: "cpus" | "memoryGb" | "pids" | "diskGb"; fro
 
 export type SandboxView = {
   // damaged: its state file cannot be read; stopReason says what is wrong with it.
-  name: string; status: "running" | "stopped" | "missing" | "damaged"; engine: string; spec: Manifest["spec"]; createdAt: string
+  name: string; status: "running" | "stopped" | "missing" | "damaged" | "unknown"; engine: string; spec: Manifest["spec"]; createdAt: string
+  machineId?: string; sandboxId?: string
   capabilities?: Engine["capabilities"]; lastVerify?: Manifest["lastVerify"]; stopReason?: string
   // What a long operation on it is doing right now.
   activity?: string
@@ -42,7 +43,7 @@ export class Core {
   // Forwards by id. They live in this daemon only: a stop, restart or removal of their sandbox, or the daemon's exit,
   // ends them, and nothing brings one back.
   private readonly forwards = new Map<string, { view: Omit<ForwardView, "connections">; server: Server; connections: Set<Session>; watch: ReturnType<typeof setInterval> }>()
-  constructor(private readonly providers: readonly Provider[], readonly dirs: Dirs, private readonly run: Runner, private readonly cliDir: string) {}
+  constructor(private readonly providers: readonly Provider[], readonly dirs: Dirs, private readonly run: Runner, private readonly cliDir: string, readonly machineId = "") {}
 
   // One operation per sandbox at a time.
   private exclusive<T>(name: string, task: () => Promise<T>): Promise<T> {
@@ -67,14 +68,14 @@ export class Core {
       // Paddock did not stop it, so ask the engine why it is not running.
       if (status === "stopped" && !stopReason) stopReason = await this.provider(manifest).stoppedWhy(manifest)
     } catch (error) { if (error instanceof PaddockError && error.code === "conflict") stopReason = error.message }
-    return { name: manifest.name, status, engine: manifest.engine.label, spec: manifest.spec, createdAt: manifest.createdAt, capabilities: manifest.engine.capabilities,
+    return { name: manifest.name, machineId: this.machineId, sandboxId: manifest.id, status, engine: manifest.engine.label, spec: manifest.spec, createdAt: manifest.createdAt, capabilities: manifest.engine.capabilities,
       lastVerify: manifest.lastVerify, stopReason, activity: this.activity.get(manifest.name), template: manifest.template }
   }
 
   async list(): Promise<SandboxView[]> {
     const { manifests, damaged } = await scanManifests(this.dirs)
     return [...await Promise.all(manifests.map((manifest) => this.view(manifest))),
-      ...damaged.map((entry): SandboxView => ({ name: entry.name, status: "damaged", engine: "", spec: { name: entry.name, image: "", cpus: 0, memoryGb: 0, pids: 0, diskGb: 0, docker: false }, createdAt: "",
+      ...damaged.map((entry): SandboxView => ({ name: entry.name, machineId: this.machineId, status: "damaged", engine: "", spec: { name: entry.name, image: "", cpus: 0, memoryGb: 0, pids: 0, diskGb: 0, docker: false }, createdAt: "",
         stopReason: `Its state file ${entry.file} cannot be read (${entry.problem}). Paddock does nothing with it; fix the file or delete it.` }))]
   }
   async get(name: string): Promise<SandboxView> { return this.view(await readManifest(this.dirs, name)) }

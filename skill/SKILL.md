@@ -31,7 +31,16 @@ paddock template list | paddock template remove TEMPLATE
 paddock remove NAME --confirm NAME          # deletes everything in it; ask the user first
 ```
 
-Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed.
+Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown.
+
+Prepared remote daemons can be attached with `paddock host attach NAME --ssh DEST --binary PATH --state-dir PATH`.
+This installs nothing. `paddock host list` refreshes their availability. Add `--host NAME` to buffered sandbox commands
+to select that daemon; names without it always mean local. `paddock list --all` shows each machine, keeping stale
+sandboxes and checks unknown. An unreachable host is not an empty successful list. A version/identity mismatch is a
+failure; never replace the remote daemon or retry a mutation automatically. Exit 10 means reconcile with a read and
+the user before another mutation. Remote streams, forwards, editor aliases and reviewed installation are not built
+in this first Machines unit. `paddock host remove NAME --confirm NAME` forgets a prepared daemon and leaves all remote
+files and services intact. Group M is unmeasured without `PADDOCK_EVAL_HOST`; read the scorecards for measured results.
 
 - A name is lowercase letters, digits and hyphens.
 - `exec` needs a running sandbox; it does not start one.
@@ -120,7 +129,12 @@ Copy the built-in page (`ui/index.html` in the Paddock source) to `~/.config/pad
 Other files in that folder are served next to it. The page calls `POST /api/METHOD` with a JSON body and the header
 `Authorization: Bearer TOKEN`; it reads the token from the `#token=` part of the link `paddock ui` prints. Methods:
 `checklist`, `engines`, `list`, `get`, `create`, `start`, `stop`, `remove`, `verify`, `resize`, `snapshot`, `templateList`,
-`templateRemove`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `sshAccess`, `extensions`, `action`.
+`templateRemove`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `sshAccess`, `extensions`, `action`, `summary`,
+`hostList`, `fleet`.
+
+Requests can include `host` to select a registered machine. A sandbox's API address is `{host, name}` and its returned
+identity is `{machineId, sandboxId}`. Supply `machineId` too when acting on a previously selected machine. Session,
+shutdown and host changes remain socket-only even when routed; the dashboard token does not authorize them.
 
 Keep showing each check's status and detail as the API returns them.
 
@@ -152,7 +166,7 @@ actual guest programs against temporary homes; core evals do not cover extension
 only for settings sent, with bounded printable names and credential values withheld.
 
 The engine measurements are in `evals/SCORECARD.md` and `evals/SCORECARD.linux.md`. Docker Desktop, Colima, Windows
-execution, a hard disk cap, and remote-engine management remain unmeasured or unbuilt as those files state.
+execution, a hard disk cap, remote installation and service recovery remain unmeasured or unbuilt as those files state.
 
 ## What you cannot do, by design
 

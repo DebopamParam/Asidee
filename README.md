@@ -59,11 +59,17 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   removed before saving; volumes (inner Docker's images and containers), memory and `/dev/shm` are not saved. Removing
   a template leaves the sandboxes made from it working. See [Templates](docs/architecture.md#templates).
 - The daemon, the CLI with `--json`, a web dashboard, and extensions.
+- Prepared Linux daemons can be registered with `paddock host attach NAME --ssh DEST --binary /absolute/paddock
+  --state-dir /absolute/state`. Buffered sandbox operations select one daemon with `--host NAME`, over system SSH to
+  its Unix socket. The remote daemon runs its own provider and checks. Version/protocol or machine-identity changes
+  are refused. `paddock host list` reports unreachable machines; `list --all` retains their cached sandboxes as unknown.
+  See [Machines](docs/architecture.md#machines) for the current limits and opt-in measurements.
 
 Not built yet:
 
 - Docker Sandboxes (microVM) support. It is detected and reported as not supported.
-- A hard disk cap, Windows execution, remote-engine management, a desktop app, and installers.
+- A hard disk cap, Windows execution, remote streams/forwards/editor aliases, reviewed host installation, a desktop app,
+  and installers. Prepared-daemon routing is the first Machines unit; the remote dashboard is later.
 - Docker Desktop and Colima measurements. Native Linux Docker and OrbStack have separate scorecards.
 - A license. Nothing here is published.
 

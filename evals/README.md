@@ -24,6 +24,15 @@ device. E04 requires that this host can open that TCP target before trying it fr
 beside working internet controls. Without the input or host control it reports why it could not measure the target.
 No port scan is performed.
 
+Set `PADDOCK_EVAL_HOST=home-linux` (or another authorized SSH alias) to measure group M. Without it the whole group
+is unmeasured. The fixture must have native Linux x86_64/arm64, a ready local Docker/gVisor engine, working BatchMode
+SSH and established host-key trust, and no running Paddock sandboxes. The evals build for its architecture here and
+copy a checksum-checked binary to `~/.pdk-machines-XXXXXX`, start a private socket-only daemon, and use `host attach`.
+They create disposable sandboxes, tamper only with those sandboxes/Paddock resources, stop the primary for the
+independent-enforcement check, then remove the sandboxes, registration, daemon and directory. No sudo, package
+installation, system-file change, Docker restart or SSH-file write is performed. Installer, service and reboot
+behavior remain unmeasured. The remote fixture is not an extra network listener.
+
 **Docker Hub pulls.** A full run pulls from Docker Hub at most five times, all from inner Docker: I01 twice
 (`alpine:latest`; the attempt without `SYS_ADMIN` fails only after fetching), I09 once (`busybox:stable`) and I15
 twice (`busybox:stable`, then by digest). Verify's probe and the other evals use images loaded from the engine, and I24
@@ -56,6 +65,7 @@ confirmed against the quota from here.
 | A | Does `ssh NAME.paddock` reach only that sandbox, with only this machine's editor key, through the daemon, without a port? |
 | L | Do resized limits hold on the engine's host when resize says they do, and are unsafe resizes refused? |
 | C | Does a template carry the sandbox's files, leave out the login files, and stay Paddock's own? |
+| M | Does one selected machine's own daemon perform operations and checks over SSH, preserving identity, availability and socket authority? |
 | D | Does the daemon keep its promises through crashes, races and upgrades? |
 | P | Does it build and run on other platforms, as far as this machine can show? |
 | E | What has nobody measured? |

@@ -2537,6 +2537,147 @@ ev("C07", "Removing a template leaves the sandboxes made from it running and res
   expect(!await imageExists(saved.reply.data.template.imageId), "a template no sandbox used kept its image after removal")
 })
 
+// M: a separately owned daemon on an explicitly named Linux machine. No host privileges or SSH files are changed.
+const TEST_HOST = process.env.PADDOCK_EVAL_HOST
+const MH = `${PREFIX}-host`; const MS = `${PREFIX}-machine`; const MC = `${PREFIX}-control`
+let remoteDir = ""; let remoteReady = false
+const word = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
+const remoteArgs = () => {
+  expect(TEST_HOST && /^(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(TEST_HOST), "PADDOCK_EVAL_HOST must be an SSH alias or user@hostname")
+  return ["ssh", "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ClearAllForwardings=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ConnectTimeout=5", TEST_HOST!]
+}
+const remote = (argv: string[], options: Parameters<typeof sh>[1] = {}) => sh([...remoteArgs(), argv.map(word).join(" ")], options)
+const remoteDocker = (argv: string[]) => remote(["docker", ...argv])
+const remotePdk = (argv: string[]) => remote(["env", `PADDOCK_STATE_DIR=${remoteDir}/s`, `PADDOCK_CONFIG_DIR=${remoteDir}/c`, "PADDOCK_SOCKET_ONLY=1", `${remoteDir}/paddock`, ...argv])
+const remoteInspect = async (name: string) => {
+  const result = await remoteDocker(["inspect", containerOf(name)])
+  return result.code === 0 ? JSON.parse(result.out)[0] : undefined
+}
+async function machineFixture() {
+  if (!TEST_HOST) skip("no PADDOCK_EVAL_HOST supplied; a disposable Linux SSH fixture is opt-in")
+  if (remoteReady) return
+  const arch = await remote(["uname", "-m"])
+  expect(arch.code === 0, `SSH fixture unreachable: ${arch.err}`)
+  expect(["x86_64", "aarch64"].includes(arch.out.trim()), `unsupported fixture architecture ${arch.out.trim()}`)
+  const existing = await remoteDocker(["ps", "--filter", "label=dev.paddock.name", "--format", "{{.Names}}"])
+  expect(existing.code === 0 && !existing.out.trim(), `the fixture has other Paddock sandboxes or Docker is unavailable: ${existing.out}${existing.err}`)
+  const made = await remote(["sh", "-c", 'mktemp -d "$HOME/.pdk-machines-XXXXXX"'])
+  remoteDir = made.out.trim()
+  expect(made.code === 0 && /^\/home\/[A-Za-z0-9_.-]+\/\.pdk-machines-[A-Za-z0-9]+$/.test(remoteDir), "could not make a private fixture folder")
+  const binary = join(tmp, "remote-paddock")
+  const build = await sh([BUN, "build", "--compile", "--minify", `--target=bun-linux-${arch.out.trim() === "x86_64" ? "x64" : "arm64"}`, "--outfile", binary, "cli/cli.ts"], { cwd: ROOT })
+  expect(build.code === 0, `remote build failed: ${build.err}`)
+  const copy = Bun.spawn([...remoteArgs(), `umask 077; cat > ${word(`${remoteDir}/paddock`)}; chmod 700 ${word(`${remoteDir}/paddock`)}`], { stdin: Bun.file(binary), stdout: "pipe", stderr: "pipe" })
+  const [copied, err] = await Promise.all([copy.exited, new Response(copy.stderr).text()])
+  expect(copied === 0, `remote copy failed: ${err}`)
+  const digest = new Bun.CryptoHasher("sha256").update(await readFile(binary)).digest("hex")
+  expect((await remote(["sha256sum", `${remoteDir}/paddock`])).out.startsWith(`${digest} `), "remote artifact digest differs")
+  const start = await remote(["sh", "-c", 'mkdir -m 700 "$1/c"; nohup env PADDOCK_STATE_DIR="$1/s" PADDOCK_CONFIG_DIR="$1/c" PADDOCK_SOCKET_ONLY=1 "$1/paddock" daemon run >"$1/daemon.log" 2>&1 </dev/null &', "fixture", remoteDir])
+  expect(start.code === 0 && await until(async () => (await remote(["test", "-S", `${remoteDir}/s/daemon.sock`])).code === 0, 20), `remote daemon did not start: ${(await remote(["cat", `${remoteDir}/daemon.log`])).out}`)
+  const attached = await pdkJson(["host", "attach", MH, "--ssh", TEST_HOST!, "--binary", `${remoteDir}/paddock`, "--state-dir", `${remoteDir}/s`])
+  expect(attached.reply.ok, `attach failed: ${attached.out}${attached.err}`)
+  remoteReady = true
+}
+const hosted = (argv: string[], options: Parameters<typeof sh>[1] = {}) => pdkJson(["--host", MH, ...argv], options)
+async function remoteSandbox(name = MS) {
+  await machineFixture()
+  const state = await remoteInspect(name)
+  if (!state) {
+    const made = await hosted(["create", name, "--image", "alpine:latest", "--cpus", "1", "--memory", "1", "--disk", "1"])
+    expect(made.reply.ok, `remote create failed: ${made.out}${made.err}`)
+  } else if (!state.State.Running) expect((await hosted(["start", name])).reply.ok, "remote start failed")
+}
+
+ev("M01", "Identical sandbox names on two machines have distinct identities and only the selected machine is mutated", async () => {
+  await remoteSandbox(); await ensure(MS)
+  const local = await inspect(MS); const target = await remoteInspect(MS)
+  expect(local?.State.Running && target?.State.Running, "both running controls are required")
+  expect(local.Config.Labels["dev.paddock.id"] !== target.Config.Labels["dev.paddock.id"], "sandbox identities collided")
+  expect((await hosted(["stop", MS])).reply.ok && !(await remoteInspect(MS)).State.Running && await running(MS), "stop affected the wrong machine")
+  expect((await hosted(["start", MS])).reply.ok, "remote start failed")
+  const resized = await hosted(["resize", MS, "--memory", "2"])
+  expect(resized.reply.ok && (await remoteInspect(MS)).HostConfig.Memory === 2 * 1024 ** 3 && (await inspect(MS)).HostConfig.Memory === 1024 ** 3, "resize affected the wrong engine")
+  const verify = await hosted(["verify", MS])
+  expect(verify.reply.ok && verify.reply.data.ok && verify.reply.data.sandbox.sandboxId === target.Config.Labels["dev.paddock.id"], `remote verification failed: ${verify.out}${verify.err}`)
+  const who = await hosted(["exec", MS, "--", "sh", "-c", "uname -a; echo remote-only > /remote-only"])
+  expect(who.reply.data?.exitCode === 0 && /gvisor/i.test(who.reply.data.stdout), "remote exec did not reach gVisor")
+  expect((await pdk(["exec", MS, "--", "test", "-e", "/remote-only"])).code !== 0, "the remote file appeared locally")
+  const template = `${PREFIX}-mtpl`
+  const saved = await hosted(["snapshot", MS, "--as", template])
+  expect(saved.reply.ok && (await hosted(["template", "list"])).reply.data.some((entry: { name: string }) => entry.name === template), "remote template was not listed")
+  expect(!(await pdkJson(["template", "list"])).reply.data.some((entry: { name: string }) => entry.name === template), "remote template appeared locally")
+  expect((await hosted(["template", "remove", template])).reply.ok, "remote template cleanup failed")
+  const listed = await hosted(["list"])
+  expect(listed.reply.data.some((entry: { name: string; machineId: string }) => entry.name === MS && entry.machineId !== local.machineId), "selected list omitted the remote identity")
+  return `${TEST_HOST}; stop/start, resize, exec, verify, snapshot and template list/remove selected only the remote engine; both copies of ${MS} existed`
+})
+
+ev("M02", "An unreachable host retains unknown sandbox evidence while local actions work; unknown hosts never fall back locally", async () => {
+  await remoteSandbox(); await ensure(MS)
+  expect((await pdkJson(["host", "list"])).reply.data.some((entry: { state: string }) => entry.state === "online"), "healthy SSH control failed")
+  const registry = join(env.PADDOCK_CONFIG_DIR, "hosts.json"); const original = await readFile(registry, "utf8")
+  try {
+    const data = JSON.parse(original); data.hosts.find((host: { name: string }) => host.name === MH).binary = `${remoteDir}/missing`
+    await writeFile(registry, JSON.stringify(data))
+    const failed = await hosted(["stop", MS])
+    expect(failed.code === 7 && failed.reply.error?.code === "offline" && (await remoteInspect(MS)).State.Running && await running(MS), "unreachable host was absent, passing or affected a sandbox")
+    const offline = await pdkJson(["host", "list"])
+    expect(offline.reply.data.find((entry: { host: { name: string } }) => entry.host.name === MH).state === "offline", "host list hid the failed machine")
+    const fleet = (await pdkJson(["list", "--all"])).reply.data.machines.find((entry: { machine: { host: { name: string } } }) => entry.machine.host.name === MH)
+    const cached = fleet?.cached?.sandboxes.find((entry: { name: string }) => entry.name === MS)
+    expect(fleet?.stale && cached?.status === "unknown" && cached.lastVerify.results.every((check: { status: string }) => check.status === "unknown"), "cached green evidence survived the failed refresh")
+    expect((await pdk(["exec", MS, "--", "true"])).code === 0, "failed host blocked a local action")
+    const unknown = await pdkJson(["--host", "not-enrolled", "stop", MS])
+    expect(unknown.code === 3 && await running(MS) && (await remoteInspect(MS)).State.Running, "unknown host fell back")
+  } finally { await writeFile(registry, original); await pdk(["host", "list"]) }
+})
+
+ev("M03", "Changed machine identity and daemon version are refused before a remote mutation, with a working-version control", async () => {
+  await remoteSandbox()
+  const registry = join(env.PADDOCK_CONFIG_DIR, "hosts.json"); const original = await readFile(registry, "utf8")
+  try {
+    const data = JSON.parse(original); data.hosts.find((host: { name: string }) => host.name === MH).machineId = "0".repeat(32)
+    await writeFile(registry, JSON.stringify(data))
+    const changed = await hosted(["stop", MS])
+    expect(changed.code === 9 && changed.reply.error?.code === "identity-changed" && (await remoteInspect(MS)).State.Running, "changed identity was accepted")
+  } finally { await writeFile(registry, original) }
+  const next = join(tmp, "incompatible"); await mkdir(next, { recursive: true })
+  for (const part of ["core", "cli", "ui", "package.json"]) await cp(join(ROOT, part), join(next, part), { recursive: true })
+  const pkg = JSON.parse(await readFile(join(next, "package.json"), "utf8")); await writeFile(join(next, "package.json"), JSON.stringify({ ...pkg, version: `${pkg.version}-incompatible` }))
+  const binary = join(next, "paddock")
+  expect((await sh([BUN, "build", "--compile", "--outfile", binary, "cli/cli.ts"], { cwd: next })).code === 0, "could not build the incompatible gateway")
+  try {
+    const bad = await sh([binary, "--json", "--host", MH, "stop", MS], { env })
+    expect(bad.code === 8 && JSON.parse(bad.out).error.code === "incompatible" && (await remoteInspect(MS)).State.Running, `version mismatch was accepted: ${bad.out}${bad.err}`)
+  } finally { await pdk(["list"]) }
+  expect((await hosted(["exec", MS, "--", "true"])).code === 0, "matching-version control failed")
+})
+
+ev("M04", "Routing preserves the dashboard boundary and the remote daemon validates sandbox options itself", async () => {
+  await remoteSandbox()
+  expect((await tcp("/api/list", { body: JSON.stringify({ host: MH }) })).status === 200, "control: routed dashboard list failed")
+  for (const method of ["hello", "shutdown", "sshSetup", "hostAttach", "hostRemove"]) expect((await tcp(`/api/${method}`, { body: JSON.stringify({ host: MH }) })).status === 403, `dashboard gained ${method} through SSH`)
+  for (const method of ["attach", "session", "hostApply", "constructor", "__proto__"]) expect((await tcp(`/api/${method}`, { body: JSON.stringify({ host: MH }) })).status === 404, `arbitrary routed method ${method} was accepted`)
+  const bad = await socket("create", { host: MH, name: "Bad", privileged: true, image: "alpine:latest" })
+  expect(bad.status === 400 && !(await remoteDocker(["ps", "-a", "--format", "{{.Names}}"])).out.split("\n").includes("paddock-Bad"), "remote validation was bypassed")
+  const daemon = JSON.parse((await remote(["cat", `${remoteDir}/s/daemon.json`])).out)
+  expect(daemon.port === 0, "remote daemon opened a dashboard port")
+  expect((await remote(["lsof", "-nP", "-a", "-p", String(daemon.pid), "-iTCP", "-sTCP:LISTEN", "-Fn"])).out.trim() === "", "remote daemon has a TCP listener")
+})
+
+ev("M05", "With the primary stopped, the remote daemon stops a weakened sandbox and keeps an untampered control running", async () => {
+  await remoteSandbox(); await remoteSandbox(MC)
+  expect((await pdk(["daemon", "stop"])).code === 0, "could not stop the primary")
+  try {
+    expect((await remoteDocker(["network", "connect", "bridge", containerOf(MS)])).code === 0, "could not tamper with the disposable remote sandbox")
+    expect(await until(async () => !(await remoteInspect(MS)).State.Running, 65), "remote enforcement depended on the primary")
+    expect((await remoteInspect(MC)).State.Running, "untampered control stopped")
+    const listed = await remotePdk(["--json", "list"])
+    expect(/network/i.test(JSON.parse(listed.out).data.find((entry: { name: string }) => entry.name === MS).stopReason), "remote daemon did not report its own stop reason")
+  } finally { await remoteDocker(["network", "disconnect", "bridge", containerOf(MS)]); await pdk(["list"]) }
+  return "remote network tamper stopped within 65 s while the primary was absent; an untampered remote control kept running"
+})
+
 ev("Z01", "Nothing is left on the engine or this machine when the run ends", async () => {
   // Control: the scan sees this run's daemon while it runs, so an empty scan after teardown means none is left.
   await pdk(["list"])
@@ -2570,6 +2711,17 @@ let tornDown = false
 async function teardown(): Promise<void> {
   if (tornDown) return
   tornDown = true
+  if (remoteDir) {
+    for (const name of [MS, MC]) await remotePdk(["remove", name, "--confirm", name])
+    const templates = await remotePdk(["--json", "template", "list"])
+    for (const template of JSON.parse(templates.out || "{}").data ?? []) if (template.name.startsWith(PREFIX)) await remotePdk(["template", "remove", template.name])
+    await pdk(["host", "remove", MH, "--confirm", MH])
+    await remotePdk(["daemon", "stop"])
+    const left = await remoteDocker(["ps", "-a", "--format", "{{.Names}}"])
+    expect(!left.out.split("\n").some((name) => name.includes(PREFIX)), `remote fixture left a container: ${left.out}`)
+    await remote(["rm", "-rf", remoteDir])
+    remoteDir = ""
+  }
   for (const sandbox of ((await pdkJson(["list"]).catch(() => undefined))?.reply.data ?? []) as Array<{ name: string }>) await pdk(["remove", sandbox.name, "--confirm", sandbox.name])
   for (const template of ((await pdkJson(["template", "list"]).catch(() => undefined))?.reply.data ?? []) as Array<{ name: string }>) await pdk(["template", "remove", template.name])
   await pdk(["daemon", "stop"])

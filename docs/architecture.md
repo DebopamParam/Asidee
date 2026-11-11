@@ -356,6 +356,50 @@ finish, so a second daemon never runs beside it. It listens on:
 
 State is in `~/.local/state/paddock`, configuration in `~/.config/paddock` (`PADDOCK_STATE_DIR`, `PADDOCK_CONFIG_DIR`).
 
+## Machines
+
+The first Machines unit registers an already prepared daemon with `host attach NAME --ssh DEST --binary PATH
+--state-dir PATH`. It installs nothing. The primary alone writes `CONFIG/hosts.json` atomically, mode 0600. Each
+daemon keeps a random persistent `STATE/machine-id`; each daemon process has a separate boot ID. Registry aliases
+cannot be rebound implicitly. Removing a prepared host forgets its entry and cache; its remote installation and data
+are retained. Reviewed installation and its removal are not implemented yet.
+
+`--host NAME` before the command's `--` selects a registered machine. The API uses `{host: "NAME", name: "demo"}`;
+unqualified names are always local, even when absent. Sandbox views carry `machineId` and `sandboxId`, so identical
+names on two machines have distinct identities. `machineId` can also be supplied as a precondition with `host` and
+`name`. An unknown host never falls back. Buffered sandbox operations, engines, templates, extensions, checklist,
+verify and daemon status/stop route over SSH. Streams, forwards and SSH setup/access for remote sandboxes are
+explicitly unavailable in this unit.
+
+The gateway executes the registered absolute binary's fixed `transport stdio --protocol 1` command, with the state
+directory set explicitly. That command only relays bytes to an existing daemon socket; it cannot install, start or
+replace a daemon. `PADDOCK_SOCKET_ONLY=1` when starting the remote daemon disables its dashboard TCP listener. No
+remote Docker context is introduced. Only the target daemon's core operates its engine or supplies checks.
+
+Each operation gets its own system SSH connection, reading the user's SSH config for ports and jump hosts. BatchMode
+and strict host-key verification are required; UpdateHostKeys, agent/X11 forwarding, configured port forwarding and
+shared control masters are disabled. Paddock writes no outer SSH config or trust file. The user must have established
+outer host trust before attaching. The transport handshakes and sends the request on one HTTP connection; the target
+also checks the selected machine ID, protocol and version on the request. The handshake includes an artifact SHA-256,
+protocols, methods and features. Version mismatch refuses work and never upgrades the target. Local CLI build
+replacement retains its previous behavior. After a mutation is sent, transport failure means `outcome-unknown`; no
+mutation is automatically replayed.
+
+The typed method catalog in `core/machines.ts` limits routing. The gateway checks socket-only access before SSH is
+opened, and the target validates the ordinary request again. Bootstrap and primary resources are not a generic RPC
+proxy. Remote JSON replies are capped at 8 MiB, with a clear overflow error. Machine summaries are validated before
+replacing cached evidence. `host list` refreshes hosts concurrently with bounded read deadlines. `fleet`/`list --all`
+return the cache and schedule independent refreshes with retries capped at 60 seconds. A lost or stale machine keeps
+its last-known sandboxes with `unknown` status and unknown checks, with the original check time. A machine with no
+successful summary has no sandbox inventory and is shown as connecting/offline, never as a successful empty list.
+
+The M eval group needs `PADDOCK_EVAL_HOST` naming an authorized Linux SSH fixture. It builds a native Linux artifact
+here, checks its checksum after copying, starts a socket-only daemon in a private temporary home directory, attaches
+it, and removes it at teardown. It never installs packages, uses sudo, restarts Docker or edits system/SSH files.
+Reboot persistence and automatic recovery are unmeasured; the fixture daemon runs only until stopped, killed or reboot.
+The scorecards record the actual M results. Root installation and Linux user-service installation have not been built
+or measured in this unit.
+
 ## Adding a provider
 
 Implement `Provider` in `core/types.ts` and add it to the list in `core/daemon.ts`. `detect()` reports each engine with
@@ -369,5 +413,5 @@ and lists or removes guest logins through the daemon's exec API. It runs host to
 credentials live inside the sandbox. See `extensions/logins/README.md` for the setup allowlist and measured limits.
 Missing setup commands are named only from settings actually sent, with bounded printable names and credential
 values withheld. The CLI also provides streamed exec, port forwards, and SSH access. Inner Docker is a checked core
-option, and the core resizes sandboxes and saves them as templates. Remote-engine management and a hard disk cap are
-not built.
+option, and the core resizes sandboxes and saves them as templates. Buffered operations can select a prepared remote
+daemon; remote streams, forwards, aliases, installation and a hard disk cap are not built.

@@ -6,6 +6,8 @@ import { createServer } from "node:net"
 import { join, normalize } from "node:path"
 import { CHECKLIST } from "./checks"
 import { Core } from "./core"
+import { CATALOG, isMethod, machineIdentity, Machines, type Hello } from "./machines"
+import { PROTOCOL } from "./transport"
 import { DockerSandboxesProvider } from "./providers/docker-sandboxes"
 import { GvisorProvider } from "./providers/gvisor"
 import { systemRunner } from "./run"
@@ -30,9 +32,15 @@ type Method = { run: (body: Body) => Promise<unknown>; socketOnly?: boolean }
 
 // The whole API. The CLI, the UI and extensions all come through this table, so each has exactly these abilities.
 // keepSandboxes: the daemon is being replaced (an upgrade), not stopped, so the sandboxes it watches keep running.
-export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, stopping: () => boolean = () => false): Record<string, Method> {
+export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, stopping: () => boolean = () => false, machines?: Machines): Record<string, Method> {
   return {
     version: { run: async () => ({ version: VERSION, build: BUILD, stopping: stopping() }) },
+    hello: { run: async () => machines?.hello, socketOnly: true },
+    summary: { run: async () => ({ hello: machines?.hello, sandboxes: await core.list(), checkedAt: new Date().toISOString() }) },
+    hostList: { run: async () => machines?.list() },
+    fleet: { run: async (body) => machines?.fleet(body.refresh) },
+    hostAttach: { run: async (body) => machines?.attach(body), socketOnly: true },
+    hostRemove: { run: async (body) => machines?.remove(body), socketOnly: true },
     checklist: { run: async () => CHECKLIST },
     engines: { run: () => core.engines() },
     list: { run: () => core.list() },
@@ -59,14 +67,14 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
   }
 }
 
-const STATUS: Record<ErrorCode, number> = { usage: 400, "not-found": 404, conflict: 409, dependency: 424, "check-failed": 422, runtime: 500 }
+const STATUS: Record<ErrorCode, number> = { usage: 400, "not-found": 404, conflict: 409, dependency: 424, "check-failed": 422, runtime: 500, offline: 503, incompatible: 409, "identity-changed": 409, "outcome-unknown": 504 }
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
 const refuse = (status: number, message: string) => json(status, { ok: false, error: { code: "usage", message } })
 
 // viaSocket: the request came over the Unix socket, which only this user can open. Otherwise it came over loopback TCP,
 // where any local process or web page can try, so it must carry the token and name this server as its Host (a page on
 // another site that resolves its own name to 127.0.0.1 does not).
-export function createHandler(table: Record<string, Method>, token: string, configDir: string) {
+export function createHandler(table: Record<string, Method>, token: string, configDir: string, machines?: Machines) {
   return async (request: Request, viaSocket: boolean, port: number): Promise<Response> => {
     const url = new URL(request.url)
     if (!viaSocket && !["127.0.0.1", "localhost"].some((host) => request.headers.get("host") === `${host}:${port}`)) return refuse(403, "Unexpected Host header.")
@@ -82,7 +90,22 @@ export function createHandler(table: Record<string, Method>, token: string, conf
         const text = await request.text()
         const body = text ? JSON.parse(text) as unknown : {}
         if (typeof body !== "object" || body === null || Array.isArray(body)) return refuse(400, "The request body must be a JSON object.")
-        return json(200, { ok: true, data: await method.run(body as Body) })
+        const payload = body as Body
+        if (payload.host !== undefined && (typeof payload.host !== "string" || !payload.host)) throw new PaddockError("usage", "host must be a registered host name or local.")
+        if (machines) {
+          const expected = request.headers.get("x-paddock-machine")
+          if (expected && expected !== machines.hello.machineId) throw new PaddockError("identity-changed", "The daemon's machine identity differs from the selected machine.")
+          if (expected && (request.headers.get("x-paddock-protocol") !== String(PROTOCOL) || request.headers.get("x-paddock-version") !== VERSION)) throw new PaddockError("incompatible", "The daemon version or wire protocol differs from the gateway's.")
+          const name = url.pathname.slice(5)
+          if (isMethod(name) && !viaSocket && CATALOG[name][0] !== "dashboard") return refuse(403, "This method is only available to the CLI.")
+          if (payload.host !== undefined && payload.host !== "local") {
+            if (!isMethod(name)) throw new PaddockError("usage", "This method cannot be routed.")
+            return json(200, { ok: true, data: await machines.route(name, payload) })
+          }
+          if (payload.machineId !== undefined && payload.machineId !== machines.hello.machineId) throw new PaddockError("identity-changed", "The request names another machine identity.")
+        } else if (payload.host !== undefined && payload.host !== "local") throw new PaddockError("dependency", "Machine routing is unavailable.")
+        const { host: _host, machineId: _identity, ...local } = payload
+        return json(200, { ok: true, data: await method.run(local) })
       } catch (error) {
         const code: ErrorCode = error instanceof PaddockError ? error.code : error instanceof SyntaxError ? "usage" : "runtime"
         return json(STATUS[code], { ok: false, error: { code, message: (error as Error).message, details: error instanceof PaddockError ? error.details : undefined } })
@@ -105,13 +128,18 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   if (alive) throw new PaddockError("conflict", "A Paddock daemon is already running.")
   await rm(socket, { force: true }); await rm(streamSocketPath(dirs), { force: true })
 
-  const core = new Core([new GvisorProvider(systemRunner, createHash("sha256").update(`${hostname()}\0${dirs.state}`).digest("hex").slice(0, 10)), new DockerSandboxesProvider(systemRunner)], dirs, systemRunner, cliDir)
+  const identity = await machineIdentity(dirs)
+  const digest = new Bun.CryptoHasher("sha256")
+  for await (const bytes of Bun.file(Bun.main.startsWith("/$bunfs/") ? process.execPath : Bun.main).stream()) digest.update(bytes)
+  const core = new Core([new GvisorProvider(systemRunner, createHash("sha256").update(`${hostname()}\0${dirs.state}`).digest("hex").slice(0, 10)), new DockerSandboxesProvider(systemRunner)], dirs, systemRunner, cliDir, identity)
+  const hello: Hello = { machineId: identity, bootId: randomBytes(16).toString("hex"), version: VERSION, buildDigest: digest.digest("hex"), protocols: [PROTOCOL], methods: Object.keys(CATALOG), features: ["machines"] }
+  const machines = new Machines(dirs, hello, async () => ({ hello, sandboxes: await core.list(), checkedAt: new Date().toISOString() }))
   const token = randomBytes(24).toString("hex")
   let stop: (keepSandboxes: boolean) => void = () => {}
   // A daemon that is stopping still answers `version`, so a client waits for it instead of starting a second one, and
   // takes no new work: a sandbox started now would be stopped, or left unwatched, a moment later.
   let stopping = false
-  const answer = createHandler(methods(core, (keep) => stop(keep), () => stopping), token, dirs.config)
+  const answer = createHandler(methods(core, (keep) => stop(keep), () => stopping, machines), token, dirs.config, machines)
   const handle = (request: Request, viaSocket: boolean, port: number): Promise<Response> =>
     stopping && new URL(request.url).pathname !== "/api/version"
       ? Promise.resolve(json(STATUS.conflict, { ok: false, error: { code: "conflict", message: "The daemon is stopping. Try again in a moment." } }))
@@ -133,9 +161,11 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   const wanted = Number(process.env.PADDOCK_PORT ?? DEFAULT_PORT)
   let tcpPort = 0
   const serveTcp = (port: number) => Bun.serve({ hostname: "127.0.0.1", port, idleTimeout: 0, fetch: (request: Request): Promise<Response> => handle(request, false, tcpPort) })
-  let tcp
-  try { tcp = serveTcp(wanted) } catch { tcp = serveTcp(0) }
-  tcpPort = tcp.port!
+  let tcp: ReturnType<typeof serveTcp> | undefined
+  if (process.env.PADDOCK_SOCKET_ONLY !== "1") {
+    try { tcp = serveTcp(wanted) } catch { tcp = serveTcp(0) }
+    tcpPort = tcp.port!
+  }
   await writeFile(daemonFile(dirs), `${JSON.stringify({ pid: process.pid, port: tcpPort, token, version: VERSION })}\n`, { mode: 0o600 })
 
   // One pass at a time: a slow engine must not stack them up. The first pass covers the time no daemon was running.
@@ -152,7 +182,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   core.closeSessions()
   if (!keepSandboxes) await core.stopWatched()
   streams.close()
-  await Promise.all([unix.stop(true), tcp.stop(true)])
+  await Promise.all([unix.stop(true), tcp?.stop(true)])
   await rm(socket, { force: true }); await rm(streamSocketPath(dirs), { force: true }); await rm(daemonFile(dirs), { force: true })
 }
 

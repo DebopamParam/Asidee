@@ -9,6 +9,8 @@ import type { ResizeChange, SandboxView } from "../core/core"
 import { BUILD, readDaemonFile, runDaemon, VERSION } from "../core/daemon"
 import type { Extension } from "../core/extensions"
 import type { ForwardView } from "../core/forwards"
+import { hostOption, type FleetView, type HostView } from "../core/machines"
+import { PROTOCOL, transportStdio } from "../core/transport"
 import type { SshAccess } from "../core/ssh"
 import { checkSocketPath, defaultDirs, socketPath, streamSocketPath } from "../core/state"
 import { dataFrames, frame, FrameReader, type OpenRequest } from "../core/stream"
@@ -21,6 +23,10 @@ const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, 
   paddock doctor                         engines on this machine and what each one needs
   paddock create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]
   paddock list
+  paddock list --all                      machines, including unavailable ones and unknown cached sandboxes
+  paddock host list                       registered SSH daemons and their connection state
+  paddock host attach NAME --ssh DEST --binary PATH --state-dir PATH   attach an already prepared daemon
+  paddock host remove NAME --confirm NAME  forget a prepared host; remote files and service stay
   paddock resize NAME [--cpus N] [--memory GB] [--pids N] [--disk GB]   says which limits apply now and which at the next start
   paddock start NAME | stop NAME
   paddock verify NAME                    run every check against the sandbox
@@ -38,11 +44,14 @@ const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, 
   paddock ext run EXTENSION ACTION [SANDBOX] [--set FIELD=VALUE]…
   paddock ui [--open]                    the dashboard's address
   paddock daemon status | stop | run
+  paddock transport stdio --protocol 1 [--stream]   internal SSH socket relay; starts nothing
 
+  --host NAME   select a registered machine (unqualified names always mean local)
   --json   print {"ok":true,"data":…} or {"ok":false,"error":{code,message}}
-Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed.`
+Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown.`
 
-const EXIT: Record<ErrorCode, number> = { runtime: 1, usage: 2, "not-found": 3, conflict: 4, dependency: 5, "check-failed": 6 }
+const EXIT: Record<ErrorCode, number> = { runtime: 1, usage: 2, "not-found": 3, conflict: 4, dependency: 5, "check-failed": 6, offline: 7, incompatible: 8, "identity-changed": 9, "outcome-unknown": 10 }
+let selectedHost: string | undefined
 const dirs = defaultDirs()
 const compiled = Bun.main.startsWith("/$bunfs/")
 const self = compiled ? [process.execPath] : [process.execPath, Bun.main]
@@ -91,16 +100,17 @@ async function call<T>(method: string, body: object = {}, watch?: string): Promi
   await ensureDaemon()
   let last = ""
   const timer = watch === undefined ? undefined : setInterval(async () => {
-    const view = await request<SandboxView>("get", { name: watch }).catch(() => undefined)
+    const view = await request<SandboxView>("get", { name: watch, host: selectedHost }).catch(() => undefined)
     if (view?.activity && view.activity !== last) { last = view.activity; console.error(`  … ${last}`) }
   }, 400)
-  try { return await request<T>(method, body) } finally { clearInterval(timer) }
+  try { return await request<T>(method, { ...body, host: selectedHost }) } finally { clearInterval(timer) }
 }
 
 // A session on the daemon's stream socket (core/stream.ts). This process only moves bytes between its own stdio and the
 // socket, and waits whenever the other side has not taken what it was given. On a terminal the session gets one too:
 // keystrokes, Ctrl-C included, go to the sandbox, and the terminal's settings are put back however the session ends.
 async function session(request: OpenRequest): Promise<never> {
+  if (selectedHost && selectedHost !== "local") throw new PaddockError("dependency", "Remote streams are not implemented yet.")
   await ensureDaemon()
   const socket = connect(streamSocketPath(dirs))
   const raw = request.kind === "exec" && request.tty && process.stdin.isTTY
@@ -174,6 +184,12 @@ async function printRun(output: RunResult, asJson = false): Promise<never> {
 }
 
 async function main(argv: string[]): Promise<void> {
+  try { const parsed = hostOption(argv); selectedHost = parsed.host; argv = parsed.argv } catch (error) {
+    const message = (error as Error).message
+    if (argv.slice(0, argv.indexOf("--") < 0 ? undefined : argv.indexOf("--")).includes("--json")) console.log(JSON.stringify({ ok: false, error: { code: "usage", message } }))
+    else console.error(`paddock: ${message}`)
+    process.exit(2)
+  }
   const split = argv.indexOf("--")
   const head = split < 0 ? argv : argv.slice(0, split); const tail = split < 0 ? [] : argv.slice(split + 1)
   const asJson = head.includes("--json")
@@ -214,6 +230,17 @@ async function main(argv: string[]): Promise<void> {
         })
       }
       case "list": case "ls": {
+        const { values } = parse({ all: { type: "boolean" } })
+        if (values.all) {
+          if (selectedHost && selectedHost !== "local") throw new PaddockError("usage", "Use --all or --host, not both.")
+          const fleet = await call<FleetView>("fleet")
+          return out(fleet, () => {
+            for (const row of fleet.machines) {
+              console.log(`${row.machine.host.name}: ${row.machine.state}${"error" in row.machine && row.machine.error ? ` (${row.machine.error})` : ""}${row.stale ? "; sandboxes unknown" : ""}`)
+              for (const sandbox of row.cached?.sandboxes ?? []) console.log(`  ${row.machine.host.name}/${sandbox.name}: ${sandbox.status}${row.stale ? ` (last checked ${row.cached?.checkedAt})` : ""}`)
+            }
+          })
+        }
         const list = await call<SandboxView[]>("list")
         return out(list, () => {
           if (!list.length) console.log("No sandboxes. Create one with `paddock create NAME`.")
@@ -343,6 +370,7 @@ async function main(argv: string[]): Promise<void> {
         return printRun(output, asJson)
       }
       case "ui": {
+        if (selectedHost && selectedHost !== "local") throw new PaddockError("usage", "The dashboard is on the primary machine.")
         await ensureDaemon()
         const daemon = await readDaemonFile(dirs)
         if (!daemon) throw new PaddockError("runtime", "The daemon is not running.")
@@ -352,6 +380,11 @@ async function main(argv: string[]): Promise<void> {
         return out({ url }, () => console.log(url))
       }
       case "daemon": {
+        if (selectedHost && selectedHost !== "local") {
+          if (rest[0] === "run") throw new PaddockError("usage", "Start a remote daemon through its service; routing never installs or starts one.")
+          const result = await call(rest[0] === "stop" ? "shutdown" : "version")
+          return out(result, () => console.log(JSON.stringify(result)))
+        }
         if (rest[0] === "run") return await runDaemon(dirs, cliDir)
         if (rest[0] === "stop") {
           const asked = await request("shutdown").then(() => true, (error) => error instanceof PaddockError && error.code === "conflict")
@@ -362,6 +395,31 @@ async function main(argv: string[]): Promise<void> {
         const version = await request<{ version: string }>("version").catch(() => undefined)
         const daemon = version ? await readDaemonFile(dirs) : undefined
         return out({ running: Boolean(version), ...daemon, token: undefined }, () => console.log(version ? `Running: version ${version.version}, pid ${daemon?.pid}, dashboard on port ${daemon?.port}.` : "Not running. It starts with the first command."))
+      }
+      case "host": {
+        if (selectedHost && selectedHost !== "local") throw new PaddockError("usage", "The host registry belongs to the primary machine.")
+        const { values, positionals } = parse({ ssh: { type: "string" }, binary: { type: "string" }, "state-dir": { type: "string" }, confirm: { type: "string" } }, rest.slice(1))
+        if (rest[0] === "list" || rest[0] === undefined) {
+          const hosts = await call<HostView[]>("hostList")
+          return out(hosts, () => {
+            if (!hosts.length) console.log("No registered hosts. Attach an already prepared daemon with `paddock host attach`.")
+            for (const { host, state, receivedAt, hello, error } of hosts) console.log(`${host.name}: ${state} (${host.ssh}), machine ${host.machineId}, ${hello?.version ?? "version unknown"}, ${host.service}, disk ${host.diskPolicy}${receivedAt ? `, last contact ${receivedAt}` : ""}${error ? `\n  ${error}` : ""}`)
+          })
+        }
+        if (rest[0] === "attach") {
+          const host = await call("hostAttach", { name: need(positionals[0], "a host name"), ssh: need(values.ssh, "--ssh DEST"), binary: need(values.binary, "--binary PATH"), stateDir: need(values["state-dir"], "--state-dir PATH") })
+          return out(host, () => console.log(`Registered prepared daemon ${positionals[0]}. No remote files or services were installed.`))
+        }
+        if (rest[0] === "remove") {
+          const removed = await call<{ removed: string }>("hostRemove", { name: need(positionals[0], "a host name"), confirm: values.confirm })
+          return out(removed, () => console.log(`Forgot ${removed.removed}. Its prepared remote daemon, service, sandboxes, images, runtime, packages and logs were retained.`))
+        }
+        throw new PaddockError("usage", "Use `paddock host list`, `paddock host attach` or `paddock host remove NAME --confirm NAME`.")
+      }
+      case "transport": {
+        const { values } = parse({ protocol: { type: "string" }, stream: { type: "boolean" } }, rest.slice(1))
+        if (selectedHost || asJson || rest[0] !== "stdio" || values.protocol !== String(PROTOCOL)) throw new PaddockError("incompatible", "Use `paddock transport stdio --protocol 1` on the target machine.")
+        return await transportStdio(values.stream ? streamSocketPath(dirs) : socketPath(dirs))
       }
       default: throw new PaddockError("usage", `Unknown command ${command}. See \`paddock help\`.`)
     }
