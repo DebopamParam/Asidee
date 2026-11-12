@@ -219,7 +219,7 @@ export function parseRouted(method: MethodName, value: unknown, hello: Hello): u
 }
 
 export const staleSummary = (summary: MachineSummary): MachineSummary => ({ ...summary, sandboxes: summary.sandboxes.map((sandbox) => ({ ...sandbox, status: "unknown",
-  lastVerify: sandbox.lastVerify && { ...sandbox.lastVerify, results: sandbox.lastVerify.results.map((check) => ({ ...check, status: "unknown", evidence: "none", detail: `Last contact lost. Previous result at ${sandbox.lastVerify!.at}: ${check.detail}` })) } })) })
+  lastVerify: sandbox.lastVerify && { ...sandbox.lastVerify, results: sandbox.lastVerify.results.map((check) => ({ ...check, status: "unknown", evidence: "none", detail: `Last contact lost. ${check.detail}` })) } })) })
 
 type Peer = Pick<HttpPeer, "call" | "close">
 // How the primary reaches another machine: a buffered call, a stream, and SSH's own word for the account and host key.

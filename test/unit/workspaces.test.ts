@@ -103,6 +103,9 @@ mac("workspace copy, verify, pipes, stop and confirmed remove preserve the origi
     const made = await workspaces.create({ name: "render", copy: source })
     await chmod(join(source, "bin"), 0o755)
     expect(made.ok).toBe(true)
+    // The checks just measured are current; the stored copy in the view is history.
+    expect(made.checks.some((check) => check.status === "pass")).toBe(true)
+    expect(made.workspace.lastVerify!.results.every((check) => check.status === "unknown" && check.evidence === "none" && check.detail.startsWith(`Measured ${made.workspace.lastVerify!.at}: `))).toBe(true)
     const work = join(made.workspace.folder, "work")
     const tool = await stat(join(work, "bin/tool")); expect(tool.mode & 0o7777).toBe(0o755); expect(tool.mtime.getTime()).toBe(old.getTime())
     const bin = await stat(join(work, "bin")); expect(bin.mode & 0o7777).toBe(0o555); expect(bin.mtime.getTime()).toBe(older.getTime())

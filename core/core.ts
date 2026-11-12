@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
 import type { Server } from "node:net"
-import { blockers, CHECKLIST, complete, failures, titleOf } from "./checks"
+import { blockers, CHECKLIST, complete, failures, historical, titleOf } from "./checks"
 import { fieldValues, loadExtensions, runCommand } from "./extensions"
 import { boundPort, LEASE_TTL_MS, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
 import { OUTPUT_LIMIT } from "./run"
@@ -75,8 +75,7 @@ export class Core {
       if (status === "stopped" && !stopReason) stopReason = await this.provider(manifest).stoppedWhy(manifest)
     } catch (error) { if (error instanceof PaddockError && error.code === "conflict") stopReason = error.message }
     return { name: manifest.name, machineId: this.machineId, sandboxId: manifest.id, status, engine: manifest.engine.label, spec: manifest.spec, createdAt: manifest.createdAt, capabilities: manifest.engine.capabilities,
-      lastVerify: manifest.lastVerify && { at: manifest.lastVerify.at, results: manifest.lastVerify.results.map((check) => ({ ...check, status: "unknown", evidence: "none",
-        detail: `Historical only. Measured at ${manifest.lastVerify!.at}: ${check.status} (${check.evidence}). ${check.detail} Current property unknown; run paddock verify ${manifest.name} for a new measurement.` })) },
+      lastVerify: historical(manifest.lastVerify),
       enforcementProblem: this.enforcementProblems.get(manifest.name) ?? manifest.enforcementProblem,
       stopReason, activity: this.activity.get(manifest.name), template: manifest.template }
   }

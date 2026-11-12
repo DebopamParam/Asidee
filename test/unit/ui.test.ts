@@ -2,14 +2,15 @@ import { expect, test } from "bun:test"
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { Window } from "happy-dom"
-import { CHECKLIST } from "../../core/checks"
+import { CHECKLIST, historical } from "../../core/checks"
+import type { CheckResult } from "../../core/types"
 
 // Runs the dashboard's own script against a DOM, with the daemon's API replaced by canned replies. It checks what the
-// page does, not how it looks.
+// page does, not how it looks. Stored checks are shaped as the core returns them.
 const check = (id: string, status: string, detail: string) => ({ id, status, evidence: "probed", detail })
 const sandbox = (over: object = {}) => ({
   name: "demo", status: "running", engine: "Fake engine", createdAt: "", spec: { name: "demo", image: "x", cpus: 2, memoryGb: 4, pids: 4096, diskGb: 20 },
-  lastVerify: { at: "2026-11-10T10:00:00Z", results: [check("kernel", "pass", "gVisor answers."), check("net-host", "fail", "A connection reached the host."), check("disk", "weak", "Watched, not capped.")] },
+  lastVerify: historical({ at: "2026-11-10T10:00:00Z", results: [check("kernel", "pass", "gVisor answers."), check("net-host", "fail", "A connection reached the host."), check("disk", "weak", "Watched, not capped.")] as CheckResult[] }),
   ...over,
 })
 const extension = { id: "tools", name: "Tools", actions: [{ id: "install", label: "Install thing", scope: "sandbox", run: ["./x"], fields: [{ id: "version", label: "Version", type: "text", default: "latest" }, { id: "force", label: "Force", type: "checkbox" }] }] }
@@ -63,10 +64,11 @@ test("past checks disclose the time even when collapsed and never show historica
   expect(ui.text("#sandboxes")).toContain("Last measured 2026-11-10T10:00:00Z. Historical only; current checks unknown.")
   ui.button("Past checks").click(); await ui.settle()
   const checks = ui.text("ul.checks")
-  expect(checks).toContain("?Cannot reach the host — current property unknownPrevious fail (probed). A connection reached the host.")
-  expect(checks).toContain("Previous weak (probed). Watched, not capped.")
-  expect(checks).toContain("Previous pass (probed). gVisor answers.")
-  expect(checks).not.toContain("✓")
+  expect(checks).toContain("?Cannot reach the host — current property unknownMeasured 2026-11-10T10:00:00Z: fail (probed). A connection reached the host.")
+  expect(checks).toContain("Measured 2026-11-10T10:00:00Z: weak (probed). Watched, not capped.")
+  expect(checks).toContain("Measured 2026-11-10T10:00:00Z: pass (probed). gVisor answers.")
+  for (const repeated of ["Measured", "(probed)"]) expect(checks.split(repeated).length - 1).toBe(3)
+  expect(checks).not.toContain("✓"); expect(checks).not.toContain("Previous")
 })
 
 test("verify, stop and remove call the API; remove sends the typed name as the confirmation", async () => {

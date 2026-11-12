@@ -68,8 +68,7 @@ test("stored verification is dated history with current properties unknown acros
     const saved = (await instance.get("demo")).lastVerify!
     expect(saved.at).toBe(measured)
     expect(saved.results.every((check) => check.status === "unknown" && check.evidence === "none")).toBe(true)
-    expect(saved.results[0]!.detail).toContain(`Measured at ${measured}`)
-    expect(saved.results[0]!.detail).toContain("Historical")
+    expect(saved.results[0]!.detail).toStartWith(`Measured ${measured}: pass (`)
   }
   await historical()
   state.starts++; await historical()

@@ -34,6 +34,12 @@ export function complete(results: readonly CheckResult[], stages: readonly Stage
 // What stops a sandbox from running. A failed or unsupported blocking check always does. One that could not be checked does too when
 // it only needs the engine's configuration or a running sandbox; a probe that could not run (no helper image, a control
 // that did not answer) is shown as unknown and does not block.
+// A stored verification is history, never a current result: each check comes back unknown with no current evidence,
+// and what was measured, when, reads once in its detail.
+export function historical(verify: { at: string; results: readonly CheckResult[] } | undefined): { at: string; results: CheckResult[] } | undefined {
+  return verify && { at: verify.at, results: verify.results.map((check) => ({ ...check, status: "unknown", evidence: "none", detail: `Measured ${verify.at}: ${check.status} (${check.evidence}). ${check.detail}` })) }
+}
+
 export function blockers(results: readonly CheckResult[], checklist = CHECKLIST): CheckResult[] {
   return results.filter((result) => {
     const item = checklist.find((entry) => entry.id === result.id)

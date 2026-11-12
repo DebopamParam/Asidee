@@ -52,9 +52,11 @@ is waived for it. A future microVM provider needs reviewed evidence or an explic
 reports the configuration checks only and marks the rest as not checked.
 
 Verification results are measurements at the recorded `at` time, not continuing guarantees. Create and verify return
-their newly measured checks. Every stored `lastVerify` returned by list/get, including after create/start/stop/resize,
-is historical: its results have current status `unknown` and no current evidence, with the original time, status,
-evidence and detail in the description. The CLI and dashboard label this even with the checklist collapsed. The saved
+their newly measured checks. Every stored `lastVerify` returned by list/get, for sandboxes and workspaces, including
+after create/start/stop/resize, is historical (`historical` in `core/checks.ts`): its results have current status
+`unknown` and no current evidence, and the detail reads `Measured <at>: <status> (<evidence>). <detail>`. The dashboard
+shows that detail as it is, under the check's title and "current property unknown"; a remote sandbox whose host stopped
+answering adds "Last contact lost." in front. The CLI and dashboard label this even with the checklist collapsed. The saved
 manifest retains the original measurement. This deliberately conservative rule also covers an engine restart with
 live restore, engine replacement/reconfiguration and a daemon restart without pretending that container start time
 alone proves continuity. Use verify for a new measurement; even a recent historical pass is not a claim about now.

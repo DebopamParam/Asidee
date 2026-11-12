@@ -138,7 +138,7 @@ function render() {
       panel.append(el("ul", { class: "checks" }, ...sandbox.lastVerify.results.map((check) => el("li", { class: "unknown" },
         el("span", { class: "mark", title: "unknown" }, MARK.unknown),
         el("span", {}, title(check.id), el("span", { class: "muted" }, " — current property unknown")),
-        el("span", { class: "detail" }, `${check.status === "unknown" ? "" : `Previous ${check.status} (${check.evidence}). `}${check.detail}`))),
+        el("span", { class: "detail" }, check.detail))),
         el("li", { class: "muted" }, el("span"), `Checked ${new Date(sandbox.lastVerify.at).toLocaleString()}.`)))
     }
     list.append(panel)

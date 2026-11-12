@@ -3,7 +3,7 @@ import { chmod, lstat, lutimes, mkdir, mkdtemp, readdir, readFile, realpath, ren
 import { createServer } from "node:net"
 import { userInfo } from "node:os"
 import { dirname, isAbsolute, join, resolve } from "node:path"
-import { blockers, complete, WORKSPACE_CHECKLIST } from "./checks"
+import { blockers, complete, historical, WORKSPACE_CHECKLIST } from "./checks"
 import { claudeState, credentialFiles, profileName, readCredential, type Host } from "./credentials"
 import { must, systemRunner } from "./run"
 import type { Dirs } from "./state"
@@ -151,7 +151,7 @@ export class Workspaces {
     const size = withSize ? await this.runHost(["/usr/bin/du", "-sk", manifest.folder], { timeoutMs: 10_000 }) : undefined
     const kb = size?.exitCode === 0 ? Number(size.stdout.trim().split(/\s/)[0]) : NaN
     return { kind: "workspace", name: manifest.name, folder: manifest.folder, status: processes === undefined ? "unknown" : processes ? "running" : "idle", processes,
-      ...(Number.isFinite(kb) ? { sizeBytes: kb * 1024 } : {}), spec: manifest.spec, createdAt: manifest.createdAt, lastVerify: manifest.lastVerify, disclosure: WORKSPACE_DISCLOSURE, problem }
+      ...(Number.isFinite(kb) ? { sizeBytes: kb * 1024 } : {}), spec: manifest.spec, createdAt: manifest.createdAt, lastVerify: historical(manifest.lastVerify), disclosure: WORKSPACE_DISCLOSURE, problem }
   }
   private async inventory(withSize: boolean): Promise<WorkspaceView[]> {
     await this.locations()
