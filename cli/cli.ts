@@ -82,7 +82,7 @@ function planLines(plan: HostPlan): string[] {
     `  Docker inside sandboxes: ${runtime.innerDocker ? "offered (--docker)" : "not offered (enroll with --docker to offer it)"}`,
     `  Disk limit: ${shown(plan.options.diskPolicy)}`,
     "",
-    plan.steps.length ? `Privileged commands (${plan.steps.length}), run in this order${plan.authentication.length ? ` after \`${plan.authentication.join(" ")}\` asks for the password once` : ""}:` : "Privileged commands: none.",
+    plan.steps.length ? `Privileged commands (${plan.steps.length}), run in this order. ${plan.authentication.length ? `Interactive apply may ask for a password with \`${plan.authentication.join(" ")}\`; --accept-plan never prompts and requires noninteractive sudo.` : "No authentication prompt."}` : "Privileged commands: none.",
   ]
   plan.steps.forEach((step, index) => lines.push(
     `  ${index + 1}. ${shown(step.label)}`, `       ${shown(step.argv.map(word).join(" "))}`, `       leaves: ${list(step.leaves) || "nothing"}`))

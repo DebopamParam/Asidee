@@ -94,6 +94,8 @@ test("an enrollment plan is shown as every command, file, download and restart, 
     `Helper image ${plan.verification.helperImage}, built on the destination from this Dockerfile:`, ...plan.verification.helperDockerfile.trim().split("\n").map((line) => `    ${line}`),
   ]) expect(out).toContain(text)
   expect(out).not.toContain("Blockers")
+  expect(out).toContain("Interactive apply may ask for a password with `sudo -v`")
+  expect(out).toContain("--accept-plan never prompts and requires noninteractive sudo")
   expect(out + err).not.toMatch(/[\x1b\x9b\u202e]/)
   // The line a forged check mark would have started is still one line of the diff.
   expect(out.split("\n").filter((line) => line.includes("forged")).every((line) => /^(    [ +-]|  Machine:|Docker restart:|  - )/.test(line))).toBe(true)
@@ -106,11 +108,15 @@ test("an enrollment plan is shown as every command, file, download and restart, 
   probe.files["/usr/local/bin/paddock"] = { kind: "link", uid: 0, mode: 0o777, target: "/usr/bin/other" }
   const blocked = await paddock(...args, "--accept-plan", "0".repeat(64))
   expect(blocked.code).toBe(4)
+  expect(blocked.out).not.toContain("asks for the password once")
   expect(blocked.out).toContain("Blockers (1); nothing is installed while one remains:\n  ✗ /usr/local/bin/paddock is unrelated")
   // --json is the whole plan and nothing else.
   const json = JSON.parse((await paddock("--json", ...args)).out)
   expect(json.data.hash).toMatch(/^[a-f0-9]{64}$/)
   expect(json.data.destination.machine).toBe(`m${ESC}`)
+  const never = await paddock(...args, "--sudo", "never")
+  expect(never.out).toContain("Privileged commands: none.")
+  expect(never.out).not.toContain("asks for the password")
 }, 30_000)
 
 test("transport stdio hands SSH every byte the daemon sent before it exits, even to a slow reader", async () => {

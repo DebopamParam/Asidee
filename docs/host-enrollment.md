@@ -73,7 +73,9 @@ dist/paddock host add build --ssh alice@linux --artifact "$PWD/dist/paddock-linu
 ```
 
 Automation needs noninteractive sudo for the declared operations. `--json` always prints a plan and applies nothing,
-even with `--accept-plan`. A changed file, artifact, machine identity, package recipe or container inventory invalidates
+even with `--accept-plan`. The text plan distinguishes interactive authentication from `--accept-plan`, which never
+prompts. `--sudo never` plans no privileged commands or authentication.
+A changed file, artifact, machine identity, package recipe or container inventory invalidates
 consent. Apply probes again after delivery and terminal authentication, before the first installation step. Review the
 revised plan and use its new hash. A plan is held by the primary daemon; restarting that daemon expires its stored plans.
 
