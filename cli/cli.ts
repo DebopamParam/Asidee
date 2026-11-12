@@ -256,8 +256,9 @@ const displayName = (name: string) => shown(selectedHost && selectedHost !== "lo
 
 // Waits for the output to be written before exiting: into a pipe, an exit right after a write loses what did not fit.
 async function printRun(output: RunResult, asJson = false): Promise<never> {
-  if (asJson) await Bun.write(Bun.stdout, `${JSON.stringify({ ok: true, data: output })}\n`)
-  else { await Bun.write(Bun.stdout, output.stdout); await Bun.write(Bun.stderr, output.stderr) }
+  const write = (stream: NodeJS.WriteStream, text: string) => new Promise<void>((resolve, reject) => stream.write(text, (error) => error ? reject(error) : resolve()))
+  await write(process.stdout, asJson ? `${JSON.stringify({ ok: true, data: output })}\n` : output.stdout)
+  if (!asJson) await write(process.stderr, output.stderr)
   process.exit(output.exitCode)
 }
 

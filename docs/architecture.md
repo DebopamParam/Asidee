@@ -210,6 +210,12 @@ S03: a shell saw this terminal's size and a resize, Ctrl-C ended a `sleep` insid
 a session ended within a second of `paddock stop`. S06: a reader asleep for longer than the whole transfer takes held
 the command in the sandbox back.
 
+Buffered exec and extension output use process stream writes and wait for completion before exiting, preserving an
+inherited regular file descriptor's current offset on stdout and stderr, including JSON output. Unit fixtures compare
+the complete redirected files, with text written before and after the CLI, for source and compiled sandbox/workspace
+exec. The reported `Bun.write` truncation did not reproduce with the project shell's Bun 1.4.2 in either mode; those
+tests passed before this defensive change too. The tester's runtime-specific cause remains unverified.
+
 ### Forwards
 
 `paddock forward add NAME --port P` makes the daemon listen on 127.0.0.1, once, at `--local-port` or a port the

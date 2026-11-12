@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test"
 import { statSync } from "node:fs"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -15,9 +15,9 @@ const ESC = "\x1b[2J\x1b[H✓ forged\x9b31m‮"
 
 // A daemon that answers as this build (so the CLI uses it) with text another machine chose. A reply that is a function
 // is given the request's body.
-async function daemon(replies: Record<string, unknown>) {
+async function daemon(replies: Record<string, unknown>, binary?: string) {
   const state = await mkdtemp(join(tmpdir(), "pdk-cli-"))
-  const build = `${VERSION}+${Math.round(statSync(CLI).mtimeMs)}`
+  const build = `${VERSION}+${Math.round(statSync(binary ?? CLI).mtimeMs)}`
   const server = Bun.serve({ unix: socketPath({ state, config: state }), fetch: async (request) => {
     const method = new URL(request.url).pathname.slice(5)
     if (method === "version") return Response.json({ ok: true, data: { version: VERSION, build } })
@@ -26,12 +26,34 @@ async function daemon(replies: Record<string, unknown>) {
   } })
   cleanups.push(async () => { server.stop(true); await rm(state, { recursive: true, force: true }) })
   // Asynchronous, so this process keeps answering while the CLI runs.
-  return async (...args: string[]) => {
-    const run = Bun.spawn([process.execPath, CLI, ...args], { env: { ...process.env, PADDOCK_STATE_DIR: state, PADDOCK_CONFIG_DIR: state }, stdout: "pipe", stderr: "pipe" })
+  const env = { ...process.env, PADDOCK_STATE_DIR: state, PADDOCK_CONFIG_DIR: state }
+  return Object.assign(async (...args: string[]) => {
+    const run = Bun.spawn([...(binary ? [binary] : [process.execPath, CLI]), ...args], { env, stdout: "pipe", stderr: "pipe" })
     const [out, err, code] = await Promise.all([new Response(run.stdout).text(), new Response(run.stderr).text(), run.exited])
     return { code, out, err }
-  }
+  }, { env })
 }
+
+test("buffered exec and JSON preserve inherited file offsets on both output streams", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pdk-output-")); cleanups.push(() => rm(root, { recursive: true, force: true }))
+  const binary = join(root, "paddock")
+  const build = Bun.spawn([process.execPath, "build", "--compile", "--minify", CLI, "--outfile", binary], { stdout: "pipe", stderr: "pipe" })
+  expect(await build.exited).toBe(0)
+  const result = { exitCode: 0, stdout: `Xé\u0000${"x".repeat(100_000)}\n`, stderr: "Eé\n" }
+  for (const executable of [undefined, binary]) {
+    const paddock = await daemon({ exec: { ok: true, data: result }, workspaceExec: { ok: true, data: result } }, executable)
+    for (const workspace of [false, true]) for (const json of [false, true]) {
+      const out = join(root, "out"); const err = join(root, "err")
+      const script = 'task_out=$1; task_err=$2; shift 2; { printf b1; printf e1 >&2; "$@"; printf b2; printf e2 >&2; } > "$task_out" 2> "$task_err"'
+      const args = [...(json ? ["--json"] : []), ...(workspace ? ["workspace"] : []), "exec", "demo", "--", "/bin/echo", "X"]
+      const child = Bun.spawn(["/bin/sh", "-c", script, "sh", out, err, ...(executable ? [executable] : [process.execPath, CLI]), ...args], { env: paddock.env, stdout: "pipe", stderr: "pipe" })
+      expect(await child.exited).toBe(0)
+      expect(await readFile(out)).toEqual(Buffer.from(`b1${json ? `${JSON.stringify({ ok: true, data: result })}\n` : result.stdout}b2`))
+      const disclosure = workspace && !json ? "Workspace, not a sandbox. Network and loopback open; no resource limits.\n" : ""
+      expect(await readFile(err)).toEqual(Buffer.from(`e1${disclosure}${json ? "" : result.stderr}e2`))
+    }
+  }
+}, 20_000)
 
 test("text from a daemon reaches the terminal without control characters", async () => {
   const machineId = "d".repeat(32)
