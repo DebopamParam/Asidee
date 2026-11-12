@@ -7,7 +7,7 @@ import { boundPort, LEASE_RENEW_MS, LEASE_TTL_MS, listenLoopback, relay, validPo
 import { validName, validSpec, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
 import { addInclude, alias, editorKey, included, includeLine, parseSshSetup, remoteAliases, updateRemoteAlias, userConfig } from "./ssh"
-import { absolutePath, bounded, HttpPeer, KILL_GRACE_MS, MUTATION_DEADLINE_MS, object, PROTOCOL, RemoteSession, sshDestination, sshIdentity, type Endpoint } from "./transport"
+import { absolutePath, bounded, checkHostKey, HttpPeer, KILL_GRACE_MS, MUTATION_DEADLINE_MS, object, PROTOCOL, RemoteSession, sshDestination, sshIdentity, type Endpoint } from "./transport"
 import { PaddockError, type CheckResult } from "./types"
 
 export const CATALOG = {
@@ -414,9 +414,10 @@ export class Machines {
       const name = hostName(body.name); const registry = await readHosts(this.dirs)
       if ([...registry.hosts, ...registry.unknown].some((host) => host.name === name)) throw new PaddockError("conflict", `${name} is already registered. Remove it explicitly before enrolling another machine.`)
       const endpoint = { ssh: sshDestination(body.ssh), binary: absolutePath(body.binary), stateDir: absolutePath(body.stateDir) }
-      const hello = await this.peer(endpoint, async (_peer, hello) => hello)
-      if (hello.machineId === this.hello.machineId || [...registry.hosts, ...registry.unknown].some((host) => host.machineId === hello.machineId)) throw new PaddockError("conflict", "This machine identity is already registered.")
       const ssh = await this.io.sshIdentity(endpoint)
+      if (typeof body.hostKey === "string") checkHostKey({ ...endpoint, hostKey: body.hostKey }, ssh.hostKey)
+      const hello = await this.peer({ ...endpoint, hostKey: ssh.hostKey }, async (_peer, hello) => hello)
+      if (hello.machineId === this.hello.machineId || [...registry.hosts, ...registry.unknown].some((host) => host.machineId === hello.machineId)) throw new PaddockError("conflict", "This machine identity is already registered.")
       const host: HostRecord = { name, ...endpoint, machineId: hello.machineId, addedAt: new Date().toISOString(), diskPolicy: "watched", service: body.service === "systemd" ? "systemd" : "prepared", sshUser: ssh.user, hostKey: ssh.hostKey }
       beforeWrite?.()
       await writeHosts(this.dirs, [...registry.entries, host]); return host

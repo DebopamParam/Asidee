@@ -38,32 +38,52 @@ export const sshArgv = (destination: string, command: readonly string[]) => ["ss
   "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ClearAllForwardings=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none",
   "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3", sshDestination(destination), command.map(shellQuote).join(" ")]
 
-export type Endpoint = { ssh: string; binary: string; stateDir: string }
+export type Endpoint = { ssh: string; binary: string; stateDir: string; hostKey?: string }
 export function transportCommand(host: Endpoint, stream = false): string[] {
   return ["/usr/bin/env", `PADDOCK_STATE_DIR=${absolutePath(host.stateDir)}`, absolutePath(host.binary), "transport", "stdio", "--protocol", String(PROTOCOL), ...(stream ? ["--stream"] : [])]
 }
 
 // One isolated SSH process per connection. stderr is diagnostic only and never mixed with protocol bytes.
 export function sshConnection(host: Endpoint, stream = false) {
-  const child = spawn("ssh", sshArgv(host.ssh, transportCommand(host, stream)).slice(1), { stdio: ["pipe", "pipe", "pipe"] })
+  const args = sshArgv(host.ssh, transportCommand(host, stream)).slice(1)
+  const child = spawn("ssh", [...(host.hostKey ? ["-v"] : []), ...args], { stdio: ["pipe", "pipe", "pipe"] })
   const wire = new Duplex({ read() { child.stdout.resume() }, write(chunk, _encoding, done) { child.stdin.write(chunk, done) }, final(done) { child.stdin.end(done) } })
   child.stdout.on("data", (chunk: Buffer) => { if (!wire.push(chunk)) child.stdout.pause() })
   child.stdout.on("end", () => wire.push(null))
   child.stdin.on("error", (error) => wire.destroy(error))
   let diagnostic = ""
-  child.stderr.on("data", (bytes: Buffer) => { if (diagnostic.length < 4000) diagnostic += bytes.toString().slice(0, 4000 - diagnostic.length) })
+  let accepted = !host.hostKey; let pending = ""; let fingerprint: string | undefined
+  let accept = () => {}; let reject = (_error: Error) => {}
+  const ready = new Promise<void>((resolve, fail) => { accept = resolve; reject = fail; if (accepted) resolve() })
+  void ready.catch(() => {})
+  const timer = setTimeout(() => reject(new PaddockError("identity-changed", `SSH could not verify the enrolled host key for ${host.ssh}. ${hostKeyHelp(host.ssh)} Remove the host record and re-enroll deliberately after checking the destination.`)), 10_000)
+  void ready.then(() => clearTimeout(timer), () => { clearTimeout(timer); child.kill() })
+  child.stderr.on("data", (bytes: Buffer) => {
+    if (diagnostic.length < 4000) diagnostic += bytes.toString().slice(0, 4000 - diagnostic.length)
+    if (accepted) return
+    pending += bytes.toString()
+    let end: number
+    while ((end = pending.indexOf("\n")) >= 0) {
+      const line = pending.slice(0, end); pending = pending.slice(end + 1)
+      fingerprint = serverHostKey(line) ?? fingerprint
+      // ProxyJump prints the jump's key first. The destination sends the fixed command only after its own handshake.
+      if (!line.startsWith("debug1: Sending command:")) continue
+      try { checkHostKey(host, fingerprint); accepted = true; accept() } catch (error) { reject(error as Error) }
+    }
+    if (pending.length > 4000) pending = pending.slice(-4000)
+  })
   child.on("error", (error) => wire.destroy(error))
   let done = false
   // ssh can be gone while its last output still waits behind a slow reader: the wire closes once that is read.
-  const exited = new Promise<void>((resolve) => child.once("close", () => { done = true; if (wire.readableEnded) wire.destroy(); else wire.once("end", () => wire.destroy()); resolve() }))
+  const exited = new Promise<void>((resolve) => child.once("close", () => { done = true; if (!accepted) reject(new PaddockError("identity-changed", `SSH did not verify the enrolled host key for ${host.ssh}. Remove the host record and re-enroll deliberately after checking the destination.`)); if (wire.readableEnded) wire.destroy(); else wire.once("end", () => wire.destroy()); resolve() }))
   wire.on("error", () => {})
   const settled = (ms: number) => bounded(exited, ms).then(() => done)
-  return { wire, pid: child.pid, diagnostic: () => diagnostic.trim(), async close() {
+  return { wire, ready, pid: child.pid, diagnostic: () => diagnostic.trim(), async close() {
     wire.destroy(); child.kill()
     if (!await settled(KILL_GRACE_MS)) { child.kill("SIGKILL"); await settled(KILL_GRACE_MS) }
   } }
 }
-export type Connection = Pick<ReturnType<typeof sshConnection>, "wire" | "diagnostic" | "close"> & { pid?: number }
+export type Connection = Pick<ReturnType<typeof sshConnection>, "wire" | "diagnostic" | "close"> & { pid?: number; ready?: Promise<void> }
 
 class RemoteFailure extends PaddockError {}
 export function parseReply(value: unknown): unknown {
@@ -91,6 +111,7 @@ export class HttpPeer {
   async call(method: string, body: object = {}, options: { timeoutMs?: number; mutation?: boolean; machineId?: string; version?: string; build?: string } = {}): Promise<unknown> {
     let dispatched = false; let settle = () => {}
     try {
+      await this.connection.ready
       const value = await new Promise<unknown>((resolve, reject) => {
         const bytes = Buffer.from(JSON.stringify(body))
         const req = request({ host: "paddock", path: `/api/${method}`, method: "POST", agent: this.agent, headers: { "content-type": "application/json", "content-length": bytes.length,
@@ -126,6 +147,10 @@ export class HttpPeer {
 // last (measured with OpenSSH 10.3 and ProxyJump), so the last line is the one that names the destination.
 export function serverHostKey(log: string): string | undefined {
   return [...log.matchAll(/Server host key: \S+ (SHA256:[A-Za-z0-9+/]{43})/g)].at(-1)?.[1]
+}
+
+export function checkHostKey(host: Endpoint, fingerprint: string | undefined): void {
+  if (host.hostKey && fingerprint !== host.hostKey) throw new PaddockError("identity-changed", `The SSH host key for ${host.ssh} ${fingerprint ? `changed from ${host.hostKey} to ${fingerprint}` : "could not be checked against its enrollment"}. Nothing was sent to its sandboxes. Check the destination, remove its host record with \`paddock host remove NAME --confirm NAME\`, then re-enroll deliberately with \`paddock host add\` or \`paddock host attach\`.`)
 }
 // What to check when ssh named no host key. Paddock's own connections never share a multiplexed one (ControlPath=none),
 // so an open master connection is not the cause.
@@ -197,7 +222,9 @@ export class RemoteSession extends EventEmitter implements Session {
       } catch (error) { const failure = error instanceof PaddockError ? error : new PaddockError("incompatible", "Malformed remote stream."); this.opened(failure); this.finish({ error: failure.message }) }
     })
     this.timer = setTimeout(() => { this.opened(new PaddockError("offline", "The remote stream did not become ready in 10 seconds.")); this.finish({ error: "The remote stream timed out." }) }, 10_000)
-    wire.write(frame("open", request))
+    void Promise.resolve(this.connection.ready).then(() => { if (!this.done) wire.write(frame("open", request)) }, (error) => {
+      this.opened(error); this.finish({ error: error.message })
+    })
   }
   static async open(host: Endpoint, request: OpenRequest, connection?: Connection): Promise<RemoteSession> {
     const session = new RemoteSession(host, request, connection)

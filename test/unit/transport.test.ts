@@ -9,6 +9,28 @@ import { HttpPeer, MAX_REPLY, RemoteSession, sshConnection } from "../../core/tr
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanups.splice(0)) await close() })
 const host = { ssh: "unused", binary: "/unused", stateDir: "/unused" }
+
+test("recorded SSH host keys are checked on each connection before requests or stream opens", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pdk-pin-")); const path = process.env.PATH
+  const key = `SHA256:${"A".repeat(43)}`
+  await writeFile(join(root, "ssh"), `#!/bin/sh
+printf 'debug1: Server host key: ssh-ed25519 SHA256:${"J".repeat(43)}\\n' >&2
+printf 'debug1: Server host key: ssh-ed25519 ${key}\\ndebug1: Sending command: transport\\n' >&2
+printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 26\\r\\n\\r\\n{"ok":true,"data":"wrong"}'
+cat > '${root}/sent'
+`)
+  await chmod(join(root, "ssh"), 0o755)
+  process.env.PATH = `${root}:${path}`
+  cleanups.push(async () => { process.env.PATH = path; await rm(root, { recursive: true, force: true }) })
+  const pinned = { ...host, hostKey: `SHA256:${"B".repeat(43)}` }
+  const client = new HttpPeer(pinned)
+  try { await expect(client.call("stop", {}, { mutation: true, timeoutMs: 1000 })).rejects.toMatchObject({ code: "identity-changed" }) }
+  finally { await client.close() }
+  expect(await Bun.file(join(root, "sent")).text()).toBe("")
+  await expect(RemoteSession.open(pinned, { kind: "exec", name: "demo", argv: ["true"], tty: false })).rejects.toThrow("re-enroll")
+  const accepted = sshConnection({ ...host, hostKey: key })
+  try { await accepted.ready; expect(accepted.wire.destroyed).toBe(false) } finally { await accepted.close() }
+}, 10_000)
 async function peer(answer: (socket: Socket) => void) {
   const root = await mkdtemp(join(tmpdir(), "pdk-wire-")); const path = join(root, "peer.sock")
   const sockets = new Set<Socket>()

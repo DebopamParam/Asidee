@@ -628,7 +628,7 @@ export class Hosts {
       }
 
       if (terminal?.closed) throw new PaddockError("outcome-unknown", "Enrollment terminal disconnected. Nothing was registered. Inspect the journal before retrying.")
-      const endpoint: Endpoint = { ssh: current.options.ssh, binary: current.binary, stateDir: current.stateDir }
+      const endpoint: Endpoint = { ssh: current.options.ssh, binary: current.binary, stateDir: current.stateDir, hostKey: current.destination.hostKey }
       terminal?.output(Buffer.from("\r\nVerifying the installed service and smoke sandbox.\r\n"))
       verifying = true
       await this.verify(endpoint, current, () => terminal?.closed ?? false)

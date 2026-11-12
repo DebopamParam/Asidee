@@ -376,6 +376,13 @@ listener and whether it runs under systemd. Removing a prepared host forgets its
 sessions and forwards; its remote installation and data are retained. `host add` installs a reviewed Linux system
 service as described below; remote uninstall remains an explicit manual operation.
 
+Every subsequent request and stream with a recorded host key compares OpenSSH's verbose destination fingerprint on
+that same SSH connection before sending operation bytes. A changed or unreadable key is refused, even if the user's
+known_hosts now trusts it. ProxyJump's intermediate keys do not replace the destination key. Check the destination,
+remove the record explicitly, and use host add/attach to re-enroll deliberately. Older records without a fingerprint
+still rely on OpenSSH's strict known_hosts check; re-attach them to record one. Unit fixtures cover this gate;
+changed-key behavior against a real remote machine has not been measured for this change.
+
 `hosts.json` must be `{version: 1, hosts: [...]}`; each record in it is then read on its own. A record this Paddock does
 not know (a future service kind or disk policy) or a damaged one is listed by `host
 list` and `list --all` as `unknown-record` with the reason, and routing to it is refused; the other hosts keep working.
