@@ -1,5 +1,6 @@
 export type Result = { exitCode: number; stdout: string; stderr: string }
 export type Runner = (argv: string[], stdin?: string) => Promise<Result>
+export { profileName } from "../../core/credentials"
 
 // Never include subprocess output or thrown spawn errors in diagnostics. Either can contain a credential.
 export const run: Runner = async (argv, stdin) => {
@@ -15,11 +16,6 @@ export function agentName(value: string): "claude" | "codex" {
   throw new Error("Choose claude or codex.")
 }
 export type Agent = ReturnType<typeof agentName>
-
-export function profileName(value: string): string {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(value)) throw new Error("Use 1–48 letters, digits, underscores or hyphens for a profile.")
-  return value
-}
 
 export function sandboxName(value: string): string {
   if (!/^[a-z0-9][a-z0-9-]{0,47}$/.test(value)) throw new Error("Give a sandbox name of lowercase letters, digits and hyphens.")

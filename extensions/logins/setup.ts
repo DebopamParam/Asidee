@@ -2,29 +2,16 @@ import { readFile, readdir, stat } from "node:fs/promises"
 import { join, relative } from "node:path"
 import { object, type Agent } from "./client"
 import { profileDirectory } from "./credentials"
+export { claudeState } from "../../core/credentials"
+import { claudeState } from "../../core/credentials"
 
 const ALLOW = {
   claude: { files: ["settings.json", "keybindings.json"], directories: ["agents", "commands", "skills", "output-styles", "hooks"] },
   codex: { files: ["config.toml"], directories: ["prompts", "skills"] },
 }
 const OMIT = new Set([".DS_Store", "node_modules", ".git", "__pycache__", "plugins", "history", "transcripts", "cache", "caches", "auth.json", ".credentials.json", ".mcp.json", ".ssh", ".aws", ".gnupg", ".env", "hosts.yml"])
-const STATE = ["hasCompletedOnboarding", "lastOnboardingVersion", "oauthAccount", "theme", "editorMode"]
 export type SetupFile = { path: string; data: string; mode: number }
 export type Setup = { hostHome: string; files: SetupFile[]; homeFiles: SetupFile[]; state: Record<string, unknown> }
-
-export async function claudeState(profile: string, home: string): Promise<Record<string, unknown>> {
-  const paths = [join(profileDirectory("claude", profile, home), ".claude.json"), ...(profile === "default" ? [join(home, ".claude.json")] : [])]
-  for (const path of paths) {
-    if (!(await stat(path).catch(() => undefined))?.isFile()) continue
-    try {
-      if ((await stat(path)).size > 1024 * 1024) throw new Error()
-      const parsed: unknown = JSON.parse(await readFile(path, "utf8"))
-      if (!object(parsed)) throw new Error()
-      return Object.fromEntries(STATE.filter((key) => Object.hasOwn(parsed, key)).map((key) => [key, parsed[key]]))
-    } catch { throw new Error("Claude account/setup state is invalid; contents withheld.") }
-  }
-  return {}
-}
 
 export function settingsCommands(value: unknown): string[] {
   if (!object(value)) return []
