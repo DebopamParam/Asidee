@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises"
 import { userInfo } from "node:os"
 import { dirname, join } from "node:path"
 import { blockers, complete, failures, WORKSPACE_CHECKLIST } from "../../core/checks"
@@ -101,4 +101,52 @@ mac("workspace copy, verify, pipes, stop and confirmed remove preserve the origi
     for (const workspace of await workspaces.list()) await workspaces.remove(workspace.name, workspace.name)
     await clean()
   }
+}, 30_000)
+
+mac("workspace PTY receives input and a resize, and returns the command's output", async () => {
+  const { workspaces, clean } = await fixture()
+  try {
+    await workspaces.create({ name: "terminal" })
+    const session = await workspaces.open("terminal", ["/bin/sh", "-c", 'read line; stty size; printf "reply:%s\\n" "$line"'], { tty: true, cols: 80, rows: 24 })
+    let output = ""; session.on("output", (_stream: string, bytes: Uint8Array) => { output += Buffer.from(bytes).toString() })
+    await session.resize(101, 37); session.resume(); session.write(Buffer.from("hello\n"))
+    await Promise.race([session.finished, Bun.sleep(5000).then(() => { session.close(); throw new Error("PTY did not complete") })])
+    expect(output).toContain("37 101"); expect(output).toContain("reply:hello")
+  } finally { for (const ws of await workspaces.list()) await workspaces.remove(ws.name, ws.name); await clean() }
+}, 15_000)
+
+mac("workspace file login copies are private, not hard links, and credential bytes never enter manifests", async () => {
+  const { root, env, workspaces, clean } = await fixture()
+  try {
+    const secret = "workspace-test-credential-never-in-manifest"
+    for (const [source, file] of [[env.CLAUDE_CONFIG_DIR, ".credentials.json"], [env.CODEX_HOME, "auth.json"]] as const) {
+      await mkdir(source); await writeFile(join(source, file), JSON.stringify({ invalidFixtureCredential: secret }))
+    }
+    const report = await workspaces.create({ name: "logins" }); const m = await workspaces.manifest("logins")
+    expect(m.logins.every((login) => login.copied)).toBe(true)
+    for (const [source, file, agent] of [[env.CLAUDE_CONFIG_DIR, ".credentials.json", "claude"], [env.CODEX_HOME, "auth.json", "codex"]] as const) {
+      const original = await stat(join(source, file)); const copied = await stat(join(report.workspace.folder, "home", `.${agent}`, file))
+      expect(copied.mode & 0o777).toBe(0o600); expect(copied.nlink).toBe(1); expect(copied.ino).not.toBe(original.ino)
+    }
+    expect(JSON.stringify(m)).not.toContain(secret)
+    expect(report.checks.find((check) => check.id === "credentials")?.detail).toContain("not verified")
+    await workspaces.remove("logins", "logins")
+    expect((await stat(join(env.CODEX_HOME, "auth.json"))).isFile()).toBe(true)
+  } finally { for (const ws of await workspaces.list()) await workspaces.remove(ws.name, ws.name); await clean() }
+}, 30_000)
+
+mac("stop recovers an unreadable or missing folder before identifying its own live process", async () => {
+  const { workspaces, clean } = await fixture()
+  try {
+    for (const mode of ["unreadable", "missing"]) {
+      const made = await workspaces.create({ name: mode })
+      const session = await workspaces.open(mode, ["/bin/sleep", "60"], { tty: false }); session.resume()
+      for (let i = 0; i < 100 && !belongs(session.pid, made.workspace.folder); i++) await Bun.sleep(10)
+      expect(belongs(session.pid, made.workspace.folder)).toBe(true)
+      if (mode === "unreadable") await chmod(made.workspace.folder, 0)
+      else await rm(made.workspace.folder, { recursive: true, force: true })
+      const stopped = await workspaces.stop(mode); expect(stopped.processes).toBe(0)
+      await session.finished; await workspaces.remove(mode, mode)
+    }
+  } finally { for (const ws of await workspaces.list()) await workspaces.remove(ws.name, ws.name); await clean() }
 }, 30_000)

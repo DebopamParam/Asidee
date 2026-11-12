@@ -41,6 +41,8 @@
   <div id="notice"></div>
   <h2>Sandboxes</h2>
   <div id="sandboxes"></div>
+  <h2>Workspaces: not sandboxes</h2>
+  <div id="workspaces"></div>
   <h2>New sandbox</h2>
   <form id="create" class="panel">
     <div class="fields">
@@ -105,10 +107,10 @@ function actionForm(sandbox, extension, action) {
   return form
 }
 
-let sandboxes = [], engines = [], drawn = ""
+let sandboxes = [], engines = [], workspaces = [], workspaceProblem = "", drawn = ""
 // Rebuilds the page only when what it shows changed, so the 5-second refresh does not wipe a form someone is typing in.
 function render() {
-  const state = JSON.stringify([sandboxes, engines, extensions, [...open], [...busy], output])
+  const state = JSON.stringify([sandboxes, engines, workspaces, workspaceProblem, extensions, [...open], [...busy], output])
   if (state === drawn) return
   drawn = state
   const list = document.getElementById("sandboxes"); list.replaceChildren()
@@ -140,6 +142,13 @@ function render() {
     }
     list.append(panel)
   }
+  const workspaceList = document.getElementById("workspaces"); workspaceList.replaceChildren()
+  for (const workspace of workspaces) workspaceList.append(el("div", { class: "panel" },
+    el("div", {}, el("span", { class: "name" }, workspace.name), `: workspace, not a sandbox; ${workspace.status}, ${workspace.processes ?? "unknown"} processes`),
+    el("div", { class: "muted" }, workspace.folder), workspace.problem ? el("div", { class: "error" }, workspace.problem) : null,
+    el("div", { class: "muted" }, workspace.disclosure), el("div", { class: "muted" }, "Use paddock workspace in the CLI to stop, verify or remove. Workspace methods are socket-only.")))
+  if (workspaceProblem) workspaceList.append(el("div", { class: "panel error" }, `Workspaces unknown: ${workspaceProblem}`))
+  else if (!workspaces.length) workspaceList.append(el("div", { class: "panel muted" }, "No workspaces. A workspace is not a sandbox."))
   const enginesNode = document.getElementById("engines"); enginesNode.replaceChildren()
   for (const engine of engines) enginesNode.append(el("div", { class: "panel" },
     el("div", {}, el("span", { class: "name" }, engine.label), " ", el("span", { class: `badge ${engine.ready ? "running" : ""}` }, engine.ready ? "ready" : "not ready")),
@@ -155,6 +164,7 @@ function render() {
 async function refresh() {
   try {
     sandboxes = await api("list"); document.getElementById("notice").replaceChildren()
+    try { workspaces = (await api("summary")).workspaces ?? []; workspaceProblem = "" } catch (error) { workspaces = []; workspaceProblem = error.message }
   } catch (error) {
     document.getElementById("notice").replaceChildren(el("div", { class: "panel error" }, token ? error.message : "Open this page with the link that `paddock ui` prints."))
   }

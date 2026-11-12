@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import { constants } from "node:fs"
 import { chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises"
 import { userInfo } from "node:os"
@@ -115,8 +115,11 @@ export class Workspaces {
   private async names() { return (await readdir(join(this.dirs.state, "workspaces")).catch(() => [])).filter((file) => file.endsWith(".json")).map((file) => file.slice(0, -5)).sort() }
   private async restoreIdentity(manifest: WorkspaceManifest) {
     const { root } = await this.locations()
-    if (await canonical(root) !== root || await canonical(manifest.folder) !== manifest.folder) throw new PaddockError("check-failed", "A workspace path was replaced by a symlink; nothing was signalled or removed.")
+    if (await canonical(root) !== root) throw new PaddockError("check-failed", "A workspace parent was replaced by a symlink; nothing was signalled or removed.")
+    const folder = await lstat(manifest.folder).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; return undefined })
+    if (folder && !folder.isDirectory()) throw new PaddockError("check-failed", "The workspace folder was replaced by a symlink or another file; nothing was signalled or removed.")
     await mkdir(manifest.folder, { recursive: true, mode: 0o700 }); await chmod(manifest.folder, 0o700)
+    if (await realpath(manifest.folder) !== manifest.folder) throw new PaddockError("check-failed", "The workspace folder is no longer canonical.")
     const tag = await lstat(manifest.tag).catch(() => undefined)
     if (tag && (!tag.isFile() || tag.nlink !== 1)) throw new PaddockError("check-failed", "The workspace tag is not a private regular file.")
     if (!tag) await writeFile(manifest.tag, manifest.id, { flag: "wx", mode: 0o444 })
@@ -146,6 +149,17 @@ export class Workspaces {
       const filename = agent === "claude" ? ".credentials.json" : "auth.json"
       let copied = false
       let detail = agent === "claude" ? "No file login copied. Keychain secrets are not requested because access can prompt; Keychain login import is not covered." : "No regular file login found. OS credential stores are not queried."
+      if (agent === "claude") {
+        const hash = (path: string) => `Claude Code-credentials-${createHash("sha256").update(path).digest("hex").slice(0, 8)}`
+        const services = [...(source === join(manifest.home, ".claude") ? ["Claude Code-credentials"] : []), hash(source), hash(`${source}/`)]
+        let keychain = false
+        for (const service of services) {
+          // Attributes only. Never request -w, which can ask the user to unlock a password.
+          const metadata = await systemRunner(["/usr/bin/security", "find-generic-password", "-s", service], { timeoutMs: 5000 })
+          if (metadata.exitCode !== 44) { keychain = true; detail = metadata.exitCode === 0 ? "Claude Keychain login found by attributes only. Import stopped before reading its password because that can prompt. Login import is not working for this profile." : "Claude Keychain precedence could not be checked; no credential was copied and no password was requested."; break }
+        }
+        if (keychain) { manifest.logins.push({ agent, copied: false, detail }); continue }
+      }
       try {
         if (!(await lstat(source)).isDirectory() || await realpath(source) !== resolve(source)) throw new Error()
         const file = await open(join(source, filename), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
@@ -255,9 +269,8 @@ export class Workspaces {
         results[results.findIndex((result) => result.id === "writes")] = { id: "writes", status: "unknown", evidence: "probed", detail: "A live write control or kernel decision for home/shared temp could not be established." }
       const controls = (checks: Array<[string, number, string]>) => checks.every(([op, type, arg]) => decision(process.pid, op, type, arg) === 0)
       const refuses = (checks: Array<[string, number, string]>) => checks.every(([op, type, arg]) => decision(probe!.pid, op, type, arg) === 1)
-      const daemons: Array<[string, number, string]> = [["lsopen", 0, ""], ["job-creation", 0, ""], ["mach-lookup", 2, "com.apple.lsd.modifydb"], ["network-outbound", 1, "/private/var/run/docker.sock"], ["network-outbound", 1, "/nix/var/nix/daemon-socket/socket"]]
       // Socket connectivity is measured independently by K10; sandbox_check cannot model every network filter.
-      const launchChannels = daemons.slice(0, 3)
+      const launchChannels: Array<[string, number, string]> = [["lsopen", 0, ""], ["job-creation", 0, ""], ["mach-lookup", 2, "com.apple.lsd.modifydb"]]
       add("daemons", !controls(launchChannels) ? "unknown" : refuses(launchChannels) ? "pass" : "fail", "probed", "Kernel decisions refuse lsopen, job creation and LaunchServices registration. Unix sockets are denied by the inspected profile; end-to-end socket attempts are K10. Apple events are not covered.")
       const data: Array<[string, number, string]> = [["user-preference-read", 6, "com.apple.finder"], ["user-preference-write", 6, "com.apple.finder"], ["mach-lookup", 2, "com.apple.pasteboard.1"], ["signal", 0, ""], ["process-info-pidinfo", 0, ""]]
       add("user-data", !controls(data) ? "unknown" : refuses(data) ? "pass" : "fail", "probed", "Kernel decisions for preferences, pasteboard lookup, signals and process-info-pidinfo compared with this unconfined daemon. End-to-end coverage is K11/K12.")
@@ -285,6 +298,8 @@ export class Workspaces {
     add("credentials", "info", "inspected", loginDetails.join(" "))
     try { const links = await hardLinks(manifest.folder); add("hard-links", links.length ? "weak" : "info", "inspected", links.length ? `Multiple links, possibly shared outside: ${links.join(", ")}. Outside links cannot be located reliably.` : "No regular files with link count > 1 now. Paddock never copies with hard links.") }
     catch { add("hard-links", "unknown", "none", "Could not walk all workspace files.") }
+    const backup = await systemRunner(["/usr/bin/tmutil", "isexcluded", manifest.folder], { timeoutMs: 5000 })
+    manifest.backup = backup.exitCode === 0 && backup.stdout.includes("[Excluded]") ? "Time Machine reports this folder excluded now; existing backups are not removed." : "Time Machine exclusion could not be verified; backups may retain files."
     add("not-covered", "info", "none", `${WORKSPACE_DISCLOSURE} ${manifest.backup}`)
     const checks = complete(results, ["config", "runtime", "probe"], "This workspace check could not be made.", WORKSPACE_CHECKLIST)
     manifest.lastVerify = { at: new Date().toISOString(), results: checks }; await this.save(manifest)

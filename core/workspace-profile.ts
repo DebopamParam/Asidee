@@ -3,7 +3,7 @@ import { dirname, join } from "node:path"
 import type { WorkspaceManifest } from "./types"
 import base from "./workspace.sb" with { type: "text" }
 
-export const WORKSPACE_DISCLOSURE = "Workspace, not a sandbox. Same Mac kernel and user; no CPU, memory, disk, GPU or process limits. Internet, LAN, tailnet and loopback are open, including services started later. Reads outside home are open. Outside command lines are visible. Inner sandboxes may fail; Paddock passes no agent flags. Homebrew and nix daemon installs outside the folder are refused. Remote effects, unified logs and backups can survive removal. Apple events, TCC services, camera, microphone, Keychain additions, other IOKit devices, Bluetooth and Spotlight retention are not covered. Hard links placed from outside can share changes. Unnamed daemon channels are not covered."
+export const WORKSPACE_DISCLOSURE = "Workspace, not a sandbox. Same Mac kernel and user; no CPU, memory, disk, GPU or process limits. Use workspace shell/exec; entering the folder alone does not confine programs. Internet, LAN, tailnet and loopback are open, including services started later. Reads outside home are open. Outside command lines are visible. Inner sandboxes may fail; Paddock passes no agent flags. Homebrew and nix daemon installs outside the folder are refused. Remote effects, unified logs and backups can survive removal. Apple events, TCC services, camera, microphone, Keychain additions, other IOKit devices, Bluetooth and Spotlight retention are not covered. Hard links placed from outside can share changes. Unnamed daemon channels are not covered."
 
 export const within = (path: string, parent: string) => path === parent || path.startsWith(`${parent === "/" ? "" : parent}/`)
 

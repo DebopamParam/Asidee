@@ -5,7 +5,9 @@ import { connect } from "node:net"
 import { resolve, dirname, join } from "node:path"
 import { createInterface } from "node:readline/promises"
 import { parseArgs } from "node:util"
-import { CHECKLIST } from "../core/checks"
+import { CHECKLIST, WORKSPACE_CHECKLIST } from "../core/checks"
+import type { WorkspaceReport, WorkspaceView, WorkspaceRemoval } from "../core/workspaces"
+import { WORKSPACE_DISCLOSURE } from "../core/workspace-profile"
 import type { ResizeChange, SandboxView } from "../core/core"
 import { BUILD, readDaemonFile, runDaemon, VERSION } from "../core/daemon"
 import type { Extension } from "../core/extensions"
@@ -42,6 +44,11 @@ const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, 
   paddock ssh setup NAME [--write-config]   sshd inside, reached as NAME.paddock through the daemon, no port
   paddock ssh access NAME                   the alias, user and home an editor uses, and whether it is ready
   paddock remove NAME --confirm NAME
+  paddock workspace create NAME [--copy PATH] [--read PATH]… [--path DIR]…
+  paddock workspace shell NAME [-- COMMAND…]   workspace, not a sandbox; macOS only
+  paddock workspace exec NAME [--stdin | --stream] -- COMMAND…
+  paddock workspace list | stop NAME | verify NAME
+  paddock workspace remove NAME --confirm NAME
   paddock snapshot NAME --as TEMPLATE    save the sandbox's files, minus the usual logins, as a template
   paddock template list | template remove TEMPLATE [--engine ID]   sandboxes made from it keep working
   paddock ext list
@@ -182,7 +189,7 @@ async function session(request: OpenRequest | EnrollmentRequest): Promise<never>
   request = { ...request, host: selectedHost }
   await ensureDaemon()
   const socket = connect(streamSocketPath(dirs))
-  const raw = process.stdin.isTTY && (request.kind === "enroll" || request.kind === "exec" && request.tty)
+  const raw = process.stdin.isTTY && (request.kind === "enroll" || (request.kind === "exec" || request.kind === "workspace") && request.tty)
   let restored = !raw
   const restore = () => { if (!restored) { restored = true; try { process.stdin.setRawMode(false) } catch {} } }
   process.on("exit", restore)
@@ -233,9 +240,9 @@ async function session(request: OpenRequest | EnrollmentRequest): Promise<never>
 const APPLIES: Record<ResizeChange["applies"], string> = { now: "now", "next start": "at the next start", unchanged: "unchanged", "not enforced": "recorded, not enforced" }
 const LIMIT: Record<ResizeChange["limit"], string> = { cpus: "CPUs", memoryGb: "memory (GB)", pids: "task limit", diskGb: "disk (GB)" }
 const MARK: Record<CheckResult["status"], string> = { pass: "✓", weak: "~", fail: "✗", unsupported: "–", unknown: "?", info: "i" }
-function printChecks(checks: CheckResult[]): void {
+function printChecks(checks: CheckResult[], checklist = CHECKLIST): void {
   for (const check of checks) {
-    const item = CHECKLIST.find((entry) => entry.id === check.id)
+    const item = checklist.find((entry) => entry.id === check.id)
     console.log(`  ${MARK[check.status] ?? "?"} ${item?.title ?? shown(check.id)}${check.status === "pass" || check.status === "info" ? "" : ` [${shown(check.status)}]`}\n      ${shown(check.detail)}${check.evidence === "none" ? "" : ` (${shown(check.evidence)})`}`)
   }
   console.log("\n  ✓ holds   ~ holds in a weaker form   ✗ does not hold   – not available on this engine   ? could not be checked   i for your information")
@@ -275,6 +282,52 @@ async function main(argv: string[]): Promise<void> {
 
   try {
     switch (command) {
+      case "workspace": {
+        if (selectedHost && selectedHost !== "local") throw new PaddockError("usage", "Workspaces run on this Mac; --host is not available.")
+        if (process.platform !== "darwin") throw new PaddockError("dependency", "Workspaces are available only on macOS. A workspace is not a sandbox.")
+        const action = rest[0]
+        const { values, positionals } = (() => {
+          try { return parseArgs({ args: rest.slice(1), allowPositionals: true, options: {
+            read: { type: "string", multiple: true }, path: { type: "string", multiple: true }, copy: { type: "string" }, loopback: { type: "string" }, confirm: { type: "string" }, stdin: { type: "boolean" }, stream: { type: "boolean" },
+          } }) } catch (error) { throw new PaddockError("usage", (error as Error).message) }
+        })()
+        const localPath = (path: string) => path === "~" || path.startsWith("~/") ? path : resolve(path)
+        const show = (view: WorkspaceView) => console.log(`${shown(view.name)}: workspace, not a sandbox; ${shown(view.status)}, ${view.processes ?? "unknown"} processes, ${view.sizeBytes === undefined ? "size unknown" : `${(view.sizeBytes / 1024 ** 2).toFixed(1)} MiB`}${view.folder ? `\n  ${shown(view.folder)}` : ""}${view.problem ? `\n  ${shown(view.problem)}` : ""}`)
+        const disclose = () => console.log(`\n${WORKSPACE_DISCLOSURE}`)
+        if (action === "list") {
+          const workspaces = await call<WorkspaceView[]>("workspaceList")
+          return out(workspaces, () => { for (const workspace of workspaces) show(workspace); if (!workspaces.length) console.log("No workspaces."); disclose() })
+        }
+        const name = need(positionals[0], "a workspace name")
+        if (action === "create" || action === "verify") {
+          const report = await call<WorkspaceReport>(action === "create" ? "workspaceCreate" : "workspaceVerify", { name,
+            ...(action === "create" ? { reads: values.read?.map(localPath), path: values.path?.map(localPath), copy: values.copy ? localPath(values.copy) : undefined, loopback: values.loopback } : {}) })
+          out(report, () => { show(report.workspace); printChecks(report.checks, WORKSPACE_CHECKLIST); for (const path of report.pathSuggestions ?? []) console.log(`Tool folder under home, closed unless declared with --read: ${shown(path)}`); disclose() })
+          if (!report.ok) process.exit(EXIT["check-failed"])
+          return
+        }
+        if (action === "stop") { const view = await call<WorkspaceView>("workspaceStop", { name }); return out(view, () => { show(view); disclose() }) }
+        if (action === "remove") {
+          const removed = await call<WorkspaceRemoval>("workspaceRemove", { name, confirm: values.confirm })
+          return out(removed, () => { console.log(`Removed workspace ${shown(removed.removed)}, not a sandbox.`); for (const path of removed.hardLinks) console.log(`Multiple hard links: ${shown(path)}`); for (const issue of [...removed.launchServices, ...removed.launchd]) console.log(shown(issue)); console.log(`Not removed or not covered: ${removed.notRemoved.map((item) => shown(item)).join("; ")}.`); disclose() })
+        }
+        if (action === "exec") {
+          if (!tail.length) throw new PaddockError("usage", "Give the workspace command after --.")
+          if (values.stream && (asJson || values.stdin)) throw new PaddockError("usage", "--stream takes neither --json nor --stdin.")
+          if (!asJson) console.error("Workspace, not a sandbox. Network and loopback open; no resource limits.")
+          if (values.stream) return await session({ kind: "workspace", name, argv: tail, tty: false })
+          return printRun(await call<RunResult>("workspaceExec", { name, argv: tail, stdin: values.stdin ? await Bun.stdin.text() : undefined }), asJson)
+        }
+        if (action === "shell") {
+          if (asJson) throw new PaddockError("usage", "An interactive workspace shell does not support --json.")
+          const prepared = await call<{ argv: string[] }>("workspaceShell", { name })
+          console.error(WORKSPACE_DISCLOSURE)
+          const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY)
+          return await session({ kind: "workspace", name, argv: tail.length ? tail : prepared.argv, tty,
+            ...(tty && process.stdout.columns > 0 && process.stdout.rows > 0 ? { cols: process.stdout.columns, rows: process.stdout.rows } : {}) })
+        }
+        throw new PaddockError("usage", "Use paddock workspace create|shell|exec|list|stop|remove|verify.")
+      }
       case undefined: case "help": case "--help": case "-h": return out({ help: HELP }, () => console.log(HELP))
       case "version": case "--version": return out({ version: VERSION }, () => console.log(VERSION))
       case "doctor": case "init": {

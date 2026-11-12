@@ -329,6 +329,7 @@ export class Core {
   // A session on the stream socket. It never starts a sandbox: a client that reconnects on its own (an editor) must not
   // undo a stop.
   async openSession(request: OpenRequest): Promise<Session> {
+    if (request.kind === "workspace") throw new PaddockError("usage", "Use the workspace session handler.")
     const manifest = await readManifest(this.dirs, request.name); const provider = this.provider(manifest)
     if (request.machineId !== undefined && request.machineId !== this.machineId) throw new PaddockError("identity-changed", "The session names another machine.")
     if (request.sandboxId !== undefined && request.sandboxId !== manifest.id) throw new PaddockError("identity-changed", "The sandbox was recreated; open a new session or forward explicitly.")

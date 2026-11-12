@@ -52,6 +52,7 @@ export class FrameReader {
 type RelayRequest = { name: string; sandboxId: string; generation: string; port: number; leaseId: string }
 type SessionRequest =
   | { kind: "exec"; name: string; argv: string[]; user?: string; tty: boolean; cols?: number; rows?: number }
+  | { kind: "workspace"; name: string; argv: string[]; tty: boolean; cols?: number; rows?: number }
   | { kind: "ssh"; name: string }
   | ({ kind: "lease" } & RelayRequest)
   | ({ kind: "dial" } & RelayRequest)
@@ -95,12 +96,17 @@ export function parseOpen(value: unknown): OpenRequest {
     if (!route.sandboxId || !route.generation || typeof body.leaseId !== "string" || !/^[a-f0-9]{32}$/.test(body.leaseId)) throw new PaddockError("usage", "A relay needs sandbox identity, run generation and lease identity.")
     return { ...route, kind: body.kind, name, sandboxId: route.sandboxId, generation: route.generation, port: validPort(body.port, "The relay port"), leaseId: body.leaseId }
   }
-  if (body.kind !== "exec") throw new PaddockError("usage", "A session is an exec or an ssh session.")
+  if (body.kind !== "exec" && body.kind !== "workspace") throw new PaddockError("usage", "A session is an exec, workspace or ssh session.")
   const argv = body.argv
   if (!Array.isArray(argv) || argv.length === 0 || !argv.every((part) => typeof part === "string" && !part.includes("\0"))) throw new PaddockError("usage", "exec needs a command.")
   if (body.user !== undefined && (typeof body.user !== "string" || !USER.test(body.user))) throw new PaddockError("usage", "The user must be a user name or id.")
   if (body.tty !== undefined && typeof body.tty !== "boolean") throw new PaddockError("usage", "tty must be true or false.")
   const tty = body.tty === true
+  if (body.kind === "workspace") {
+    if (route.host && route.host !== "local" || body.user !== undefined) throw new PaddockError("usage", "Workspace sessions run locally as this user.")
+    return { ...route, kind: "workspace", name, argv: argv as string[], tty,
+      ...(tty && body.cols !== undefined ? { cols: size(body.cols, "cols") } : {}), ...(tty && body.rows !== undefined ? { rows: size(body.rows, "rows") } : {}) }
+  }
   return { ...route, kind: "exec", name, argv: argv as string[], tty, ...(body.user === undefined ? {} : { user: body.user as string }),
     ...(tty && body.cols !== undefined ? { cols: size(body.cols, "cols") } : {}), ...(tty && body.rows !== undefined ? { rows: size(body.rows, "rows") } : {}) }
 }

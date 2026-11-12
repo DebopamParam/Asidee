@@ -39,6 +39,16 @@ async function page(replies: Record<string, (body: any) => unknown>, url = "http
 
 const base = { checklist: () => CHECKLIST, engines: () => [{ id: "fake:1", label: "Fake engine", ready: true, problems: [], capabilities: { kernelIsolation: "gvisor", networkGuard: true, diskLimit: "watched" } }], extensions: () => ({ extensions: [extension], errors: [] }) }
 
+test("workspaces appear separately with their disclosure, and unavailable inventory is unknown", async () => {
+  const ui = await page({ ...base, list: () => [], summary: () => ({ workspaces: [{ name: "render", status: "idle", processes: 0, folder: "/fixture/render", disclosure: "Workspace, not a sandbox. Loopback open; no limits." }] }) })
+  expect(ui.text("#workspaces")).toContain("render: workspace, not a sandbox")
+  expect(ui.text("#workspaces")).toContain("Loopback open; no limits")
+  expect(ui.text("#sandboxes")).not.toContain("render")
+  const unavailable = await page({ ...base, list: () => [], summary: () => { throw new Error("Inventory unavailable") } })
+  expect(unavailable.text("#workspaces")).toContain("Workspaces unknown: Inventory unavailable")
+  expect(unavailable.text("#workspaces")).not.toContain("No workspaces")
+})
+
 test("the dashboard lists sandboxes, sends the token, and hides it from the address bar", async () => {
   const ui = await page({ ...base, list: () => [sandbox()] })
   expect(ui.text("#sandboxes")).toContain("demo running")

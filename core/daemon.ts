@@ -18,6 +18,7 @@ import { serveStream } from "./stream"
 import { PaddockError, type ErrorCode } from "./types"
 import builtInUi from "../ui/index.html" with { type: "text" }
 import pkg from "../package.json"
+import { Workspaces } from "./workspaces"
 
 // Bun's types describe an .html import as a page bundle; with type "text" it is the file's text.
 const BUILT_IN_UI = builtInUi as unknown as string
@@ -36,11 +37,19 @@ type Method = { run: (body: Body) => Promise<unknown>; socketOnly?: boolean }
 
 // The whole API. The CLI, the UI and extensions all come through this table, so each has exactly these abilities.
 // keepSandboxes: the daemon is being replaced (an upgrade), not stopped, so the sandboxes it watches keep running.
-export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, stopping: () => boolean = () => false, machines?: Machines, hosts = machines ? new Hosts(machines) : undefined): Record<string, Method> {
+export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, stopping: () => boolean = () => false, machines?: Machines, hosts = machines ? new Hosts(machines) : undefined, workspaces = new Workspaces(core.dirs)): Record<string, Method> {
   return {
     version: { run: async () => ({ version: VERSION, build: BUILD, stopping: stopping() }) },
     hello: { run: async () => machines?.hello, socketOnly: true },
-    summary: { run: async () => ({ hello: machines?.hello, sandboxes: await core.list(), checkedAt: new Date().toISOString() }) },
+    summary: { run: async () => ({ hello: machines?.hello, sandboxes: await core.list(), workspaces: process.platform === "darwin" ? await workspaces.list() : [], checkedAt: new Date().toISOString() }) },
+    workspaceList: { run: () => workspaces.list(), socketOnly: true },
+    workspaceGet: { run: (body) => workspaces.get(String(body.name)), socketOnly: true },
+    workspaceCreate: { run: (body) => workspaces.create(body), socketOnly: true },
+    workspaceExec: { run: (body) => workspaces.exec(String(body.name), body.argv, typeof body.stdin === "string" ? body.stdin : undefined), socketOnly: true },
+    workspaceShell: { run: async (body) => ({ workspace: await workspaces.get(String(body.name)), stream: "workspace", argv: ["/bin/zsh", "-l"] }), socketOnly: true },
+    workspaceStop: { run: (body) => workspaces.stop(String(body.name)), socketOnly: true },
+    workspaceRemove: { run: (body) => workspaces.remove(String(body.name), body.confirm), socketOnly: true },
+    workspaceVerify: { run: (body) => workspaces.verify(String(body.name)), socketOnly: true },
     hostList: { run: async () => machines?.list() },
     fleet: { run: async (body) => machines?.fleet(body.refresh) },
     hostAttach: { run: async (body) => machines?.attach(body), socketOnly: true },
@@ -140,7 +149,9 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   const identity = await machineIdentity(dirs)
   const digest = new Bun.CryptoHasher("sha256")
   for await (const bytes of Bun.file(Bun.main.startsWith("/$bunfs/") ? process.execPath : Bun.main).stream()) digest.update(bytes)
-  const core = new Core([new GvisorProvider(systemRunner, createHash("sha256").update(`${hostname()}\0${dirs.state}`).digest("hex").slice(0, 10)), new DockerSandboxesProvider(systemRunner)], dirs, systemRunner, cliDir, identity)
+  const providers = process.env.PADDOCK_WORKSPACE_ONLY === "1" ? [] : [new GvisorProvider(systemRunner, createHash("sha256").update(`${hostname()}\0${dirs.state}`).digest("hex").slice(0, 10)), new DockerSandboxesProvider(systemRunner)]
+  const core = new Core(providers, dirs, systemRunner, cliDir, identity)
+  const workspaces = new Workspaces(dirs)
   // service: systemd sets INVOCATION_ID for each unit it starts; a daemon started by hand or by the CLI has none.
   const hello: Hello = { machineId: identity, bootId: randomBytes(16).toString("hex"), version: VERSION, buildDigest: digest.digest("hex"), sourceDigest: SOURCE, protocols: [PROTOCOL], methods: Object.keys(CATALOG),
     features: ["machines", "remote-streams", "remote-forwards", "ssh", "lease-renewal"], listener: process.env.PADDOCK_SOCKET_ONLY === "1" ? "socket-only" : "dashboard", service: process.env.INVOCATION_ID ? "systemd" : "none" }
@@ -151,7 +162,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   // A daemon that is stopping still answers `version`, so a client waits for it instead of starting a second one, and
   // takes no new work: a sandbox started now would be stopped, or left unwatched, a moment later.
   let stopping = false
-  const answer = createHandler(methods(core, (keep) => stop(keep), () => stopping, machines, hosts), token, dirs.config, machines)
+  const answer = createHandler(methods(core, (keep) => stop(keep), () => stopping, machines, hosts, workspaces), token, dirs.config, machines)
   const handle = (request: Request, viaSocket: boolean, port: number): Promise<Response> =>
     stopping && new URL(request.url).pathname !== "/api/version"
       ? Promise.resolve(json(STATUS.conflict, { ok: false, error: { code: "conflict", message: "The daemon is stopping. Try again in a moment." } }))
@@ -166,7 +177,9 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   // down: each side pauses until the other has taken what it was given.
   const streams = createServer({ allowHalfOpen: true }, (connection) => {
     if (stopping) return connection.destroy()
-    serveStream(connection, (request) => machines.openSession(request, (request) => core.openSession(request)), (hash) => hosts.session(hash))
+    serveStream(connection, (request) => request.kind === "workspace"
+      ? workspaces.open(request.name, request.argv, request)
+      : machines.openSession(request, (request) => core.openSession(request)), (hash) => hosts.session(hash))
   })
   await new Promise<void>((resolve, reject) => { streams.once("error", reject); streams.listen(streamSocketPath(dirs), () => resolve()) })
   await chmod(streamSocketPath(dirs), 0o600)
@@ -182,7 +195,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
 
   // One pass at a time: a slow engine must not stack them up. The first pass covers the time no daemon was running.
   let enforcing = false
-  const enforce = async () => { if (enforcing) return; enforcing = true; try { await core.enforce() } finally { enforcing = false } }
+  const enforce = async () => { if (enforcing) return; enforcing = true; try { await core.enforce(); if (process.platform === "darwin") await workspaces.list().catch(() => undefined) } finally { enforcing = false } }
   void core.sweep().then(enforce)
   const timer = setInterval(() => { void enforce() }, ENFORCE_MS)
   const keepSandboxes = await new Promise<boolean>((resolve) => {
@@ -193,6 +206,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   clearInterval(timer)
   hosts.close()
   core.closeSessions()
+  workspaces.closeSessions()
   // Bounded (Machines.close), and never a reason to skip the next line.
   await machines.close().catch(() => {})
   if (!keepSandboxes) await core.stopWatched()

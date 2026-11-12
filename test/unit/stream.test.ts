@@ -47,6 +47,13 @@ test("a session request keeps only known fields and refuses engine options, bad 
   for (const bad of ["", "{", "[]", '{"cols":120}', '{"cols":0,"rows":1}', '{"cols":"80","rows":24}']) expect(() => parseSize(Buffer.from(bad))).toThrow(PaddockError)
 })
 
+test("workspace sessions are local, inherit this user and cannot request a sandbox user", () => {
+  expect(parseOpen({ kind: "workspace", name: "render", argv: ["/bin/zsh"], tty: true, cols: 80, rows: 24, env: { TOKEN: "ignored" } }))
+    .toEqual({ kind: "workspace", name: "render", argv: ["/bin/zsh"], tty: true, cols: 80, rows: 24 })
+  expect(() => parseOpen({ kind: "workspace", name: "render", argv: ["sh"], host: "remote" })).toThrow("locally")
+  expect(() => parseOpen({ kind: "workspace", name: "render", argv: ["sh"], user: "0" })).toThrow("this user")
+})
+
 // A session that echoes its input and exits 3 at end of input.
 class Echo extends EventEmitter implements Session {
   tty = false; closed?: string; ended = false; sizes: number[][] = []

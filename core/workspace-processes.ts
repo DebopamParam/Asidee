@@ -1,8 +1,8 @@
 import { cc, dlopen, ptr } from "bun:ffi"
-import { lstatSync } from "node:fs"
+import { lstatSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { PaddockError } from "./types"
-import wrapper from "./workspace-check.c" with { type: "file" }
+import wrapper from "./workspace-check.c" with { type: "text" }
 
 export function requireMac(platform = process.platform): void {
   if (platform !== "darwin") throw new PaddockError("dependency", "Workspaces are available only on macOS. A workspace is not a sandbox.")
@@ -10,7 +10,15 @@ export function requireMac(platform = process.platform): void {
 
 function library() {
   requireMac()
-  const check = cc({ source: wrapper, symbols: { paddock_sandbox_check: { args: ["i32", "ptr", "i32", "ptr"], returns: "i32" } } })
+  // TinyCC opens an OS file, so Bun's embedded /$bunfs paths cannot be passed directly.
+  const temporary = mkdtempSync("/private/tmp/paddock-ffi-")
+  const source = join(temporary, "check.c")
+  const check = (() => {
+    try {
+      writeFileSync(source, wrapper, { mode: 0o600 })
+      return cc({ source, symbols: { paddock_sandbox_check: { args: ["i32", "ptr", "i32", "ptr"], returns: "i32" } } })
+    } finally { rmSync(temporary, { recursive: true, force: true }) }
+  })()
   const proc = dlopen("/usr/lib/libSystem.B.dylib", {
     proc_listallpids: { args: ["ptr", "i32"], returns: "i32" },
     proc_pidinfo: { args: ["i32", "i32", "u64", "ptr", "i32"], returns: "i32" },
