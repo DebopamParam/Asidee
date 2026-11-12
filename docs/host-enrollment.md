@@ -15,8 +15,10 @@ trust decision about your artifact, not a signed release manifest. Keep the bina
 
 ## What the destination needs
 
-SSH must already trust the host. The plan names the host key SSH verified, which Paddock reads from `ssh -v`; when SSH
-does not report one, planning is refused with the command that shows what SSH printed. The read-only probe requires
+SSH must already trust the host. The plan names the host key SSH verified, which Paddock captures with OpenSSH's
+`KnownHostsCommand` (OpenSSH 8.5 or later on this machine) and never reads from ssh's output; when SSH does not report
+exactly one plain key, planning is refused. Every SSH command after consent, and every later connection to the
+registered host, is pinned to that key (see the architecture's host-key pin). The read-only probe requires
 Python 3, glibc and systemd, and never uses sudo. The installation recipe accepts Debian, Ubuntu and Linux Mint based on
 Ubuntu noble; a host whose installation is already complete is reused whatever its distribution. Only the combinations
 in the scorecard have installation measurements.

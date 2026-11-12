@@ -51,7 +51,7 @@ a readable `/etc/docker/daemon.json` containing unrelated settings. These evals 
 starts from the state the one before it left, so run the group whole.
 
 N02 through N04 measure the plan, stale inventory and configuration consent, and refusals; one of them is a private
-`ssh` wrapper that withholds the host key SSH verified. N11 corrupts one uploaded binary byte through such a wrapper
+`ssh` wrapper that drops Paddock's `KnownHostsCommand`, so SSH reports no verified host key. N11 corrupts one uploaded binary byte through such a wrapper
 and N05 forces a failure halfway: each requires the report of what was and was not changed. N06 installs, with a real
 Docker-restart interruption, the installed digests, smoke isolation and disk checks. N07 removes the host and reuses
 its service with `--sudo never`.

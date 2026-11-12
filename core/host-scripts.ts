@@ -219,7 +219,8 @@ try:
         raise RuntimeError('Final read-only probe failed: ' + check.stderr.decode())
     actual = json.loads(check.stdout)
     expected = dict(p['destination'])
-    del expected['hostKey']
+    # Read by the primary's ssh, not by the probe.
+    expected.pop('hostKey', None); expected.pop('hostPublicKey', None)
     if actual != expected:
         report(dict(ok=False, stale=True, completed=[], error='Inputs changed during artifact delivery; nothing installed'))
         sys.exit(0)

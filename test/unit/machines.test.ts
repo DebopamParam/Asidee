@@ -20,7 +20,8 @@ async function setup() {
   await mkdir(dirs.config)
   return dirs
 }
-const identity: Partial<MachineIo> = { sshIdentity: async () => ({ user: "builder", hostKey: `SHA256:${"A".repeat(43)}` }) }
+const PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEU61N7KJmkiTPSmrOfaemXZu/1hocrAC0WXPcRUyjQ8"
+const identity: Partial<MachineIo> = { sshIdentity: async () => ({ user: "builder", hostKey: "SHA256:0X7US8OfQfzxyXkA9yUZy3JjznnQA/iqkCBdPkPPSEQ", hostPublicKey: PUBLIC_KEY }) }
 const summary = (hello = REMOTE): MachineSummary => ({ hello, checkedAt: "2026-11-11T00:00:00Z", sandboxes: [{ machineId: hello.machineId, sandboxId: "f".repeat(32), name: "demo", status: "running", engine: "remote-engine", createdAt: "2026-11-11",
   spec: { name: "demo", image: "alpine", cpus: 1, memoryGb: 1, diskGb: 1, pids: 512, docker: false }, lastVerify: { at: "2026-11-11", results: [{ id: "kernel", status: "pass", evidence: "probed", detail: "remote probe" }] } }] })
 
@@ -36,8 +37,10 @@ test("host records reject destinations, paths, identities and aliases that can c
   for (const value of ["-oProxyCommand=id", "host -p 22", "a;id", "$(id)", "user@-host", "a\nb", "a@b@c"]) expect(() => sshDestination(value)).toThrow()
   expect(sshDestination("alice@build.example")).toBe("alice@build.example")
   expect(parseHosts({ version: 1, hosts: [HOST] }).hosts).toEqual([HOST])
+  const pinned = { ...HOST, hostKey: "SHA256:0X7US8OfQfzxyXkA9yUZy3JjznnQA/iqkCBdPkPPSEQ", hostPublicKey: PUBLIC_KEY }
+  expect(parseHosts({ version: 1, hosts: [pinned] }).hosts).toEqual([pinned])
   for (const value of [{}, { version: 2, hosts: [] }]) expect(() => parseHosts(value)).toThrow()
-  for (const value of [{ version: 1, hosts: [HOST, HOST] }, { version: 1, hosts: [{ ...HOST, binary: "relative" }] }, { version: 1, hosts: [{ ...HOST, machineId: "bad" }] }, { version: 1, hosts: [{ ...HOST, hostKey: "SHA256:short" }] }])
+  for (const value of [{ version: 1, hosts: [HOST, HOST] }, { version: 1, hosts: [{ ...HOST, binary: "relative" }] }, { version: 1, hosts: [{ ...HOST, machineId: "bad" }] }, { version: 1, hosts: [{ ...HOST, hostKey: "SHA256:short" }] }, { version: 1, hosts: [{ ...HOST, hostKey: `SHA256:${"A".repeat(43)}`, hostPublicKey: PUBLIC_KEY }] }, { version: 1, hosts: [{ ...HOST, hostPublicKey: PUBLIC_KEY }] }])
     expect(parseHosts(value).unknown).toHaveLength(1)
   const argv = sshArgv(HOST.ssh, transportCommand({ ...HOST, binary: "/path/a'b" }))
   for (const option of ["BatchMode=yes", "StrictHostKeyChecking=yes", "UpdateHostKeys=no", "ForwardAgent=no", "ForwardX11=no", "ClearAllForwardings=yes", "ControlMaster=no", "ControlPath=none"]) expect(argv).toContain(option)
@@ -282,7 +285,9 @@ test("the hosts file is read record by record: an unknown or damaged record is s
   // Attaching another host keeps the records it does not understand exactly as they were, and records SSH's account and key.
   const second = { ...HOST, name: "second", machineId: "7".repeat(32) }
   const two = new Machines(dirs, LOCAL, async () => summary(LOCAL), { ...identity, connectPeer: fakePeers((method) => method === "hello" ? { ...REMOTE, machineId: second.machineId } : undefined).connectPeer })
-  expect(await two.attach(second)).toMatchObject({ sshUser: "builder", hostKey: `SHA256:${"A".repeat(43)}` })
+  expect(await two.attach(second)).toMatchObject({ sshUser: "builder", hostKey: "SHA256:0X7US8OfQfzxyXkA9yUZy3JjznnQA/iqkCBdPkPPSEQ", hostPublicKey: PUBLIC_KEY })
+  // Enrollment names the key its plan was made for; another one now is refused before anything is registered.
+  expect(await outcome(two.attach({ ...second, name: "third", machineId: "8".repeat(32), hostKey: `SHA256:${"B".repeat(43)}`, hostPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" }))).toMatchObject({ code: "identity-changed" })
   const written = JSON.parse(await readFile(join(dirs.config, "hosts.json"), "utf8")).hosts
   expect(written.slice(0, 3)).toEqual([HOST, later, "garbage"])
   await machines.remove({ name: "later", confirm: "later" })

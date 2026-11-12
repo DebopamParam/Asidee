@@ -94,7 +94,7 @@ test("an enrollment plan is shown as every command, file, download and restart, 
   // with text chosen to redraw a terminal.
   const probe: HostProbe = {
     system: "Linux", arch: "aarch64", libc: ["glibc", "2.39"], uid: 1000, gid: 1000, user: "alice", home: "/home/alice", machine: `m${ESC}`, boot: "b",
-    hostKey: `SHA256:${"A".repeat(43)}`, systemd: true, os: { ID: "ubuntu", PRETTY_NAME: `Ubuntu${ESC}` },
+    hostKey: "SHA256:0X7US8OfQfzxyXkA9yUZy3JjznnQA/iqkCBdPkPPSEQ", hostPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEU61N7KJmkiTPSmrOfaemXZu/1hocrAC0WXPcRUyjQ8", systemd: true, os: { ID: "ubuntu", PRETTY_NAME: `Ubuntu${ESC}` },
     docker: { code: 0, out: "{}", err: "" }, containers: { code: 0, out: [{ Names: `owner-web${ESC}`, ID: "123" }, { Names: "sandbox-mine", ID: "456" }].map((row) => JSON.stringify(row)).join("\n"), err: "" },
     packages: { code: 0, out: "", err: "" }, downloads: [], apt: {}, repositories: {}, ancestors: {},
     files: Object.fromEntries([

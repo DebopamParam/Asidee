@@ -4,34 +4,65 @@ import { connect, createServer, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { dataFrames, frame, FrameReader, serveStream, type Frame } from "../../core/stream"
-import { HttpPeer, MAX_REPLY, RemoteSession, sshConnection } from "../../core/transport"
+import { hostPublicKey, HttpPeer, keyFingerprint, MAX_REPLY, RemoteSession, sshConnection } from "../../core/transport"
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanups.splice(0)) await close() })
 const host = { ssh: "unused", binary: "/unused", stateDir: "/unused" }
 
-test("recorded SSH host keys are checked on each connection before requests or stream opens", async () => {
+const KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEU61N7KJmkiTPSmrOfaemXZu/1hocrAC0WXPcRUyjQ8"
+const OTHER = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+// A stand-in ssh that holds `actual` and behaves as OpenSSH does with the options Paddock passes: it compares the key in
+// the UserKnownHostsFile it is given and, if that is not its key, refuses before reading stdin or printing anything.
+async function keyedSsh(actual: string, output: Uint8Array) {
   const root = await mkdtemp(join(tmpdir(), "pdk-pin-")); const path = process.env.PATH
-  const key = `SHA256:${"A".repeat(43)}`
+  await writeFile(join(root, "output"), output)
   await writeFile(join(root, "ssh"), `#!/bin/sh
-printf 'debug1: Server host key: ssh-ed25519 SHA256:${"J".repeat(43)}\\n' >&2
-printf 'debug1: Server host key: ssh-ed25519 ${key}\\ndebug1: Sending command: transport\\n' >&2
-printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 26\\r\\n\\r\\n{"ok":true,"data":"wrong"}'
-cat > '${root}/sent'
+printf '%s\\n' "$@" > '${root}/argv'
+for arg in "$@"; do case "$arg" in UserKnownHostsFile=*) file="\${arg#UserKnownHostsFile=}";; esac; done
+cp "$file" '${root}/pinned' 2>/dev/null
+if [ "$(cat "$file" 2>/dev/null)" != "paddock-enrolled-host ${actual}" ]; then
+  printf 'The fingerprint for the ED25519 key sent by the remote host is\\nSHA256:${"C".repeat(43)}.\\nHost key for paddock-enrolled-host has changed and you have requested strict checking.\\nHost key verification failed.\\n' >&2; exit 255
+fi
+cat '${root}/output'; cat > '${root}/sent'
 `)
   await chmod(join(root, "ssh"), 0o755)
   process.env.PATH = `${root}:${path}`
   cleanups.push(async () => { process.env.PATH = path; await rm(root, { recursive: true, force: true }) })
-  const pinned = { ...host, hostKey: `SHA256:${"B".repeat(43)}` }
+  return root
+}
+
+test("a recorded host public key pins every request and stream, and a refused key sends and reads nothing", async () => {
+  const root = await keyedSsh(OTHER, Buffer.from('HTTP/1.1 200 OK\r\nContent-Length: 26\r\n\r\n{"ok":true,"data":"wrong"}'))
+  const pinned = { ...host, hostKey: keyFingerprint(KEY), hostPublicKey: KEY }
   const client = new HttpPeer(pinned)
-  try { await expect(client.call("stop", {}, { mutation: true, timeoutMs: 1000 })).rejects.toMatchObject({ code: "identity-changed" }) }
+  // A mutation whose key was refused was never sent, so its outcome is known: the identity changed.
+  try { await expect(client.call("stop", {}, { mutation: true, timeoutMs: 3000 })).rejects.toMatchObject({ code: "identity-changed", message: expect.stringContaining(`it offered SHA256:${"C".repeat(43)}`) }) }
   finally { await client.close() }
-  expect(await Bun.file(join(root, "sent")).text()).toBe("")
-  // The peer's stdout is not a frame: it must never reach the parser, so the refusal is the identity's, not a malformed stream.
+  expect(await Bun.file(join(root, "sent")).exists()).toBe(false)
+  const argv = (await Bun.file(join(root, "argv")).text()).split("\n")
+  for (const option of ["GlobalKnownHostsFile=/dev/null", "HostKeyAlias=paddock-enrolled-host", "CheckHostIP=no", "VerifyHostKeyDNS=no", "KnownHostsCommand=none", "StrictHostKeyChecking=yes"]) expect(argv).toContain(option)
+  expect(argv).not.toContain("-v")
+  expect(await Bun.file(join(root, "pinned")).text()).toBe(`paddock-enrolled-host ${KEY}\n`)
+  // The private known_hosts file is gone once ssh is.
+  expect(await Bun.file(argv.find((arg) => arg.startsWith("UserKnownHostsFile="))!.slice("UserKnownHostsFile=".length)).exists()).toBe(false)
   await expect(RemoteSession.open(pinned, { kind: "exec", name: "demo", argv: ["true"], tty: false })).rejects.toMatchObject({ code: "identity-changed", message: expect.stringContaining("re-enroll") })
-  const accepted = sshConnection({ ...host, hostKey: key })
-  try { await accepted.ready; expect(accepted.wire.destroyed).toBe(false) } finally { await accepted.close() }
-}, 10_000)
+})
+
+test("a record with only a fingerprint is refused before ssh runs, never used unpinned", async () => {
+  const root = await keyedSsh(KEY, new Uint8Array())
+  const old = { ...host, hostKey: keyFingerprint(KEY) }
+  const client = new HttpPeer(old)
+  try { await expect(client.call("stop", {}, { mutation: true, timeoutMs: 1000 })).rejects.toMatchObject({ code: "identity-changed", message: expect.stringContaining("only its host-key fingerprint") }) }
+  finally { await client.close() }
+  await expect(RemoteSession.open(old, { kind: "exec", name: "demo", argv: ["true"], tty: false })).rejects.toMatchObject({ code: "identity-changed" })
+  expect(await Bun.file(join(root, "argv")).exists()).toBe(false)
+})
+
+test("a fingerprint is computed as ssh-keygen prints it, and only plain known_hosts keys are accepted", () => {
+  expect(keyFingerprint(KEY)).toBe("SHA256:0X7US8OfQfzxyXkA9yUZy3JjznnQA/iqkCBdPkPPSEQ")
+  for (const bad of ["ssh-ed25519", `${KEY}\nevil ${KEY}`, `ssh-ed25519-cert-v01@openssh.com ${KEY.split(" ")[1]}`, `${KEY} comment`, `-o ${KEY.split(" ")[1]}`]) expect(() => hostPublicKey(bad)).toThrow()
+})
 async function peer(answer: (socket: Socket) => void) {
   const root = await mkdtemp(join(tmpdir(), "pdk-wire-")); const path = join(root, "peer.sock")
   const sockets = new Set<Socket>()
@@ -138,12 +169,11 @@ test("closing an SSH process that was stopped (SIGSTOP) finishes within its kill
   expect(() => process.kill(connection.pid!, 0)).toThrow()
 }, 10_000)
 
-// A stand-in ssh on PATH that prints `output` and exits without reading its stdin, after naming `hostKey` as verbose ssh does.
-async function exitingSsh(output: Uint8Array, hostKey?: string) {
+// A stand-in ssh on PATH that prints `output` and exits without reading its stdin.
+async function exitingSsh(output: Uint8Array) {
   const root = await mkdtemp(join(tmpdir(), "pdk-ssh-")); const path = process.env.PATH
   await writeFile(join(root, "output"), output)
-  const verbose = hostKey ? `printf 'debug1: Server host key: ssh-ed25519 ${hostKey}\\ndebug1: Sending command: transport\\n' >&2\n` : ""
-  await writeFile(join(root, "ssh"), `#!/bin/sh\n${verbose}exec cat '${join(root, "output")}'\n`); await chmod(join(root, "ssh"), 0o755)
+  await writeFile(join(root, "ssh"), `#!/bin/sh\nexec cat '${join(root, "output")}'\n`); await chmod(join(root, "ssh"), 0o755)
   process.env.PATH = `${root}:${path}`
   cleanups.push(async () => { process.env.PATH = path; await rm(root, { recursive: true, force: true }) })
 }
@@ -161,11 +191,10 @@ test("a hosted stream whose ssh exits while its reader is slow still delivers ev
   expect(session.linkLost).toBe(false)
 }, 30_000)
 
-test("a pinned stream's bytes held until its key is accepted still all arrive behind a slow reader", async () => {
+test("a pinned stream whose key ssh accepted delivers every byte behind a slow reader", async () => {
   const bytes = new Uint8Array(4 * 1048576); for (let at = 0; at < bytes.length; at += 65536) crypto.getRandomValues(bytes.subarray(at, at + 65536))
-  const key = `SHA256:${"C".repeat(43)}`
-  await exitingSsh(Buffer.concat([frame("ready", { tty: false }), ...dataFrames("stdout", bytes), frame("exit", { code: 3 })]), key)
-  const session = await RemoteSession.open({ ...host, hostKey: key }, { kind: "exec", name: "demo", argv: ["true"], tty: false })
+  await keyedSsh(KEY, Buffer.concat([frame("ready", { tty: false }), ...dataFrames("stdout", bytes), frame("exit", { code: 3 })]))
+  const session = await RemoteSession.open({ ...host, hostKey: keyFingerprint(KEY), hostPublicKey: KEY }, { kind: "exec", name: "demo", argv: ["true"], tty: false })
   const ended = new Promise<{ code?: number; error?: string }>((resolve) => session.on("end", resolve))
   const hash = new Bun.CryptoHasher("sha256"); let received = 0
   session.on("output", (_kind, chunk: Buffer) => { hash.update(chunk); received += chunk.length; session.pause(); setTimeout(() => session.resume(), 1) })

@@ -1,4 +1,8 @@
 import { spawn } from "node:child_process"
+import { createHash } from "node:crypto"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { Agent, request } from "node:http"
 import { connect } from "node:net"
 import { Duplex } from "node:stream"
@@ -34,59 +38,107 @@ export function absolutePath(value: unknown): string {
   return value
 }
 
-export const sshArgv = (destination: string, command: readonly string[]) => ["ssh", "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no",
+export const sshArgv = (destination: string, command: readonly string[], options: readonly string[] = []) => ["ssh", "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no",
   "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ClearAllForwardings=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none",
-  "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3", sshDestination(destination), command.map(shellQuote).join(" ")]
+  "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3", ...options, sshDestination(destination), command.map(shellQuote).join(" ")]
 
-export type Endpoint = { ssh: string; binary: string; stateDir: string; hostKey?: string }
+// hostKey: the SHA-256 fingerprint shown to people. hostPublicKey: the key itself ("TYPE BASE64"), which every connection
+// is pinned to. A record from before the public key was kept has only the fingerprint and is refused.
+export type Endpoint = { ssh: string; binary: string; stateDir: string; hostKey?: string; hostPublicKey?: string }
 export function transportCommand(host: Endpoint, stream = false): string[] {
   return ["/usr/bin/env", `PADDOCK_STATE_DIR=${absolutePath(host.stateDir)}`, absolutePath(host.binary), "transport", "stdio", "--protocol", String(PROTOCOL), ...(stream ? ["--stream"] : [])]
 }
 
+export function hostPublicKey(value: unknown): string {
+  if (typeof value !== "string" || !/^[a-z][a-z0-9@.-]{0,63} [A-Za-z0-9+/]{16,16384}={0,2}$/.test(value) || value.includes("-cert-")) throw new PaddockError("usage", "A host public key must be one known_hosts key: its type and base64, without a certificate.")
+  return value
+}
+// As `ssh-keygen -l` prints it.
+export const keyFingerprint = (publicKey: string) => `SHA256:${createHash("sha256").update(Buffer.from(publicKey.split(" ")[1]!, "base64")).digest("base64").replace(/=+$/, "")}`
+
+// ssh splits option values at whitespace and expands % and ~ in file names, so a private file's path must have none.
+function privateFolder(): string {
+  const base = /^[A-Za-z0-9_./-]+$/.test(tmpdir()) ? tmpdir() : "/tmp"
+  return mkdtempSync(join(base, "paddock-ssh-"))
+}
+const PIN_ALIAS = "paddock-enrolled-host"
+// The destination is checked against this one key and nothing else: not the user's known_hosts or global file, DNS, or
+// a KnownHostsCommand. OpenSSH does that check itself, before authentication, so nothing the server sends (a banner
+// reaches the same stderr as -v's lines) can pass it, and no byte is sent or read before it. A ProxyJump hop runs its own
+// ssh, which these options do not reach, so the user's own trust still checks the jump host.
+export function pinnedKnownHosts(publicKey: string): { options: string[]; remove(): void } {
+  const folder = privateFolder(); const file = join(folder, "known_hosts")
+  writeFileSync(file, `${PIN_ALIAS} ${hostPublicKey(publicKey)}\n`, { mode: 0o600 })
+  return { options: ["-o", `UserKnownHostsFile=${file}`, "-o", "GlobalKnownHostsFile=/dev/null", "-o", `HostKeyAlias=${PIN_ALIAS}`, "-o", "CheckHostIP=no", "-o", "VerifyHostKeyDNS=no", "-o", "KnownHostsCommand=none"],
+    remove: () => rmSync(folder, { recursive: true, force: true }) }
+}
+// OpenSSH runs KnownHostsCommand with the key the server offered in key exchange (%I is HOSTNAME for the destination's
+// lookup), then goes on only if the user's own known_hosts trusts that key. So the key captured on a connection that got
+// past the check (ssh did not exit 255) is the one the user's trust accepted, written by ssh and not by the server. It
+// replaces a KnownHostsCommand of the user's own for that connection.
+export function hostKeyCapture(destination: string): { options: string[]; read(exitCode: number | null): string; remove(): void } {
+  const folder = privateFolder(); const file = join(folder, "offered")
+  return {
+    options: ["-o", `KnownHostsCommand=/bin/sh -c 'printf "%%s %%s %%s\\n" "$1" "$2" "$3" >> "$0"' ${file} %I %t %K`],
+    read(exitCode) {
+      if (exitCode === 255 || exitCode === null) throw new PaddockError("dependency", `SSH could not connect to ${destination} with the user's own host trust, so no host key was recorded.`)
+      let offered = ""; try { offered = readFileSync(file, "utf8") } catch {}
+      const keys = new Set(offered.split("\n").filter((line) => line.startsWith("HOSTNAME ") && !line.includes("-cert-")).map((line) => line.slice("HOSTNAME ".length)))
+      if (keys.size !== 1) throw new PaddockError("dependency", `SSH did not report exactly one host key it verified for ${destination}, so no host key was recorded. Paddock needs OpenSSH 8.5 or later (KnownHostsCommand) first on PATH, and a plain host key rather than only a certificate.`)
+      return hostPublicKey([...keys][0])
+    },
+    remove: () => rmSync(folder, { recursive: true, force: true }),
+  }
+}
+export const enrolledKeyHelp = "Check the destination, remove its host record with `paddock host remove NAME --confirm NAME`, then re-enroll deliberately with `paddock host add` or `paddock host attach`."
+function pinRefusal(host: Endpoint): PaddockError | undefined {
+  if (host.hostKey && !host.hostPublicKey) return new PaddockError("identity-changed", `${host.ssh} was enrolled with only its host-key fingerprint, read from ssh's verbose output, where text the server sends before authentication can imitate it. Paddock now pins the whole public key and does not use this record. Nothing was sent. ${enrolledKeyHelp}`)
+}
+
 // One isolated SSH process per connection. stderr is diagnostic only and never mixed with protocol bytes.
 export function sshConnection(host: Endpoint, stream = false) {
-  const args = sshArgv(host.ssh, transportCommand(host, stream)).slice(1)
-  const child = spawn("ssh", [...(host.hostKey ? ["-v"] : []), ...args], { stdio: ["pipe", "pipe", "pipe"] })
-  let accepted = !host.hostKey; let pending = ""; let fingerprint: string | undefined
-  // Until the pinned key is accepted, the peer's bytes stay in the pipe, unread: no parser ever sees an unverified peer.
-  const wire = new Duplex({ read() { if (accepted) child.stdout.resume() }, write(chunk, _encoding, done) { child.stdin.write(chunk, done) }, final(done) { child.stdin.end(done) } })
-  const relay = () => {
-    child.stdout.on("data", (chunk: Buffer) => { if (!wire.push(chunk)) child.stdout.pause() })
-    child.stdout.on("end", () => wire.push(null))
+  const old = pinRefusal(host)
+  if (old) {
+    const wire = new Duplex({ read() {}, write(_chunk, _encoding, done) { done(old) } }); wire.on("error", () => {})
+    const ready = Promise.reject(old); void ready.catch(() => {})
+    return { wire, ready, pid: undefined as number | undefined, diagnostic: () => old.message, refusal: async () => old, async close() { wire.destroy() } }
   }
+  const pin = host.hostPublicKey ? pinnedKnownHosts(host.hostPublicKey) : undefined
+  const argv = sshArgv(host.ssh, transportCommand(host, stream), pin?.options)
+  const child = spawn(argv[0]!, argv.slice(1), { stdio: ["pipe", "pipe", "pipe"] })
+  const wire = new Duplex({ read() { child.stdout.resume() }, write(chunk, _encoding, done) { child.stdin.write(chunk, done) }, final(done) { child.stdin.end(done) } })
+  let outputEnded = false
+  child.stdout.on("data", (chunk: Buffer) => { if (!wire.push(chunk)) child.stdout.pause() })
+  child.stdout.on("end", () => { outputEnded = true; wire.push(null) })
   child.stdin.on("error", (error) => wire.destroy(error))
-  let diagnostic = ""
-  let accept = () => {}; let reject = (_error: Error) => {}
-  const ready = new Promise<void>((resolve, fail) => { accept = () => { relay(); resolve() }; reject = fail; if (accepted) accept() })
-  void ready.catch(() => {})
-  const timer = setTimeout(() => reject(new PaddockError("identity-changed", `SSH could not verify the enrolled host key for ${host.ssh}. ${hostKeyHelp(host.ssh)} Remove the host record and re-enroll deliberately after checking the destination.`)), 10_000)
-  void ready.then(() => clearTimeout(timer), () => { clearTimeout(timer); child.kill() })
+  let diagnostic = ""; let messages = ""
   child.stderr.on("data", (bytes: Buffer) => {
     if (diagnostic.length < 4000) diagnostic += bytes.toString().slice(0, 4000 - diagnostic.length)
-    if (accepted) return
-    pending += bytes.toString()
-    let end: number
-    while ((end = pending.indexOf("\n")) >= 0) {
-      const line = pending.slice(0, end); pending = pending.slice(end + 1)
-      fingerprint = serverHostKey(line) ?? fingerprint
-      // ProxyJump prints the jump's key first. The destination sends the fixed command only after its own handshake.
-      if (!line.startsWith("debug1: Sending command:")) continue
-      try { checkHostKey(host, fingerprint); accepted = true; accept() } catch (error) { reject(error as Error) }
-    }
-    if (pending.length > 4000) pending = pending.slice(-4000)
+    if (messages.length < 65536) messages += bytes.toString()
   })
   child.on("error", (error) => wire.destroy(error))
-  let done = false
+  let done = false; let refused: PaddockError | undefined
   // ssh can be gone while its last output still waits behind a slow reader: the wire closes once that is read.
-  const exited = new Promise<void>((resolve) => child.once("close", () => { done = true; if (!accepted) reject(new PaddockError("identity-changed", `SSH did not verify the enrolled host key for ${host.ssh}. Remove the host record and re-enroll deliberately after checking the destination.`)); if (wire.readableEnded) wire.destroy(); else wire.once("end", () => wire.destroy()); resolve() }))
+  const exited = new Promise<void>((resolve) => child.once("close", (code) => {
+    done = true; pin?.remove()
+    // A ProxyJump hop's own refusal reaches the same stderr; only one that names the pin's alias is the destination's.
+    if (pin && code === 255 && messages.includes("Host key verification failed.") && messages.includes(`for ${PIN_ALIAS} `)) {
+      const offered = diagnostic.match(/key sent by the remote host is\s+(SHA256:[A-Za-z0-9+/]{43})/)?.[1]
+      refused = new PaddockError("identity-changed", `The SSH host key for ${host.ssh} is not the one recorded at enrollment (${host.hostKey ?? keyFingerprint(host.hostPublicKey!)})${offered ? `; it offered ${offered}` : ""}. OpenSSH refused it before anything was sent. ${enrolledKeyHelp}`)
+    }
+    if (wire.readableEnded) wire.destroy(); else wire.once("end", () => wire.destroy()); resolve()
+  }))
   wire.on("error", () => {})
   const settled = (ms: number) => bounded(exited, ms).then(() => done)
-  return { wire, ready, pid: child.pid, diagnostic: () => diagnostic.trim(), async close() {
-    wire.destroy(); child.kill()
-    if (!await settled(KILL_GRACE_MS)) { child.kill("SIGKILL"); await settled(KILL_GRACE_MS) }
-  } }
+  return { wire, ready: Promise.resolve(), pid: child.pid, diagnostic: () => diagnostic.trim(),
+    // Whether the link ended because the pinned key was refused. Asked only once output ended, when ssh exits at once.
+    refusal: async () => { if (outputEnded) await settled(KILL_GRACE_MS); return refused },
+    async close() {
+      wire.destroy(); child.kill()
+      if (!await settled(KILL_GRACE_MS)) { child.kill("SIGKILL"); await settled(KILL_GRACE_MS) }
+    } }
 }
-export type Connection = Pick<ReturnType<typeof sshConnection>, "wire" | "diagnostic" | "close"> & { pid?: number; ready?: Promise<void> }
+export type Connection = Pick<ReturnType<typeof sshConnection>, "wire" | "diagnostic" | "close"> & { pid?: number; ready?: Promise<void>; refusal?: () => Promise<PaddockError | undefined> }
 
 class RemoteFailure extends PaddockError {}
 export function parseReply(value: unknown): unknown {
@@ -136,6 +188,8 @@ export class HttpPeer {
       return parseReply(value)
     } catch (error) {
       if (error instanceof RemoteFailure) throw error
+      const refused = await this.connection.refusal?.()
+      if (refused) throw refused
       // Said as it happened: a reply that was unusable is not a lost link, and a cancelled request is neither.
       const cause = this.ended ?? (error instanceof PaddockError ? error.message : `The SSH link to ${this.endpoint.ssh} ended: ${this.connection.diagnostic() || (error as Error).message}`)
       if (options.mutation && dispatched) throw new PaddockError("outcome-unknown", `${cause} ${method} had been sent to ${this.endpoint.ssh}, so its outcome is unknown. It was not retried. Reconcile with get before acting again.`)
@@ -146,33 +200,22 @@ export class HttpPeer {
   async close(reason?: string): Promise<void> { this.ended ??= reason; this.agent.destroy(); await this.connection.close() }
 }
 
-// The host key a verbose ssh says it verified. Through a jump host ssh prints one such line per hop, the destination's
-// last (measured with OpenSSH 10.3 and ProxyJump), so the last line is the one that names the destination.
-export function serverHostKey(log: string): string | undefined {
-  return [...log.matchAll(/Server host key: \S+ (SHA256:[A-Za-z0-9+/]{43})/g)].at(-1)?.[1]
-}
-
-export function checkHostKey(host: Endpoint, fingerprint: string | undefined): void {
-  if (host.hostKey && fingerprint !== host.hostKey) throw new PaddockError("identity-changed", `The SSH host key for ${host.ssh} ${fingerprint ? `changed from ${host.hostKey} to ${fingerprint}` : "could not be checked against its enrollment"}. Nothing was sent to its sandboxes. Check the destination, remove its host record with \`paddock host remove NAME --confirm NAME\`, then re-enroll deliberately with \`paddock host add\` or \`paddock host attach\`.`)
-}
-// What to check when ssh named no host key. Paddock's own connections never share a multiplexed one (ControlPath=none),
-// so an open master connection is not the cause.
-export const hostKeyHelp = (destination: string) => `Check that \`ssh -v ${destination} true 2>&1 | grep 'Server host key'\` prints a line: Paddock needs OpenSSH's own client first on PATH, not a wrapper that drops -v or its output.`
-
 // The account and outer host key SSH really uses for a destination, from ssh itself: `ssh -G` resolves the user from the
-// user's own configuration, and a verbose connection names the host key it verified. Recorded when a host is attached.
-export async function sshIdentity(endpoint: Endpoint): Promise<{ user: string; hostKey: string }> {
-  const config = Bun.spawn(["ssh", "-G", sshDestination(endpoint.ssh)], { stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+// user's own configuration, and a capture (above) records the key the user's trust accepted. Recorded when attached.
+export async function sshIdentity(endpoint: Endpoint): Promise<{ user: string; hostKey: string; hostPublicKey: string }> {
+  // env: Bun otherwise resolves "ssh" with the PATH this process started with, unlike node:child_process for connections.
+  const config = Bun.spawn(["ssh", "-G", sshDestination(endpoint.ssh)], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: process.env })
   const [resolved, settings] = await Promise.all([config.exited, new Response(config.stdout).text()])
   const user = settings.match(/^user ([A-Za-z0-9_][A-Za-z0-9_.-]{0,63})$/m)?.[1]
-  // The fixed transport command again, with stdin closed: it reaches the daemon socket and ends at once.
-  const argv = sshArgv(endpoint.ssh, transportCommand(endpoint))
-  const probe = Bun.spawn([argv[0]!, "-v", ...argv.slice(1)], { stdin: "ignore", stdout: "ignore", stderr: "pipe", timeout: 20_000 })
-  const [, log] = await Promise.all([probe.exited, new Response(probe.stderr).text()])
-  const hostKey = serverHostKey(log)
   if (resolved !== 0 || !user) throw new PaddockError("dependency", `SSH did not report the user it uses for ${endpoint.ssh}, so nothing was registered.`)
-  if (!hostKey) throw new PaddockError("dependency", `SSH did not report the host key it verified for ${endpoint.ssh}, so nothing was registered. ${hostKeyHelp(endpoint.ssh)}`)
-  return { user, hostKey }
+  // The fixed transport command again, with stdin closed: it reaches the daemon socket and ends at once.
+  const capture = hostKeyCapture(endpoint.ssh)
+  try {
+    const argv = sshArgv(endpoint.ssh, transportCommand(endpoint), capture.options)
+    const probe = Bun.spawn(argv, { stdin: "ignore", stdout: "ignore", stderr: "ignore", timeout: 20_000, env: process.env })
+    const key = capture.read(await probe.exited)
+    return { user, hostKey: keyFingerprint(key), hostPublicKey: key }
+  } finally { capture.remove() }
 }
 
 // This mode relays only to an existing private socket. It never starts or replaces a daemon.
@@ -260,7 +303,10 @@ export class RemoteSession extends EventEmitter implements Session {
     this.pending = []
     // The SSH process is closed whatever a listener does with the end, so `closed` always settles.
     try {
-      if (!this.ready) this.opened(new PaddockError("offline", exit.error ?? "The remote stream ended before ready."))
+      if (!this.ready) {
+        const offline = new PaddockError("offline", exit.error ?? "The remote stream ended before ready.")
+        void (this.connection.refusal?.() ?? Promise.resolve(undefined)).then((refused) => this.opened(refused ?? offline), () => this.opened(offline))
+      }
       this.emit("end", exit)
     } finally { void this.connection.close().finally(() => this.closedResolve()) }
   }

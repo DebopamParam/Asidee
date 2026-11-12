@@ -8,7 +8,7 @@ import { compatible, hostName, parseHello, readHosts, type Hello, type HostRecor
 import { HELPER_IMAGE, MANAGED_RUNTIME } from "./providers/gvisor"
 import HELPER_DOCKERFILE from "./providers/helper.Dockerfile" with { type: "text" }
 import { systemRunner, must } from "./run"
-import { hostKeyHelp, HttpPeer, object, serverHostKey, sshArgv, sshDestination, type Endpoint } from "./transport"
+import { hostKeyCapture, HttpPeer, keyFingerprint, object, pinnedKnownHosts, sshArgv, sshDestination, type Endpoint } from "./transport"
 import { PaddockError, type ErrorCode, type Session, type RunResult } from "./types"
 
 // The one gVisor release enrollment installs. Its archive is checked against the SHA-512 the release publishes, and
@@ -192,7 +192,7 @@ export type HostProbe = {
   packages: Command; downloads: Download[]; apt: Record<string, string>; repositories: Record<string,string>
   files: Record<string, FileState>; ancestors: Record<string, { uid: number; mode: number; link: boolean } | null>
   unit: Command; dockerGroup: Command; lingering: Command
-  hostKey: string
+  hostKey: string; hostPublicKey: string
 }
 
 const strings = (v: unknown): v is Record<string, string> => object(v) && Object.values(v).every((v) => typeof v === "string")
@@ -207,7 +207,7 @@ const file = (v: unknown): v is FileState => object(v) && (
   )
 )
 function isProbe(v: unknown): v is HostProbe {
-  return object(v) && [v.system,v.arch,v.user,v.home,v.machine,v.boot,v.hostKey].every((v) => typeof v === "string")
+  return object(v) && [v.system,v.arch,v.user,v.home,v.machine,v.boot,v.hostKey,v.hostPublicKey].every((v) => typeof v === "string")
     && Number.isSafeInteger(v.uid) && Number.isSafeInteger(v.gid) && typeof v.systemd === "boolean"
     && strings(v.os) && Array.isArray(v.libc) && v.libc.every((v) => typeof v === "string") && strings(v.apt) && strings(v.repositories)
     && [v.docker,v.containers,v.packages,v.unit,v.dockerGroup,v.lingering].every(command)
@@ -220,21 +220,27 @@ function isProbe(v: unknown): v is HostProbe {
 const probeRequest = (options: EnrollmentOptions) => ({ sha256: options.artifact.sha256, runtimeFiles: GVISOR_FILES.map((name) => `${RUNTIME_DIR}/${name}`) })
 
 async function probe(options: EnrollmentOptions): Promise<HostProbe> {
-  const argv = sshArgv(options.ssh, ["python3", "-c", HOST_PROBE])
-  // -v makes ssh name the host key it accepted, on stderr.
-  const result = must(
-    await systemRunner([argv[0]!, "-v", ...argv.slice(1)], { stdin: JSON.stringify(probeRequest(options)), timeoutMs: 90_000 }),
-    "Read-only enrollment probe (requires Python 3, established SSH trust and readable Docker inventory)",
-  )
-  let value: unknown
-  try { value = JSON.parse(result.stdout) } catch {
-    throw new PaddockError("dependency", `The read-only probe did not print its evidence; it printed ${JSON.stringify(result.stdout.slice(0, 200))}. A login script on ${options.ssh} that prints to a non-interactive session causes this. Nothing was installed.`)
-  }
-  const hostKey = serverHostKey(result.stderr)
-  if (!hostKey) throw new PaddockError("dependency", `SSH did not report the host key it verified for ${options.ssh}, so the plan cannot name the machine it was made for. ${hostKeyHelp(options.ssh)} Nothing was installed.`)
-  const bound = object(value) ? { ...value, hostKey } : undefined
-  if (!isProbe(bound)) throw new PaddockError("dependency", "The read-only probe returned incomplete evidence. Nothing was installed.")
-  return bound
+  const capture = hostKeyCapture(options.ssh)
+  try {
+    const result = must(
+      await systemRunner(sshArgv(options.ssh, ["python3", "-c", HOST_PROBE], capture.options), { stdin: JSON.stringify(probeRequest(options)), timeoutMs: 90_000 }),
+      "Read-only enrollment probe (requires Python 3, established SSH trust and readable Docker inventory)",
+    )
+    let value: unknown
+    try { value = JSON.parse(result.stdout) } catch {
+      throw new PaddockError("dependency", `The read-only probe did not print its evidence; it printed ${JSON.stringify(result.stdout.slice(0, 200))}. A login script on ${options.ssh} that prints to a non-interactive session causes this. Nothing was installed.`)
+    }
+    const hostPublicKey = capture.read(result.exitCode)
+    const bound = object(value) ? { ...value, hostKey: keyFingerprint(hostPublicKey), hostPublicKey } : undefined
+    if (!isProbe(bound)) throw new PaddockError("dependency", "The read-only probe returned incomplete evidence. Nothing was installed.")
+    return bound
+  } finally { capture.remove() }
+}
+
+// After consent, every command goes only to the host key the plan names.
+async function pinned<T>(plan: HostPlan, run: (options: string[]) => Promise<T>): Promise<T> {
+  const pin = pinnedKnownHosts(plan.destination.hostPublicKey)
+  try { return await run(pin.options) } finally { pin.remove() }
 }
 
 // ---- the plan: everything an installation would do, decided from the probe alone
@@ -628,7 +634,7 @@ export class Hosts {
       }
 
       if (terminal?.closed) throw new PaddockError("outcome-unknown", "Enrollment terminal disconnected. Nothing was registered. Inspect the journal before retrying.")
-      const endpoint: Endpoint = { ssh: current.options.ssh, binary: current.binary, stateDir: current.stateDir, hostKey: current.destination.hostKey }
+      const endpoint: Endpoint = { ssh: current.options.ssh, binary: current.binary, stateDir: current.stateDir, hostKey: current.destination.hostKey, hostPublicKey: current.destination.hostPublicKey }
       terminal?.output(Buffer.from("\r\nVerifying the installed service and smoke sandbox.\r\n"))
       verifying = true
       await this.verify(endpoint, current, () => terminal?.closed ?? false)
@@ -697,15 +703,16 @@ export class Hosts {
 
   // Sends the plan to the destination and runs it there. With a terminal, the plan goes into a private request file
   // first, so the terminal's input stays free for sudo.
-  private async install(plan: HostPlan, bytes: Uint8Array, terminal?: Terminal): Promise<RunResult> {
+  private install(plan: HostPlan, bytes: Uint8Array, terminal?: Terminal): Promise<RunResult> { return pinned(plan, (pin) => this.installPinned(plan, bytes, pin, terminal)) }
+  private async installPinned(plan: HostPlan, bytes: Uint8Array, pin: string[], terminal?: Terminal): Promise<RunResult> {
     // The artifact's bytes travel only when this plan installs them.
     const artifact = plan.uploads.some((upload) => upload.kind === "artifact") ? { artifactBytes: Buffer.from(bytes).toString("base64") } : {}
     const input = JSON.stringify({ ...plan, interactive: Boolean(terminal), probeScript: HOST_PROBE, probeRequest: probeRequest(plan.options), ...artifact })
-    if (!terminal) return systemRunner(sshArgv(plan.options.ssh, ["python3", "-c", HOST_APPLY]), { stdin: input, timeoutMs: 20 * 60_000 })
+    if (!terminal) return systemRunner(sshArgv(plan.options.ssh, ["python3", "-c", HOST_APPLY], pin), { stdin: input, timeoutMs: 20 * 60_000 })
     if (terminal.closed) throw new PaddockError("conflict", "Enrollment terminal closed before installation.")
-    must(await systemRunner(sshArgv(plan.options.ssh, ["python3", "-c", HOST_REQUEST, plan.requestPath]), { stdin: input, timeoutMs: 120_000 }), "Staging the private enrollment request")
+    must(await systemRunner(sshArgv(plan.options.ssh, ["python3", "-c", HOST_REQUEST, plan.requestPath], pin), { stdin: input, timeoutMs: 120_000 }), "Staging the private enrollment request")
     if (terminal.closed) throw new PaddockError("outcome-unknown", `Terminal closed after staging ${plan.requestPath}. No installation was started; remove that staging file before retrying.`)
-    const argv = sshArgv(plan.options.ssh, ["python3", "-c", HOST_APPLY, plan.requestPath]); argv[1] = "-tt"
+    const argv = sshArgv(plan.options.ssh, ["python3", "-c", HOST_APPLY, plan.requestPath], pin); argv[1] = "-tt"
     const child = spawn(argv[0]!, argv.slice(1), { stdio: ["pipe", "pipe", "pipe"] }); terminal.child = child
     child.stdin.on("error", () => {}); child.stdin.on("drain", terminal.drain)
     let output = ""; let size = 0
@@ -751,7 +758,7 @@ export class Hosts {
       if (hello.buildDigest !== plan.options.artifact.sha256 || hello.service !== "systemd" || hello.listener !== "socket-only")
         throw new PaddockError("incompatible", "Service artifact digest, supervisor or socket-only listener does not match the approved installation.")
 
-      const unit = must(await systemRunner(sshArgv(endpoint.ssh, ["systemctl", "show", plan.service, "--property=ActiveState,UnitFileState,User,SupplementaryGroups,ExecStart"])), "Inspecting the boot service")
+      const unit = must(await pinned(plan, (pin) => systemRunner(sshArgv(endpoint.ssh, ["systemctl", "show", plan.service, "--property=ActiveState,UnitFileState,User,SupplementaryGroups,ExecStart"], pin))), "Inspecting the boot service")
       if (!serviceMatches(unit.stdout, plan.destination.user, plan.binary))
         throw new PaddockError("dependency", `Boot-service inspection did not show ${plan.service} active, permanently enabled, and running ${plan.binary} daemon run as ${plan.destination.user} with SupplementaryGroups=docker.`)
       requireSmokeEngine(await call("engines"), spec.docker)

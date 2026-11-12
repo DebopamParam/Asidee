@@ -3280,17 +3280,18 @@ ev("N04", "A wrong artifact checksum, absent consent, sudo-never without a compl
   }
   const denied = await socket("hostApply", { hash: enrollmentPlan!.hash, accepted: false })
   expect(!denied.reply.ok, "the API applied a plan without accepted:true")
-  // An ssh that keeps its debug output to itself: the plan could not name the machine it was made for.
+  // An ssh that drops Paddock's KnownHostsCommand, so it reports no key it verified: the plan could not name the machine.
   const silent = await sshWrapper("silent-host-key", `
-result = subprocess.run([real] + sys.argv[1:], stdin=sys.stdin.buffer, stdout=sys.stdout.buffer, stderr=subprocess.PIPE)
-sys.stderr.buffer.write(b''.join(line for line in result.stderr.splitlines(True) if b'Server host key' not in line))
-sys.exit(result.returncode)
+args = sys.argv[1:]
+kept = [a for i, a in enumerate(args) if not a.startswith('KnownHostsCommand=') and not (a == '-o' and i + 1 < len(args) and args[i + 1].startswith('KnownHostsCommand='))]
+sys.exit(subprocess.run([real] + kept, stdin=sys.stdin.buffer, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer).returncode)
 `)
   try {
     const refused = await pdkJson(enrollArgs(), { env: silent })
-    expect(refused.code === 5 && refused.reply.error?.message.includes("grep 'Server host key'"), `a plan was made without the host key SSH verified: ${refused.out.slice(0, 300)}`)
+    expect(refused.code === 5 && refused.reply.error?.message.includes("exactly one host key"), `a plan was made without the host key SSH verified: ${refused.out.slice(0, 300)}`)
   } finally { await realSsh() }
-  expect((await planned()).destination.hostKey.startsWith("SHA256:"), "the unwrapped ssh control did not report a host key")
+  const control = (await planned()).destination
+  expect(control.hostKey.startsWith("SHA256:") && control.hostPublicKey.split(" ").length === 2, "the unwrapped ssh control did not report a host key")
   expect(before === await enrollSnapshot(), "a refusal changed remote files")
   await unregistered()
 })

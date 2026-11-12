@@ -403,18 +403,44 @@ before routing or reading dashboard files. No parser diagnostic is returned.
 The first Machines unit registers an already prepared daemon with `host attach NAME --ssh DEST --binary PATH
 --state-dir PATH`. It installs nothing. The primary alone writes `CONFIG/hosts.json` atomically, mode 0600. Each
 daemon keeps a random persistent `STATE/machine-id`; each daemon process has a separate boot ID. Registry aliases
-cannot be rebound implicitly. Attach records the account and the outer host-key fingerprint (`SHA256:…`) that SSH used,
-from `ssh -G` and the verbose handshake; `host list` shows them, with whether the remote daemon has its dashboard
+cannot be rebound implicitly. Attach records the account SSH uses, from `ssh -G`, and the outer host's public key with
+its fingerprint (`SHA256:…`), captured as described below; `host list` shows them, with whether the remote daemon has its dashboard
 listener and whether it runs under systemd. Removing a prepared host forgets its entry and cache and ends its open
 sessions and forwards; its remote installation and data are retained. `host add` installs a reviewed Linux system
 service as described below; remote uninstall remains an explicit manual operation.
 
-Every subsequent request and stream with a recorded host key compares OpenSSH's verbose destination fingerprint on
-that same SSH connection before sending operation bytes. A changed or unreadable key is refused, even if the user's
-known_hosts now trusts it. ProxyJump's intermediate keys do not replace the destination key. Check the destination,
-remove the record explicitly, and use host add/attach to re-enroll deliberately. Older records without a fingerprint
-still rely on OpenSSH's strict known_hosts check; re-attach them to record one. Unit fixtures cover this gate;
-changed-key behavior against a real remote machine has not been measured for this change.
+### The host-key pin
+
+Enrollment (attach, and the probes of host add) records the destination's public key from OpenSSH itself: Paddock passes
+a `KnownHostsCommand` that writes the key the server offered during key exchange to a private file and adds no trust;
+the user's own known_hosts must still accept the key (`StrictHostKeyChecking=yes`), and a key is recorded only when ssh
+got past that check (it did not exit 255) and reported exactly one plain key for the destination. This replaces a
+KnownHostsCommand of the user's own for that connection and needs OpenSSH 8.5 or later on the primary.
+
+Every later request and stream of a host with a recorded key, and every SSH command of an enrollment after consent,
+runs with a private known_hosts file holding only that key under a fixed `HostKeyAlias`, `GlobalKnownHostsFile=/dev/null`,
+`KnownHostsCommand=none`, `VerifyHostKeyDNS=no` and `CheckHostIP=no`. OpenSSH therefore checks the destination against
+that one key before authentication, so no operation byte is sent and none is read from a server holding another key,
+even if the user's known_hosts, DNS or a KnownHostsCommand now trusts it; such a refusal is `identity-changed`, never
+`outcome-unknown`. A ProxyJump hop is a separate ssh that these options do not reach, so the user's own trust still
+checks the jump host, and a jump's refusal is reported as offline, not as a changed destination key. Check the
+destination, remove the record explicitly, and use host add/attach to re-enroll deliberately.
+
+The pin used to be the `Server host key` line of `ssh -v`. That is not sound: OpenSSH prints a server's pre-authentication
+banner to the same stderr, newlines included, after key exchange. Against a throwaway sshd on loopback (OpenSSH 10.3 on
+macOS, its own host key and configuration) a banner line `debug1: Server host key: ssh-ed25519 SHA256:<another key>`
+came after the real one and before `Sending command`, and the old parser read the forged fingerprint as verified.
+Records from that version carry only a fingerprint; they are refused with `identity-changed` and the steps to re-attach,
+never used unpinned. Records without any key, from before fingerprints, still rely on OpenSSH's strict known_hosts
+check alone.
+
+`test/unit/ssh-pin.test.ts` measures this with the real client and a throwaway sshd on loopback, skipped where
+`/usr/sbin/sshd` is absent: the banner forgery against `ssh -v`; the captured key is the real one despite the banner;
+a pinned call succeeds; a pin to another key is refused as `identity-changed` while the fixture's known_hosts trusts the
+real key, and the server's command never ran; through ProxyJump the pinned destination answers and a jump the
+known_hosts does not trust is refused as offline; a destination the known_hosts does not trust is not recorded. Unit
+fixtures cover the options passed and the old-record refusal. Not measured: a real remote machine with a changed key, a
+user `KnownHostsCommand` or `@cert-authority` setup at enrollment, and OpenSSH versions other than 10.3.
 
 `hosts.json` must be `{version: 1, hosts: [...]}`; each record in it is then read on its own. A record this Paddock does
 not know (a future service kind or disk policy) or a damaged one is listed by `host

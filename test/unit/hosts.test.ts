@@ -7,7 +7,6 @@ import {
 import { parseHosts } from "../../core/machines"
 import { GvisorProvider } from "../../core/providers/gvisor"
 import { enrollmentHash, parseOpen } from "../../core/stream"
-import { serverHostKey } from "../../core/transport"
 import { PaddockError } from "../../core/types"
 
 const RUNTIME_DIR = `/opt/paddock/gvisor/${GVISOR_RELEASE}`
@@ -19,7 +18,7 @@ const file = (text: string | null, extra: object = {}) => ({ kind: "file" as con
 function evidence(): HostProbe {
   return {
     system: "Linux", arch: "aarch64", libc: ["glibc", "2.39"], uid: 1000, gid: 1000, user: "alice", home: "/home/alice", machine: "m", boot: "b",
-    hostKey: `SHA256:${"A".repeat(43)}`, systemd: true, os: { ID: "ubuntu", VERSION_ID: "24.04" },
+    hostKey: "SHA256:0X7US8OfQfzxyXkA9yUZy3JjznnQA/iqkCBdPkPPSEQ", hostPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEU61N7KJmkiTPSmrOfaemXZu/1hocrAC0WXPcRUyjQ8", systemd: true, os: { ID: "ubuntu", VERSION_ID: "24.04" },
     docker: { code: 0, out: "{}", err: "" }, containers: { code: 0, out: '{"Names":"owner-web","ID":"123"}', err: "" },
     packages: { code: 0, out: "", err: "" }, downloads: [], apt: {}, repositories: {}, ancestors: {},
     files: Object.fromEntries([
@@ -307,14 +306,6 @@ test("a file diff keeps unchanged lines as context and marks only what changes",
   // Past the size a line diff is computed for, it says so instead of showing something else as a diff.
   const long = `${Array.from({ length: 2500 }, (_, index) => `line ${index}`).join("\n")}\n`
   expect(lineDiff("/x", long, `${long}more\n`)).toContain("Too long for a line diff")
-})
-
-test("the host key recorded for a destination is the last one ssh verified, which through a jump host is the destination's", () => {
-  const jump = `SHA256:${"J".repeat(43)}`; const destination = `SHA256:${"D".repeat(43)}`
-  const log = `debug1: Setting implicit ProxyCommand from ProxyJump: ssh -v -W '[%h]:%p' jump\ndebug1: Server host key: ssh-ed25519 ${jump}\nAuthenticated to jump\ndebug1: Server host key: ssh-ed25519 ${destination}\nAuthenticated to build (via proxy)\n`
-  expect(serverHostKey(log)).toBe(destination)
-  expect(serverHostKey(`debug1: Server host key: ssh-ed25519 ${destination}\n`)).toBe(destination)
-  expect(serverHostKey("debug1: auto-mux: Trying existing master\n")).toBeUndefined()
 })
 
 test("a daemon identity this primary already knows is recognised however its file ends", () => {
