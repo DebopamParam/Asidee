@@ -68,6 +68,15 @@ Every 30 seconds the daemon repeats the configuration and runtime checks and the
 one that fails, recording the reason. A check that could not be made in one pass does not stop a running sandbox: that
 is usually an engine that was busy. Four such passes in a row do, because by then nobody is checking it. The probes are not repeated on the timer: they start containers, and `paddock verify` runs them.
 
+Each unsuccessful enforcement pass records a timestamp and warning on that sandbox, shown by CLI list/get output
+and the collapsed dashboard. This includes thrown status/check/disk errors, unknown blocking checks, unmeasured
+watched disk use and a failed stop attempt. These consume the same four-pass unknown budget; a known blocking failure
+still requests a stop immediately. One sandbox's error does not skip the others. A complete healthy enforcement pass
+clears its warning and budget. Warnings survive a daemon restart when state is writable; if a write fails, the daemon
+keeps a visible in-memory warning naming that failure, which cannot survive its restart. An engine inspection error
+is unknown, not a missing sandbox. A failure of the whole pass is also written to the daemon's stderr as a structured
+enforcement-error event. Unit fixtures cover these failures; no live engine failure was induced for this change.
+
 ### How the guard is compared
 
 The helper loads the shipped rules into an empty network namespace of its own, lists them, and compares that listing

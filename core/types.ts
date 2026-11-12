@@ -96,6 +96,7 @@ export type Manifest = {
   createdAt: string
   lastVerify?: { at: string; results: CheckResult[] }
   stopReason?: string
+  enforcementProblem?: { at: string; message: string }
   // Set by `paddock ssh setup` for this sandbox; a sandbox recreated under the name starts without it.
   ssh?: SshSetup
   // The template it was made from, as resolved at creation. spec.image is then imageId.

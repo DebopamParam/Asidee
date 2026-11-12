@@ -200,7 +200,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
 
   // One pass at a time: a slow engine must not stack them up. The first pass covers the time no daemon was running.
   let enforcing = false
-  const enforce = async () => { if (enforcing) return; enforcing = true; try { await core.enforce() } finally { enforcing = false } }
+  const enforce = async () => { if (enforcing) return; enforcing = true; try { await core.enforce() } catch (error) { process.stderr.write(`${JSON.stringify({ event: "enforcement-error", message: (error as Error).message })}\n`) } finally { enforcing = false } }
   void core.sweep().then(enforce)
   const timer = setInterval(() => { void enforce() }, ENFORCE_MS)
   const keepSandboxes = await new Promise<boolean>((resolve) => {

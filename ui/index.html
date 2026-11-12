@@ -132,6 +132,7 @@ function render() {
           sandbox.lastVerify ? "Past checks" : "Not verified"),
         el("button", { class: "danger", onclick: () => { const typed = prompt(`This deletes ${sandbox.name} and everything in it. Type its name to confirm.`); if (typed !== null) act(sandbox.name, "remove", () => api("remove", { name: sandbox.name, confirm: typed })) } }, "Remove")))
     if (sandbox.status === "running") for (const extension of extensions) for (const action of extension.actions.filter((entry) => entry.scope === "sandbox")) panel.append(el("div", { style: "margin-top:10px" }, actionForm(sandbox, extension, action)))
+    if (sandbox.enforcementProblem) panel.append(el("div", { class: "error" }, `Enforcement unknown at ${sandbox.enforcementProblem.at}: ${sandbox.enforcementProblem.message}`))
     if (output[sandbox.name]) panel.append(el("pre", {}, output[sandbox.name]))
     if (open.has(sandbox.name) && sandbox.lastVerify) {
       panel.append(el("ul", { class: "checks" }, ...sandbox.lastVerify.results.map((check) => el("li", { class: "unknown" },

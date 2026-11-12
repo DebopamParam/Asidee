@@ -9,7 +9,7 @@ import { DockerSandboxesProvider } from "../../core/providers/docker-sandboxes"
 import { fieldValues, loadExtensions, parseExtension } from "../../core/extensions"
 import { configChecks, DOCKER_CAPABILITIES, dockerVolume, gvisorSetup, network, unsafeRuntimeArgs, type GuardState } from "../../core/providers/gvisor"
 import { OUTPUT_LIMIT, systemRunner } from "../../core/run"
-import { readConfig, validSizes, validSpec, validTemplateName } from "../../core/state"
+import { readConfig, readManifest, validSizes, validSpec, validTemplateName } from "../../core/state"
 import { PaddockError, type CheckResult, type Engine, type Limits, type Manifest, type Provider, type Stage, type Template } from "../../core/types"
 
 const engine: Engine = { id: "fake:1", provider: "fake", label: "Fake engine", ready: true, problems: [], data: { context: "fake", runtime: "runsc" }, capabilities: { kernelIsolation: "gvisor", diskLimit: "watched", networkGuard: true, docker: true, execStream: true, loopbackRelay: true, resize: "live", snapshot: true } }
@@ -413,6 +413,49 @@ test("the daemon's pass stops a running sandbox that fails a check or passed its
   state.overrides.config = allPass("config").map((entry) => entry.id === "network-guard" ? { ...entry, status: "fail" as const, detail: "guard missing" } : entry)
   await paddock.enforce()
   expect(await paddock.get("demo")).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("guard missing") })
+})
+
+test("enforcement exceptions are recorded per sandbox, survive a daemon restart and do not skip other sandboxes", async () => {
+  for (const operation of ["status", "checks", "diskUsedBytes"] as const) {
+    const { provider } = fakeProvider(); const paddock = await core(provider)
+    await paddock.create({ name: "demo" }); await paddock.create({ name: "other" })
+    const original = provider[operation]; let otherChecked = false
+    const checks = provider.checks
+    provider.checks = async (manifest, stage) => { if (manifest.name === "other") otherChecked = true; return checks(manifest, stage) }
+    if (operation === "status") provider.status = async (manifest) => { if (manifest.name === "demo") throw new Error("engine offline"); return "running" }
+    if (operation === "checks") provider.checks = async (manifest, stage) => { if (manifest.name === "demo") throw new Error("guard unreadable"); otherChecked = true; return checks(manifest, stage) }
+    if (operation === "diskUsedBytes") provider.diskUsedBytes = async (manifest) => { if (manifest.name === "demo") throw new Error("disk unreadable"); return 0 }
+    await paddock.enforce()
+    expect(otherChecked).toBe(true)
+    const saved = await readManifest(paddock.dirs, "demo")
+    expect(saved.enforcementProblem?.message).toContain("Enforcement could not be completed")
+    expect(saved.enforcementProblem?.at).toMatch(/^\d{4}-/)
+    const restarted = new Core([provider], paddock.dirs, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere")
+    expect((await restarted.get("demo")).enforcementProblem).toEqual(saved.enforcementProblem)
+    expect((await paddock.get("other")).enforcementProblem).toBeUndefined()
+    Object.assign(provider, { [operation]: original })
+    await paddock.enforce()
+    expect((await paddock.get("demo")).enforcementProblem).toBeUndefined()
+  }
+})
+
+test("unmeasured disk use and exceptions consume the unknown budget, and failed stops stay visible", async () => {
+  const { provider, state } = fakeProvider(); const paddock = await core(provider)
+  await paddock.create({ name: "demo" })
+  provider.diskUsedBytes = async () => undefined
+  await paddock.enforce()
+  expect((await paddock.get("demo")).enforcementProblem?.message).toContain("Disk use could not be measured")
+  provider.checks = async () => { throw new Error("guard unreadable") }
+  provider.stop = async () => { throw new Error("stop refused") }
+  for (let at = 1; at < UNCHECKED_PASSES; at++) await paddock.enforce()
+  expect(state.running).toBe(true)
+  const view = await paddock.get("demo")
+  expect(view.enforcementProblem?.message).toContain("stop refused")
+  expect(view.enforcementProblem?.message).toContain("guard unreadable")
+  provider.stop = async () => { state.running = false }
+  await paddock.enforce()
+  expect(state.running).toBe(false)
+  expect((await paddock.get("demo")).stopReason).toContain("4 passes")
 })
 
 test("stopping the daemon stops the sandboxes whose disk limit only it enforces", async () => {

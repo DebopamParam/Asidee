@@ -250,6 +250,7 @@ function printChecks(checks: CheckResult[], checklist = CHECKLIST): void {
 
 function printSandbox(view: SandboxView): void {
   console.log(`${displayName(view.name)}: ${shown(view.status)} on ${shown(view.engine)}${view.stopReason ? `\n  ${shown(view.stopReason)}` : ""}`)
+  if (view.enforcementProblem) console.log(`  Enforcement unknown at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}`)
 }
 const displayName = (name: string) => shown(selectedHost && selectedHost !== "local" ? `${selectedHost}/${name}` : name)
 
@@ -363,7 +364,7 @@ async function main(argv: string[]): Promise<void> {
           return out(fleet, () => {
             for (const row of fleet.machines) {
               console.log(`${shown(row.machine.host.name)}: ${shown(row.machine.state)}${"error" in row.machine && row.machine.error ? ` (${shown(row.machine.error)})` : ""}${row.stale ? "; sandboxes unknown" : ""}`)
-              for (const sandbox of row.cached?.sandboxes ?? []) console.log(`  ${shown(row.machine.host.name)}/${shown(sandbox.name)}: ${shown(sandbox.status)}${row.stale ? ` (last checked ${shown(row.cached?.checkedAt)})` : ""}${sandbox.status === "damaged" ? `\n    ${shown(sandbox.stopReason)}` : ""}`)
+              for (const sandbox of row.cached?.sandboxes ?? []) console.log(`  ${shown(row.machine.host.name)}/${shown(sandbox.name)}: ${shown(sandbox.status)}${row.stale ? ` (last checked ${shown(row.cached?.checkedAt)})` : ""}${sandbox.status === "damaged" ? `\n    ${shown(sandbox.stopReason)}` : ""}${sandbox.enforcementProblem ? `\n    Enforcement unknown at ${shown(sandbox.enforcementProblem.at)}: ${shown(sandbox.enforcementProblem.message)}` : ""}`)
             }
           })
         }
@@ -374,6 +375,7 @@ async function main(argv: string[]): Promise<void> {
             const verified = view.lastVerify ? `last measured ${shown(view.lastVerify.at)}; historical only, current checks unknown` : "never verified"
             if (view.status === "damaged") { console.log(`${displayName(view.name).padEnd(24)} damaged\n    ${shown(view.stopReason)}`); continue }
             console.log(`${displayName(view.name).padEnd(24)} ${shown(view.status).padEnd(8)} ${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  ${shown(view.engine)}${view.template ? `  template ${shown(view.template.name)}` : ""}  (${verified})${view.stopReason ? `\n    ${shown(view.stopReason)}` : ""}`)
+            if (view.enforcementProblem) console.log(`    Enforcement unknown at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}`)
           }
         })
       }

@@ -155,7 +155,7 @@ export function parseRow(entry: unknown, hello: Hello, index = 0): SandboxView {
   if (!object(entry) || entry.machineId !== hello.machineId) throw new PaddockError("incompatible", "The remote daemon reported a sandbox of another machine.")
   const name = typeof entry.name === "string" && /^[a-z0-9][a-z0-9-]{0,30}$/.test(entry.name) ? entry.name : `unreadable-${index + 1}`
   try {
-    if (!["running", "stopped", "missing", "damaged"].includes(String(entry.status)) || typeof entry.engine !== "string" || typeof entry.createdAt !== "string"
+    if (!["running", "stopped", "missing", "damaged", "unknown"].includes(String(entry.status)) || typeof entry.engine !== "string" || typeof entry.createdAt !== "string"
       || (entry.status !== "damaged" && !id(entry.sandboxId)) || !object(entry.spec)) throw new Error("its status, engine, identity or spec")
     if (validName(entry.name) && entry.spec.name !== name) throw new Error("its spec names another sandbox")
     let lastVerify: SandboxView["lastVerify"]
@@ -165,10 +165,15 @@ export function parseRow(entry: unknown, hello: Hello, index = 0): SandboxView {
       lastVerify = entry.lastVerify as SandboxView["lastVerify"]
     }
     for (const key of ["stopReason", "activity"]) if (entry[key] !== undefined && typeof entry[key] !== "string") throw new Error(`its ${key}`)
+    let enforcementProblem: SandboxView["enforcementProblem"]
+    if (entry.enforcementProblem !== undefined) {
+      if (!object(entry.enforcementProblem) || typeof entry.enforcementProblem.at !== "string" || typeof entry.enforcementProblem.message !== "string") throw new Error("its enforcement warning")
+      enforcementProblem = { at: entry.enforcementProblem.at, message: entry.enforcementProblem.message }
+    }
     const spec = entry.status === "damaged" ? damagedSpec(name) : validSpec(entry.spec.template ? { ...entry.spec, image: undefined } : entry.spec)
     if (entry.status !== "damaged" && entry.spec.template && typeof entry.spec.image === "string") spec.image = entry.spec.image
     return { name, status: entry.status as SandboxView["status"], machineId: hello.machineId, ...(id(entry.sandboxId) ? { sandboxId: entry.sandboxId } : {}), engine: entry.engine, createdAt: entry.createdAt, spec,
-      lastVerify, ...(typeof entry.stopReason === "string" ? { stopReason: entry.stopReason } : {}), ...(typeof entry.activity === "string" ? { activity: entry.activity } : {}) }
+      lastVerify, enforcementProblem, ...(typeof entry.stopReason === "string" ? { stopReason: entry.stopReason } : {}), ...(typeof entry.activity === "string" ? { activity: entry.activity } : {}) }
   } catch (error) {
     return { name, status: "damaged", machineId: hello.machineId, ...(id(entry.sandboxId) ? { sandboxId: entry.sandboxId } : {}), engine: typeof entry.engine === "string" ? entry.engine : "", createdAt: "", spec: damagedSpec(name),
       stopReason: `The remote daemon reported this sandbox in a form this Paddock cannot read (${(error as Error).message}). See it with that machine's own Paddock.` }

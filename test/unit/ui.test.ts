@@ -96,6 +96,12 @@ test("a stopped sandbox shows why it stopped, offers Start, and has no extension
   expect(ui.button("Install thing")).toBeUndefined()
 })
 
+test("an enforcement failure is visible without opening historical checks", async () => {
+  const ui = await page({ ...base, list: () => [sandbox({ enforcementProblem: { at: "2026-11-12T00:00:00Z", message: "guard unreadable" } })] })
+  expect(ui.text("#sandboxes")).toContain("Enforcement unknown at 2026-11-12T00:00:00Z: guard unreadable")
+  expect(ui.text("ul.checks")).toBe("")
+})
+
 test("creating sends the form, and an error from the core is shown as it is", async () => {
   let made = false
   const ui = await page({ ...base, list: () => made ? [sandbox({ name: "fresh", lastVerify: undefined })] : [], create: (body) => {

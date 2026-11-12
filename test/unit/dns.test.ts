@@ -56,3 +56,9 @@ test("prepare restores a lost guard and network without trusting an old network 
   expect(state.guard).toBe("intact"); expect(state.network).toBe(true)
   expect(calls.some((argv) => argv.includes(`com.docker.network.bridge.name=${bridge(manifest.name)}`))).toBe(true)
 })
+
+test("an unavailable engine is an inspection error, never a missing sandbox that enforcement skips", async () => {
+  const { manifest } = fixture()
+  const provider = new GvisorProvider(async () => ({ exitCode: 1, stdout: "", stderr: "Cannot connect to the Docker daemon" }))
+  await expect(provider.status(manifest)).rejects.toThrow("Cannot connect")
+})

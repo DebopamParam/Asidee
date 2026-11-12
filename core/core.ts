@@ -27,6 +27,7 @@ export type SandboxView = {
   name: string; status: "running" | "stopped" | "missing" | "damaged" | "unknown"; engine: string; spec: Manifest["spec"]; createdAt: string
   machineId?: string; sandboxId?: string
   capabilities?: Engine["capabilities"]; lastVerify?: Manifest["lastVerify"]; stopReason?: string
+  enforcementProblem?: Manifest["enforcementProblem"]
   // What a long operation on it is doing right now.
   activity?: string
   template?: Manifest["template"]
@@ -39,6 +40,7 @@ export class Core {
   private readonly activity = new Map<string, string>()
   // Passes in a row in which a blocking check of a running sandbox could not be made.
   private readonly unchecked = new Map<string, number>()
+  private readonly enforcementProblems = new Map<string, NonNullable<Manifest["enforcementProblem"]>>()
   // Open sessions per sandbox name, closed when it stops or is removed.
   private readonly sessions = new Map<string, Set<Session>>()
   private readonly leases = new Map<string, { name: string; sandboxId: string; generation: string; port: number; session: Session; dials: Set<Session> }>()
@@ -65,7 +67,7 @@ export class Core {
   async engines(): Promise<Engine[]> { return (await Promise.all(this.providers.map((provider) => provider.detect()))).flat() }
 
   private async view(manifest: Manifest): Promise<SandboxView> {
-    let status: SandboxView["status"] = "missing"
+    let status: SandboxView["status"] = "unknown"
     let stopReason = manifest.stopReason
     try {
       status = await this.provider(manifest).status(manifest)
@@ -75,6 +77,7 @@ export class Core {
     return { name: manifest.name, machineId: this.machineId, sandboxId: manifest.id, status, engine: manifest.engine.label, spec: manifest.spec, createdAt: manifest.createdAt, capabilities: manifest.engine.capabilities,
       lastVerify: manifest.lastVerify && { at: manifest.lastVerify.at, results: manifest.lastVerify.results.map((check) => ({ ...check, status: "unknown", evidence: "none",
         detail: `Historical only. Measured at ${manifest.lastVerify!.at}: ${check.status} (${check.evidence}). ${check.detail} Current property unknown; run paddock verify ${manifest.name} for a new measurement.` })) },
+      enforcementProblem: this.enforcementProblems.get(manifest.name) ?? manifest.enforcementProblem,
       stopReason, activity: this.activity.get(manifest.name), template: manifest.template }
   }
 
@@ -212,6 +215,7 @@ export class Core {
       this.activity.set(name, "Removing")
       this.endSessions(name, `The session ended: ${name} was removed.`)
       await this.provider(manifest).remove(manifest); await deleteManifest(this.dirs, name)
+      this.enforcementProblems.delete(name); this.unchecked.delete(name)
       if (manifest.ssh) await writeClientFiles(this.dirs, await listManifests(this.dirs))
       return { removed: name }
     })
@@ -513,26 +517,59 @@ export class Core {
   // stopped. This is what catches a guard that was flushed, a container started behind Paddock's back, or an engine
   // whose runtime was reconfigured, without waiting for someone to run verify.
   async enforce(): Promise<void> {
-    for (const listed of await listManifests(this.dirs).catch(() => [])) {
+    for (const listed of await listManifests(this.dirs)) {
       await this.exclusive(listed.name, async () => {
-        const manifest = await readManifest(this.dirs, listed.name); const provider = this.provider(manifest)
-        if ((await provider.status(manifest)) !== "running") { this.unchecked.delete(manifest.name); return }
-        const results = await this.stage(manifest, ["config", "runtime"], true)
-        const failed = failures(results)
-        // One pass that could not check is an engine hiccup. Several in a row is a sandbox nobody is checking.
-        const blind = failed.length ? [] : blockers(results)
-        this.unchecked.set(manifest.name, blind.length ? (this.unchecked.get(manifest.name) ?? 0) + 1 : 0)
-        if (blind.length && this.unchecked.get(manifest.name)! >= UNCHECKED_PASSES) {
+        const manifest = await readManifest(this.dirs, listed.name)
+        let stoppingFor: string | undefined
+        try {
+          const provider = this.provider(manifest)
+          if ((await provider.status(manifest)) !== "running") { this.unchecked.delete(manifest.name); return }
+          const results = await this.stage(manifest, ["config", "runtime"], true)
+          const describe = (entries: CheckResult[]) => entries.map((entry) => `${titleOf(entry.id)} (${entry.detail})`).join("; ")
+          const failed = failures(results)
+          if (failed.length) {
+            stoppingFor = `Blocking checks did not hold: ${describe(failed)}`
+            await this.recordEnforcement(manifest, stoppingFor)
+            await this.stopBecause(manifest, `Stopped by the daemon at ${new Date().toISOString()}: ${describe(failed)}`)
+            this.unchecked.delete(manifest.name); return
+          }
+          const blind = blockers(results); const problems = blind.length ? [`Could not check ${describe(blind)}`] : []
+          if (manifest.engine.capabilities?.diskLimit === "watched") {
+            const used = await provider.diskUsedBytes(manifest)
+            if (used === undefined) problems.push("Disk use could not be measured; the watched disk limit is unknown.")
+            else if (used > manifest.spec.diskGb * 1024 ** 3) {
+              const reason = `Stopped by the disk watch: it used ${(used / 1024 ** 3).toFixed(1)} GB of its ${manifest.spec.diskGb} GB. Free space inside it after a start, or it is stopped again.`
+              stoppingFor = reason
+              await this.recordEnforcement(manifest, reason); await this.stopBecause(manifest, reason)
+              this.unchecked.delete(manifest.name); return
+            }
+          }
+          if (problems.length) return await this.enforcementUnknown(manifest, problems.join("; "))
           this.unchecked.delete(manifest.name)
-          return this.stopBecause(manifest, `Stopped by the daemon at ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC: for ${UNCHECKED_PASSES} passes in a row it could not check ${blind.map((entry) => `${titleOf(entry.id)} (${entry.detail})`).join("; ")}`)
+          this.enforcementProblems.delete(manifest.name)
+          if (manifest.enforcementProblem) { delete manifest.enforcementProblem; await writeManifest(this.dirs, manifest) }
+        } catch (error) {
+          await this.enforcementUnknown(manifest, `Enforcement could not be completed: ${(error as Error).message}${stoppingFor ? `; ${stoppingFor}` : ""}`)
         }
-        if (failed.length) return this.stopBecause(manifest, `Stopped by the daemon at ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC: ${failed.map((entry) => `${titleOf(entry.id)} (${entry.detail})`).join("; ")}`)
-        if (manifest.engine.capabilities?.diskLimit !== "watched") return
-        const used = await provider.diskUsedBytes(manifest)
-        if (used !== undefined && used > manifest.spec.diskGb * 1024 ** 3)
-          await this.stopBecause(manifest, `Stopped by the disk watch: it used ${(used / 1024 ** 3).toFixed(1)} GB of its ${manifest.spec.diskGb} GB. Free space inside it after a start, or it is stopped again.`)
-      }).catch(() => {})
+      }).catch((error) => { this.enforcementProblems.set(listed.name, { at: new Date().toISOString(), message: `Enforcement could not read its state: ${(error as Error).message}` }) })
     }
+  }
+
+  private async recordEnforcement(manifest: Manifest, message: string): Promise<void> {
+    const problem = { at: new Date().toISOString(), message }
+    manifest.enforcementProblem = problem; this.enforcementProblems.set(manifest.name, problem)
+    try { await writeManifest(this.dirs, manifest) } catch (error) { problem.message += `; could not save this warning: ${(error as Error).message}` }
+  }
+
+  private async enforcementUnknown(manifest: Manifest, message: string): Promise<void> {
+    const count = (this.unchecked.get(manifest.name) ?? 0) + 1
+    this.unchecked.set(manifest.name, count)
+    await this.recordEnforcement(manifest, message)
+    if (count < UNCHECKED_PASSES) return
+    try {
+      await this.stopBecause(manifest, `Stopped by the daemon at ${new Date().toISOString()}: for ${UNCHECKED_PASSES} passes in a row it could not check enforcement. ${message}`)
+      this.unchecked.delete(manifest.name)
+    } catch (error) { await this.recordEnforcement(manifest, `${message}; the stop attempt also failed: ${(error as Error).message}`) }
   }
 
   // A watched disk limit holds only while something watches. When the daemon is stopped on purpose, the sandboxes that

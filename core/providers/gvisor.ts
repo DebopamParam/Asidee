@@ -345,7 +345,10 @@ export class GvisorProvider implements Provider {
 
   private async inspect(manifest: Manifest): Promise<Inspect | undefined> {
     const output = await this.docker(manifest.engine, ["inspect", container(manifest.name)])
-    if (output.exitCode !== 0) return undefined
+    if (output.exitCode !== 0) {
+      if (/No such (?:container|object):/i.test(output.stderr)) return undefined
+      throw new PaddockError("runtime", `Could not inspect ${manifest.name}: ${output.stderr.trim() || "the engine returned no evidence"}`)
+    }
     const inspect = (JSON.parse(output.stdout) as Inspect[])[0]!
     // A container under this name that the core did not create (or a recreated one) is never operated on.
     if (inspect.Config.Labels?.[LABEL_ID] !== manifest.id)
