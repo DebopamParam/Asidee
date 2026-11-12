@@ -277,7 +277,8 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
       const result = await drop(ws)
       expect(result.hardLinks.includes(join(ws.folder, "work/shared")), "hard-linked file was not reported")
       expect(!await Bun.file(join(ws.folder, ".paddock-tag")).exists() && await readFile(outside, "utf8") === "changed", "remove retained workspace or touched outside hard link")
-      expect(!(await sh([LSREGISTER, "-dump"])).out.includes(app.app), "removed app remains registered")
+      const remaining = (await sh([LSREGISTER, "-dump"])).out.split("\n").filter((line) => line.includes(app.app))
+      expect(!remaining.length && result.launchServices.length === 0, `removed app remains registered or unregistration failed: ${JSON.stringify({ reported: result.launchServices, remaining })}`)
       expect(result.notRemoved.length > 0 && result.disclosure.includes("not a sandbox"), "removal residuals were not disclosed")
     } finally { if (await Bun.file(join(ws.folder, ".paddock-tag")).exists()) await drop(ws) }
   })
@@ -409,6 +410,7 @@ export async function runWorkspaceEvals(args: string[], binary: string): Promise
   class Unmeasured extends Error {}
   const suite = workspaceSuite(binary, (reason) => { throw new Unmeasured(reason) })
   const only = args.includes("--only") ? args[args.indexOf("--only") + 1]!.split(",") : undefined
+  if (only?.some((id) => id !== "K" && !suite.evals.some((entry) => entry.id === id))) throw new Error("Unknown K eval ID. Nothing was started.")
   const outcomes: Array<{ id: string; claim: string; result: string; note: string }> = []
   try {
     for (const entry of suite.evals.filter((ev) => ev.id === "K15" || !only || only.includes("K") || only.includes(ev.id))) {
@@ -422,8 +424,9 @@ export async function runWorkspaceEvals(args: string[], binary: string): Promise
   console.log(summary)
   if (args.includes("--write")) {
     const path = join(import.meta.dir, "SCORECARD.workspace.md")
-    const revision = (await sh(["git", "rev-parse", "--short", "HEAD"])).out.trim()
-    await writeFile(path, `# Workspace scorecard\n\nOnly ${outcomes.map((ev) => ev.id).join(", ")}, on macOS ${(await sh(["/usr/bin/sw_vers", "-productVersion"])).out.trim()}, ${process.arch}, ${new Date().toISOString()}, revision ${revision} plus any working-tree changes.\nThe sandbox scorecards are unchanged.\n\n${summary}.\n\n| Id | Result | Claim | Evidence or limit |\n|---|---|---|---|\n${outcomes.map((ev) => `| ${ev.id} | ${ev.result} | ${ev.claim} | ${ev.note.replace(/\|/g, "\\|").replace(/\n/g, " ")} |`).join("\n")}\n`)
+    const revision = process.env.PADDOCK_EVAL_REVISION ?? (await sh(["git", "rev-parse", "--short", "HEAD"])).out.trim()
+    const dirty = (await sh(["git", "status", "--porcelain", "--", "core", "cli", "ui", "package.json", "evals/run.ts", "evals/workspace.ts", "evals/workspace-metal.m"])).out.trim()
+    await writeFile(path, `# Workspace scorecard\n\nOnly ${outcomes.map((ev) => ev.id).join(", ")}, on macOS ${(await sh(["/usr/bin/sw_vers", "-productVersion"])).out.trim()}, ${process.arch}, ${new Date().toISOString()}, revision ${revision}${dirty ? " plus uncommitted implementation changes" : ""}.\nThe sandbox scorecards are unchanged.\n\n${summary}.\n\n| Id | Result | Claim | Evidence or limit |\n|---|---|---|---|\n${outcomes.map((ev) => `| ${ev.id} | ${ev.result} | ${ev.claim} | ${ev.note.replace(/\|/g, "\\|").replace(/\n/g, " ")} |`).join("\n")}\n`)
   }
   return outcomes.some((ev) => ev.result === "fail") ? 1 : 0
 }

@@ -78,6 +78,9 @@ beside a second workspace and an unconfined marker decoy that survive.
 Remove requires `--confirm NAME`. After stopping, it unregisters `.app` bundles, checks LaunchServices and launchd
 for references, and reports regular files with multiple hard links. It deletes the workspace and its manifest and
 profile only after another empty finder result. It does not follow symlinks or chmod hard-linked regular files.
+One K16 run still showed a registration after pre-deletion unregistration. Remove now checks after deletion and
+retries its bundles for a bounded settling period. The database is filtered before collecting output because its
+full dump exceeds 16 MiB on this Mac. A leftover or unreadable database is reported.
 Multiple links can all be inside the workspace; Paddock cannot locate every external link. Outside hard links
 supplied by another program can share changes that survive removal.
 

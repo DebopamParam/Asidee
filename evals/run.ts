@@ -56,7 +56,7 @@ const until = async (condition: () => Promise<boolean>, seconds: number) => {
 }
 
 // ---- the run's own Paddock: a temporary state and config folder, a port of its own
-if (only?.length && only.every((id) => /^K(?:\d{2})?$/.test(id))) {
+if (only?.length && only.every((id) => id.startsWith("K"))) {
   const binary = join(ROOT, "dist", "paddock")
   const build = await sh([BUN, "build", "--compile", "--minify", "--outfile", binary, "cli/cli.ts"], { cwd: ROOT })
   if (build.code !== 0) { console.error(build.err); process.exit(1) }
@@ -4020,7 +4020,7 @@ async function teardown(): Promise<void> {
 }
 
 // ---- run
-const wanted = evals.filter((entry) => !only || only.some((key) => entry.id === key || (key.length === 1 && entry.id.startsWith(key))) || entry.id === "Z01")
+const wanted = evals.filter((entry) => !only || only.some((key) => entry.id === key || (key.length === 1 && entry.id.startsWith(key))) || entry.id === "Z01" || entry.id === "K15" && only.some((key) => key.startsWith("K")))
 console.error(`Building, and starting a Paddock of its own in ${tmp} (sandboxes are named ${PREFIX}-…)`)
 const build = await sh([BUN, "build", "--compile", "--minify", "--outfile", BIN, "cli/cli.ts"], { cwd: ROOT })
 if (build.code !== 0) { console.error(build.err); process.exit(1) }
@@ -4038,12 +4038,17 @@ if ((await docker(["image", "inspect", "alpine:latest"])).code !== 0) await dock
 
 type Outcome = { id: string; claim: string; result: "pass" | "fail" | "not measured"; note: string; seconds: number }
 const outcomes: Outcome[] = []
+let workspaceControl = false
 const interrupted = () => { void teardown().then(killDaemons).then(() => process.exit(130)) }
 process.on("SIGINT", interrupted); process.on("SIGTERM", interrupted)
 for (const entry of wanted) {
   const start = Date.now(); let result: Outcome["result"] = "pass"; let note = ""
-  try { note = (await Promise.race([entry.run(), Bun.sleep(420_000).then(() => { throw new Error("no result after 7 minutes") })])) ?? "" }
+  try {
+    if (entry.id.startsWith("K") && entry.id !== "K15" && !workspaceControl) skip("K15's finder control did not pass; workspace lifecycle evals are disabled.")
+    note = (await Promise.race([entry.run(), Bun.sleep(420_000).then(() => { throw new Error("no result after 7 minutes") })])) ?? ""
+  }
   catch (error) { result = error instanceof Skip ? "not measured" : "fail"; note = (error as Error).message }
+  if (entry.id === "K15") workspaceControl = result === "pass"
   outcomes.push({ id: entry.id, claim: entry.claim, result, note, seconds: Math.round((Date.now() - start) / 1000) })
   console.error(`${result === "pass" ? "✓" : result === "fail" ? "✗" : "–"} ${entry.id} ${entry.claim}${note ? `\n      ${note}` : ""}`)
 }

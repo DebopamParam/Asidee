@@ -330,14 +330,25 @@ export class Workspaces {
       const lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
       const issues: string[] = []
       for (const bundle of bundles) { const run = await systemRunner([lsregister, "-u", bundle], { timeoutMs: 10_000 }); if (run.exitCode !== 0) issues.push(`Unregistration failed for ${bundle}.`) }
-      const registered = await systemRunner([lsregister, "-dump"], { timeoutMs: 20_000 })
-      if (registered.exitCode !== 0) issues.push("LaunchServices inspection failed; retained registrations unknown.")
-      else issues.push(...registered.stdout.split("\n").filter((line) => line.includes(manifest.folder)))
       const jobs = await systemRunner(["/bin/launchctl", "print", `gui/${process.getuid?.()}`], { timeoutMs: 10_000 })
       const launchd = jobs.exitCode === 0 ? jobs.stdout.split("\n").filter((line) => line.includes(manifest.folder)) : ["launchd inspection failed; retained jobs unknown."]
       if (workspacePids(manifest.folder).length) throw new PaddockError("check-failed", "Processes appeared during removal; folder retained.")
       // Walk without following symlinks or chmodding hard-linked regular files outside this tree.
       await rm(manifest.folder, { recursive: true, force: true })
+      // Filter before collecting: this Mac's full database exceeds the runner's 16 MiB output limit.
+      const references = `"$1" -dump | /usr/bin/grep -F -- "$2"
+status=("\${PIPESTATUS[@]}")
+[ "\${status[0]}" -eq 0 ] || exit "\${status[0]}"
+[ "\${status[1]}" -le 1 ] || exit "\${status[1]}"`
+      for (const deadline = Date.now() + 5000;;) {
+        const registered = await systemRunner(["/bin/bash", "-c", references, "paddock-lsregister", lsregister, manifest.folder], { timeoutMs: 20_000 })
+        if (registered.exitCode !== 0) { issues.push(`LaunchServices inspection failed (exit ${registered.exitCode}; ${registered.stderr.slice(0, 200)}); retained registrations unknown.`); break }
+        const remaining = registered.stdout.split("\n").filter(Boolean)
+        if (!remaining.length) break
+        if (Date.now() >= deadline) { issues.push(...remaining); break }
+        for (const bundle of bundles) await systemRunner([lsregister, "-u", bundle], { timeoutMs: 10_000 })
+        await Bun.sleep(100)
+      }
       await rm(this.profileFile(name), { force: true }); await rm(this.file(name), { force: true })
       return { removed: name, kind: "workspace", hardLinks: links, launchServices: issues, launchd,
         notRemoved: ["Unified system logs", "Existing Time Machine or other backups", "Remote pushes, API calls, uploads and other network effects", "Changes through hard links supplied from outside", "Spotlight retention, Keychain additions and unnamed channels are not covered"], disclosure: WORKSPACE_DISCLOSURE }
