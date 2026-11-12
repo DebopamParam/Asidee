@@ -82,7 +82,7 @@ if info['code'] == 0:
     info['out'] = json.dumps(kept, sort_keys=True)
 containers = command(['docker', '--host', 'unix:///var/run/docker.sock', 'ps', '--no-trunc', '--format', '{{json .}}'])
 if containers['code'] == 0:
-    rows = [{k: v[k] for k in ['ID', 'Names', 'Image']} for v in map(json.loads, filter(None, containers['out'].splitlines()))]
+    rows = [{k: v[k] for k in ['ID', 'Names', 'Image', 'Labels']} for v in map(json.loads, filter(None, containers['out'].splitlines()))]
     containers['out'] = '\n'.join(json.dumps(row, sort_keys=True) for row in sorted(rows, key=lambda row: row['ID']))
 
 # Where Docker is absent, apt says which packages installing it would download, and the apt sources, keys and indexes

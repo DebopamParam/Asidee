@@ -260,7 +260,7 @@ test("only what is missing is planned: a runtime Docker has not loaded restarts 
 
 test("a plan that restarts the Paddock service names the running sandboxes it stops, and claims a Docker interruption only when it plans one", () => {
   const probe = updated()
-  probe.containers.out = '{"Names":"paddock-work","ID":"1"}\n{"Names":"owner-web","ID":"2"}'
+  probe.containers.out = JSON.stringify({ Names: "paddock-work", ID: "1", Labels: `dev.paddock.name=work,dev.paddock.id=${"a".repeat(32)}` }) + '\n{"Names":"owner-web","ID":"2"}'
   const update = installationPlan(other, probe, client)
   expect(update.restart).toEqual({ required: false, containers: ["owner-web (2)", "paddock-work (1)"], service: true, sandboxes: ["paddock-work (1)"] })
   expect(update.steps.at(-1)).toMatchObject({ label: "Restart the Paddock service", argv: ["sudo", "-n", "systemctl", "restart", "paddock@1000.service"] })
@@ -273,6 +273,19 @@ test("a plan that restarts the Paddock service names the running sandboxes it st
   expect(fresh.warnings.join(" ")).not.toContain("No Docker restart is planned")
   expect(fresh.warnings.join(" ")).not.toContain("Restarting the Paddock service")
   expect(installationPlan(options, prepared(), client).warnings.join(" ")).toContain("No Docker restart is planned")
+})
+
+test("service restart victims use ownership labels rather than a name prefix", () => {
+  const probe = updated()
+  probe.containers.out = [
+    { Names: "paddock-unrelated", ID: "1", Labels: "app=owner" },
+    { Names: "renamed-work", ID: "2", Labels: `dev.paddock.name=work,dev.paddock.id=${"a".repeat(32)}` },
+    { Names: "paddock-probe", ID: "3", Labels: "dev.paddock.probe=owner" },
+  ].map((row) => JSON.stringify(row)).join("\n")
+  const plan = installationPlan(other, probe, client)
+  expect(plan.restart.service).toBe(true)
+  expect(plan.restart.containers).toHaveLength(3)
+  expect(plan.restart.sandboxes).toEqual(["renamed-work (2)"])
 })
 
 test("a file diff keeps unchanged lines as context and marks only what changes", () => {

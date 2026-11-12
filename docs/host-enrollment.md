@@ -79,6 +79,11 @@ A changed file, artifact, machine identity, package recipe or container inventor
 consent. Apply probes again after delivery and terminal authentication, before the first installation step. Review the
 revised plan and use its new hash. A plan is held by the primary daemon; restarting that daemon expires its stored plans.
 
+Container inventory retains ownership labels. Service restart warnings identify Paddock sandboxes by both
+`dev.paddock.id` and `dev.paddock.name`, rather than a name prefix; unrelated containers and probe helpers are excluded.
+The Docker restart warning still lists every running container. Invalid inventory JSON refuses the plan with a
+Paddock dependency error and asks for a new read-only probe.
+
 `--sudo never` reuses an installation that is already complete: the system service active and enabled at boot, running
 the supplied artifact from the reviewed unit, with the pinned runtime registered and loaded by Docker. It plans no
 command, upload or restart, and refuses anything less. It installs no user unit, even when lingering is enabled.

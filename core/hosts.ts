@@ -353,8 +353,8 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
   const prepared = serviceCurrent && binaryInstalled && linked && runtimeMissing.length === 0 && registered && loaded
   const reuse = options.sudo === "never" || prepared
 
-  // Every running container, because a Docker restart may interrupt each one. The ones named as Paddock names its
-  // sandboxes are listed again where the Paddock service restarts, which stops the sandboxes it watches.
+  // Every running container, because a Docker restart may interrupt each one. Ownership labels distinguish sandboxes
+  // from unrelated containers and Paddock's probe helpers, regardless of their names.
   const inventory: string[] = []; const sandboxes: string[] = []
   if (destination.docker.code === 0) {
     if (destination.containers.code !== 0) installing.push("Cannot read every running container; Docker restart impact is unknown.")
@@ -363,7 +363,8 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
       try { v = JSON.parse(line) } catch { throw new PaddockError("dependency", "Invalid Docker container inventory. Nothing was installed; repeat the read-only plan probe.") }
       if (!object(v) || typeof v.Names !== "string" || typeof v.ID !== "string") throw new PaddockError("dependency", "Invalid Docker container inventory.")
       inventory.push(`${v.Names} (${v.ID})`)
-      if (v.Names.startsWith("paddock-")) sandboxes.push(`${v.Names} (${v.ID})`)
+      const labels = new Map(typeof v.Labels === "string" ? v.Labels.split(",").map((label) => [label.slice(0, label.indexOf("=")), label.slice(label.indexOf("=") + 1)]) : [])
+      if (/^[a-f0-9]{32}$/.test(labels.get("dev.paddock.id") ?? "") && /^[a-z0-9][a-z0-9-]{0,30}$/.test(labels.get("dev.paddock.name") ?? "")) sandboxes.push(`${v.Names} (${v.ID})`)
     }
   } else if (!destination.downloads.length)
     installing.push("Docker is installed but its local socket is not readable, or the apt recipe is unavailable. Prepare Docker access first; the probe never uses sudo.")
