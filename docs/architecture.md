@@ -69,10 +69,12 @@ one that fails, recording the reason. A check that could not be made in one pass
 is usually an engine that was busy. Four such passes in a row do, because by then nobody is checking it. The probes are not repeated on the timer: they start containers, and `paddock verify` runs them.
 
 Each unsuccessful enforcement pass records a timestamp and warning on that sandbox, shown by CLI list/get output
-and the collapsed dashboard. This includes thrown status/check/disk errors, unknown blocking checks, unmeasured
-watched disk use and a failed stop attempt. These consume the same four-pass unknown budget; a known blocking failure
-still requests a stop immediately. One sandbox's error does not skip the others. A complete healthy enforcement pass
-clears its warning and budget. Warnings survive a daemon restart when state is writable; if a write fails, the daemon
+and the collapsed dashboard as "Enforcement problem at …". This includes thrown status/check/disk errors, unknown
+blocking checks, unmeasured watched disk use and a failed stop attempt. These consume the same four-pass unknown
+budget; a known blocking failure or a passed disk limit still requests a stop immediately. Once a stop succeeds, the
+warning is cleared and the sandbox's stop reason carries the explanation; a warning remains only while enforcement is
+unknown or a stop failed. One sandbox's error does not skip the others. A complete healthy enforcement pass, a pass
+that finds the sandbox not running, and a successful explicit start each clear its warning and budget. Warnings survive a daemon restart when state is writable; if a write fails, the daemon
 keeps a visible in-memory warning naming that failure, which cannot survive its restart. An engine inspection error
 is unknown, not a missing sandbox. A failure of the whole pass is also written to the daemon's stderr as a structured
 enforcement-error event. Unit fixtures cover these failures; no live engine failure was induced for this change.

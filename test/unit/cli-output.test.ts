@@ -86,7 +86,7 @@ test("list shows the timestamp and reason of an enforcement failure", async () =
   const row = { name: "demo", status: "running", engine: "fake", spec: { cpus: 1, memoryGb: 1 }, enforcementProblem: { at: "2026-11-12T00:00:00Z", message: "disk unreadable" } }
   const paddock = await daemon({ list: { ok: true, data: [row] } })
   const { out } = await paddock("list")
-  expect(out).toContain("Enforcement unknown at 2026-11-12T00:00:00Z: disk unreadable")
+  expect(out).toContain("Enforcement problem at 2026-11-12T00:00:00Z: disk unreadable")
 })
 
 test("an enrollment plan is shown as every command, file, download and restart, without the destination's control characters", async () => {

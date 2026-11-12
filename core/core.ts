@@ -113,7 +113,9 @@ export class Core {
   private async stopBecause(manifest: Manifest, reason: string): Promise<void> {
     this.endSessions(manifest.name, `The session ended: ${manifest.name} was stopped. ${reason}`)
     await this.provider(manifest).stop(manifest)
-    manifest.stopReason = reason; await writeManifest(this.dirs, manifest)
+    // A stop resolves what enforcement found; stopReason now carries it, so it is not left as a standing problem.
+    manifest.stopReason = reason; delete manifest.enforcementProblem; this.enforcementProblems.delete(manifest.name)
+    await writeManifest(this.dirs, manifest)
   }
 
   private async startChecked(manifest: Manifest): Promise<void> {
@@ -133,7 +135,8 @@ export class Core {
       await provider.stop(manifest).catch(() => {})
       throw error
     }
-    if (manifest.stopReason) { delete manifest.stopReason; await writeManifest(this.dirs, manifest) }
+    const stale = manifest.stopReason !== undefined; delete manifest.stopReason
+    await this.clearEnforcement(manifest, stale)
   }
 
   private async verifyNow(manifest: Manifest): Promise<{ checks: CheckResult[]; failed: CheckResult[] }> {
@@ -523,7 +526,7 @@ export class Core {
         let stoppingFor: string | undefined
         try {
           const provider = this.provider(manifest)
-          if ((await provider.status(manifest)) !== "running") { this.unchecked.delete(manifest.name); return }
+          if ((await provider.status(manifest)) !== "running") { this.unchecked.delete(manifest.name); return await this.clearEnforcement(manifest) }
           const results = await this.stage(manifest, ["config", "runtime"], true)
           const describe = (entries: CheckResult[]) => entries.map((entry) => `${titleOf(entry.id)} (${entry.detail})`).join("; ")
           const failed = failures(results)
@@ -546,8 +549,7 @@ export class Core {
           }
           if (problems.length) return await this.enforcementUnknown(manifest, problems.join("; "))
           this.unchecked.delete(manifest.name)
-          this.enforcementProblems.delete(manifest.name)
-          if (manifest.enforcementProblem) { delete manifest.enforcementProblem; await writeManifest(this.dirs, manifest) }
+          await this.clearEnforcement(manifest)
         } catch (error) {
           await this.enforcementUnknown(manifest, `Enforcement could not be completed: ${(error as Error).message}${stoppingFor ? `; ${stoppingFor}` : ""}`)
         }
@@ -559,6 +561,13 @@ export class Core {
     const problem = { at: new Date().toISOString(), message }
     manifest.enforcementProblem = problem; this.enforcementProblems.set(manifest.name, problem)
     try { await writeManifest(this.dirs, manifest) } catch (error) { problem.message += `; could not save this warning: ${(error as Error).message}` }
+  }
+
+  // changed: the caller altered the manifest too, so it is written even without a problem to clear.
+  private async clearEnforcement(manifest: Manifest, changed = false): Promise<void> {
+    this.enforcementProblems.delete(manifest.name)
+    if (manifest.enforcementProblem) { delete manifest.enforcementProblem; changed = true }
+    if (changed) await writeManifest(this.dirs, manifest)
   }
 
   private async enforcementUnknown(manifest: Manifest, message: string): Promise<void> {

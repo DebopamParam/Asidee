@@ -98,7 +98,7 @@ test("a stopped sandbox shows why it stopped, offers Start, and has no extension
 
 test("an enforcement failure is visible without opening historical checks", async () => {
   const ui = await page({ ...base, list: () => [sandbox({ enforcementProblem: { at: "2026-11-12T00:00:00Z", message: "guard unreadable" } })] })
-  expect(ui.text("#sandboxes")).toContain("Enforcement unknown at 2026-11-12T00:00:00Z: guard unreadable")
+  expect(ui.text("#sandboxes")).toContain("Enforcement problem at 2026-11-12T00:00:00Z: guard unreadable")
   expect(ui.text("ul.checks")).toBe("")
 })
 

@@ -439,6 +439,51 @@ test("enforcement exceptions are recorded per sandbox, survive a daemon restart 
   }
 })
 
+test("a failure enforcement acted on is cleared once the stop succeeds, and stays only while the stop failed", async () => {
+  const { provider, state } = fakeProvider(); const paddock = await core(provider)
+  await paddock.create({ name: "demo", diskGb: 1 })
+  state.overrides.config = allPass("config").map((entry) => entry.id === "network-guard" ? { ...entry, status: "fail" as const, detail: "guard missing" } : entry)
+  await paddock.enforce()
+  const stopped = await paddock.get("demo")
+  expect(stopped).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("guard missing") })
+  expect(stopped.enforcementProblem).toBeUndefined()
+  expect((await readManifest(paddock.dirs, "demo")).enforcementProblem).toBeUndefined()
+  delete state.overrides.config; await paddock.start("demo")
+  provider.diskUsedBytes = async () => 2 * 1024 ** 3
+  await paddock.enforce()
+  expect(await paddock.get("demo")).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("disk watch"), enforcementProblem: undefined })
+  // The stop failed: the sandbox still runs past its limit, and that is what stays shown.
+  provider.diskUsedBytes = async () => 0; await paddock.start("demo")
+  provider.diskUsedBytes = async () => 2 * 1024 ** 3; const stop = provider.stop
+  provider.stop = async () => { throw new Error("stop refused") }
+  await paddock.enforce()
+  expect(state.running).toBe(true)
+  expect((await paddock.get("demo")).enforcementProblem?.message).toMatch(/stop refused.*disk watch/)
+  provider.stop = stop; provider.diskUsedBytes = async () => 0
+})
+
+test("a stale enforcement problem is cleared when the sandbox is found stopped and on an explicit start", async () => {
+  const { provider, state } = fakeProvider(); const paddock = await core(provider)
+  await paddock.create({ name: "demo" })
+  provider.diskUsedBytes = async () => undefined
+  await paddock.enforce()
+  expect((await paddock.get("demo")).enforcementProblem?.message).toContain("Disk use could not be measured")
+  // Stopped behind the daemon's back: nothing is left to enforce, so the warning goes.
+  state.running = false
+  await paddock.enforce()
+  expect((await paddock.get("demo")).enforcementProblem).toBeUndefined()
+  expect((await readManifest(paddock.dirs, "demo")).enforcementProblem).toBeUndefined()
+  await paddock.start("demo"); await paddock.enforce()
+  expect((await paddock.get("demo")).enforcementProblem).toBeDefined()
+  // An explicit start passes its own blocking checks, so it begins without the old warning.
+  await paddock.stop("demo")
+  expect((await paddock.get("demo")).enforcementProblem).toBeDefined()
+  await paddock.start("demo")
+  expect((await paddock.get("demo")).enforcementProblem).toBeUndefined()
+  const saved = await readManifest(paddock.dirs, "demo")
+  expect(saved.enforcementProblem).toBeUndefined(); expect(saved.stopReason).toBeUndefined()
+})
+
 test("unmeasured disk use and exceptions consume the unknown budget, and failed stops stay visible", async () => {
   const { provider, state } = fakeProvider(); const paddock = await core(provider)
   await paddock.create({ name: "demo" })

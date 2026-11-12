@@ -250,7 +250,7 @@ function printChecks(checks: CheckResult[], checklist = CHECKLIST): void {
 
 function printSandbox(view: SandboxView): void {
   console.log(`${displayName(view.name)}: ${shown(view.status)} on ${shown(view.engine)}${view.stopReason ? `\n  ${shown(view.stopReason)}` : ""}`)
-  if (view.enforcementProblem) console.log(`  Enforcement unknown at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}`)
+  if (view.enforcementProblem) console.log(`  Enforcement problem at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}`)
 }
 const displayName = (name: string) => shown(selectedHost && selectedHost !== "local" ? `${selectedHost}/${name}` : name)
 
@@ -376,7 +376,7 @@ async function main(argv: string[]): Promise<void> {
             const verified = view.lastVerify ? `last measured ${shown(view.lastVerify.at)}; historical only, current checks unknown` : "never verified"
             if (view.status === "damaged") { console.log(`${displayName(view.name).padEnd(24)} damaged\n    ${shown(view.stopReason)}`); continue }
             console.log(`${displayName(view.name).padEnd(24)} ${shown(view.status).padEnd(8)} ${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  ${shown(view.engine)}${view.template ? `  template ${shown(view.template.name)}` : ""}  (${verified})${view.stopReason ? `\n    ${shown(view.stopReason)}` : ""}`)
-            if (view.enforcementProblem) console.log(`    Enforcement unknown at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}`)
+            if (view.enforcementProblem) console.log(`    Enforcement problem at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}`)
           }
         })
       }
