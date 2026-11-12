@@ -310,7 +310,9 @@ async function main(argv: string[]): Promise<void> {
           const report = await call<WorkspaceReport>(action === "create" ? "workspaceCreate" : "workspaceVerify", { name,
             ...(action === "create" ? { reads: values.read?.map(localPath), path: values.path?.map(localPath), copy: values.copy ? localPath(values.copy) : undefined, loopback: values.loopback,
               logins: values["no-logins"] ? { kind: "none" } : { kind: "profiles", claude: values["claude-profile"] ?? "default", codex: values["codex-profile"] ?? "default" } } : {}) })
-          out(report, () => { show(report.workspace); printChecks(report.checks, WORKSPACE_CHECKLIST); for (const path of report.pathSuggestions ?? []) console.log(`Tool folder under home, closed unless declared with --read: ${shown(path)}`); disclose() })
+          out(report, () => { show(report.workspace); printChecks(report.checks, WORKSPACE_CHECKLIST); for (const path of report.pathSuggestions ?? []) console.log(`Tool folder under home, closed unless declared with --read: ${shown(path)}`)
+            // The not-covered check already carries the disclosure when verification reached it.
+            if (!report.checks.some((check) => check.detail.includes(WORKSPACE_DISCLOSURE))) disclose() })
           if (!report.ok) process.exit(EXIT["check-failed"])
           return
         }

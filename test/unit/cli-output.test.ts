@@ -7,6 +7,7 @@ import { join } from "node:path"
 import { VERSION } from "../../core/daemon"
 import { enrollmentOptions, GVISOR, GVISOR_FILES, GVISOR_RELEASE, installationPlan, type HostProbe } from "../../core/hosts"
 import { socketPath, streamSocketPath } from "../../core/state"
+import { WORKSPACE_DISCLOSURE } from "../../core/workspace-profile"
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanups.splice(0)) await close() })
@@ -80,6 +81,18 @@ test("list describes saved verification as dated history with current checks unk
   expect(code).toBe(0)
   expect(out).toContain("last measured 2026-11-10T10:00:00Z; historical only, current checks unknown")
   expect(out).not.toContain("0 failed")
+})
+
+test("workspace create and verify print the disclosure once, also when no check carried it", async () => {
+  const workspace = { kind: "workspace", name: "render", folder: "/w/render", status: "stopped", processes: 0, disclosure: WORKSPACE_DISCLOSURE }
+  const reached = { workspace, ok: true, checks: [{ id: "not-covered", status: "info", evidence: "none", detail: `${WORKSPACE_DISCLOSURE} Time Machine exclusion could not be verified.` }] }
+  const cut = { workspace, ok: true, checks: [{ id: "not-covered", status: "unknown", evidence: "none", detail: "This workspace check could not be made." }] }
+  const paddock = await daemon({ workspaceCreate: { ok: true, data: reached }, workspaceVerify: { ok: true, data: cut } })
+  for (const action of ["create", "verify"]) {
+    const result = await paddock("workspace", action, "render")
+    expect(result.code).toBe(0)
+    expect(result.out.split(WORKSPACE_DISCLOSURE).length - 1).toBe(1)
+  }
 })
 
 test("list shows the timestamp and reason of an enforcement failure", async () => {
