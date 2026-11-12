@@ -20,6 +20,18 @@ const post = (method: string, headers: Record<string, string> = {}, body = "{}")
   new Request(`http://127.0.0.1:7717/api/${method}`, { method: "POST", headers: { host: "127.0.0.1:7717", ...headers }, body })
 const auth = { authorization: `Bearer ${TOKEN}` }
 
+test("malformed dashboard URLs return a generic client error", async () => {
+  const { handle } = await handler()
+  for (const path of ["/%", "/%E0%A4", "/%00", "/?token=%FF", "/api/list?x=%"]) {
+    const response = await handle(new Request(`http://127.0.0.1:7717${path}`, { headers: { host: "127.0.0.1:7717" } }), false, 7717)
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ ok: false, error: { code: "usage", message: "Malformed request URL." } })
+  }
+  const request = post("list")
+  Object.defineProperty(request, "url", { value: "http://[invalid" })
+  expect((await handle(request, true, 0)).status).toBe(400)
+})
+
 test("the loopback port needs the token and this server's Host; the socket needs neither", async () => {
   const { handle } = await handler()
   expect((await handle(post("list"), false, 7717)).status).toBe(401)

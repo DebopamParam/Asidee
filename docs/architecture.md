@@ -362,6 +362,8 @@ finish, so a second daemon never runs beside it. It listens on:
   available here.
 
 State is in `~/.local/state/paddock`, configuration in `~/.config/paddock` (`PADDOCK_STATE_DIR`, `PADDOCK_CONFIG_DIR`).
+Malformed request URLs, including invalid percent encoding in paths or query parameters, receive a generic HTTP 400
+before routing or reading dashboard files. No parser diagnostic is returned.
 
 ## Machines
 

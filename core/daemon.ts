@@ -93,7 +93,12 @@ const refuse = (status: number, message: string) => json(status, { ok: false, er
 // another site that resolves its own name to 127.0.0.1 does not).
 export function createHandler(table: Record<string, Method>, token: string, configDir: string, machines?: Machines) {
   return async (request: Request, viaSocket: boolean, port: number): Promise<Response> => {
-    const url = new URL(request.url)
+    let url: URL; let pathname: string
+    try {
+      url = new URL(request.url)
+      pathname = decodeURIComponent(url.pathname)
+      if (/[\x00-\x1f\x7f]/.test(pathname + decodeURIComponent(url.search))) throw new URIError()
+    } catch { return refuse(400, "Malformed request URL.") }
     if (!viaSocket && !["127.0.0.1", "localhost"].some((host) => request.headers.get("host") === `${host}:${port}`)) return refuse(403, "Unexpected Host header.")
     if (url.pathname.startsWith("/api/")) {
       const method = Object.hasOwn(table, url.pathname.slice(5)) ? table[url.pathname.slice(5)] : undefined
@@ -131,7 +136,7 @@ export function createHandler(table: Record<string, Method>, token: string, conf
     }
     if (viaSocket || request.method !== "GET") return json(404, { ok: false, error: { code: "not-found", message: "Not found." } })
     // A folder at CONFIG/ui replaces the built-in dashboard: it is a client of the same API, with the same token.
-    const custom = join(configDir, "ui"); const path = normalize(join(custom, url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname)))
+    const custom = join(configDir, "ui"); const path = normalize(join(custom, url.pathname === "/" ? "index.html" : pathname))
     if (path.startsWith(`${custom}/`) && await Bun.file(path).exists()) return new Response(Bun.file(path), { headers: { "x-frame-options": "DENY" } })
     if (url.pathname === "/") return new Response(BUILT_IN_UI, { headers: { "content-type": "text/html; charset=utf-8", "x-frame-options": "DENY" } })
     return new Response("Not found", { status: 404 })
@@ -164,7 +169,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   let stopping = false
   const answer = createHandler(methods(core, (keep) => stop(keep), () => stopping, machines, hosts, workspaces), token, dirs.config, machines)
   const handle = (request: Request, viaSocket: boolean, port: number): Promise<Response> =>
-    stopping && new URL(request.url).pathname !== "/api/version"
+    stopping && URL.canParse(request.url) && new URL(request.url).pathname !== "/api/version"
       ? Promise.resolve(json(STATUS.conflict, { ok: false, error: { code: "conflict", message: "The daemon is stopping. Try again in a moment." } }))
       : answer(request, viaSocket, port)
 
