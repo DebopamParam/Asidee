@@ -372,13 +372,9 @@ export class GvisorProvider implements Provider {
 
   async start(manifest: Manifest): Promise<void> {
     const { engine, name } = manifest
-    if ((await this.inspect(manifest))?.State.Running) { if (!manifest.spec.docker) return }
-    else must(await this.docker(engine, ["start", container(name)]), `Starting ${name}`)
-    // A Docker sandbox writes its DNS before dockerd starts, so the daemon's containers inherit it.
-    if (!manifest.spec.docker) {
-      const dns = await this.docker(engine, ["exec", "-i", "-u", "0", container(name), "sh", "-c", "cat > /etc/resolv.conf"], { stdin: SANDBOX_DNS })
-      if (dns.exitCode !== 0) throw new PaddockError("runtime", `${name} started, but its DNS could not be set: ${dns.stderr.trim()}`)
-    }
+    if (!(await this.inspect(manifest))?.State.Running) must(await this.docker(engine, ["start", container(name)]), `Starting ${name}`)
+    const dns = await this.dnsCheck(manifest)
+    if (dns.status !== "pass") throw new PaddockError("runtime", `${name} started, but its DNS could not be set and read back: ${dns.detail}`)
     if (manifest.spec.docker) {
       must(await this.docker(engine, ["exec", "-u", "0", container(name), "sh", "-c", INNER_NAT]), "Setting Docker's inner NAT (needs iptables-legacy and gVisor --net-raw)")
       // Merged packets accepted by gVisor's own sockets can be dropped when forwarded to inner containers.
@@ -675,9 +671,10 @@ export class GvisorProvider implements Provider {
     }
     if (stage === "runtime") {
       const kernel = await this.kernelCheck(manifest, inspect)
-      if (!manifest.spec.docker) return [kernel, result("docker", "info", "inspected", "Not requested; no capabilities are added for inner Docker.")]
+      const dns = kernel.status === "pass" ? await this.dnsCheck(manifest) : result("dns", "unknown", "none", "DNS was not set or read because the isolated kernel check did not pass.")
+      if (!manifest.spec.docker) return [kernel, dns, result("docker", "info", "inspected", "Not requested; no capabilities are added for inner Docker.")]
       const info = kernel.status === "pass" ? await this.dockerInfo(manifest) : undefined
-      return [kernel, info?.exitCode === 0 && info.stdout.trim() === `/var/lib/docker ${DOCKER_DRIVER}` ? result("docker", "pass", "probed", `The private Docker daemon answers on its Unix socket inside gVisor, with its data in /var/lib/docker on the copy-on-write ${DOCKER_DRIVER} driver. It is the sandbox's main process; if it exits, the sandbox stops. Inner containers use the sandbox's DNS, a public fallback of 1.1.1.1 and 8.8.8.8: under gVisor the engine's resolver 127.0.0.11 refuses queries, and its upstream is in a range the guard drops.`)
+      return [kernel, dns, info?.exitCode === 0 && info.stdout.trim() === `/var/lib/docker ${DOCKER_DRIVER}` ? result("docker", "pass", "probed", `The private Docker daemon answers on its Unix socket inside gVisor, with its data in /var/lib/docker on the copy-on-write ${DOCKER_DRIVER} driver. It is the sandbox's main process; if it exits, the sandbox stops. Inner containers inherit the sandbox's public DNS fallback of 1.1.1.1 and 8.8.8.8 at creation; the separate DNS check reports its current configuration.`)
         : result("docker", "fail", "probed", `The requested inner Docker daemon did not answer with /var/lib/docker on the ${DOCKER_DRIVER} driver: ${info ? `${info.stdout.trim()} ${info.stderr.trim()}` : "the isolated kernel check did not pass"}`)]
     }
     const next = (this.probing.get(manifest.engine.id) ?? Promise.resolve()).then(() => this.probe(manifest, inspect))
@@ -687,6 +684,16 @@ export class GvisorProvider implements Provider {
 
   private dockerInfo(manifest: Manifest): Promise<RunResult> {
     return this.docker(manifest.engine, ["exec", "-u", "0", container(manifest.name), "docker", "--host", "unix:///var/run/docker.sock", "info", "--format", "{{.DockerRootDir}} {{.Driver}}"], { timeoutMs: 10_000 })
+  }
+
+  private async dnsCheck(manifest: Manifest): Promise<CheckResult> {
+    try {
+      // Docker may rewrite this engine-owned file across a restart, even with the container still running.
+      const dns = await this.docker(manifest.engine, ["exec", "-i", "-u", "0", container(manifest.name), "sh", "-c", "cat > /etc/resolv.conf && cat /etc/resolv.conf"], { stdin: SANDBOX_DNS })
+      if (dns.exitCode !== 0) return result("dns", "unknown", "none", `The DNS fallback could not be set and read back: ${dns.stderr.trim()}`)
+      return dns.stdout === SANDBOX_DNS ? result("dns", "pass", "inspected", "Read back /etc/resolv.conf with public fallback resolvers 1.1.1.1 and 8.8.8.8, bypassing the engine's per-network resolver. This checks configuration, not a live lookup or existing inner containers' resolver state.")
+        : result("dns", "fail", "inspected", "The resolver file read back differs from Paddock's public DNS fallback.")
+    } catch (error) { return result("dns", "unknown", "none", `The DNS fallback could not be set and read back: ${(error as Error).message}`) }
   }
 
   // The runtime the engine reports, confirmed from inside: gVisor's kernel log and version string name it.

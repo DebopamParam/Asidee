@@ -60,7 +60,7 @@ export type Engine = {
 }
 
 export type CheckId =
-  | "kernel" | "hardening" | "mounts" | "network-guard" | "inbound" | "forwards" | "ssh" | "limits" | "disk" | "docker"
+  | "kernel" | "hardening" | "mounts" | "network-guard" | "inbound" | "forwards" | "ssh" | "limits" | "disk" | "docker" | "dns"
   | "template" | "net-host" | "net-peers" | "net-private" | "egress" | "credentials"
   | "seatbelt" | "writes" | "home-closed" | "daemons" | "user-data" | "processes" | "gpu" | "network" | "loopback" | "not-covered" | "hard-links"
 

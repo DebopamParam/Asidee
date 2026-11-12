@@ -32,6 +32,7 @@ is waived for it. A future microVM provider needs reviewed evidence or an explic
 |---|---|---|---|
 | Isolated kernel | yes | after start | The runtime is gVisor, and the kernel inside identifies as gVisor. |
 | Inner Docker is available when requested | yes | after start | Its Unix socket answers, its data root is /var/lib/docker, and its driver is the copy-on-write `overlayfs`. The detail discloses the public DNS fallback. Not requested is a disclosure. |
+| Public DNS fallback is configured | yes | after start | Rewrites and reads back /etc/resolv.conf with 1.1.1.1 and 8.8.8.8. This measures configuration, not live resolution. |
 | No privileged mode, host namespaces, undeclared capabilities or devices | yes | before start | Engine configuration. With Docker, exactly NET_ADMIN and SYS_ADMIN added inside gVisor; otherwise no additions. |
 | No host folders | yes | before start | Engine configuration; with Docker, volume driver options and ownership too. |
 | Own network, guard loaded | yes | before start | Engine configuration, and the loaded firewall rules compared rule for rule with the shipped ones. |
@@ -127,6 +128,15 @@ resolvers rather than having a separate daemon DNS override. On this engine a us
 `0.250.250.200`, is in the guard's blocked 0/8 range. Paddock therefore writes a **public DNS fallback, 1.1.1.1 and
 8.8.8.8**, for the sandbox, which the inner daemon inherits. This is a product choice of where DNS queries go; the
 `docker` check discloses it. Private DNS and split DNS were not measured.
+
+Every start, including an already running sandbox and one with inner Docker, now rewrites this fallback and reads it
+back. The runtime enforcement pass does the same, repairing a resolver file Docker reset without trusting a previous
+per-network resolver address. An unreadable/unwritable file is `unknown`, never pass; start refuses it and enforcement
+uses the usual four-pass unknown budget. The guard and bridge remain checked on every pass; a missing/changed guard
+stops a running sandbox, and start reloads the guard and recreates a missing network before checking configuration.
+Fake-runner unit tests cover reset resolver files, start paths and lost guard/network preparation. Recovery and live
+name resolution after a real Docker engine restart remain unmeasured for this change. Existing inner containers may
+retain their own resolver state; the DNS check makes no claim about them.
 
 On a network the inner daemon creates (compose makes one per project), inner containers ask dockerd's own resolver at
 `127.0.0.11`, which forwards to the sandbox's servers. Dockerd sets up that resolver with `iptables` even with
