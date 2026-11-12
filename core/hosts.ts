@@ -359,7 +359,8 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
   if (destination.docker.code === 0) {
     if (destination.containers.code !== 0) installing.push("Cannot read every running container; Docker restart impact is unknown.")
     else for (const line of destination.containers.out.split("\n").filter(Boolean)) {
-      const v: unknown = JSON.parse(line)
+      let v: unknown
+      try { v = JSON.parse(line) } catch { throw new PaddockError("dependency", "Invalid Docker container inventory. Nothing was installed; repeat the read-only plan probe.") }
       if (!object(v) || typeof v.Names !== "string" || typeof v.ID !== "string") throw new PaddockError("dependency", "Invalid Docker container inventory.")
       inventory.push(`${v.Names} (${v.ID})`)
       if (v.Names.startsWith("paddock-")) sandboxes.push(`${v.Names} (${v.ID})`)

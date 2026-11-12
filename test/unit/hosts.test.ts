@@ -51,6 +51,12 @@ function updated(): HostProbe {
   return probe
 }
 
+test("malformed container inventory raises a Paddock dependency error", () => {
+  const probe = evidence(); probe.containers.out += "\n{broken"
+  expect(() => installationPlan(options, probe, client)).toThrow(PaddockError)
+  expect(() => installationPlan(options, probe, client)).toThrow("Invalid Docker container inventory")
+})
+
 test("enrollment accepts only a watched plan, an explicit artifact digest and a true-or-false Docker option", () => {
   const made = enrollmentOptions({ name: "build", ssh: "alice@build", artifact: { path: "/tmp/paddock", sha256: "a".repeat(64) } })
   expect(made.sudo).toBe("ask")
