@@ -114,12 +114,17 @@ no loose test file in the home root. K01 briefly writes exclusive control files 
 `/Users/Shared` and `/opt/homebrew/Cellar`, then deletes them. K07 through K09 use only a fixture app/job and remove
 their registrations. K11 reads controls but neither changes preferences/clipboard nor logs their contents.
 
-K06 needs the existing Command Line Tools SDK/clang and ffmpeg; it runs real Metal compute and hardware-only HEVC
-VideoToolbox encoding. K13 is explicitly unmeasured because a Keychain password control can prompt. Apple events
+K06 needs the existing Command Line Tools SDK/clang and ffmpeg; it runs real Metal compute, hardware-only HEVC
+VideoToolbox encoding and the product's runtime media check. K13's confined Keychain boundary remains unmeasured;
+the separately authorized host Keychain import is measured by K23. Apple events
 have no end-to-end side-effect probe and remain not covered. K20 needs a working unconfined Codex sandbox control.
 K21 compares clone and plain copy for independent inodes/bytes, without a performance claim. K22 exercises the
-compiled CLI and socket authority. K23 reads existing file logins only, copies them privately, and reports CLI
-recognition separately from unverified authentication and refresh. K24 checks Time Machine's current exclusion.
+compiled CLI and socket authority. K23 creates a workspace through the CLI using default profiles, reuses the sandbox
+Keychain reader with a timeout, and requires product-path `claude auth status` to report logged in. It performs no
+login, logout, authenticated API call or refresh. K24 checks Time Machine's current exclusion. Other fixtures use
+`--no-logins`. K25 checks read-only summary, K26 checks launch without information probes and permission-preserving
+verify, K27 demonstrates the old argument/parameter escape beside the product separator, and K28 checks fallible
+confined policy controls plus a real Unix-socket probe.
 `at` and crontab installation are not tested against the user's queues.
 
 `--write` for a K-only run writes only `SCORECARD.workspace.md`, with the selected IDs. Neither full sandbox scorecard

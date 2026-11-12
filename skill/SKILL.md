@@ -119,7 +119,8 @@ one for an isolated sandbox without the user's choice. Read [macOS workspaces](.
 coverage and limits.
 
 ```sh
-paddock workspace create NAME --copy /absolute/project [--read PATH] [--path DIR]
+paddock workspace create NAME --copy /absolute/project [--read PATH] [--path DIR] [--no-logins]
+paddock workspace create NAME --claude-profile work --codex-profile work
 paddock workspace shell NAME
 paddock workspace exec NAME [--stdin | --stream] -- COMMAND ARG…
 paddock workspace list
@@ -139,11 +140,18 @@ LAN, tailnet and loopback, and open reads outside home. Current listeners appear
 are reachable too. There is no declared-ports option. `--read ~/.ssh`, workspace/state/home ancestors and shared temp
 allowances are refused. Writes and installs outside the folder remain refused, including Docker and nix sockets.
 
-File-backed logins can be copied privately at creation and deleted with the folder. Claude's Keychain password is
-not requested because it can prompt; import is unavailable for a Keychain-only profile. Codex's copied file was
-recognised inside, but authenticated calls and refresh are unverified. Never log tokens or call a recognised file
-verified authentication. Paddock passes no flags to change an agent's inner sandbox. Describe any resulting failure
-and let the user choose the agent's configuration.
+Creation imports `default` profiles unless the user selects named profiles. `--claude-profile work` reads
+`~/.claude-work`; `--codex-profile work` reads `~/.codex-work`. `--no-logins` reads/imports no logins. Daemon environment
+variables do not select sources. Claude uses the sandbox importer's shared Keychain reader, with a 15-second timeout;
+macOS may prompt. A denied or timed-out read stays not imported. Claude credential and onboarding/account state are
+private files inside. Product-path `claude auth status` reported logged in; authenticated calls and refresh remain
+unverified. Never log tokens or call a recognised file verified authentication. Paddock passes no flags to change an
+agent's inner sandbox. Describe failures and let the user choose the agent's configuration.
+
+Summary is read-only and does not walk workspace trees. Only explicit list/get requests measure size. Launch runs
+blocking checks only. Informational probes, including the available hardware-only VideoToolbox encode, run on create
+and verify. Verify leaves unreadable directories unchanged and reports an unknown hard-link result; remove repairs
+permissions. Do not treat the media encode check as a Metal-compute measurement.
 
 Remove reports multiple hard links, LaunchServices and launchd references and things it cannot undo. Remote effects,
 unified logs, existing backups and changes through outside hard links can remain. Apple events, TCC capabilities,
@@ -229,8 +237,9 @@ command reads a token from stdin or a hidden prompt. Never put a token in argv, 
 There is no secret proxy in a gVisor container: the token lives inside it and code there can read and send it out.
 Use `login.ts list NAME` and `login.ts logout NAME all` (or an agent and `--profile PROFILE`); the machine stays logged in.
 Guest imported profiles use `CLAUDE_CONFIG_DIR="$HOME/.claude-PROFILE"` or `CODEX_HOME="$HOME/.codex-PROFILE"`.
-File-profile and `gh` imports were checked live once; the Claude Keychain path was not. Extension unit tests run the
-actual guest programs against temporary homes; core evals do not cover extensions. Missing setup commands are named
+File-profile and `gh` sandbox imports were checked live once; the Claude Keychain guest path was not. Workspaces
+separately measure the shared Keychain reader and Claude recognition. Extension unit tests run actual guest programs
+against temporary homes; core sandbox evals do not cover extensions. Missing setup commands are named
 only for settings sent, with bounded printable names and credential values withheld.
 
 The engine measurements are in `evals/SCORECARD.md` and `evals/SCORECARD.linux.md`. Docker Desktop, Colima, Windows

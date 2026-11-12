@@ -40,23 +40,29 @@ stream to 16 MiB. `--stream` uses the existing private stream socket. `shell` us
 terminal and carries terminal input and resize. PTY output waiting for a slow client is capped at 1 MiB; exceeding
 that ends the session with an error. A closed session ends its identified starter. Detached descendants remain
 tracked until `workspace stop` or `remove`. A daemon restart does not remove a workspace or its detached processes.
+Exec and shell run only blocking checks before launch. They do not run GPU/login probes, `lsof`, `tmutil`, `du`, or
+the hard-link walk. Full informational checks run at creation and explicit verify. Verify only reads directories
+while looking for hard links; an unreadable subtree is unknown. Permission repair belongs to remove.
 
 ## Logins
 
-Creation copies an existing file-backed Claude or Codex login into the workspace home, mode 0600, without hard
-links. `CLAUDE_CONFIG_DIR` and `CODEX_HOME` select the source profile when the daemon starts; otherwise the canonical
-`~/.claude` and `~/.codex` are used. Agent settings, hooks and skills are not imported. Tokens never enter a manifest,
-argument vector, diagnostic or log. Code inside can read and send these copied logins over the open network.
+Creation imports the `default` Claude and Codex profiles unless explicitly selected otherwise. `--claude-profile work`
+reads `~/.claude-work`; `--codex-profile work` reads `~/.codex-work`. `--no-logins` skips all credential and account-state
+reads and imports. These choices are in the spec; the daemon's inherited `CLAUDE_CONFIG_DIR` and `CODEX_HOME` never
+select sources. Inside, both variables point to the workspace's own agent directories.
 
-On macOS, Claude gives its Keychain login precedence over a credential file. Paddock queries attributes only. When
-an entry exists, import stops before requesting its password because that request can prompt. A stale file is not
-used in its place. **Claude Keychain import is not working in this version.** No login or logout is attempted.
+The sandbox login extension and workspaces share `core/credentials.ts`. Claude's Keychain item takes precedence over
+its file fallback. The reader uses `security find-generic-password -s SERVICE -w`, with a 15-second timeout for
+workspace imports. macOS may ask for access. A denied or timed-out read is reported as not imported, with no stale
+file substitution. Imported credentials are mode 0600 with no hard links. Claude's allowlisted onboarding/account
+state goes in its private `.claude.json`, with the same API-key clearing used for sandbox imports. Agent hooks,
+skills and other setup are not imported. Tokens never enter manifests, argv, logs or diagnostics.
 
-K23 found the existing Claude Keychain entry by attributes only and stopped there. It copied the selected Codex file
-with independent bytes and private permissions; `codex login status` recognised it inside. **Authenticated API calls
-and token refresh remain unverified.** A recognised login is not reported as verified authentication. The original
-credential files were read only, and the copies were deleted with the fixture workspace. Refreshing a copied token
-could affect other clients of that login; this was not measured.
+K23 used the product CLI to create a workspace from the owner's default Claude profile, read the Keychain item and
+run `claude auth status` inside. It reported `loggedIn: true`. **Authenticated API calls and token refresh remain
+unverified.** No login or logout was attempted. Unit fixtures cover named file profiles and independent private
+copies. Code inside can read and send the imported logins over the open network. Refreshing a copy could affect
+other clients of that login; that behavior was not measured.
 
 Paddock passes no flags to disable an agent's own sandbox. The K20 eval explicitly starts Codex's sandbox with an
 unconfined control. Chrome, Codex and other nested sandboxes may need a user-chosen configuration to work here.
@@ -101,9 +107,13 @@ created workspace folders excluded, measured by K24; existing backups and other 
   K probes. `at` and crontab installation were not tested because the eval does not change the user's queues.
 - **Apple events are not covered.** A deny rule or kernel decision alone does not establish a blocked side effect.
   Screen capture, accessibility, other TCC services, camera, microphone, Keychain additions, other IOKit devices,
-  Bluetooth, and unnamed daemon channels remain not covered. No permission-prompt probe was attempted.
+  Bluetooth, and unnamed daemon channels remain not covered. No TCC permission probe was attempted. The separately
+  authorized Keychain import can prompt.
 - K06 measured Metal computation and hardware-only HEVC VideoToolbox encoding on this Mac. Torch/MPS, Chrome's
-  renderer, CoreML and GPU performance were not rerun by these evals. Verify reports GPU support as unknown.
+  renderer, CoreML and GPU performance were not rerun by these evals. Create and verify also run a cheap hardware-only
+  HEVC VideoToolbox encode when ffmpeg is on the workspace PATH. A nonempty movie and exit zero pass that check; an
+  encode failure fails it. No available executable or a probe that cannot run is unknown with a reason. This check
+  does not claim Metal compute coverage, and does not run before exec or shell.
 - `sandbox-exec`, Seatbelt policy and `sandbox_check` are deprecated or private interfaces. Their continued behavior
   is a measurement on the scorecard's macOS version, not a promise about future macOS versions. Re-run K after updates.
 
@@ -112,6 +122,16 @@ created workspace folders excluded, measured by K24; existing backups and other 
 Workspaces have a separate spec, manifest directory and fixed checklist; they are not providers. All eight
 `workspace*` API methods are socket-only and local. The dashboard displays a separate **Workspaces: not sandboxes**
 section through the read-only summary. Its actions stay in the CLI. Non-macOS commands refuse before starting a daemon.
+Summary reads manifests and counts tagged processes, without repairing identity, changing modes or walking the tree.
+An unavailable folder/tag stays unknown. Only explicit CLI list/get measure size with `du`. The 30-second sandbox
+enforcement pass does no workspace inventory work. Full check results retain their verification timestamp.
+
+Policy decision controls run inside confined processes. Read and write decisions have same-operation allowed
+controls on the workspace folder. Global denials use a second confined profile with the needed allows, running
+only a trusted `sleep`; unsupported operation names cannot establish a pass. Every blocking check also tries a real
+Unix listener in a private fixture folder: its unconfined control must answer and the confined connect must fail.
+Every launch inserts `--` after sandbox-exec's profile parameters. K27 demonstrates that the old unseparated
+`-D WS=/` form opened a controlled outside write, and that the product separator prevents it.
 
 The finder calls `proc_listallpids` and `proc_pidinfo` directly through `bun:ffi`. A direct fixed-arity binding to
 variadic `sandbox_check` gave wrong decisions on Apple Silicon. A six-line C wrapper supplies the correct Darwin

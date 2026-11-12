@@ -2,10 +2,10 @@ import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symli
 import { connect, createServer } from "node:net"
 import { userInfo } from "node:os"
 import { dirname, join } from "node:path"
-import { workspacePids } from "../core/workspace-processes"
+import { controlledDecision, workspacePids } from "../core/workspace-processes"
 import { workspaceEnvironment, workspaceProfile } from "../core/workspace-profile"
 import type { WorkspaceManifest } from "../core/types"
-import { Workspaces } from "../core/workspaces"
+import controlProfile from "../core/workspace-control.sb" with { type: "text" }
 
 type Run = { code: number; out: string; err: string }
 type Eval = { id: string; claim: string; run: () => Promise<string | void> }
@@ -34,14 +34,14 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
   const pdk = async (args: string[], stdin?: string) => { await init(); return sh([binary, ...args], { env, stdin, timeout: 90_000 }) }
   const json = async (args: string[]) => { const result = await pdk(["--json", "workspace", ...args]); const reply = JSON.parse(result.out); expect(result.code === 0 && reply.ok, `workspace ${args[0]} refused: ${reply.error?.message ?? reply.data?.checks?.filter((check: { status: string }) => check.status === "fail").map((check: { detail: string }) => check.detail).join("; ") ?? result.err}`); return reply.data }
   const manifest = async (name: string) => JSON.parse(await readFile(join(env.PADDOCK_STATE_DIR!, "workspaces", `${name}.json`), "utf8")) as WorkspaceManifest
-  const make = async (args: string[] = []) => { await init(); const name = `k-${++counter}`; const report = await json(["create", name, ...args]); return { name, folder: report.workspace.folder as string, manifest: await manifest(name) } }
+  const make = async (args: string[] = []) => { await init(); const name = `k-${++counter}`; const report = await json(["create", name, "--no-logins", ...args]); return { name, folder: report.workspace.folder as string, manifest: await manifest(name) } }
   const inside = async (ws: { name: string }, argv: string[]) => {
     const m = await manifest(ws.name); const profile = workspaceProfile(m)
-    return sh(["/usr/bin/sandbox-exec", "-f", join(env.PADDOCK_STATE_DIR!, "workspaces", `${ws.name}.sb`), ...profile.params.flatMap((value) => ["-D", value]), ...argv], { env: workspaceEnvironment(m), cwd: join(m.folder, "work"), timeout: 30_000 })
+    return sh(["/usr/bin/sandbox-exec", "-f", join(env.PADDOCK_STATE_DIR!, "workspaces", `${ws.name}.sb`), ...profile.params.flatMap((value) => ["-D", value]), "--", ...argv], { env: workspaceEnvironment(m), cwd: join(m.folder, "work"), timeout: 30_000 })
   }
   const spawnInside = async (ws: { name: string }, argv: string[]) => {
     const m = await manifest(ws.name); const profile = workspaceProfile(m)
-    const child = Bun.spawn(["/usr/bin/sandbox-exec", "-f", join(env.PADDOCK_STATE_DIR!, "workspaces", `${ws.name}.sb`), ...profile.params.flatMap((value) => ["-D", value]), ...argv],
+    const child = Bun.spawn(["/usr/bin/sandbox-exec", "-f", join(env.PADDOCK_STATE_DIR!, "workspaces", `${ws.name}.sb`), ...profile.params.flatMap((value) => ["-D", value]), "--", ...argv],
       { env: workspaceEnvironment(m), cwd: join(m.folder, "work"), stdout: "pipe", stderr: "pipe" })
     started.push(child); void new Response(child.stdout).arrayBuffer(); void new Response(child.stderr).arrayBuffer(); return child
   }
@@ -162,7 +162,9 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
       const movie = join(ws.folder, "work/hardware.mov")
       const video = await inside(ws, ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64:r=5:d=0.4", "-c:v", "hevc_videotoolbox", "-allow_sw", "0", "-y", movie])
       expect(video.code === 0 && (await stat(movie)).size > 0, `hardware-only encoding failed: ${video.err.slice(0, 500)}`)
-      return `${metal.out.trim()}; HEVC VideoToolbox with -allow_sw 0 produced a nonempty movie. Torch, Chrome, CoreML and GPU performance are not measured by this eval.`
+      const report = await json(["verify", ws.name]); const gpu = report.checks.find((entry: { id: string }) => entry.id === "gpu")
+      expect(gpu.status === "pass" && gpu.evidence === "probed", "verify did not actually measure hardware encoding")
+      return `${metal.out.trim()}; HEVC VideoToolbox with -allow_sw 0 produced a nonempty movie. Product verify also reports a probed hardware encode pass. Torch, Chrome, CoreML and GPU performance are not measured by this eval.`
     } finally { await drop(ws) }
   })
 
@@ -241,7 +243,7 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
   })
 
   ev("K13", "Keychain credential access is covered by a working unconfined control", async () => {
-    skip("Not measured. No Keychain password read was attempted, to avoid a permission prompt. Closed-home behavior does not prove end-to-end Keychain denial.")
+    skip("Not measured. K23 exercises the authorized host Keychain import; that does not prove confined Keychain reads are refused. No inside-password boundary probe was run.")
   })
 
   ev("K14", "Stop clears detached, env-cleared, new-session, process-group and fork-loop children only", async () => {
@@ -363,22 +365,26 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
     } finally { await drop(ws) }
   })
 
-  ev("K23", "Existing file logins are copied privately; CLI recognition and authentication are distinguished", async () => {
+  ev("K23", "The selected default Claude login is imported through the product and reports logged in", async () => {
     await init()
-    const workspaces = new Workspaces({ state: join(root, "login-state"), config: join(root, "login-config") }, { ...process.env, PADDOCK_WORKSPACES_ROOT: join(root, "login-workspaces") })
+    const name = "login-copy"
     try {
-      const report = await workspaces.create({ name: "login-copy" }); const m = await workspaces.manifest("login-copy")
-      for (const login of m.logins.filter((entry) => entry.copied)) {
-        const sourceDir = process.env[login.agent === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"] ?? join(m.home, `.${login.agent}`)
-        const filename = login.agent === "codex" ? "auth.json" : ".credentials.json"
-        const original = join(sourceDir, filename); const copied = join(m.folder, "home", `.${login.agent}`, filename)
-        expect((await stat(copied)).ino !== (await stat(original)).ino && (await stat(copied)).nlink === 1 && ((await stat(copied)).mode & 0o777) === 0o600, "copied login mode or inode is not private")
-        expect(Buffer.from(await readFile(original)).equals(await readFile(copied)), "copied credential bytes differ; contents withheld")
-      }
-      const detail = report.checks.find((entry) => entry.id === "credentials")!.detail
-      if (!m.logins.some((entry) => entry.copied)) skip(`No file-backed login was available. ${detail}`)
-      return `${detail} No authenticated API call or token refresh was attempted; working authentication remains unverified. Original files were read only.`
-    } finally { for (const ws of await workspaces.list()) await workspaces.remove(ws.name, ws.name) }
+      const report = await json(["create", name])
+      const m = await manifest(name)
+      expect(m.spec.logins.kind === "profiles" && m.spec.logins.claude === "default" && m.spec.logins.codex === "default", "default profile selection was not explicit")
+      const login = m.logins.find((entry) => entry.agent === "claude")
+      if (!login?.copied) skip(login?.detail ?? "Claude was not imported; no password or credential contents were logged.")
+      const credential = join(m.folder, "home/.claude/.credentials.json")
+      expect((await stat(credential)).nlink === 1 && ((await stat(credential)).mode & 0o777) === 0o600, "Claude login file is not private")
+      expect(((await stat(join(m.folder, "home/.claude/.claude.json"))).mode & 0o777) === 0o600, "Claude state is not private")
+      const status = await pdk(["workspace", "exec", name, "--", "claude", "auth", "status"])
+      let loggedIn = false
+      try { loggedIn = JSON.parse(status.out).loggedIn === true } catch {}
+      expect(status.code === 0 && loggedIn, "Claude credential and state were written, but auth status inside did not report loggedIn true (exit " + status.code + "); output withheld")
+      expect(report.checks.find((check: { id: string }) => check.id === "credentials").detail.includes("CLI reports logged in"), "create did not report the measured login status")
+      return "Default profile selected independently of daemon environment; timed Keychain reader reused from sandbox login import. Private credential and onboarding/account state copied. Product-path claude auth status reported loggedIn true. "
+        + report.checks.find((check: { id: string }) => check.id === "credentials").detail + " No login, logout, authenticated API call or refresh was performed."
+    } finally { if (await Bun.file(join(env.PADDOCK_STATE_DIR!, "workspaces", name + ".json")).exists()) await json(["remove", name, "--confirm", name]) }
   })
 
   ev("K24", "Time Machine reports the workspace folder excluded after creation", async () => {
@@ -389,6 +395,70 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
       expect(ws.manifest.backup.includes("excluded now"), "manifest failed to report the current exclusion")
       return "isexcluded reports [Excluded]. No backup was created, inspected or removed."
     } finally { await drop(ws) }
+  })
+
+  ev("K25", "Dashboard summary neither repairs workspace identity nor walks it for size", async () => {
+    const ws = await make()
+    try {
+      await rm(ws.manifest.tag); await chmod(ws.folder, 0o555)
+      const before = await stat(ws.folder)
+      const response = await fetch("http://paddock/api/summary", { unix: join(env.PADDOCK_STATE_DIR!, "daemon.sock"), method: "POST", body: "{}" } as RequestInit)
+      const reply = await response.json() as { ok: boolean; data: { workspaces: Array<{ name: string; status: string; sizeBytes?: number }> } }
+      const row = reply.data.workspaces.find((entry) => entry.name === ws.name)
+      expect(reply.ok && row?.status === "unknown" && row.sizeBytes === undefined, "summary repaired missing identity or returned a size walk")
+      expect(!await Bun.file(ws.manifest.tag).exists() && ((await stat(ws.folder)).mode & 0o777) === 0o555 && (await stat(ws.folder)).ctimeMs === before.ctimeMs, "summary mutated workspace identity or permissions")
+      const sized = await json(["get", ws.name]); expect(typeof sized.sizeBytes === "number", "an explicit CLI get did not measure size")
+      expect(!await Bun.file(ws.manifest.tag).exists() && ((await stat(ws.folder)).mode & 0o777) === 0o555, "explicit get repaired workspace identity or permissions")
+      return "Missing tag and read-only root stayed unchanged; unknown process state, no size. Unit Runner instrumentation additionally requires zero host commands from summary."
+    } finally { await drop(ws) }
+  })
+
+  ev("K26", "Product exec skips informational probes and verify does not repair unreadable subdirectories", async () => {
+    const ws = await make(); const home = join(ws.folder, "home"); const bin = join(home, ".local/bin"); const closed = join(ws.folder, "work/closed")
+    try {
+      await mkdir(bin, { recursive: true }); await writeFile(join(bin, "ffmpeg"), '#!/bin/sh\nprintf called > "$HOME/information-called"\nexit 1\n'); await chmod(join(bin, "ffmpeg"), 0o700)
+      await mkdir(closed); await chmod(closed, 0)
+      const previous = (await manifest(ws.name)).lastVerify?.at
+      const output = await pdk(["workspace", "exec", ws.name, "--", "/usr/bin/true"])
+      expect(output.code === 0 && !await Bun.file(join(home, "information-called")).exists() && ((await stat(closed)).mode & 0o777) === 0, "exec ran information probes or changed directory permissions")
+      const shell = await pdk(["workspace", "shell", ws.name, "--", "/usr/bin/true"])
+      expect(shell.code === 0 && !await Bun.file(join(home, "information-called")).exists(), "shell ran informational probes")
+      expect((await manifest(ws.name)).lastVerify?.at === previous, "exec replaced the last full verify")
+      const report = await json(["verify", ws.name])
+      expect(await Bun.file(join(home, "information-called")).exists(), "explicit verify omitted the available GPU probe")
+      expect(report.checks.find((entry: { id: string }) => entry.id === "gpu").status === "fail", "a failed hardware encode was not reported as failed")
+      expect(report.checks.find((entry: { id: string }) => entry.id === "hard-links").status === "unknown" && ((await stat(closed)).mode & 0o777) === 0, "verify silently repaired unreadable directories")
+      return "Exec preserved the last full verification; failing ffmpeg ran only for explicit verify. An unreadable hard-link walk stays unknown until remove repairs permissions."
+    } finally { await drop(ws) }
+  })
+
+  ev("K27", "Command arguments cannot be parsed as sandbox-exec options, beside a working escape control", async () => {
+    const ws = await make(); const target = join(root, "argument-control")
+    try {
+      const argv = ["-D", "WS=/", "/bin/sh", "-c", 'printf escaped > "$1"', "control", target]
+      const confined = await pdk(["workspace", "exec", ws.name, "--", ...argv])
+      expect(confined.code === 71 && !await Bun.file(target).exists(), "the product parsed command arguments as sandbox-exec options")
+      const profile = workspaceProfile(ws.manifest)
+      const control = await sh(["/usr/bin/sandbox-exec", "-f", join(env.PADDOCK_STATE_DIR!, "workspaces", `${ws.name}.sb`), ...profile.params.flatMap((value) => ["-D", value]), ...argv], { env: workspaceEnvironment(ws.manifest), cwd: join(ws.folder, "work") })
+      expect(control.code === 0 && await readFile(target, "utf8") === "escaped", "the old unseparated form did not demonstrate parameter replacement")
+      return "Old form accepted -D WS=/ and wrote only this eval's outside control file. Product -- separator caused execvp of -D to fail, with no outside write. The tested -p two-profile form itself returned usage error on this macOS."
+    } finally { await drop(ws) }
+  })
+
+  ev("K28", "Misspelled operations and unconfined decision controls cannot establish a pass", async () => {
+    const ws = await make(); let child: Bun.Subprocess | undefined
+    try {
+      const file = join(root, "decision-control.sb"); await writeFile(file, controlProfile)
+      child = Bun.spawn(["/usr/bin/sandbox-exec", "-f", file, "-D", `WS=${ws.folder}`, "-D", `TAGFILE=${ws.manifest.tag}`, "--", "/bin/sleep", "30"], { stdout: "pipe", stderr: "pipe" }); started.push(child)
+      await Bun.sleep(100)
+      expect(controlledDecision(child.pid, child.pid, "file-read-data", 1, ws.folder) === "allowed", "valid same-operation confined control failed")
+      expect(controlledDecision(child.pid, child.pid, "paddock-misspelled-operation") === "unknown", "misspelled operation was treated as measured")
+      expect(controlledDecision(child.pid, process.pid, "file-read-data", 1, ws.folder) === "unknown", "an unconfined decision control was accepted")
+      const report = await json(["verify", ws.name])
+      expect(report.checks.find((entry: { id: string }) => entry.id === "daemons").status === "pass", "live Unix socket and confined decision controls did not pass")
+      expect(report.checks.find((entry: { id: string }) => entry.id === "writes").status === "pass", "controlled outside write decisions did not pass")
+      return "A trusted sleep runs under an allow-control profile, with explicit job-creation permission and this workspace's denied tag. No workspace/user command runs in that control. Real Unix-socket connect denial is measured independently of policy decisions."
+    } finally { if (child) { child.kill("SIGKILL"); await child.exited }; await drop(ws) }
   })
 
   return { evals, async close() {

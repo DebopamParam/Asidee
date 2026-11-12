@@ -541,7 +541,20 @@ The `workspaceList`, `workspaceGet`, `workspaceCreate`, `workspaceExec`, `worksp
 `workspaceRemove` and `workspaceVerify` methods are all socket-only and local. Shells and streamed exec use the
 existing stream socket with `kind: "workspace"`; remote routes and a requested user are refused. The dashboard's
 read-only summary carries a separate workspace inventory. Dashboard workspace actions remain unavailable to honor
-socket-only authority. The 30-second pass measures size and tagged-process count; no resource limit is enforced.
+socket-only authority. Summary reads manifests and tagged-process counts without identity repair, chmod or tree
+walks. CLI list/get alone request live size measurements. The 30-second enforcement pass does no workspace work.
+
+Launch runs only blocking checks. Create and verify additionally inspect listeners, logins, hard links, Time Machine
+and an available ffmpeg hardware-only encode. Verify does not repair directory permissions for its hard-link walk;
+remove does. Policy controls use confined processes with same-operation allowed decisions, and the daemon/socket
+check includes a real listener with a working outside control. A `--` separator prevents command arguments from
+changing sandbox-exec's parameters.
+
+Credential reading and Claude's state allowlist live in `core/credentials.ts`, reused by the login extension.
+Workspace specs explicitly select `default` or named profiles, or no logins. Daemon environment variables cannot
+choose sources. Keychain password reads are bounded to 15 seconds, with no credential values in diagnostics or
+manifests. Claude's private credential/state files were measured through product-path `auth status`; authenticated
+requests and refresh remain unverified.
 
 The profile is static SBPL plus parameter-name-only read and ancestor rules. Every path is canonical and passed
 using `-D`. Tag denies come last. `workspace-processes.ts` uses `bun:ffi` and a small runtime C varargs wrapper for

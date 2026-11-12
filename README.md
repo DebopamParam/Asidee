@@ -101,9 +101,11 @@ and loopback open. Reads outside home are open. Remote effects, unified logs, ex
 externally supplied hard links can survive removal. Apple events and permission-gated capabilities are not covered.
 Paddock passes no flags to change agents' own sandboxes. Entering the folder from an ordinary shell applies no profile.
 
-Creation copies file-backed agent logins when available. Claude's macOS Keychain login is detected by attributes
-only and **is not imported**, because password access can prompt. The selected Codex file was copied privately and
-recognised by its CLI inside; authenticated calls and refresh remain **unverified**. No login or logout is attempted.
+Creation imports the `default` agent profiles, with explicit `--claude-profile NAME` and `--codex-profile NAME`
+selection or `--no-logins`. Claude's macOS Keychain login uses the shared sandbox credential reader, with a 15-second
+timeout; it may prompt. Product-path `claude auth status` reported logged in after import. Authenticated calls and
+refresh remain **unverified**; no login or logout is attempted. Create and verify probe hardware-only VideoToolbox
+when ffmpeg is available. Command launches run only blocking checks, and dashboard summaries do no tree walks or repairs.
 
 Workspaces require macOS and Bun, without a Docker engine. The separate workspace checklist never weakens the
 sandbox checklist. All workspace methods are socket-only; the dashboard displays them in their own section.
@@ -197,4 +199,5 @@ It needs Bun on this machine and Node in an already running sandbox; GitHub also
 Existing credentials require an explicit replace choice. **There is no secret proxy in a gVisor container: the token
 lives inside the sandbox and code there can read and send it out.** Logout leaves this machine logged in.
 Imports of file-backed Claude and Codex profiles and of this machine's `gh` login were checked live in one sandbox; the
-Claude Keychain path and agents accepting an imported login were not. Its README lists what was checked.
+Claude Keychain guest-import path and agents accepting that sandbox import were not. The shared Keychain reader and
+Claude's login recognition are now measured separately for workspaces. Its README lists the sandbox measurements.
