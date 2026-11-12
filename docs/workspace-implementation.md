@@ -49,13 +49,15 @@ continues to run first. No process-selection guard was relaxed.
 |---|---|
 | `nix develop -c bun test` | 208 passed, 0 failed, 1 gated live-engine test skipped; 209 tests in 19 files. |
 | `nix develop -c bun run typecheck` | Clean, using the repository's `tsc --noEmit` script. |
-| `nix develop -c bun evals/run.ts --only K --write` | See the generated workspace scorecard. |
+| `nix develop -c bun evals/run.ts --only K --write` | 27 passed, 0 failed, 1 not measured; implementation and eval revision `bfdb72b`. |
 
 K23 creates the workspace through the compiled CLI using default profiles, despite unrelated profile paths in the
 daemon environment. The shared reader retrieved the owner's default Claude Keychain credential. The private state
 and credential were written, and `paddock workspace exec ... -- claude auth status` reported `loggedIn: true`.
 Credential values, account fields and subprocess status output are withheld; the report records only the boolean
 result and fixed diagnostic text. No login, logout, authenticated API call or refresh was performed.
+The default Codex credential was not imported because the reader could not obtain a valid readable credential.
+Named Codex selection is covered with fixtures; no real named Codex profile was exercised in this revision.
 
 The K suite also reruns its prior controls for copied-project independence, outside writes and home/shared-temp
 reads, profile injection, Metal/VideoToolbox, app opening/registration, launchd, daemon sockets, DNS, preferences and
@@ -95,3 +97,6 @@ shell-configuration edit, Keychain write or preference edit is performed.
 The existing ignored `dist/paddock` is rebuilt and retained, alongside installed development packages. Temporary run
 logs are removed after the results are recorded. Ordinary tool caches and macOS unified-log retention are not erased
 or audited. The source, operator documentation and separate workspace scorecard are the intended artifacts.
+
+The final independent audit found no fixture workspace directories, temporary state/socket/FFI directories,
+fixture-process or daemon PIDs, LaunchServices references, launchd references or remaining K01 write-control files.
