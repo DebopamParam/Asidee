@@ -62,6 +62,18 @@ export type Engine = {
 export type CheckId =
   | "kernel" | "hardening" | "mounts" | "network-guard" | "inbound" | "forwards" | "ssh" | "limits" | "disk" | "docker"
   | "template" | "net-host" | "net-peers" | "net-private" | "egress" | "credentials"
+  | "seatbelt" | "writes" | "home-closed" | "daemons" | "user-data" | "processes" | "gpu" | "network" | "loopback" | "not-covered" | "hard-links"
+
+export type WorkspaceSpec = { name: string; reads: string[]; loopback: "open"; path: string[]; copy?: string }
+export type WorkspaceManifest = {
+  version: 1; kind: "workspace"; name: string; id: string; spec: WorkspaceSpec
+  folder: string; tag: string; home: string; userVar: string
+  reads: Array<{ given: string; canonical: string; resolvedAt: string }>
+  profileHash: string; macOS: string; createdAt: string
+  logins: Array<{ agent: "claude" | "codex"; copied: boolean; detail: string }>
+  backup: string
+  lastVerify?: { at: string; results: CheckResult[] }
+}
 
 // pass: holds. weak: holds in a weaker form than the title says (the detail says how). fail: does not hold.
 // unsupported: this engine cannot provide it. unknown: could not be checked. info: a disclosure, not a guarantee.
