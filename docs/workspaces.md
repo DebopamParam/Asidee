@@ -17,8 +17,14 @@ paddock workspace remove render --confirm render
 ```
 
 Creation makes `~/Paddock/render/{home,tmp,work}`. The working directory is `work`. `--copy` copies the source's
-contents there, including hidden files, with `cp -R -P -X`. Symlinks are preserved. Paddock opens the source for reading
-only and makes no hard links to it. Writes through symlinks to outside paths are still refused by the profile.
+contents there, including hidden files, with `cp -R -P -X`, then sets each copy's modification and access times and
+permission bits from the source (not setuid, setgid or sticky bits). Symlinks are copied as links, never followed.
+Ownership, ACLs, file flags and the source's extended attributes are not carried; a file hard-linked in the source
+becomes separate copies. macOS itself marks the copy: measured on macOS 26.7.1, every file this process tree writes
+gets `com.apple.provenance`, which cannot be removed, and a copy of a quarantined file gets a fresh
+`com.apple.quarantine` of its own. Paddock leaves that quarantine in place, so Gatekeeper still checks it.
+`test/unit/workspaces.test.ts` covers a 0755 file and a 0555 folder with old times, a 0664 file, a symlink, an ACL
+and two extended attributes. Paddock opens the source for reading only and makes no hard links to it. Writes through symlinks to outside paths are still refused by the profile.
 Removing the workspace never walks or deletes the source. Copy out anything you want to keep before removing it.
 Only commands launched through `paddock workspace shell` or `exec` acquire the profile. Entering the folder with an
 ordinary shell, or opening its files through Finder, does not apply confinement.

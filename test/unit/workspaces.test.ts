@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises"
+import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, utimes, writeFile } from "node:fs/promises"
 import { userInfo } from "node:os"
 import { dirname, join } from "node:path"
 import { blockers, complete, failures, WORKSPACE_CHECKLIST } from "../../core/checks"
@@ -89,8 +89,31 @@ mac("workspace copy, verify, pipes, stop and confirmed remove preserve the origi
   const { root, workspaces, clean } = await fixture()
   try {
     const source = join(root, "project"); await mkdir(source); await writeFile(join(source, "file"), "original")
+    // Modes the umask would clear, old times on a file and a read-only folder, a link that is not followed, and
+    // extended attributes and an ACL that are not carried.
+    const old = new Date("2001-02-03T04:05:06Z"); const older = new Date("1999-01-01T00:00:00Z")
+    await mkdir(join(source, "bin")); await writeFile(join(source, "bin/tool"), "#!/bin/sh\n"); await chmod(join(source, "bin/tool"), 0o755); await utimes(join(source, "bin/tool"), old, old)
+    await writeFile(join(source, "shared"), "group"); await chmod(join(source, "shared"), 0o664)
+    await writeFile(join(source, "outside"), "outside"); await symlink(join(source, "outside"), join(source, "link"))
+    await writeFile(join(source, "quarantined"), "q")
+    for (const [name, value] of [["com.apple.quarantine", "0081;00000000;Test;"], ["org.paddock.test", "carried"]] as const)
+      expect(Bun.spawnSync(["/usr/bin/xattr", "-w", name, value, join(source, "quarantined")]).exitCode).toBe(0)
+    expect(Bun.spawnSync(["/bin/chmod", "+a", "everyone deny delete", join(source, "quarantined")]).exitCode).toBe(0)
+    await chmod(join(source, "bin"), 0o555); await utimes(join(source, "bin"), older, older)
     const made = await workspaces.create({ name: "render", copy: source })
+    await chmod(join(source, "bin"), 0o755)
     expect(made.ok).toBe(true)
+    const work = join(made.workspace.folder, "work")
+    const tool = await stat(join(work, "bin/tool")); expect(tool.mode & 0o7777).toBe(0o755); expect(tool.mtime.getTime()).toBe(old.getTime())
+    const bin = await stat(join(work, "bin")); expect(bin.mode & 0o7777).toBe(0o555); expect(bin.mtime.getTime()).toBe(older.getTime())
+    expect((await stat(join(work, "shared"))).mode & 0o7777).toBe(0o664)
+    expect((await lstat(join(work, "link"))).isSymbolicLink()).toBe(true); expect(await readlink(join(work, "link"))).toBe(join(source, "outside"))
+    // macOS marks the copy itself: provenance on every file this process writes, and a fresh quarantine on a copy of a
+    // quarantined file. The source's own values are what must not arrive.
+    const attributes = Bun.spawnSync(["/usr/bin/xattr", "-l", join(work, "quarantined")]).stdout.toString()
+    expect(attributes).not.toContain("org.paddock.test"); expect(attributes).not.toContain("0081;00000000;Test;")
+    expect(Bun.spawnSync(["/bin/ls", "-le", join(work, "quarantined")]).stdout.toString()).not.toContain("deny delete")
+    expect(Bun.spawnSync(["/bin/ls", "-le", join(source, "quarantined")]).stdout.toString()).toContain("deny delete")
     expect(made.workspace.disclosure).toContain("not a sandbox")
     expect(made.checks.find((check) => check.id === "gpu")?.detail).toContain("Metal compute")
     const command = await workspaces.exec("render", ["/bin/sh", "-c", 'printf changed > file; printf "$HOME"; printf error >&2; exit 7'])
@@ -104,6 +127,7 @@ mac("workspace copy, verify, pipes, stop and confirmed remove preserve the origi
     expect(await workspaces.list()).toEqual([])
   } finally {
     for (const workspace of await workspaces.list()) await workspaces.remove(workspace.name, workspace.name)
+    Bun.spawnSync(["/bin/chmod", "-R", "-N", root])
     await clean()
   }
 }, 30_000)

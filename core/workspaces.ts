@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto"
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises"
+import { chmod, lstat, lutimes, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, utimes, writeFile } from "node:fs/promises"
 import { createServer } from "node:net"
 import { userInfo } from "node:os"
 import { dirname, isAbsolute, join, resolve } from "node:path"
@@ -74,6 +74,20 @@ export async function hardLinks(folder: string, repair = false): Promise<string[
   }
   await walk(folder)
   return found.sort()
+}
+
+// A plain cp keeps neither times nor modes the umask clears, and cp -p would also carry the group, ACLs and file flags.
+// So the copy is plain and the times and permission bits (not setuid, setgid or sticky) are set here from the source,
+// children before their folder, without following a symlink on either side.
+export async function copyTimesAndModes(source: string, target: string): Promise<void> {
+  for (const entry of await readdir(target, { withFileTypes: true })) {
+    const from = join(source, entry.name); const to = join(target, entry.name)
+    const info = await lstat(from).catch(() => undefined)
+    if (!info || info.isSymbolicLink() !== entry.isSymbolicLink() || info.isDirectory() !== entry.isDirectory() || info.isFile() !== entry.isFile()) continue
+    if (entry.isSymbolicLink()) { await lutimes(to, info.atime, info.mtime); continue }
+    if (entry.isDirectory()) await copyTimesAndModes(from, to)
+    await chmod(to, info.mode & 0o777); await utimes(to, info.atime, info.mtime)
+  }
 }
 
 export class Workspaces {
@@ -210,7 +224,10 @@ export class Workspaces {
       try {
         for (const name of ["home", "tmp", "work", "home/.claude", "home/.codex"]) await mkdir(join(folder, name), { mode: 0o700 })
         await writeFile(manifest.tag, manifest.id, { flag: "wx", mode: 0o444 })
-        if (source) must(await this.runHost(["/bin/cp", "-R", "-P", "-X", `${source}/.`, join(folder, "work")], { timeoutMs: 600_000 }), "Copying the project")
+        if (source) {
+          must(await this.runHost(["/bin/cp", "-R", "-P", "-X", `${source}/.`, join(folder, "work")], { timeoutMs: 600_000 }), "Copying the project")
+          await copyTimesAndModes(source, join(folder, "work"))
+        }
         await this.copyLogins(manifest)
         const backup = await this.runHost(["/usr/bin/tmutil", "addexclusion", folder])
         const excluded = backup.exitCode === 0 ? await this.runHost(["/usr/bin/tmutil", "isexcluded", folder]) : undefined
