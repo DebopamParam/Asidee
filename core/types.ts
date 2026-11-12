@@ -64,7 +64,8 @@ export type CheckId =
   | "template" | "net-host" | "net-peers" | "net-private" | "egress" | "credentials"
   | "seatbelt" | "writes" | "home-closed" | "daemons" | "user-data" | "processes" | "gpu" | "network" | "loopback" | "not-covered" | "hard-links"
 
-export type WorkspaceSpec = { name: string; reads: string[]; loopback: "open"; path: string[]; copy?: string }
+export type WorkspaceLogins = { kind: "none" } | { kind: "profiles"; claude: string; codex: string }
+export type WorkspaceSpec = { name: string; reads: string[]; loopback: "open"; path: string[]; copy?: string; logins: WorkspaceLogins }
 export type WorkspaceManifest = {
   version: 1; kind: "workspace"; name: string; id: string; spec: WorkspaceSpec
   folder: string; tag: string; home: string; userVar: string

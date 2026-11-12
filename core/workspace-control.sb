@@ -1,0 +1,7 @@
+(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write* (subpath (param "WS")))
+(allow job-creation)
+(deny file-read-data (literal (param "TAGFILE")))
+(deny file-write* (literal (param "TAGFILE")))

@@ -34,6 +34,7 @@ export function workspaceEnvironment(manifest: Pick<WorkspaceManifest, "folder" 
     HOME: home, TMPDIR: `${manifest.folder}/tmp/`, PADDOCK_WORKSPACE: manifest.name, GIT_CEILING_DIRECTORIES: dirname(manifest.folder),
     XDG_CONFIG_HOME: join(home, ".config"), XDG_CACHE_HOME: join(home, ".cache"), XDG_DATA_HOME: join(home, ".local/share"), XDG_STATE_HOME: join(home, ".local/state"),
     NPM_CONFIG_PREFIX: join(home, ".local"),
+    CLAUDE_CONFIG_DIR: join(home, ".claude"), CODEX_HOME: join(home, ".codex"),
     PATH: [join(home, ".local/bin"), join(home, ".cargo/bin"), join(home, ".bun/bin"), ...manifest.spec.path, "/opt/homebrew/bin", "/opt/homebrew/sbin", "/run/current-system/sw/bin", `/etc/profiles/per-user/${inherited.USER ?? ""}/bin`, "/nix/var/nix/profiles/default/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":"),
   }
   for (const key of ["USER", "LOGNAME", "SHELL", "TERM", "LANG"]) if (inherited[key]) env[key] = inherited[key]

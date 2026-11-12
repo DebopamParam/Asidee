@@ -3,7 +3,10 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "
 import { userInfo } from "node:os"
 import { dirname, join } from "node:path"
 import { blockers, complete, failures, WORKSPACE_CHECKLIST } from "../../core/checks"
-import { belongs, decision, requireMac, signalWorkspacePid, workspacePids } from "../../core/workspace-processes"
+import { belongs, controlledDecision, decision, requireMac, signalWorkspacePid, workspacePids } from "../../core/workspace-processes"
+import { systemRunner } from "../../core/run"
+import type { Runner } from "../../core/types"
+import controlProfile from "../../core/workspace-control.sb" with { type: "text" }
 import { WORKSPACE_DISCLOSURE, workspaceEnvironment, workspaceProfile } from "../../core/workspace-profile"
 import { canonical, validateRead, validWorkspaceSpec, Workspaces } from "../../core/workspaces"
 
@@ -13,7 +16,9 @@ const fixture = async () => {
   const root = await mkdtemp(join(import.meta.dir, "../../dist/workspace-test-"))
   const state = join(root, "state"); const config = join(root, "config")
   const env = { ...process.env, PADDOCK_WORKSPACES_ROOT: join(root, "workspaces"), CLAUDE_CONFIG_DIR: join(root, "no-claude"), CODEX_HOME: join(root, "no-codex") }
-  return { root, env, workspaces: new Workspaces({ state, config }, env), clean: () => rm(root, { recursive: true, force: true }) }
+  const commands: string[][] = []
+  const runHost: Runner = (argv, options) => { commands.push([...argv]); return systemRunner(argv, options) }
+  return { root, env, commands, workspaces: new Workspaces({ state, config }, env, { home: root, platform: "linux", runner: async () => { throw new Error("No host command is needed for file fixtures.") } }, runHost), clean: () => rm(root, { recursive: true, force: true }) }
 }
 
 mac("K15 finder control: empty workspace matches zero, known processes match exactly, and decoys do not match", async () => {
@@ -46,7 +51,7 @@ mac("K15 finder control: empty workspace matches zero, known processes match exa
 })
 
 test("workspace spec drops unknown fields, permits only open loopback, and refuses unsupported platforms", () => {
-  expect(validWorkspaceSpec({ name: "render", reads: ["/a"], privileged: true })).toEqual({ name: "render", reads: ["/a"], path: [], loopback: "open" })
+  expect(validWorkspaceSpec({ name: "render", reads: ["/a"], privileged: true })).toEqual({ name: "render", reads: ["/a"], path: [], loopback: "open", logins: { kind: "profiles", claude: "default", codex: "default" } })
   expect(() => validWorkspaceSpec({ name: "../outside" })).toThrow()
   expect(() => validWorkspaceSpec({ name: "render", loopback: [80] })).toThrow("Declared ports")
   expect(() => requireMac("linux")).toThrow("only on macOS")
@@ -87,7 +92,7 @@ mac("workspace copy, verify, pipes, stop and confirmed remove preserve the origi
     const made = await workspaces.create({ name: "render", copy: source })
     expect(made.ok).toBe(true)
     expect(made.workspace.disclosure).toContain("not a sandbox")
-    expect(made.checks.find((check) => check.id === "gpu")?.status).toBe("unknown")
+    expect(made.checks.find((check) => check.id === "gpu")?.detail).toContain("Metal compute")
     const command = await workspaces.exec("render", ["/bin/sh", "-c", 'printf changed > file; printf "$HOME"; printf error >&2; exit 7'])
     expect(command.exitCode).toBe(7); expect(command.stderr).toBe("error")
     expect(command.stdout).toBe(join(made.workspace.folder, "home"))
@@ -119,19 +124,19 @@ mac("workspace file login copies are private, not hard links, and credential byt
   const { root, env, workspaces, clean } = await fixture()
   try {
     const secret = "workspace-test-credential-never-in-manifest"
-    for (const [source, file] of [[env.CLAUDE_CONFIG_DIR, ".credentials.json"], [env.CODEX_HOME, "auth.json"]] as const) {
+    for (const [source, file] of [[join(root, ".claude"), ".credentials.json"], [join(root, ".codex"), "auth.json"]] as const) {
       await mkdir(source); await writeFile(join(source, file), JSON.stringify({ invalidFixtureCredential: secret }))
     }
     const report = await workspaces.create({ name: "logins" }); const m = await workspaces.manifest("logins")
     expect(m.logins.every((login) => login.copied)).toBe(true)
-    for (const [source, file, agent] of [[env.CLAUDE_CONFIG_DIR, ".credentials.json", "claude"], [env.CODEX_HOME, "auth.json", "codex"]] as const) {
+    for (const [source, file, agent] of [[join(root, ".claude"), ".credentials.json", "claude"], [join(root, ".codex"), "auth.json", "codex"]] as const) {
       const original = await stat(join(source, file)); const copied = await stat(join(report.workspace.folder, "home", `.${agent}`, file))
       expect(copied.mode & 0o777).toBe(0o600); expect(copied.nlink).toBe(1); expect(copied.ino).not.toBe(original.ino)
     }
     expect(JSON.stringify(m)).not.toContain(secret)
-    expect(report.checks.find((check) => check.id === "credentials")?.detail).toContain("not verified")
+    expect(report.checks.find((check) => check.id === "credentials")?.detail).toContain("did not report logged in")
     await workspaces.remove("logins", "logins")
-    expect((await stat(join(env.CODEX_HOME, "auth.json"))).isFile()).toBe(true)
+    expect((await stat(join(root, ".codex/auth.json"))).isFile()).toBe(true)
   } finally { for (const ws of await workspaces.list()) await workspaces.remove(ws.name, ws.name); await clean() }
 }, 30_000)
 
@@ -150,3 +155,102 @@ mac("stop recovers an unreadable or missing folder before identifying its own li
     }
   } finally { for (const ws of await workspaces.list()) await workspaces.remove(ws.name, ws.name); await clean() }
 }, 30_000)
+
+mac("summary and get never repair identity or permissions; only an explicit size request runs du", async () => {
+  const { root, commands, workspaces, clean } = await fixture()
+  try {
+    const made = await workspaces.create({ name: "inventory", logins: { kind: "none" } })
+    await rm(join(made.workspace.folder, ".paddock-tag"))
+    await chmod(made.workspace.folder, 0o555)
+    const before = await stat(made.workspace.folder); commands.length = 0
+    const rows = await workspaces.summary()
+    expect(rows[0]?.status).toBe("unknown"); expect(rows[0]?.sizeBytes).toBeUndefined()
+    expect(commands).toEqual([])
+    await workspaces.get("inventory", false)
+    expect(commands).toEqual([])
+    expect((await stat(made.workspace.folder)).mode & 0o777).toBe(0o555)
+    expect((await stat(made.workspace.folder)).ctimeMs).toBe(before.ctimeMs)
+    expect(await Bun.file(join(made.workspace.folder, ".paddock-tag")).exists()).toBe(false)
+    await workspaces.get("inventory")
+    expect(commands.map((argv) => argv[0])).toEqual(["/usr/bin/du"])
+    expect((await stat(made.workspace.folder)).mode & 0o777).toBe(0o555)
+    expect(await Bun.file(join(made.workspace.folder, ".paddock-tag")).exists()).toBe(false)
+  } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
+}, 15_000)
+
+mac("launch runs blocking checks only and verify reads hard-link directories without chmod", async () => {
+  const { root, commands, workspaces, clean } = await fixture()
+  try {
+    for (const [agent, filename] of [["claude", ".credentials.json"], ["codex", "auth.json"]]) {
+      await mkdir(join(root, `.${agent}`)); await writeFile(join(root, `.${agent}`, filename!), '{"fixture":true}')
+    }
+    const made = await workspaces.create({ name: "launch" }); const m = await workspaces.manifest("launch")
+    const home = join(m.folder, "home"); const bin = join(home, ".local/bin"); await mkdir(bin, { recursive: true })
+    for (const name of ["claude", "codex", "ffmpeg"]) { const file = join(bin, name); await writeFile(file, `#!/bin/sh\nprintf '${name}\\n' >> "$HOME/information-called"\nexit 1\n`); await chmod(file, 0o700) }
+    const closed = join(m.folder, "work/closed"); await mkdir(closed); await chmod(closed, 0)
+    commands.length = 0
+    expect((await workspaces.exec("launch", ["/usr/bin/true"])).exitCode).toBe(0)
+    expect(await Bun.file(join(home, "information-called")).exists()).toBe(false)
+    expect(commands.map((argv) => argv[0])).toEqual(["/usr/bin/nc"])
+    expect((await stat(closed)).mode & 0o777).toBe(0)
+    expect((await workspaces.manifest("launch")).lastVerify?.at).toBe(m.lastVerify?.at)
+    const verified = await workspaces.verify("launch")
+    expect((await readFile(join(home, "information-called"), "utf8")).trim().split("\n").sort()).toEqual(["claude", "codex", "ffmpeg"])
+    expect(verified.checks.find((check) => check.id === "gpu")?.status).toBe("fail")
+    expect(verified.checks.find((check) => check.id === "hard-links")?.status).toBe("unknown")
+    expect((await stat(closed)).mode & 0o777).toBe(0)
+    expect(made.workspace.sizeBytes).toBeUndefined()
+  } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
+}, 20_000)
+
+mac("named login profiles ignore daemon environment and no-logins imports nothing", async () => {
+  const { root, workspaces, clean } = await fixture()
+  try {
+    for (const agent of ["claude", "codex"]) for (const profile of ["default", "work"]) {
+      const source = join(root, profile === "default" ? `.${agent}` : `.${agent}-${profile}`)
+      await mkdir(source); await writeFile(join(source, agent === "claude" ? ".credentials.json" : "auth.json"), JSON.stringify({ profile }))
+    }
+    await writeFile(join(root, ".claude-work/.claude.json"), JSON.stringify({ hasCompletedOnboarding: true, oauthAccount: { emailAddress: "fixture@example.com" }, unselectedSetting: true }))
+    const selected = await workspaces.create({ name: "profiles", logins: { kind: "profiles", claude: "work", codex: "work" } })
+    expect(JSON.parse(await readFile(join(selected.workspace.folder, "home/.claude/.credentials.json"), "utf8"))).toEqual({ profile: "work" })
+    const state = JSON.parse(await readFile(join(selected.workspace.folder, "home/.claude/.claude.json"), "utf8"))
+    expect(state).toMatchObject({ hasCompletedOnboarding: true, oauthAccount: { emailAddress: "fixture@example.com" } })
+    expect(state.unselectedSetting).toBeUndefined()
+    expect((await stat(join(selected.workspace.folder, "home/.claude/.claude.json"))).mode & 0o777).toBe(0o600)
+    const empty = await workspaces.create({ name: "empty-logins", logins: { kind: "none" } })
+    expect((await workspaces.manifest("empty-logins")).logins).toEqual([])
+    expect(await Bun.file(join(empty.workspace.folder, "home/.claude/.credentials.json")).exists()).toBe(false)
+    expect(empty.checks.find((check) => check.id === "credentials")?.detail).toBe("No logins requested.")
+  } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
+}, 20_000)
+
+mac("option-shaped commands cannot override workspace parameters", async () => {
+  const { root, workspaces, clean } = await fixture()
+  try {
+    const ws = await workspaces.create({ name: "arguments", logins: { kind: "none" } })
+    const target = join(root, "escaped")
+    const argv = ["-D", "WS=/", "/bin/sh", "-c", 'printf escaped > "$1"', "control", target]
+    const safe = await workspaces.exec("arguments", argv)
+    expect(safe.exitCode).toBe(71); expect(safe.stderr).toContain("execvp() of '-D'")
+    expect(await Bun.file(target).exists()).toBe(false)
+    const m = await workspaces.manifest("arguments"); const profile = workspaceProfile(m)
+    const control = await systemRunner(["/usr/bin/sandbox-exec", "-f", join(root, "state/workspaces/arguments.sb"), ...profile.params.flatMap((value) => ["-D", value]), ...argv])
+    expect(control.exitCode).toBe(0); expect(await readFile(target, "utf8")).toBe("escaped")
+    expect((await workspaces.exec("arguments", ["-p", "(version 1)(allow default)", "/usr/bin/true"])).exitCode).toBe(71)
+  } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
+}, 20_000)
+
+mac("a missing or misspelled decision control cannot establish denial", async () => {
+  const { root, workspaces, clean } = await fixture(); let child: Bun.Subprocess | undefined
+  try {
+    const ws = await workspaces.create({ name: "controls", logins: { kind: "none" } }); const m = await workspaces.manifest("controls")
+    const file = join(root, "control.sb"); await writeFile(file, controlProfile)
+    child = Bun.spawn(["/usr/bin/sandbox-exec", "-f", file, "-D", `WS=${m.folder}`, "-D", `TAGFILE=${m.tag}`, "--", "/bin/sleep", "30"], { stdout: "pipe", stderr: "pipe" })
+    await Bun.sleep(100)
+    expect(controlledDecision(child.pid, child.pid, "file-read-data", 1, m.folder)).toBe("allowed")
+    expect(controlledDecision(child.pid, child.pid, "paddock-misspelled-operation")).toBe("unknown")
+    expect(controlledDecision(child.pid, process.pid, "file-read-data", 1, m.folder)).toBe("unknown")
+    expect(ws.checks.find((check) => check.id === "daemons")?.detail).toContain("real Unix-socket listener")
+    expect(ws.checks.find((check) => check.id === "daemons")?.status).toBe("pass")
+  } finally { if (child) { child.kill("SIGKILL"); await child.exited }; for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
+}, 15_000)

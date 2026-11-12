@@ -1,16 +1,18 @@
-import { createHash, randomBytes } from "node:crypto"
-import { constants } from "node:fs"
-import { chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises"
+import { randomBytes } from "node:crypto"
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises"
+import { createServer } from "node:net"
 import { userInfo } from "node:os"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { blockers, complete, WORKSPACE_CHECKLIST } from "./checks"
+import { claudeState, credentialFiles, profileName, readCredential, type Host } from "./credentials"
 import { must, systemRunner } from "./run"
 import type { Dirs } from "./state"
 import { object } from "./transport"
-import { PaddockError, type CheckResult, type RunResult, type Session, type WorkspaceManifest, type WorkspaceSpec } from "./types"
-import { belongs, decision, requireMac, stopWorkspaceProcesses, workspacePids } from "./workspace-processes"
+import { PaddockError, type CheckResult, type RunResult, type Session, type Runner, type WorkspaceManifest, type WorkspaceSpec } from "./types"
+import { belongs, controlledDecision, decision, requireMac, stopWorkspaceProcesses, workspacePids } from "./workspace-processes"
 import { within, WORKSPACE_DISCLOSURE, workspaceEnvironment, workspaceProfile } from "./workspace-profile"
 import { WorkspaceSession } from "./workspace-session"
+import controlProfile from "./workspace-control.sb" with { type: "text" }
 
 export type WorkspaceView = {
   kind: "workspace"; name: string; folder: string; status: "idle" | "running" | "damaged" | "unknown"
@@ -32,7 +34,11 @@ function strings(value: unknown, label: string): string[] {
 export function validWorkspaceSpec(input: Record<string, unknown>): WorkspaceSpec {
   if (input.loopback !== undefined && input.loopback !== "open") throw new PaddockError("usage", "Workspace loopback is open. Declared ports are not available in this version.")
   const copy = input.copy === undefined ? undefined : strings([input.copy], "copy")[0]
-  return { name: workspaceName(input.name), reads: strings(input.reads, "reads"), path: strings(input.path, "path"), loopback: "open", ...(copy ? { copy } : {}) }
+  const selected = input.logins ?? { kind: "profiles", claude: "default", codex: "default" }
+  if (!object(selected) || (selected.kind !== "none" && selected.kind !== "profiles")) throw new PaddockError("usage", "logins must select named profiles or none.")
+  const profile = (value: unknown) => { if (typeof value !== "string") throw new PaddockError("usage", "Choose a named login profile."); try { return profileName(value) } catch { throw new PaddockError("usage", "A login profile is 1 to 48 letters, digits, underscores or hyphens.") } }
+  const logins: WorkspaceSpec["logins"] = selected.kind === "none" ? { kind: "none" } : { kind: "profiles", claude: profile(selected.claude), codex: profile(selected.codex) }
+  return { name: workspaceName(input.name), reads: strings(input.reads, "reads"), path: strings(input.path, "path"), loopback: "open", ...(copy ? { copy } : {}), logins }
 }
 export const validArgv = (value: unknown): string[] => {
   if (!Array.isArray(value) || !value.length || !value.every((arg) => typeof arg === "string" && !arg.includes("\0"))) throw new PaddockError("usage", "workspace exec needs a command after --.")
@@ -58,13 +64,13 @@ export function validateRead(path: string, protectedPaths: { home: string; root:
   if (["/private/tmp", "/private/var/tmp", "/private/var/folders"].some((entry) => within(path, entry) || within(entry, path))) throw new PaddockError("usage", "--read cannot reopen shared temporary folders.")
 }
 
-export async function hardLinks(folder: string): Promise<string[]> {
+export async function hardLinks(folder: string, repair = false): Promise<string[]> {
   const found: string[] = []
   const walk = async (path: string) => {
     const info = await lstat(path)
     if (info.isSymbolicLink()) return
     if (info.isFile() && info.nlink > 1) found.push(path)
-    if (info.isDirectory()) { await chmod(path, info.mode | 0o700); for (const entry of await readdir(path)) await walk(join(path, entry)) }
+    if (info.isDirectory()) { if (repair) await chmod(path, info.mode | 0o700); for (const entry of await readdir(path)) await walk(join(path, entry)) }
   }
   await walk(folder)
   return found.sort()
@@ -73,7 +79,7 @@ export async function hardLinks(folder: string): Promise<string[]> {
 export class Workspaces {
   private readonly locks = new Map<string, Promise<unknown>>()
   private readonly sessions = new Set<Session>()
-  constructor(readonly dirs: Dirs, private readonly env: NodeJS.ProcessEnv = process.env) {}
+  constructor(readonly dirs: Dirs, private readonly env: NodeJS.ProcessEnv = process.env, private readonly loginHost?: Host, private readonly runHost: Runner = systemRunner) {}
   private exclusive<T>(name: string, task: () => Promise<T>): Promise<T> {
     const next = (this.locks.get(name) ?? Promise.resolve()).then(task, task)
     this.locks.set(name, next.catch(() => {})); return next
@@ -110,7 +116,7 @@ export class Workspaces {
     if (spec.name !== name || !input.reads.every((read) => object(read) && typeof read.given === "string" && typeof read.canonical === "string" && isAbsolute(read.canonical) && typeof read.resolvedAt === "string")
       || !input.logins.every((login) => object(login) && (login.agent === "claude" || login.agent === "codex") && typeof login.copied === "boolean" && typeof login.detail === "string"))
       throw new PaddockError("check-failed", `The workspace manifest for ${name} is invalid.`)
-    return input as WorkspaceManifest
+    return { ...input, spec } as WorkspaceManifest
   }
   private async names() { return (await readdir(join(this.dirs.state, "workspaces")).catch(() => [])).filter((file) => file.endsWith(".json")).map((file) => file.slice(0, -5)).sort() }
   private async restoreIdentity(manifest: WorkspaceManifest) {
@@ -125,52 +131,55 @@ export class Workspaces {
     if (!tag) await writeFile(manifest.tag, manifest.id, { flag: "wx", mode: 0o444 })
     else if (await readFile(manifest.tag, "utf8") !== manifest.id) throw new PaddockError("check-failed", "The workspace tag identity changed.")
   }
-  private async view(manifest: WorkspaceManifest): Promise<WorkspaceView> {
+  private async view(manifest: WorkspaceManifest, withSize = false): Promise<WorkspaceView> {
     let processes: number | undefined; let problem: string | undefined
-    try { await this.restoreIdentity(manifest); processes = workspacePids(manifest.folder).length } catch (error) { problem = (error as Error).message }
-    const size = await systemRunner(["/usr/bin/du", "-sk", manifest.folder], { timeoutMs: 10_000 })
-    const kb = size.exitCode === 0 ? Number(size.stdout.trim().split(/\s/)[0]) : NaN
+    try { processes = workspacePids(manifest.folder).length } catch (error) { problem = (error as Error).message }
+    const size = withSize ? await this.runHost(["/usr/bin/du", "-sk", manifest.folder], { timeoutMs: 10_000 }) : undefined
+    const kb = size?.exitCode === 0 ? Number(size.stdout.trim().split(/\s/)[0]) : NaN
     return { kind: "workspace", name: manifest.name, folder: manifest.folder, status: processes === undefined ? "unknown" : processes ? "running" : "idle", processes,
       ...(Number.isFinite(kb) ? { sizeBytes: kb * 1024 } : {}), spec: manifest.spec, createdAt: manifest.createdAt, lastVerify: manifest.lastVerify, disclosure: WORKSPACE_DISCLOSURE, problem }
   }
-  async list(): Promise<WorkspaceView[]> {
+  private async inventory(withSize: boolean): Promise<WorkspaceView[]> {
     await this.locations()
     const views: WorkspaceView[] = []
     for (const name of await this.names()) {
-      try { views.push(await this.get(name)) } catch (error) { views.push({ kind: "workspace", name, folder: "", status: "damaged", problem: (error as Error).message, disclosure: WORKSPACE_DISCLOSURE }) }
+      try { views.push(await this.view(await this.manifest(name), withSize)) } catch (error) { views.push({ kind: "workspace", name, folder: "", status: "damaged", problem: (error as Error).message, disclosure: WORKSPACE_DISCLOSURE }) }
     }
     return views
   }
-  async get(name: string): Promise<WorkspaceView> { return this.view(await this.manifest(name)) }
+  async summary(): Promise<WorkspaceView[]> { return this.inventory(false) }
+  async list(): Promise<WorkspaceView[]> { return this.inventory(true) }
+  async get(name: string, withSize = true): Promise<WorkspaceView> { return this.view(await this.manifest(name), withSize) }
 
   private async copyLogins(manifest: WorkspaceManifest): Promise<void> {
+    const selected = manifest.spec.logins
+    if (selected.kind === "none") return
     for (const agent of ["claude", "codex"] as const) {
-      const source = this.env[agent === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"] ?? join(manifest.home, `.${agent}`)
-      const filename = agent === "claude" ? ".credentials.json" : "auth.json"
+      let failure = "Not imported: the credential or Claude account state could not be read; contents withheld."
+      const sourceHost: Host = this.loginHost ?? { home: manifest.home, platform: process.platform, runner: (argv) => this.runHost(argv, { timeoutMs: 15_000, maxOutputBytes: 2 * 1024 * 1024 + 1024 }) }
+      const host: Host = { ...sourceHost, runner: async (argv) => {
+        const result = await sourceHost.runner(argv)
+        if (argv.includes("-w") && result.exitCode !== 0) failure = result.overflow ? "Not imported: credential output exceeded its limit; contents withheld."
+          : result.exitCode === 124 ? "Not imported: Keychain password read timed out or was interrupted; the timeout is 15 seconds and a pending access prompt is possible."
+          : "Not imported: Keychain password access was denied or failed (exit " + result.exitCode + "); contents withheld."
+        return result
+      } }
+      const dest = join(manifest.folder, "home", "." + agent)
       let copied = false
-      let detail = agent === "claude" ? "No file login copied. Keychain secrets are not requested because access can prompt; Keychain login import is not covered." : "No regular file login found. OS credential stores are not queried."
-      if (agent === "claude") {
-        const hash = (path: string) => `Claude Code-credentials-${createHash("sha256").update(path).digest("hex").slice(0, 8)}`
-        const services = [...(source === join(manifest.home, ".claude") ? ["Claude Code-credentials"] : []), hash(source), hash(`${source}/`)]
-        let keychain = false
-        for (const service of services) {
-          // Attributes only. Never request -w, which can ask the user to unlock a password.
-          const metadata = await systemRunner(["/usr/bin/security", "find-generic-password", "-s", service], { timeoutMs: 5000 })
-          if (metadata.exitCode !== 44) { keychain = true; detail = metadata.exitCode === 0 ? "Claude Keychain login found by attributes only. Import stopped before reading its password because that can prompt. Login import is not working for this profile." : "Claude Keychain precedence could not be checked; no credential was copied and no password was requested."; break }
-        }
-        if (keychain) { manifest.logins.push({ agent, copied: false, detail }); continue }
-      }
       try {
-        if (!(await lstat(source)).isDirectory() || await realpath(source) !== resolve(source)) throw new Error()
-        const file = await open(join(source, filename), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-        let text: string
-        try { const info = await file.stat(); if (!info.isFile() || info.size > 1024 * 1024) throw new Error(); text = await file.readFile("utf8") } finally { await file.close() }
-        if (!object(JSON.parse(text))) throw new Error()
-        const dest = join(manifest.folder, "home", `.${agent}`)
-        await mkdir(dest, { mode: 0o700 }); await writeFile(join(dest, filename), text, { flag: "wx", mode: 0o600 })
-        copied = true; detail = "A file-backed login was copied with mode 0600; authentication has not been verified."
-      } catch { /* Credential bytes and filesystem errors must never enter diagnostics. */ }
-      manifest.logins.push({ agent, copied, detail })
+        const credential = await readCredential(agent, selected[agent], host)
+        const state = agent === "claude" ? await claudeState(selected.claude, host.home) : undefined
+        await mkdir(dest, { recursive: true, mode: 0o700 })
+        if (state) {
+          await writeFile(join(dest, ".claude.json"), JSON.stringify(state), { mode: 0o600, flag: "wx" })
+          await writeFile(join(dest, "settings.json"), JSON.stringify({ env: { ANTHROPIC_API_KEY: "" } }), { mode: 0o600, flag: "wx" })
+        }
+        await writeFile(join(dest, credentialFiles[agent]), credential, { mode: 0o600, flag: "wx" })
+        copied = true
+      } catch {
+        for (const file of [credentialFiles[agent], ...(agent === "claude" ? [".claude.json", "settings.json"] : [])]) await rm(join(dest, file), { force: true })
+      }
+      manifest.logins.push({ agent, copied, detail: copied ? "Selected profile " + selected[agent] + " copied privately; CLI recognition has not been checked." : failure })
     }
   }
 
@@ -194,17 +203,17 @@ export class Workspaces {
       spec.path = await Promise.all(spec.path.map((path) => realpath(expand(path, home))))
       const source = spec.copy ? await realpath(expand(spec.copy, home)) : undefined
       if (source && (!(await lstat(source)).isDirectory() || within(folder, source) || within(source, root) || within(source, state))) throw new PaddockError("usage", "--copy must be a project directory separate from workspace and state folders.")
-      const temp = must(await systemRunner(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"]), "Finding this user's temp folder").stdout.trim()
+      const temp = must(await this.runHost(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"]), "Finding this user's temp folder").stdout.trim()
       const manifest: WorkspaceManifest = { version: 1, kind: "workspace", name: spec.name, id: randomBytes(16).toString("hex"), spec, folder, tag: join(folder, ".paddock-tag"), home,
-        userVar: await realpath(dirname(temp)), reads, profileHash: "", macOS: must(await systemRunner(["/usr/bin/sw_vers", "-productVersion"]), "Reading macOS version").stdout.trim(), createdAt: new Date().toISOString(), logins: [], backup: "Time Machine exclusion not measured." }
+        userVar: await realpath(dirname(temp)), reads, profileHash: "", macOS: must(await this.runHost(["/usr/bin/sw_vers", "-productVersion"]), "Reading macOS version").stdout.trim(), createdAt: new Date().toISOString(), logins: [], backup: "Time Machine exclusion not measured." }
       await mkdir(root, { recursive: true, mode: 0o700 }); await mkdir(folder, { mode: 0o700 })
       try {
-        for (const name of ["home", "tmp", "work"]) await mkdir(join(folder, name), { mode: 0o700 })
+        for (const name of ["home", "tmp", "work", "home/.claude", "home/.codex"]) await mkdir(join(folder, name), { mode: 0o700 })
         await writeFile(manifest.tag, manifest.id, { flag: "wx", mode: 0o444 })
-        if (source) must(await systemRunner(["/bin/cp", "-R", "-P", "-X", `${source}/.`, join(folder, "work")], { timeoutMs: 600_000 }), "Copying the project")
+        if (source) must(await this.runHost(["/bin/cp", "-R", "-P", "-X", `${source}/.`, join(folder, "work")], { timeoutMs: 600_000 }), "Copying the project")
         await this.copyLogins(manifest)
-        const backup = await systemRunner(["/usr/bin/tmutil", "addexclusion", folder])
-        const excluded = backup.exitCode === 0 ? await systemRunner(["/usr/bin/tmutil", "isexcluded", folder]) : undefined
+        const backup = await this.runHost(["/usr/bin/tmutil", "addexclusion", folder])
+        const excluded = backup.exitCode === 0 ? await this.runHost(["/usr/bin/tmutil", "isexcluded", folder]) : undefined
         manifest.backup = excluded?.exitCode === 0 && excluded.stdout.includes("[Excluded]") ? "Time Machine reports this folder excluded now; existing backups are not removed." : "Time Machine exclusion could not be verified; backups may retain files."
         const profile = workspaceProfile(manifest); manifest.profileHash = profile.hash
         await mkdir(dirname(this.file(spec.name)), { recursive: true, mode: 0o700 })
@@ -230,7 +239,7 @@ export class Workspaces {
     if (profile.hash !== manifest.profileHash || await readFile(this.profileFile(manifest.name), "utf8") !== profile.text) throw new PaddockError("check-failed", "The workspace profile changed; execution refused.")
     for (const path of [manifest.home, manifest.userVar, ...manifest.reads.map((read) => read.canonical), ...manifest.spec.path])
       if (await realpath(path) !== path) throw new PaddockError("check-failed", "A canonical profile path changed; execution refused.")
-    const session = new WorkspaceSession({ argv: ["/usr/bin/sandbox-exec", "-f", this.profileFile(manifest.name), ...profile.params.flatMap((value) => ["-D", value]), ...argv],
+    const session = new WorkspaceSession({ argv: ["/usr/bin/sandbox-exec", "-f", this.profileFile(manifest.name), ...profile.params.flatMap((value) => ["-D", value]), "--", ...argv],
       env: workspaceEnvironment(manifest, this.env), cwd: join(manifest.folder, "work"), folder: manifest.folder, tty, cols, rows })
     this.sessions.add(session); session.on("end", () => this.sessions.delete(session))
     return session
@@ -239,11 +248,14 @@ export class Workspaces {
     const session = await this.launch(manifest, argv)
     return session.collect(stdin, timeoutMs)
   }
-  private async verifyNow(manifest: WorkspaceManifest): Promise<WorkspaceReport> {
+  private async blockingChecks(manifest: WorkspaceManifest): Promise<CheckResult[]> {
     const results: CheckResult[] = []
     const add = (id: CheckResult["id"], status: CheckResult["status"], evidence: CheckResult["evidence"], detail: string) => results.push({ id, status, evidence, detail })
     let probe: WorkspaceSession | undefined
+    let control: WorkspaceSession | undefined
     let fixture: string | undefined
+    let socketFixture: string | undefined
+    let server: ReturnType<typeof createServer> | undefined
     try {
       await this.restoreIdentity(manifest)
       const before = workspacePids(manifest.folder)
@@ -255,50 +267,85 @@ export class Workspaces {
       add("processes", pids.includes(probe.pid) ? "pass" : "fail", "probed", `${before.length} processes before the known probe; finder ${pids.length} including its pid. Kernel tag criterion and uid checked. K15 supplies the independent empty-workspace control.`)
       fixture = join(dirname(manifest.folder), `.paddock-probe-${randomBytes(8).toString("hex")}`)
       await mkdir(fixture, { mode: 0o700 }); const target = join(fixture, "outside")
+      const controlFile = join(fixture, "control.sb"); await writeFile(controlFile, controlProfile, { mode: 0o600 })
+      control = new WorkspaceSession({ argv: ["/usr/bin/sandbox-exec", "-f", controlFile, "-D", `WS=${manifest.folder}`, "-D", `TAGFILE=${manifest.tag}`, "--", "/bin/sleep", "30"],
+        env: workspaceEnvironment(manifest, this.env), cwd: join(manifest.folder, "work"), folder: manifest.folder, tty: false })
+      for (let i = 0; i < 100 && !belongs(control.pid, manifest.folder); i++) { if (control.ended) break; await Bun.sleep(10) }
+      if (!belongs(control.pid, manifest.folder)) throw new Error("The confined decision control did not acquire its expected profile.")
       await writeFile(target, "control")
       const write = await this.run(manifest, ["/bin/sh", "-c", 'printf changed > "$1"', "probe", target])
       const insideWrite = await this.run(manifest, ["/bin/sh", "-c", 'printf inside > "$TMPDIR/paddock-write-probe" && rm "$TMPDIR/paddock-write-probe"'])
-      add("writes", write.exitCode !== 0 && await readFile(target, "utf8") === "control" && insideWrite.exitCode === 0 ? "pass" : "fail", "probed", "A controlled sibling-file write was refused; an inside write succeeded. Home and shared-temp write decisions are also checked against an unconfined process.")
+      const writeRefused = write.exitCode !== 0 && await readFile(target, "utf8") === "control"
+      add("writes", writeRefused && insideWrite.exitCode === 0 ? "pass" : "fail", "probed", `Sibling write ${writeRefused ? "refused" : "not refused"}; inside write ${insideWrite.exitCode === 0 ? "succeeded" : "failed"}. Home/shared-temp decisions use same-operation allowed controls in a confined profile.`)
       const read = await this.run(manifest, ["/bin/cat", target])
       const closed = [manifest.home, "/private/tmp", "/private/var/tmp", manifest.userVar]
-      const readControl = closed.every((path) => decision(process.pid, "file-read-data", 1, path) === 0)
-      const denied = closed.every((path) => decision(probe!.pid, "file-read-data", 1, path) === 1)
-      add("home-closed", !readControl ? "unknown" : read.exitCode !== 0 && denied ? "pass" : "fail", "probed", `Controlled sibling home read refused; shared-temp kernel decisions checked. Read allowances: ${manifest.reads.map((read) => read.canonical).join(", ") || "none"}.`)
+      const readControl = decision(probe.pid, "file-read-data", 1, manifest.folder) === 0 && closed.every((path) => controlledDecision(probe!.pid, control!.pid, "file-read-data", 1, path) !== "unknown")
+      const denied = closed.every((path) => controlledDecision(probe!.pid, control!.pid, "file-read-data", 1, path) === "denied")
+      add("home-closed", !readControl ? "unknown" : read.exitCode !== 0 && denied ? "pass" : "fail", "probed", `Sibling home read ${read.exitCode !== 0 ? "refused" : "allowed"}; allowed confined controls ${readControl ? "answered" : "unavailable"}; shared-temp decisions ${denied ? "denied" : "not established as denied"}. Read allowances: ${manifest.reads.map((read) => read.canonical).join(", ") || "none"}.`)
       const writeTargets = [manifest.home, "/private/tmp", manifest.userVar]
-      if (!writeTargets.every((path) => decision(probe!.pid, "file-write-create", 1, path) === 1 && decision(process.pid, "file-write-create", 1, path) === 0))
+      const writeAnswers = writeTargets.map((path) => decision(probe!.pid, "file-write-create", 1, path))
+      if (decision(probe.pid, "file-write-create", 1, manifest.folder) !== 0 || writeAnswers.some((answer) => answer !== 0 && answer !== 1))
         results[results.findIndex((result) => result.id === "writes")] = { id: "writes", status: "unknown", evidence: "probed", detail: "A live write control or kernel decision for home/shared temp could not be established." }
-      const controls = (checks: Array<[string, number, string]>) => checks.every(([op, type, arg]) => decision(process.pid, op, type, arg) === 0)
-      const refuses = (checks: Array<[string, number, string]>) => checks.every(([op, type, arg]) => decision(probe!.pid, op, type, arg) === 1)
-      // Socket connectivity is measured independently by K10; sandbox_check cannot model every network filter.
+      else if (writeAnswers.includes(0)) results[results.findIndex((result) => result.id === "writes")] = { id: "writes", status: "fail", evidence: "probed", detail: "An outside file-write-create decision was allowed beside the same-operation allowed control inside the workspace." }
+      const controls = (checks: Array<[string, number, string]>) => checks.every(([op, type, arg]) => controlledDecision(probe!.pid, control!.pid, op, type, arg) !== "unknown"
+        && (op !== "mach-lookup" || decision(probe!.pid, op, type, "com.apple.system.logger") === 0))
+      const refuses = (checks: Array<[string, number, string]>) => checks.every(([op, type, arg]) => controlledDecision(probe!.pid, control!.pid, op, type, arg) === "denied")
       const launchChannels: Array<[string, number, string]> = [["lsopen", 0, ""], ["job-creation", 0, ""], ["mach-lookup", 2, "com.apple.lsd.modifydb"]]
-      add("daemons", !controls(launchChannels) ? "unknown" : refuses(launchChannels) ? "pass" : "fail", "probed", "Kernel decisions refuse lsopen, job creation and LaunchServices registration. Unix sockets are denied by the inspected profile; end-to-end socket attempts are K10. Apple events are not covered.")
+      socketFixture = await mkdtemp("/private/tmp/paddock-check-")
+      const socket = join(socketFixture, "control.sock"); const marker = "paddock-socket-control\n"
+      server = createServer((connection) => connection.end(marker))
+      await new Promise<void>((resolve, reject) => { server!.once("error", reject); server!.listen(socket, resolve) })
+      const socketControl = await this.runHost(["/usr/bin/nc", "-w", "1", "-U", socket], { timeoutMs: 3000 })
+      const socketAttempt = await this.run(manifest, ["/usr/bin/nc", "-w", "1", "-U", socket])
+      const socketDenied = socketAttempt.exitCode === 1 && socketAttempt.stdout === ""
+      const socketsKnown = socketControl.exitCode === 0 && socketControl.stdout === marker && (socketAttempt.exitCode === 0 || socketDenied)
+      add("daemons", !controls(launchChannels) || !socketsKnown ? "unknown" : refuses(launchChannels) && socketDenied ? "pass" : "fail", "probed", `A real Unix-socket listener control ${socketControl.exitCode === 0 && socketControl.stdout === marker ? "answered" : "failed (exit " + socketControl.exitCode + ")"}; confined connect ${socketDenied ? "refused" : "not established as refused"}. Allowed confined policy controls ${controls(launchChannels) ? "answered" : "unavailable"}; decisions ${launchChannels.map(([op, type, arg]) => op + "=" + controlledDecision(probe!.pid, control!.pid, op, type, arg)).join(", ")}. Apple events are not covered.`)
       const data: Array<[string, number, string]> = [["user-preference-read", 6, "com.apple.finder"], ["user-preference-write", 6, "com.apple.finder"], ["mach-lookup", 2, "com.apple.pasteboard.1"], ["signal", 0, ""], ["process-info-pidinfo", 0, ""]]
-      add("user-data", !controls(data) ? "unknown" : refuses(data) ? "pass" : "fail", "probed", "Kernel decisions for preferences, pasteboard lookup, signals and process-info-pidinfo compared with this unconfined daemon. End-to-end coverage is K11/K12.")
+      add("user-data", !controls(data) ? "unknown" : refuses(data) ? "pass" : "fail", "probed", `Preferences, pasteboard lookup, signals and process-info-pidinfo allowed confined controls ${controls(data) ? "answered" : "unavailable"}; denials ${refuses(data) ? "confirmed" : "not established"}. End-to-end coverage is K11/K12.`)
     } catch (error) { add("seatbelt", "fail", "none", (error as Error).message) }
     finally {
       if (probe) { probe.close(); await probe.finished }
+      if (control) { control.close(); await control.finished }
+      if (server?.listening) await new Promise<void>((resolve) => server!.close(() => resolve()))
+      if (socketFixture) await rm(socketFixture, { recursive: true, force: true })
       if (fixture) await rm(fixture, { recursive: true, force: true })
     }
-    add("gpu", "unknown", "none", "Not measured by verify. K06 measures Metal compute and hardware-only VideoToolbox on this Mac when its prerequisites are available.")
+    return complete(results, ["config", "runtime", "probe"], "This workspace check could not be made.", WORKSPACE_CHECKLIST.filter((item) => item.blocking))
+  }
+  private async verifyNow(manifest: WorkspaceManifest): Promise<WorkspaceReport> {
+    const results = await this.blockingChecks(manifest)
+    const add = (id: CheckResult["id"], status: CheckResult["status"], evidence: CheckResult["evidence"], detail: string) => results.push({ id, status, evidence, detail })
+    const available = await this.run(manifest, ["/bin/sh", "-c", "command -v ffmpeg"]).catch(() => undefined)
+    if (!available) add("gpu", "unknown", "none", "The ffmpeg availability probe could not run; hardware encode was not measured. Metal compute is not covered by this check.")
+    else if (available.exitCode !== 0) add("gpu", "unknown", "none", "No ffmpeg executable is available on the workspace PATH; hardware encode was not measured. Metal compute is not covered by this check.")
+    else {
+      const movie = join(manifest.folder, "tmp", `paddock-gpu-${randomBytes(8).toString("hex")}.mov`)
+      try {
+        const encoded = await this.run(manifest, ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64:r=5:d=0.4", "-c:v", "hevc_videotoolbox", "-allow_sw", "0", "-y", movie])
+        const written = (await stat(movie).catch(() => undefined))?.size ?? 0
+        add("gpu", encoded.exitCode === 0 && written > 0 ? "pass" : "fail", "probed", `Hardware-only HEVC VideoToolbox encode ${encoded.exitCode === 0 && written > 0 ? "produced a nonempty movie" : "failed (exit " + encoded.exitCode + ")"}; software fallback disabled. Metal compute is not covered by this check.`)
+      } catch { add("gpu", "unknown", "none", "The hardware encode probe could not run. Metal compute is not covered by this check.") }
+      finally { await rm(movie, { force: true }) }
+    }
     add("network", "info", "inspected", "No IP network restrictions. Internet, LAN, tailnet and remote effects are open; HTTPS is measured by K18.")
-    const listeners = await systemRunner(["/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], { timeoutMs: 5000, maxOutputBytes: 256 * 1024 })
+    const listeners = await this.runHost(["/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], { timeoutMs: 5000, maxOutputBytes: 256 * 1024 })
     add("loopback", listeners.exitCode === 0 ? "weak" : "unknown", listeners.exitCode === 0 ? "inspected" : "none", listeners.exitCode === 0
       ? `Open. Current listeners, including wildcard binds reachable on loopback: ${listeners.stdout.trim().split("\n").slice(1).join("; ")}. Services started later are also reachable.` : "Open. Current listeners could not be enumerated.")
     const loginDetails: string[] = []
     for (const login of manifest.logins) {
       if (!login.copied) { loginDetails.push(`${login.agent}: ${login.detail}`); continue }
-      const status = await this.run(manifest, login.agent === "claude" ? ["claude", "auth", "status", "--json"] : ["codex", "login", "status"]).catch(() => undefined)
+      const status = await this.run(manifest, login.agent === "claude" ? ["claude", "auth", "status"] : ["codex", "login", "status"]).catch(() => undefined)
       let recognized = false
       if (status?.exitCode === 0) {
         if (login.agent === "codex") recognized = /logged in/i.test(`${status.stdout}\n${status.stderr}`)
         else { try { const parsed: unknown = JSON.parse(status.stdout); recognized = object(parsed) && parsed.loggedIn === true } catch {} }
       }
-      loginDetails.push(`${login.agent}: copied; ${recognized ? "CLI reports a login; server-side authentication and refresh not measured" : "CLI login status not verified; output withheld"}.`)
+      loginDetails.push(`${login.agent}: copied; ${recognized ? "CLI reports logged in; authenticated API calls and refresh not measured" : status ? "CLI did not report logged in (exit " + status.exitCode + "); output withheld" : "CLI status could not run; output withheld"}.`)
     }
-    add("credentials", "info", "inspected", loginDetails.join(" "))
+    add("credentials", "info", manifest.logins.some((login) => login.copied) ? "probed" : "inspected", loginDetails.join(" ") || "No logins requested.")
     try { const links = await hardLinks(manifest.folder); add("hard-links", links.length ? "weak" : "info", "inspected", links.length ? `Multiple links, possibly shared outside: ${links.join(", ")}. Outside links cannot be located reliably.` : "No regular files with link count > 1 now. Paddock never copies with hard links.") }
     catch { add("hard-links", "unknown", "none", "Could not walk all workspace files.") }
-    const backup = await systemRunner(["/usr/bin/tmutil", "isexcluded", manifest.folder], { timeoutMs: 5000 })
+    const backup = await this.runHost(["/usr/bin/tmutil", "isexcluded", manifest.folder], { timeoutMs: 5000 })
     manifest.backup = backup.exitCode === 0 && backup.stdout.includes("[Excluded]") ? "Time Machine reports this folder excluded now; existing backups are not removed." : "Time Machine exclusion could not be verified; backups may retain files."
     add("not-covered", "info", "none", `${WORKSPACE_DISCLOSURE} ${manifest.backup}`)
     const checks = complete(results, ["config", "runtime", "probe"], "This workspace check could not be made.", WORKSPACE_CHECKLIST)
@@ -309,8 +356,8 @@ export class Workspaces {
   async open(name: string, argv: unknown, options: { tty: boolean; cols?: number; rows?: number }): Promise<WorkspaceSession> {
     const command = validArgv(argv)
     return this.exclusive(workspaceName(name), async () => {
-      const manifest = await this.manifest(name); const report = await this.verifyNow(manifest)
-      const blocked = blockers(report.checks, WORKSPACE_CHECKLIST)
+      const manifest = await this.manifest(name)
+      const blocked = blockers(await this.blockingChecks(manifest), WORKSPACE_CHECKLIST)
       if (blocked.length) throw new PaddockError("check-failed", "Workspace execution refused by its checklist.", blocked)
       return this.launch(manifest, command, options.tty, options.cols, options.rows)
     })
@@ -323,14 +370,14 @@ export class Workspaces {
     if (confirm !== workspaceName(name)) throw new PaddockError("usage", `Removing a workspace deletes its files. Give --confirm ${name}.`)
     return this.exclusive(name, async () => {
       const manifest = await this.manifest(name); await this.restoreIdentity(manifest); await stopWorkspaceProcesses(manifest.folder)
-      const links = await hardLinks(manifest.folder)
+      const links = await hardLinks(manifest.folder, true)
       const bundles: string[] = []
       const walk = async (path: string) => { for (const entry of await readdir(path, { withFileTypes: true })) if (entry.isDirectory()) { const full = join(path, entry.name); if (entry.name.endsWith(".app")) bundles.push(full); else await walk(full) } }
       await walk(manifest.folder)
       const lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
       const issues: string[] = []
-      for (const bundle of bundles) { const run = await systemRunner([lsregister, "-u", bundle], { timeoutMs: 10_000 }); if (run.exitCode !== 0) issues.push(`Unregistration failed for ${bundle}.`) }
-      const jobs = await systemRunner(["/bin/launchctl", "print", `gui/${process.getuid?.()}`], { timeoutMs: 10_000 })
+      for (const bundle of bundles) { const run = await this.runHost([lsregister, "-u", bundle], { timeoutMs: 10_000 }); if (run.exitCode !== 0) issues.push(`Unregistration failed for ${bundle}.`) }
+      const jobs = await this.runHost(["/bin/launchctl", "print", `gui/${process.getuid?.()}`], { timeoutMs: 10_000 })
       const launchd = jobs.exitCode === 0 ? jobs.stdout.split("\n").filter((line) => line.includes(manifest.folder)) : ["launchd inspection failed; retained jobs unknown."]
       if (workspacePids(manifest.folder).length) throw new PaddockError("check-failed", "Processes appeared during removal; folder retained.")
       // Walk without following symlinks or chmodding hard-linked regular files outside this tree.
@@ -341,12 +388,12 @@ status=("\${PIPESTATUS[@]}")
 [ "\${status[0]}" -eq 0 ] || exit "\${status[0]}"
 [ "\${status[1]}" -le 1 ] || exit "\${status[1]}"`
       for (const deadline = Date.now() + 5000;;) {
-        const registered = await systemRunner(["/bin/bash", "-c", references, "paddock-lsregister", lsregister, manifest.folder], { timeoutMs: 20_000 })
+        const registered = await this.runHost(["/bin/bash", "-c", references, "paddock-lsregister", lsregister, manifest.folder], { timeoutMs: 20_000 })
         if (registered.exitCode !== 0) { issues.push(`LaunchServices inspection failed (exit ${registered.exitCode}; ${registered.stderr.slice(0, 200)}); retained registrations unknown.`); break }
         const remaining = registered.stdout.split("\n").filter(Boolean)
         if (!remaining.length) break
         if (Date.now() >= deadline) { issues.push(...remaining); break }
-        for (const bundle of bundles) await systemRunner([lsregister, "-u", bundle], { timeoutMs: 10_000 })
+        for (const bundle of bundles) await this.runHost([lsregister, "-u", bundle], { timeoutMs: 10_000 })
         await Bun.sleep(100)
       }
       await rm(this.profileFile(name), { force: true }); await rm(this.file(name), { force: true })

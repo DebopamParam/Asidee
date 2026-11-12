@@ -35,6 +35,12 @@ export function decision(pid: number, operation: string | null, filter = 0, argu
   return lib().check.symbols.paddock_sandbox_check(pid, op ? ptr(op) : null, filter | (operation === null ? 0 : 0x40000000), ptr(arg))
 }
 
+export function controlledDecision(pid: number, control: number, operation: string, filter = 0, argument = ""): "allowed" | "denied" | "unknown" {
+  if (decision(pid, null) !== 1 || decision(control, null) !== 1 || decision(control, operation, filter, argument) !== 0) return "unknown"
+  const answer = decision(pid, operation, filter, argument)
+  return answer === 0 ? "allowed" : answer === 1 ? "denied" : "unknown"
+}
+
 function paths(folder: string): void {
   if (!lstatSync(folder).isDirectory() || !lstatSync(join(folder, ".paddock-tag")).isFile())
     throw new PaddockError("check-failed", "The workspace folder and regular tag must exist before its processes can be identified.")

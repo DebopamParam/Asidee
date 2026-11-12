@@ -41,12 +41,12 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
   return {
     version: { run: async () => ({ version: VERSION, build: BUILD, stopping: stopping() }) },
     hello: { run: async () => machines?.hello, socketOnly: true },
-    summary: { run: async () => ({ hello: machines?.hello, sandboxes: await core.list(), workspaces: process.platform === "darwin" ? await workspaces.list() : [], checkedAt: new Date().toISOString() }) },
+    summary: { run: async () => ({ hello: machines?.hello, sandboxes: await core.list(), workspaces: process.platform === "darwin" ? await workspaces.summary() : [], checkedAt: new Date().toISOString() }) },
     workspaceList: { run: () => workspaces.list(), socketOnly: true },
     workspaceGet: { run: (body) => workspaces.get(String(body.name)), socketOnly: true },
     workspaceCreate: { run: (body) => workspaces.create(body), socketOnly: true },
     workspaceExec: { run: (body) => workspaces.exec(String(body.name), body.argv, typeof body.stdin === "string" ? body.stdin : undefined), socketOnly: true },
-    workspaceShell: { run: async (body) => ({ workspace: await workspaces.get(String(body.name)), stream: "workspace", argv: ["/bin/zsh", "-l"] }), socketOnly: true },
+    workspaceShell: { run: async (body) => ({ workspace: await workspaces.get(String(body.name), false), stream: "workspace", argv: ["/bin/zsh", "-l"] }), socketOnly: true },
     workspaceStop: { run: (body) => workspaces.stop(String(body.name)), socketOnly: true },
     workspaceRemove: { run: (body) => workspaces.remove(String(body.name), body.confirm), socketOnly: true },
     workspaceVerify: { run: (body) => workspaces.verify(String(body.name)), socketOnly: true },
@@ -195,7 +195,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
 
   // One pass at a time: a slow engine must not stack them up. The first pass covers the time no daemon was running.
   let enforcing = false
-  const enforce = async () => { if (enforcing) return; enforcing = true; try { await core.enforce(); if (process.platform === "darwin") await workspaces.list().catch(() => undefined) } finally { enforcing = false } }
+  const enforce = async () => { if (enforcing) return; enforcing = true; try { await core.enforce() } finally { enforcing = false } }
   void core.sweep().then(enforce)
   const timer = setInterval(() => { void enforce() }, ENFORCE_MS)
   const keepSandboxes = await new Promise<boolean>((resolve) => {
