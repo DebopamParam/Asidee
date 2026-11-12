@@ -30,20 +30,20 @@ export function complete(results: readonly CheckResult[], stages: readonly Stage
     results.find((result) => result.id === item.id) ?? { id: item.id, status: "unknown", evidence: "none", detail: missing })
 }
 
-// What stops a sandbox from running. A failed blocking check always does. One that could not be checked does too when
+// What stops a sandbox from running. A failed or unsupported blocking check always does. One that could not be checked does too when
 // it only needs the engine's configuration or a running sandbox; a probe that could not run (no helper image, a control
 // that did not answer) is shown as unknown and does not block.
 export function blockers(results: readonly CheckResult[], checklist = CHECKLIST): CheckResult[] {
   return results.filter((result) => {
     const item = checklist.find((entry) => entry.id === result.id)
     if (!item?.blocking) return false
-    return result.status === "fail" || (result.status === "unknown" && item.stage !== "probe")
+    return result.status === "fail" || result.status === "unsupported" || (result.status === "unknown" && item.stage !== "probe")
   })
 }
 
 // For a sandbox that is already running, where a check that could not be made this minute is no reason to stop it.
 export function failures(results: readonly CheckResult[], checklist = CHECKLIST): CheckResult[] {
-  return results.filter((result) => result.status === "fail" && checklist.find((entry) => entry.id === result.id)?.blocking)
+  return results.filter((result) => (result.status === "fail" || result.status === "unsupported") && checklist.find((entry) => entry.id === result.id)?.blocking)
 }
 
 export const WORKSPACE_CHECKLIST: readonly ChecklistItem[] = [

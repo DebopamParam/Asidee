@@ -21,6 +21,13 @@
 `core/checks.ts` lists the checks. Providers supply the evidence for each one; a check a provider does not report comes
 out as "could not be checked", never as a pass.
 
+A blocking check reported as `unsupported` refuses create/start and stops a running sandbox on enforcement or verify,
+including a probe. Its error names the missing property. An `unknown` probe remains a disclosure and does not block;
+an engine known to lack a promised property is different from an attempt that could not measure it. Nonblocking
+unsupported checks remain disclosures. The gVisor provider must satisfy the whole blocking checklist. Docker Sandboxes
+is detection-only and not ready in this build; create is refused before any sandbox is made. No gVisor-specific check
+is waived for it. A future microVM provider needs reviewed evidence or an explicit checklist decision before becoming ready.
+
 | Check | Blocking | When | How the gVisor provider checks it |
 |---|---|---|---|
 | Isolated kernel | yes | after start | The runtime is gVisor, and the kernel inside identifies as gVisor. |

@@ -5,6 +5,7 @@ import { connect } from "node:net"
 import { join } from "node:path"
 import { blockers, CHECKLIST, complete } from "../../core/checks"
 import { Core, UNCHECKED_PASSES } from "../../core/core"
+import { DockerSandboxesProvider } from "../../core/providers/docker-sandboxes"
 import { fieldValues, loadExtensions, parseExtension } from "../../core/extensions"
 import { configChecks, DOCKER_CAPABILITIES, dockerVolume, gvisorSetup, network, unsafeRuntimeArgs, type GuardState } from "../../core/providers/gvisor"
 import { OUTPUT_LIMIT, systemRunner } from "../../core/run"
@@ -107,6 +108,28 @@ test("a failed blocking check blocks; an unknown probe and a weak disk limit do 
     { id: "disk", status: "weak", evidence: "inspected", detail: "" }, { id: "egress", status: "info", evidence: "probed", detail: "" },
   ]
   expect(blockers(results).map((entry) => entry.id)).toEqual(["net-peers"])
+})
+
+test("unsupported blocking properties refuse creation and name the missing promise", async () => {
+  for (const id of ["network-guard", "kernel", "net-host"] as const) {
+    const stage = CHECKLIST.find((item) => item.id === id)!.stage
+    const results = allPass(stage).map((entry): CheckResult => entry.id === id ? { ...entry, status: "unsupported", detail: "Engine cannot provide this." } : entry)
+    expect(blockers(results).map((entry) => entry.id)).toEqual([id])
+    const { provider, state } = fakeProvider({ [stage]: results }); const paddock = await core(provider)
+    await expect(paddock.create({ name: "demo" })).rejects.toThrow(CHECKLIST.find((item) => item.id === id)!.title)
+    expect(state.running).toBe(false)
+  }
+  expect(blockers([{ id: "disk", status: "unsupported", evidence: "none", detail: "No disk cap." }])).toEqual([])
+})
+
+test("Docker Sandboxes is detection-only and refuses create without touching an engine", async () => {
+  const calls: string[][] = []
+  const provider = new DockerSandboxesProvider(async (argv) => { calls.push([...argv]); return { exitCode: 0, stdout: "1.0", stderr: "" } })
+  const paddock = await core(provider)
+  expect((await provider.detect())[0]?.ready).toBe(false)
+  await expect(paddock.create({ name: "demo", engine: "docker-sandboxes" })).rejects.toThrow("does not support Docker Sandboxes yet")
+  expect(calls.every((argv) => argv.join(" ") === "sbx version")).toBe(true)
+  expect(await paddock.list()).toEqual([])
 })
 
 test("a spec keeps only known fields and refuses option-like images", () => {
