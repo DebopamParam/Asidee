@@ -32,7 +32,7 @@ is waived for it. A future microVM provider needs reviewed evidence or an explic
 |---|---|---|---|
 | Isolated kernel | yes | after start | The runtime is gVisor, and the kernel inside identifies as gVisor. |
 | Inner Docker is available when requested | yes | after start | Its Unix socket answers, its data root is /var/lib/docker, and its driver is the copy-on-write `overlayfs`. The detail discloses the public DNS fallback. Not requested is a disclosure. |
-| Public DNS fallback is configured | yes | after start | Rewrites and reads back /etc/resolv.conf with 1.1.1.1 and 8.8.8.8. This measures configuration, not live resolution. |
+| Public DNS fallback is configured | yes | after start | Reads /etc/resolv.conf; only if it is not 1.1.1.1 and 8.8.8.8, rewrites it, reads it back and says it was restored. This measures configuration, not live resolution. |
 | No privileged mode, host namespaces, undeclared capabilities or devices | yes | before start | Engine configuration. With Docker, exactly NET_ADMIN and SYS_ADMIN added inside gVisor; otherwise no additions. |
 | No host folders | yes | before start | Engine configuration; with Docker, volume driver options and ownership too. |
 | Own network, guard loaded | yes | before start | Engine configuration, and the loaded firewall rules compared rule for rule with the shipped ones. |
@@ -138,9 +138,11 @@ resolvers rather than having a separate daemon DNS override. On this engine a us
 8.8.8.8**, for the sandbox, which the inner daemon inherits. This is a product choice of where DNS queries go; the
 `docker` check discloses it. Private DNS and split DNS were not measured.
 
-Every start, including an already running sandbox and one with inner Docker, now rewrites this fallback and reads it
-back. The runtime enforcement pass does the same, repairing a resolver file Docker reset without trusting a previous
-per-network resolver address. An unreadable/unwritable file is `unknown`, never pass; start refuses it and enforcement
+Every start, including an already running sandbox and one with inner Docker, and every runtime enforcement pass reads
+this file first. Only when it differs from the fallback (Docker can reset it, for example across an engine restart) or
+cannot be read is it rewritten and read back, and the check's detail then says it was reset and restored; a file that
+is already right is not written, so the 30-second pass does not rewrite it. A previous per-network resolver address is
+never trusted. A file that cannot be restored and read back is `unknown`, never pass; start refuses it and enforcement
 uses the usual four-pass unknown budget. The guard and bridge remain checked on every pass; a missing/changed guard
 stops a running sandbox, and start reloads the guard and recreates a missing network before checking configuration.
 Fake-runner unit tests cover reset resolver files, start paths and lost guard/network preparation. Recovery and live

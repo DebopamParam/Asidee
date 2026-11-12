@@ -689,14 +689,20 @@ export class GvisorProvider implements Provider {
     return this.docker(manifest.engine, ["exec", "-u", "0", container(manifest.name), "docker", "--host", "unix:///var/run/docker.sock", "info", "--format", "{{.DockerRootDir}} {{.Driver}}"], { timeoutMs: 10_000 })
   }
 
+  // Read first and write only a file that differs, so a pass every 30 seconds does not rewrite it. Docker may reset this
+  // engine-owned file across a restart, even with the container still running.
   private async dnsCheck(manifest: Manifest): Promise<CheckResult> {
+    const scope = "This checks configuration, not a live lookup or existing inner containers' resolver state."
     try {
-      // Docker may rewrite this engine-owned file across a restart, even with the container still running.
+      const found = await this.docker(manifest.engine, ["exec", "-u", "0", container(manifest.name), "cat", "/etc/resolv.conf"])
+      if (found.exitCode === 0 && found.stdout === SANDBOX_DNS)
+        return result("dns", "pass", "inspected", `Read /etc/resolv.conf: Paddock's public fallback resolvers 1.1.1.1 and 8.8.8.8, bypassing the engine's per-network resolver; nothing was written. ${scope}`)
+      const before = found.exitCode === 0 ? "had been reset to other content" : `could not be read (${found.stderr.trim()})`
       const dns = await this.docker(manifest.engine, ["exec", "-i", "-u", "0", container(manifest.name), "sh", "-c", "cat > /etc/resolv.conf && cat /etc/resolv.conf"], { stdin: SANDBOX_DNS })
-      if (dns.exitCode !== 0) return result("dns", "unknown", "none", `The DNS fallback could not be set and read back: ${dns.stderr.trim()}`)
-      return dns.stdout === SANDBOX_DNS ? result("dns", "pass", "inspected", "Read back /etc/resolv.conf with public fallback resolvers 1.1.1.1 and 8.8.8.8, bypassing the engine's per-network resolver. This checks configuration, not a live lookup or existing inner containers' resolver state.")
-        : result("dns", "fail", "inspected", "The resolver file read back differs from Paddock's public DNS fallback.")
-    } catch (error) { return result("dns", "unknown", "none", `The DNS fallback could not be set and read back: ${(error as Error).message}`) }
+      if (dns.exitCode !== 0) return result("dns", "unknown", "none", `/etc/resolv.conf ${before}, and the DNS fallback could not be set and read back: ${dns.stderr.trim()}`)
+      return dns.stdout === SANDBOX_DNS ? result("dns", "pass", "inspected", `/etc/resolv.conf ${before}; Paddock restored its public fallback resolvers 1.1.1.1 and 8.8.8.8 and read them back. ${scope}`)
+        : result("dns", "fail", "inspected", `/etc/resolv.conf ${before}, and the file read back after restoring it differs from Paddock's public DNS fallback.`)
+    } catch (error) { return result("dns", "unknown", "none", `The DNS fallback could not be read, set and read back: ${(error as Error).message}`) }
   }
 
   // The runtime the engine reports, confirmed from inside: gVisor's kernel log and version string name it.

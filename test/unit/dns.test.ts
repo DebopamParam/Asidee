@@ -6,7 +6,7 @@ import type { Manifest, Runner } from "../../core/types"
 function fixture(docker = false) {
   const manifest: Manifest = { version: 1, name: "demo", id: "owned", createdAt: "", spec: validSpec({ name: "demo", docker }),
     engine: { id: "fake", provider: "gvisor", label: "fake", ready: true, problems: [], data: { context: "fake", runtime: "runsc" } } }
-  const state = { running: true, resolver: "nameserver 127.0.0.11\n", writable: true, readable: true, guard: "intact", network: true }
+  const state = { running: true, resolver: "nameserver 127.0.0.11\n", writable: true, readable: true, guard: "intact", network: true, writes: 0 }
   const calls: string[][] = []
   const runner: Runner = async (argv, options) => {
     calls.push([...argv]); const args = argv.slice(3)
@@ -19,8 +19,8 @@ function fixture(docker = false) {
     else if (args[0] === "run" && args.includes("nft")) state.guard = "intact"
     else if (args[0] === "run") stdout = state.guard
     else if (args[0] === "exec" && args.some((arg) => arg.includes("/etc/resolv.conf"))) {
-      if (options?.stdin) { if (state.writable) state.resolver = String(options.stdin); else exitCode = 1 }
-      if (args.some((arg) => arg.includes("cat /etc/resolv.conf"))) { stdout = state.resolver; if (!state.readable) exitCode = 1 }
+      if (options?.stdin) { state.writes++; if (state.writable) state.resolver = String(options.stdin); else exitCode = 1 }
+      if (exitCode === 0) { stdout = state.resolver; if (!state.readable) { stdout = ""; exitCode = 1 } }
     } else if (args.includes("docker")) stdout = "/var/lib/docker overlayfs"
     else if (args[0] === "exec") stdout = "gVisor"
     return { stdout, stderr: exitCode ? "fixture refused" : "", exitCode }
@@ -37,16 +37,21 @@ for (const docker of [false, true]) test(`start restores DNS on an already runni
   expect(state.resolver).toContain("nameserver 1.1.1.1")
 })
 
-test("the enforcement runtime checks restore reset DNS and disclose an unreadable resolver", async () => {
+test("the enforcement runtime checks read DNS, restore it only when reset, and disclose an unreadable resolver", async () => {
   const { provider, manifest, state } = fixture()
-  const checks = await provider.checks(manifest, "runtime")
-  expect(state.resolver).toContain("nameserver 1.1.1.1")
-  expect(checks.find((check) => check.id === "dns")).toMatchObject({ status: "pass", evidence: "inspected" })
+  const dns = async () => (await provider.checks(manifest, "runtime")).find((check) => check.id === "dns")
+  const repaired = await dns()
+  expect(state.resolver).toContain("nameserver 1.1.1.1"); expect(state.writes).toBe(1)
+  expect(repaired).toMatchObject({ status: "pass", evidence: "inspected" })
+  expect(repaired?.detail).toContain("had been reset to other content; Paddock restored")
+  // Already right: read, not rewritten, and the detail says nothing was written.
+  for (let pass = 0; pass < 3; pass++) expect((await dns())?.detail).toContain("nothing was written")
+  expect(state.writes).toBe(1)
   state.resolver = "nameserver 127.0.0.11\n"; state.writable = false
-  expect((await provider.checks(manifest, "runtime")).find((check) => check.id === "dns")?.status).toBe("unknown")
+  expect((await dns())?.status).toBe("unknown")
   await expect(provider.start(manifest)).rejects.toThrow("DNS")
   state.writable = true; state.readable = false
-  expect((await provider.checks(manifest, "runtime")).find((check) => check.id === "dns")?.status).toBe("unknown")
+  expect((await dns())?.status).toBe("unknown")
 })
 
 test("prepare restores a lost guard and network without trusting an old network resolver address", async () => {
