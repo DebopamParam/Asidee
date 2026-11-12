@@ -27,7 +27,8 @@ cat > '${root}/sent'
   try { await expect(client.call("stop", {}, { mutation: true, timeoutMs: 1000 })).rejects.toMatchObject({ code: "identity-changed" }) }
   finally { await client.close() }
   expect(await Bun.file(join(root, "sent")).text()).toBe("")
-  await expect(RemoteSession.open(pinned, { kind: "exec", name: "demo", argv: ["true"], tty: false })).rejects.toThrow("re-enroll")
+  // The peer's stdout is not a frame: it must never reach the parser, so the refusal is the identity's, not a malformed stream.
+  await expect(RemoteSession.open(pinned, { kind: "exec", name: "demo", argv: ["true"], tty: false })).rejects.toMatchObject({ code: "identity-changed", message: expect.stringContaining("re-enroll") })
   const accepted = sshConnection({ ...host, hostKey: key })
   try { await accepted.ready; expect(accepted.wire.destroyed).toBe(false) } finally { await accepted.close() }
 }, 10_000)
@@ -137,11 +138,12 @@ test("closing an SSH process that was stopped (SIGSTOP) finishes within its kill
   expect(() => process.kill(connection.pid!, 0)).toThrow()
 }, 10_000)
 
-// A stand-in ssh on PATH that prints `output` and exits without reading its stdin.
-async function exitingSsh(output: Uint8Array) {
+// A stand-in ssh on PATH that prints `output` and exits without reading its stdin, after naming `hostKey` as verbose ssh does.
+async function exitingSsh(output: Uint8Array, hostKey?: string) {
   const root = await mkdtemp(join(tmpdir(), "pdk-ssh-")); const path = process.env.PATH
   await writeFile(join(root, "output"), output)
-  await writeFile(join(root, "ssh"), `#!/bin/sh\nexec cat '${join(root, "output")}'\n`); await chmod(join(root, "ssh"), 0o755)
+  const verbose = hostKey ? `printf 'debug1: Server host key: ssh-ed25519 ${hostKey}\\ndebug1: Sending command: transport\\n' >&2\n` : ""
+  await writeFile(join(root, "ssh"), `#!/bin/sh\n${verbose}exec cat '${join(root, "output")}'\n`); await chmod(join(root, "ssh"), 0o755)
   process.env.PATH = `${root}:${path}`
   cleanups.push(async () => { process.env.PATH = path; await rm(root, { recursive: true, force: true }) })
 }
@@ -157,6 +159,20 @@ test("a hosted stream whose ssh exits while its reader is slow still delivers ev
   expect(await within(ended, 20_000, "the slow stream's end")).toEqual({ code: 5 })
   expect(received).toBe(bytes.length)
   expect(session.linkLost).toBe(false)
+}, 30_000)
+
+test("a pinned stream's bytes held until its key is accepted still all arrive behind a slow reader", async () => {
+  const bytes = new Uint8Array(4 * 1048576); for (let at = 0; at < bytes.length; at += 65536) crypto.getRandomValues(bytes.subarray(at, at + 65536))
+  const key = `SHA256:${"C".repeat(43)}`
+  await exitingSsh(Buffer.concat([frame("ready", { tty: false }), ...dataFrames("stdout", bytes), frame("exit", { code: 3 })]), key)
+  const session = await RemoteSession.open({ ...host, hostKey: key }, { kind: "exec", name: "demo", argv: ["true"], tty: false })
+  const ended = new Promise<{ code?: number; error?: string }>((resolve) => session.on("end", resolve))
+  const hash = new Bun.CryptoHasher("sha256"); let received = 0
+  session.on("output", (_kind, chunk: Buffer) => { hash.update(chunk); received += chunk.length; session.pause(); setTimeout(() => session.resume(), 1) })
+  session.resume()
+  expect(await within(ended, 20_000, "the pinned stream's end")).toEqual({ code: 3 })
+  expect(received).toBe(bytes.length)
+  expect(hash.digest("hex")).toBe(new Bun.CryptoHasher("sha256").update(bytes).digest("hex"))
 }, 30_000)
 
 test("a call over an SSH link that has already ended fails at once as offline instead of waiting", async () => {

@@ -47,14 +47,17 @@ export function transportCommand(host: Endpoint, stream = false): string[] {
 export function sshConnection(host: Endpoint, stream = false) {
   const args = sshArgv(host.ssh, transportCommand(host, stream)).slice(1)
   const child = spawn("ssh", [...(host.hostKey ? ["-v"] : []), ...args], { stdio: ["pipe", "pipe", "pipe"] })
-  const wire = new Duplex({ read() { child.stdout.resume() }, write(chunk, _encoding, done) { child.stdin.write(chunk, done) }, final(done) { child.stdin.end(done) } })
-  child.stdout.on("data", (chunk: Buffer) => { if (!wire.push(chunk)) child.stdout.pause() })
-  child.stdout.on("end", () => wire.push(null))
+  let accepted = !host.hostKey; let pending = ""; let fingerprint: string | undefined
+  // Until the pinned key is accepted, the peer's bytes stay in the pipe, unread: no parser ever sees an unverified peer.
+  const wire = new Duplex({ read() { if (accepted) child.stdout.resume() }, write(chunk, _encoding, done) { child.stdin.write(chunk, done) }, final(done) { child.stdin.end(done) } })
+  const relay = () => {
+    child.stdout.on("data", (chunk: Buffer) => { if (!wire.push(chunk)) child.stdout.pause() })
+    child.stdout.on("end", () => wire.push(null))
+  }
   child.stdin.on("error", (error) => wire.destroy(error))
   let diagnostic = ""
-  let accepted = !host.hostKey; let pending = ""; let fingerprint: string | undefined
   let accept = () => {}; let reject = (_error: Error) => {}
-  const ready = new Promise<void>((resolve, fail) => { accept = resolve; reject = fail; if (accepted) resolve() })
+  const ready = new Promise<void>((resolve, fail) => { accept = () => { relay(); resolve() }; reject = fail; if (accepted) accept() })
   void ready.catch(() => {})
   const timer = setTimeout(() => reject(new PaddockError("identity-changed", `SSH could not verify the enrolled host key for ${host.ssh}. ${hostKeyHelp(host.ssh)} Remove the host record and re-enroll deliberately after checking the destination.`)), 10_000)
   void ready.then(() => clearTimeout(timer), () => { clearTimeout(timer); child.kill() })
