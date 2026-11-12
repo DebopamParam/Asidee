@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, wri
 import { userInfo } from "node:os"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { blockers, complete, WORKSPACE_CHECKLIST } from "./checks"
-import { must, OUTPUT_LIMIT, systemRunner } from "./run"
+import { must, systemRunner } from "./run"
 import type { Dirs } from "./state"
 import { object } from "./transport"
 import { PaddockError, type CheckResult, type RunResult, type Session, type WorkspaceManifest, type WorkspaceSpec } from "./types"

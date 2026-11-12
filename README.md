@@ -88,9 +88,31 @@ Not built yet:
 - Docker Desktop and Colima measurements. Native Linux Docker and OrbStack have separate scorecards.
 - A license. Nothing here is published.
 
+## macOS workspaces are not sandboxes
+
+`paddock workspace create render --copy /absolute/project` makes a disposable `~/Paddock/render` folder. Commands
+started through `paddock workspace shell render` or `workspace exec render -- COMMAND` inherit a Seatbelt profile.
+They run directly on the Mac; K06 measured Metal compute and hardware-only HEVC VideoToolbox encoding on Apple M5.
+`workspace stop` ends processes identified by their kernel profile. `workspace remove render --confirm render` stops
+them and deletes the folder, leaving the original project alone. Paddock never copies with hard links.
+
+A workspace is **not a sandbox**. It shares this Mac's kernel and user, has no resource limits, and keeps the network
+and loopback open. Reads outside home are open. Remote effects, unified logs, existing backups and changes through
+externally supplied hard links can survive removal. Apple events and permission-gated capabilities are not covered.
+Paddock passes no flags to change agents' own sandboxes. Entering the folder from an ordinary shell applies no profile.
+
+Creation copies file-backed agent logins when available. Claude's macOS Keychain login is detected by attributes
+only and **is not imported**, because password access can prompt. The selected Codex file was copied privately and
+recognised by its CLI inside; authenticated calls and refresh remain **unverified**. No login or logout is attempted.
+
+Workspaces require macOS and Bun, without a Docker engine. The separate workspace checklist never weakens the
+sandbox checklist. All workspace methods are socket-only; the dashboard displays them in their own section.
+See [macOS workspaces](docs/workspaces.md) and [their separate K scorecard](evals/SCORECARD.workspace.md) for controls,
+removal limits and login status. The full sandbox scorecards were not regenerated for this feature.
+
 ## Try it
 
-You need [Bun](https://bun.sh) and Docker with a gVisor runtime. `nix develop` gives you Bun if you use Nix.
+For sandboxes, you need [Bun](https://bun.sh) and Docker with a gVisor runtime. `nix develop` gives you Bun if you use Nix.
 
 ```sh
 bun install

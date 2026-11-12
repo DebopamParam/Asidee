@@ -1,6 +1,6 @@
 ---
 name: paddock
-description: Create, use, verify and remove Paddock sandboxes with the `paddock` CLI, and customize Paddock (extensions, dashboard, defaults) for the user. Use when a task needs an isolated place to run code or an agent, or when the user asks to change how their Paddock looks or behaves.
+description: Create, use, verify and remove Paddock sandboxes or macOS workspaces with the CLI, and customize Paddock for the user. Workspaces are not sandboxes. Use when a task needs an isolated sandbox, a disposable Mac workspace with GPU access, or a change to Paddock's clients.
 ---
 
 # Paddock
@@ -111,6 +111,49 @@ persistence and automatic sandbox recovery are not measured.
   as exec's user and allows `ssh -L` only to the sandbox's loopback. Running setup again makes a new host key. The
   `--write-config` flag changes the user's `~/.ssh/config` (one `Include` line at the top), so ask first. A stopped
   sandbox refuses SSH and is not started by it.
+
+## Operating macOS workspaces
+
+A workspace is **not a sandbox**. Use it when the user chooses direct Mac execution and GPU access. Never substitute
+one for an isolated sandbox without the user's choice. Read [macOS workspaces](../docs/workspaces.md) for measured
+coverage and limits.
+
+```sh
+paddock workspace create NAME --copy /absolute/project [--read PATH] [--path DIR]
+paddock workspace shell NAME
+paddock workspace exec NAME [--stdin | --stream] -- COMMAND ARG…
+paddock workspace list
+paddock workspace verify NAME
+paddock workspace stop NAME
+paddock workspace remove NAME --confirm NAME
+```
+
+The folder is `~/Paddock/NAME`. `--copy` brings a separate copy into `work`; removing it never removes the original.
+Only processes started through workspace shell/exec acquire the profile. Entering the folder through another shell
+does not confine anything. Copy out wanted files before confirmed removal. A stop does not delete files and a later
+exec can run again. Use the CLI to stop and remove; never signal PIDs from an environment marker or delete the folder
+before its processes have been identified and ended.
+
+Always describe it as a workspace, not a sandbox. It has the same kernel and user, no resource limits, open internet,
+LAN, tailnet and loopback, and open reads outside home. Current listeners appear in create/verify; later listeners
+are reachable too. There is no declared-ports option. `--read ~/.ssh`, workspace/state/home ancestors and shared temp
+allowances are refused. Writes and installs outside the folder remain refused, including Docker and nix sockets.
+
+File-backed logins can be copied privately at creation and deleted with the folder. Claude's Keychain password is
+not requested because it can prompt; import is unavailable for a Keychain-only profile. Codex's copied file was
+recognised inside, but authenticated calls and refresh are unverified. Never log tokens or call a recognised file
+verified authentication. Paddock passes no flags to change an agent's inner sandbox. Describe any resulting failure
+and let the user choose the agent's configuration.
+
+Remove reports multiple hard links, LaunchServices and launchd references and things it cannot undo. Remote effects,
+unified logs, existing backups and changes through outside hard links can remain. Apple events, TCC capabilities,
+camera/microphone capture, Keychain additions, Spotlight retention and unnamed channels are not covered. Never promise
+that removing a workspace erases every trace from this Mac or the network.
+
+`nix develop -c bun evals/run.ts --only K --write` runs only the workspace suite with independent temporary state and
+engine providers disabled. It always includes K15 before lifecycle checks and writes only `SCORECARD.workspace.md`.
+The full sandbox scorecards require their own full runs. Test roots stay inside the checkout's ignored `dist/` while
+still being validated as inside the account's real home. No test creates an owner's `~/Paddock` workspace.
 
 ## Customizing Paddock
 

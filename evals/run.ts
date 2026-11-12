@@ -23,6 +23,7 @@ import { OUTPUT_LIMIT } from "../core/run"
 import { FrameReader, frame } from "../core/stream"
 import { WAIT_FOR_PROBE_ROUTES } from "../core/providers/probe"
 import HELPER_DOCKERFILE from "../core/providers/helper.Dockerfile" with { type: "text" }
+import { runWorkspaceEvals, workspaceSuite } from "./workspace"
 
 const ROOT = join(dirname(Bun.main), "..")
 const BUN = process.execPath
@@ -55,6 +56,12 @@ const until = async (condition: () => Promise<boolean>, seconds: number) => {
 }
 
 // ---- the run's own Paddock: a temporary state and config folder, a port of its own
+if (only?.length && only.every((id) => /^K(?:\d{2})?$/.test(id))) {
+  const binary = join(ROOT, "dist", "paddock")
+  const build = await sh([BUN, "build", "--compile", "--minify", "--outfile", binary, "cli/cli.ts"], { cwd: ROOT })
+  if (build.code !== 0) { console.error(build.err); process.exit(1) }
+  process.exit(await runWorkspaceEvals(args, binary))
+}
 const tmp = await mkdtemp(join(tmpdir(), "pdk-"))
 // PADDOCK_SSH_CONFIG: what `paddock ssh setup --write-config` changes instead of ~/.ssh/config.
 const env = { PADDOCK_STATE_DIR: join(tmp, "s"), PADDOCK_CONFIG_DIR: join(tmp, "c"), PADDOCK_PORT: "0", PADDOCK_SSH_CONFIG: join(tmp, "home", ".ssh", "config") }
@@ -180,6 +187,8 @@ const panel = (name: string) => `[...document.querySelectorAll("#sandboxes .pane
 type Eval = { id: string; claim: string; run: () => Promise<string | void> }
 const evals: Eval[] = []
 const ev = (id: string, claim: string, run: Eval["run"]) => evals.push({ id, claim, run })
+const workspaceEvals = workspaceSuite(BIN, skip)
+evals.push(...workspaceEvals.evals)
 
 // H: what the checklist says is true when tried from inside.
 ev("H01", "A sandbox runs on gVisor's kernel, not the host's", async () => {
@@ -3989,6 +3998,7 @@ let tornDown = false
 async function teardown(): Promise<void> {
   if (tornDown) return
   tornDown = true
+  await workspaceEvals.close()
   if (remoteDir) {
     for (const name of [MS, MC]) await remotePdk(["remove", name, "--confirm", name])
     const templates = await remotePdk(["--json", "template", "list"])

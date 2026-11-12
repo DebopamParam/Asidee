@@ -43,7 +43,9 @@ Paddock's one promise: **it never claims a property it cannot show.** Concretely
    environment docs.
 4. **Machines**: daemon per machine, `paddock host add` for Linux, the dashboard showing all of them.
 5. **Move over**: the owner's sandboxes recreated; the HQ shell and skill switched to `paddock`.
-6. Afterwards: a bounded "workspace" kind (not a sandbox), then the sandbox-to-sandbox network.
+6. Afterwards: the macOS [workspace kind](workspaces.md), not a sandbox, is implemented with its own checklist and
+   K evals. Claude Keychain import and authenticated token refresh remain unverified or unavailable as that document
+   states. The sandbox-to-sandbox network is still later.
 
 ## Rules for everyone working here
 

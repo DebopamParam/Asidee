@@ -94,6 +94,37 @@ confirmed against the quota from here.
 
 ## How an eval decides
 
+### Workspace group K
+
+```sh
+nix develop -c bun evals/run.ts --only K
+nix develop -c bun evals/run.ts --only K15,K14,K16
+nix develop -c bun evals/run.ts --only K --write
+```
+
+A K-only selection takes a separate path before engine discovery. It builds the CLI and starts a private local daemon
+with `PADDOCK_WORKSPACE_ONLY=1`; it never runs Docker commands, SSH, sandbox teardown or the other groups. K10 only
+connects to Docker/nix Unix sockets and closes them, without sending an API request. K15 always runs first, including
+when selecting individual IDs. Its empty/exact PID controls must pass before any lifecycle eval runs.
+
+Workspaces and their copied fixture projects are under the checkout's ignored `dist/paddock-workspace-evals-*`, which
+is still inside the account's real home as the profile requires. Their daemon uses `/private/tmp/pdk-k-*`; Nix's own
+TMPDIR can disappear when its command exits and is not used for that daemon. There is no fixture in `~/Paddock` and
+no loose test file in the home root. K01 briefly writes exclusive control files in the user's temp folder,
+`/Users/Shared` and `/opt/homebrew/Cellar`, then deletes them. K07 through K09 use only a fixture app/job and remove
+their registrations. K11 reads controls but neither changes preferences/clipboard nor logs their contents.
+
+K06 needs the existing Command Line Tools SDK/clang and ffmpeg; it runs real Metal compute and hardware-only HEVC
+VideoToolbox encoding. K13 is explicitly unmeasured because a Keychain password control can prompt. Apple events
+have no end-to-end side-effect probe and remain not covered. K20 needs a working unconfined Codex sandbox control.
+K21 compares clone and plain copy for independent inodes/bytes, without a performance claim. K22 exercises the
+compiled CLI and socket authority. K23 reads existing file logins only, copies them privately, and reports CLI
+recognition separately from unverified authentication and refresh. K24 checks Time Machine's current exclusion.
+`at` and crontab installation are not tested against the user's queues.
+
+`--write` for a K-only run writes only `SCORECARD.workspace.md`, with the selected IDs. Neither full sandbox scorecard
+is regenerated. The [workspace reference](../docs/workspaces.md) describes remaining removal and coverage limits.
+
 - **It does not ask Paddock.** "Cannot reach the host" is a listener on the engine's host and a connection attempt
   from inside the sandbox, made with the sandbox's own `nc`.
 - **A blocked attempt needs a control.** Each target is first reached from the engine's host. T01 removes the guard
@@ -106,6 +137,7 @@ confirmed against the quota from here.
 | Group | Question |
 |---|---|
 | H | Is what the checklist says true when tried from inside a sandbox? |
+| K | Do macOS workspaces, which are not sandboxes, hold their write/read/profile and process-cleanup claims? |
 | I | Does inner Docker run with minimal added capabilities, guarded networking, shared limits and clean removal? |
 | T | Is a sandbox that stops holding caught and stopped? |
 | R | Can any client ask the core for an unsafe sandbox? |

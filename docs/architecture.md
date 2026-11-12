@@ -530,6 +530,31 @@ when `--write-config` is explicitly requested; evals redirect it to a temporary 
 absence of a remote editor private key, and refusal of stopped/recreated sandboxes. Real editor bootstrap and T3 over
 the remote alias remain unmeasured.
 
+## macOS workspaces are a separate kind
+
+`core/workspaces.ts` owns macOS workspaces. They have `WorkspaceSpec`, `WorkspaceManifest`, a `state/workspaces/`
+directory and `WORKSPACE_CHECKLIST`. They reuse result types and the existing `complete`, `blockers` and `failures`
+functions with their own checklist. A workspace is not a sandbox or a `Provider`; it cannot satisfy the sandbox's
+isolated-kernel, network or resource-limit checks. No sandbox check is skipped or reworded for it.
+
+The `workspaceList`, `workspaceGet`, `workspaceCreate`, `workspaceExec`, `workspaceShell`, `workspaceStop`,
+`workspaceRemove` and `workspaceVerify` methods are all socket-only and local. Shells and streamed exec use the
+existing stream socket with `kind: "workspace"`; remote routes and a requested user are refused. The dashboard's
+read-only summary carries a separate workspace inventory. Dashboard workspace actions remain unavailable to honor
+socket-only authority. The 30-second pass measures size and tagged-process count; no resource limit is enforced.
+
+The profile is static SBPL plus parameter-name-only read and ancestor rules. Every path is canonical and passed
+using `-D`. Tag denies come last. `workspace-processes.ts` uses `bun:ffi` and a small runtime C varargs wrapper for
+Darwin's calling convention, without a helper binary. Both the allowed-folder/denied-tag criterion and the recheck
+immediately before every signal are required. Source and compiled execution, empty/exact finder controls, detached
+process cleanup and private project copying have local K evals. See [macOS workspaces](workspaces.md) for the complete
+boundary, test-root validation, copied-login limits and temporary-source handling. In particular, Apple events and
+Keychain authentication are not established by a policy decision or the presence of a credential file.
+
+`PADDOCK_WORKSPACE_ONLY=1` disables providers for a daemon used solely for workspaces. The K-only runner sets this
+with private state, so it neither discovers engines nor connects to registered machines. A normal daemon retains its
+existing provider sweep and sandbox enforcement.
+
 ## Adding a provider
 
 Implement `Provider` in `core/types.ts` and add it to the list in `core/daemon.ts`. `detect()` reports each engine with
