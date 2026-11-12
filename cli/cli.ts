@@ -36,7 +36,8 @@ const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, 
   paddock resize NAME [--cpus N] [--memory GB] [--pids N] [--disk GB]   says which limits apply now and which at the next start
   paddock start NAME | stop NAME
   paddock verify NAME                    run every check against the sandbox
-  paddock exec NAME [--user USER] [--stdin] -- COMMAND…   --stdin sends this command's input (text)
+  paddock exec NAME [--user USER] [--stdin] -- COMMAND…   --stdin sends this command's input, bytes exact, up to 16 MiB;
+                                                         output comes back as text (invalid UTF-8 replaced)
   paddock exec NAME --stream [--user USER] -- COMMAND…    bytes in and out as they come, any size
   paddock shell NAME [-- COMMAND…]
   paddock forward add NAME --port PORT [--local-port PORT]   127.0.0.1 here to PORT on the sandbox's loopback
@@ -254,6 +255,8 @@ function printSandbox(view: SandboxView): void {
 }
 const displayName = (name: string) => shown(selectedHost && selectedHost !== "local" ? `${selectedHost}/${name}` : name)
 
+// Buffered input travels as base64 so every byte arrives as it was; a string would lose bytes that are not UTF-8.
+const stdinBytes = async () => ({ stdinBase64: Buffer.from(await Bun.stdin.arrayBuffer()).toString("base64") })
 // Waits for the output to be written before exiting: into a pipe, an exit right after a write loses what did not fit.
 async function printRun(output: RunResult, asJson = false): Promise<never> {
   const write = (stream: NodeJS.WriteStream, text: string) => new Promise<void>((resolve, reject) => stream.write(text, (error) => error ? reject(error) : resolve()))
@@ -321,7 +324,7 @@ async function main(argv: string[]): Promise<void> {
           if (values.stream && (asJson || values.stdin)) throw new PaddockError("usage", "--stream takes neither --json nor --stdin.")
           if (!asJson) console.error("Workspace, not a sandbox. Network and loopback open; no resource limits.")
           if (values.stream) return await session({ kind: "workspace", name, argv: tail, tty: false })
-          return printRun(await call<RunResult>("workspaceExec", { name, argv: tail, stdin: values.stdin ? await Bun.stdin.text() : undefined }), asJson)
+          return printRun(await call<RunResult>("workspaceExec", { name, argv: tail, ...(values.stdin ? await stdinBytes() : {}) }), asJson)
         }
         if (action === "shell") {
           if (asJson) throw new PaddockError("usage", "An interactive workspace shell does not support --json.")
@@ -435,7 +438,7 @@ async function main(argv: string[]): Promise<void> {
         if (!tail.length) throw new PaddockError("usage", "Give the command after --, as in `paddock exec NAME -- ls -la`.")
         if (values.stream && (asJson || values.stdin)) throw new PaddockError("usage", "--stream passes bytes through as they come, so it takes neither --json nor --stdin (its input is always this command's).")
         if (values.stream) return await session({ kind: "exec", name: need(positionals[0], "a name"), argv: tail, tty: false, ...(typeof values.user === "string" ? { user: values.user } : {}) })
-        const output = await call<RunResult>("exec", { name: need(positionals[0], "a name"), argv: tail, user: values.user, stdin: values.stdin ? await Bun.stdin.text() : undefined })
+        const output = await call<RunResult>("exec", { name: need(positionals[0], "a name"), argv: tail, user: values.user, ...(values.stdin ? await stdinBytes() : {}) })
         return printRun(output, asJson)
       }
       case "shell": {

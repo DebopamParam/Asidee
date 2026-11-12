@@ -17,7 +17,7 @@ Add `--json` to any command for `{"ok":true,"data":…}` or `{"ok":false,"error"
 paddock doctor                              # engines and what each needs
 paddock create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--pids N] [--disk GB]
 paddock list
-paddock exec NAME [--stdin] -- COMMAND ARG… # exit code, stdout and stderr are the command's
+paddock exec NAME [--stdin] -- COMMAND ARG… # exit code, stdout and stderr are the command's; output as text
 paddock exec NAME --stream -- COMMAND ARG…  # raw bytes in and out, no size limit
 paddock start NAME | paddock stop NAME
 paddock forward add NAME --port P [--local-port L]  # 127.0.0.1:L here to 127.0.0.1:P in the sandbox

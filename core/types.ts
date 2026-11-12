@@ -143,7 +143,7 @@ export interface Provider {
   stop(manifest: Manifest): Promise<void>
   remove(manifest: Manifest): Promise<void>
   status(manifest: Manifest): Promise<"running" | "stopped" | "missing">
-  exec(manifest: Manifest, argv: readonly string[], options?: { user?: string; stdin?: string }): Promise<RunResult>
+  exec(manifest: Manifest, argv: readonly string[], options?: { user?: string; stdin?: string | Uint8Array }): Promise<RunResult>
   // A command whose bytes are relayed as they come, for shells, binary exec and anything long-lived.
   openExec(manifest: Manifest, argv: readonly string[], options: { user?: string; tty: boolean; cols?: number; rows?: number }): Promise<Session>
   // Which run of the sandbox is running now, or undefined when it is not. A restart or a recreated container differs.

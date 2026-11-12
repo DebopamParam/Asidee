@@ -35,8 +35,9 @@ keys, proxy variables, `SSH_AUTH_SOCK`, `DYLD_*`, or arbitrary shell settings. S
 readable. npm global, pip user and uv tool installs were measured with local fixture packages in K02. Installing into
 Homebrew's outside Cellar or through the nix daemon is refused. SwiftPM remains unsupported by the current profile.
 
-Buffered `exec` uses pipes, carries stdin with `--stdin`, preserves the command's exit status and limits each output
-stream to 16 MiB. `--stream` uses the existing private stream socket. `shell` uses a PTY when the caller has a
+Buffered `exec` uses pipes, carries stdin with `--stdin` byte for byte (up to 16 MiB), preserves the command's exit
+status and limits each output stream to 16 MiB. Its output is returned as text: invalid UTF-8 is replaced. `--stream`
+uses the existing private stream socket and is the byte-exact path for output. `shell` uses a PTY when the caller has a
 terminal and carries terminal input and resize. PTY output waiting for a slow client is capped at 1 MiB; exceeding
 that ends the session with an error. A closed session ends its identified starter. Detached descendants remain
 tracked until `workspace stop` or `remove`. A daemon restart does not remove a workspace or its detached processes.

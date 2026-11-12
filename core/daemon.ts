@@ -11,7 +11,7 @@ import { Hosts } from "./hosts"
 import { PROTOCOL } from "./transport"
 import { DockerSandboxesProvider } from "./providers/docker-sandboxes"
 import { GvisorProvider } from "./providers/gvisor"
-import { systemRunner } from "./run"
+import { OUTPUT_LIMIT, systemRunner } from "./run"
 import { checkSocketPath, daemonFile, socketPath, streamSocketPath, type Dirs } from "./state"
 import { sourceDigest } from "./source" with { type: "macro" }
 import { serveStream } from "./stream"
@@ -33,6 +33,25 @@ const DEFAULT_PORT = 7717
 const ENFORCE_MS = 30_000
 
 type Body = Record<string, unknown>
+
+// Buffered exec input, held in memory like its output and limited the same way. stdinBase64 carries bytes exactly; a
+// string stdin, as older clients send, is still taken and sent as UTF-8.
+export function execStdin(body: Body): string | Uint8Array | undefined {
+  const limit = `Buffered exec input is limited to ${OUTPUT_LIMIT / 1024 ** 2} MiB; use --stream for more.`
+  if (body.stdinBase64 !== undefined) {
+    if (body.stdin !== undefined) throw new PaddockError("usage", "Send stdin or stdinBase64, not both.")
+    const encoded = body.stdinBase64
+    if (typeof encoded !== "string" || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new PaddockError("usage", "stdinBase64 must be standard padded base64.")
+    if (encoded.length / 4 * 3 > OUTPUT_LIMIT + 2) throw new PaddockError("usage", limit)
+    const bytes = Buffer.from(encoded, "base64")
+    if (bytes.length > OUTPUT_LIMIT) throw new PaddockError("usage", limit)
+    return new Uint8Array(bytes)
+  }
+  if (body.stdin === undefined) return undefined
+  if (typeof body.stdin !== "string") throw new PaddockError("usage", "stdin must be a string; send bytes as stdinBase64.")
+  if (Buffer.byteLength(body.stdin) > OUTPUT_LIMIT) throw new PaddockError("usage", limit)
+  return body.stdin
+}
 type Method = { run: (body: Body) => Promise<unknown>; socketOnly?: boolean }
 
 // The whole API. The CLI, the UI and extensions all come through this table, so each has exactly these abilities.
@@ -45,7 +64,7 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     workspaceList: { run: () => workspaces.list(), socketOnly: true },
     workspaceGet: { run: (body) => workspaces.get(String(body.name)), socketOnly: true },
     workspaceCreate: { run: (body) => workspaces.create(body), socketOnly: true },
-    workspaceExec: { run: (body) => workspaces.exec(String(body.name), body.argv, typeof body.stdin === "string" ? body.stdin : undefined), socketOnly: true },
+    workspaceExec: { run: (body) => workspaces.exec(String(body.name), body.argv, execStdin(body)), socketOnly: true },
     workspaceShell: { run: async (body) => ({ workspace: await workspaces.get(String(body.name), false), stream: "workspace", argv: ["/bin/zsh", "-l"] }), socketOnly: true },
     workspaceStop: { run: (body) => workspaces.stop(String(body.name)), socketOnly: true },
     workspaceRemove: { run: (body) => workspaces.remove(String(body.name), body.confirm), socketOnly: true },
@@ -71,7 +90,7 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     snapshot: { run: (body) => core.snapshot(String(body.name), body.as) },
     templateList: { run: () => core.templateList() },
     templateRemove: { run: (body) => core.templateRemove(body.name, body.engine) },
-    exec: { run: (body) => core.exec(String(body.name), body.argv, { user: typeof body.user === "string" ? body.user : undefined, stdin: typeof body.stdin === "string" ? body.stdin : undefined }) },
+    exec: { run: (body) => core.exec(String(body.name), body.argv, { user: typeof body.user === "string" ? body.user : undefined, stdin: execStdin(body) }) },
     extensions: { run: () => core.extensions() },
     action: { run: (body) => core.runAction(body.extension, body.action, body.sandbox, body.values) },
     forwardAdd: { run: (body) => core.forwardAdd(String(body.name), body.port, body.localPort) },

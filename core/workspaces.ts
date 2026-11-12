@@ -244,7 +244,7 @@ export class Workspaces {
     this.sessions.add(session); session.on("end", () => this.sessions.delete(session))
     return session
   }
-  private async run(manifest: WorkspaceManifest, argv: string[], stdin?: string, timeoutMs = 20_000): Promise<RunResult> {
+  private async run(manifest: WorkspaceManifest, argv: string[], stdin?: string | Uint8Array, timeoutMs = 20_000): Promise<RunResult> {
     const session = await this.launch(manifest, argv)
     return session.collect(stdin, timeoutMs)
   }
@@ -362,7 +362,7 @@ export class Workspaces {
       return this.launch(manifest, command, options.tty, options.cols, options.rows)
     })
   }
-  async exec(name: string, argv: unknown, stdin?: string): Promise<RunResult> { return (await this.open(name, argv, { tty: false })).collect(stdin, 0) }
+  async exec(name: string, argv: unknown, stdin?: string | Uint8Array): Promise<RunResult> { return (await this.open(name, argv, { tty: false })).collect(stdin, 0) }
   async stop(name: string): Promise<WorkspaceView> {
     return this.exclusive(workspaceName(name), async () => { const manifest = await this.manifest(name); await this.restoreIdentity(manifest); await stopWorkspaceProcesses(manifest.folder); return this.view(manifest) })
   }

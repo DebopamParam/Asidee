@@ -326,7 +326,7 @@ export class Core {
     })
   }
 
-  async exec(name: string, argv: unknown, options: { user?: string; stdin?: string } = {}): Promise<RunResult> {
+  async exec(name: string, argv: unknown, options: { user?: string; stdin?: string | Uint8Array } = {}): Promise<RunResult> {
     if (!Array.isArray(argv) || argv.length === 0 || !argv.every((part) => typeof part === "string")) throw new PaddockError("usage", "exec needs a command.")
     if (options.user !== undefined && !/^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}$/.test(options.user)) throw new PaddockError("usage", "The user must be a user name or id.")
     const manifest = await readManifest(this.dirs, name)

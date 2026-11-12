@@ -64,7 +64,7 @@ export class WorkspaceSession extends EventEmitter implements Session {
     this.ended = true; this.terminal?.close(); this.child?.stdin.destroy(); this.child?.stdout.destroy(); this.child?.stderr.destroy()
     this.emit("end", { error: reason })
   }
-  collect(stdin?: string, timeoutMs = 0): Promise<RunResult> {
+  collect(stdin?: string | Uint8Array, timeoutMs = 0): Promise<RunResult> {
     if (this.tty) throw new PaddockError("usage", "Buffered workspace output needs pipes.")
     return new Promise((resolve) => {
       const chunks = { stdout: [] as Uint8Array[], stderr: [] as Uint8Array[] }; const sizes = { stdout: 0, stderr: 0 }

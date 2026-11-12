@@ -196,6 +196,17 @@ restarts, because `sleep`, its main process, does not reap them; they count agai
 16 MiB comes back whole; more on stdout, on stderr, and 1 GiB on stdout are each refused with the limit named, no
 flooding process is left running, and the same daemon answers afterwards.
 
+Buffered input is bytes: `--stdin` reads the caller's stdin whole and sends it as `stdinBase64`, which the daemon
+decodes after checking that it is canonical base64 of at most 16 MiB (`execStdin` in `core/daemon.ts`); a request
+with a string `stdin` is still accepted and sent as UTF-8, and one with both is refused. A routed request carries the
+field unchanged, and a remote daemon built from other source is refused before it is asked. Buffered output is text:
+stdout and stderr are decoded as UTF-8 and invalid sequences are replaced, so a command whose output is not text needs
+`--stream`. Measured in `test/unit/exec-bytes.test.ts`: all 256 byte values and invalid UTF-8 sequences go from the
+CLI's `--stdin` into the request unchanged for `exec` and `workspace exec`; through the daemon's method table they
+reach a real `shasum` with the same hash, for a sandbox exec (the engine client faked, so the hasher runs on this
+machine) and inside a real workspace; and a routed exec forwards them unchanged. A hash inside a live gVisor sandbox
+and a live `--host` exec were not run for this.
+
 ### Sessions
 
 `paddock exec --stream` and `paddock shell` are sessions. The daemon relays them on a second Unix socket in the state
@@ -209,7 +220,9 @@ session, including a terminal or SSH proxy. Input EOF is a protocol frame and do
 for the other side to take what it was given, so nothing is buffered beyond a socket buffer and a frame. A session
 ends with an error when its sandbox is stopped or removed or the daemon stops, and a stopped sandbox is refused, never
 started. Buffered `exec` keeps its 16 MiB limit. S01: 256 MiB of random bytes went in and came back with the same
-hash on both sides, the daemon grew by at most 5 MiB. S02: stderr stayed apart, exit 5 and end of input came through.
+hash on both sides, the daemon grew by at most 5 MiB. The CLI's side of a stream is byte-exact in both directions
+for `exec` and `workspace exec` (`test/unit/exec-bytes.test.ts`: every byte value, invalid UTF-8 and 3 MiB of random
+bytes in, the same hash out, and stderr kept apart, against a stub session server). S02: stderr stayed apart, exit 5 and end of input came through.
 S03: a shell saw this terminal's size and a resize, Ctrl-C ended a `sleep` inside, and the terminal was restored. S04:
 a session ended within a second of `paddock stop`. S06: a reader asleep for longer than the whole transfer takes held
 the command in the sandbox back.
