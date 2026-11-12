@@ -371,7 +371,7 @@ async function main(argv: string[]): Promise<void> {
         return out(list, () => {
           if (!list.length) console.log("No sandboxes. Create one with `paddock create NAME`.")
           for (const view of list) {
-            const verified = view.lastVerify ? `verified ${shown(view.lastVerify.at.slice(0, 16).replace("T", " "))} UTC, ${view.lastVerify.results.filter((check) => check.status === "fail").length} failed` : "never verified"
+            const verified = view.lastVerify ? `last measured ${shown(view.lastVerify.at)}; historical only, current checks unknown` : "never verified"
             if (view.status === "damaged") { console.log(`${displayName(view.name).padEnd(24)} damaged\n    ${shown(view.stopReason)}`); continue }
             console.log(`${displayName(view.name).padEnd(24)} ${shown(view.status).padEnd(8)} ${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  ${shown(view.engine)}${view.template ? `  template ${shown(view.template.name)}` : ""}  (${verified})${view.stopReason ? `\n    ${shown(view.stopReason)}` : ""}`)
           }

@@ -119,25 +119,25 @@ function render() {
     if (sandbox.status === "damaged") { list.append(el("div", { class: "panel" }, el("span", { class: "name" }, sandbox.name), " ", el("span", { class: "badge" }, "damaged"), el("div", { class: "error" }, sandbox.stopReason))); continue }
     const is = (key) => busy.has(`${sandbox.name}:${key}`)
     const button = (label, key, task, extra = {}) => el("button", { ...extra, ...(is(key) ? { disabled: "" } : {}), onclick: () => act(sandbox.name, key, task) }, is(key) ? "Working…" : label)
-    const failed = sandbox.lastVerify?.results.filter((check) => check.status === "fail").length
     const panel = el("div", { class: "panel" },
       el("div", { class: "row" },
         el("div", { class: "grow" }, el("span", { class: "name" }, sandbox.name), " ", el("span", { class: `badge ${sandbox.status}` }, sandbox.status),
           el("div", { class: "muted" }, `${sandbox.spec.cpus} CPU · ${sandbox.spec.memoryGb} GB memory · ${sandbox.spec.diskGb} GB disk · ${sandbox.engine}`),
           sandbox.activity ? el("div", { class: "muted" }, `${sandbox.activity}…`) : null,
+          sandbox.lastVerify ? el("div", { class: "muted" }, `Last measured ${sandbox.lastVerify.at}. Historical only; current checks unknown.`) : null,
           sandbox.stopReason ? el("div", { class: "muted" }, sandbox.stopReason) : null),
         sandbox.status === "running" ? button("Stop", "stop", () => api("stop", { name: sandbox.name })) : button("Start", "start", () => api("start", { name: sandbox.name })),
         button("Verify", "verify", async () => { open.add(sandbox.name); await api("verify", { name: sandbox.name }) }),
         el("button", { onclick: () => { open.has(sandbox.name) ? open.delete(sandbox.name) : open.add(sandbox.name); render() } },
-          sandbox.lastVerify ? (failed ? `${failed} failed` : "Checks") : "Not verified"),
+          sandbox.lastVerify ? "Past checks" : "Not verified"),
         el("button", { class: "danger", onclick: () => { const typed = prompt(`This deletes ${sandbox.name} and everything in it. Type its name to confirm.`); if (typed !== null) act(sandbox.name, "remove", () => api("remove", { name: sandbox.name, confirm: typed })) } }, "Remove")))
     if (sandbox.status === "running") for (const extension of extensions) for (const action of extension.actions.filter((entry) => entry.scope === "sandbox")) panel.append(el("div", { style: "margin-top:10px" }, actionForm(sandbox, extension, action)))
     if (output[sandbox.name]) panel.append(el("pre", {}, output[sandbox.name]))
     if (open.has(sandbox.name) && sandbox.lastVerify) {
-      panel.append(el("ul", { class: "checks" }, ...sandbox.lastVerify.results.map((check) => el("li", { class: check.status },
-        el("span", { class: "mark", title: check.status }, MARK[check.status]),
-        el("span", {}, title(check.id), WORD[check.status] ? el("span", { class: "muted" }, ` — ${WORD[check.status]}`) : null),
-        el("span", { class: "detail" }, `${check.detail}${check.evidence === "none" ? "" : ` (${check.evidence})`}`))),
+      panel.append(el("ul", { class: "checks" }, ...sandbox.lastVerify.results.map((check) => el("li", { class: "unknown" },
+        el("span", { class: "mark", title: "unknown" }, MARK.unknown),
+        el("span", {}, title(check.id), el("span", { class: "muted" }, " — current property unknown")),
+        el("span", { class: "detail" }, `${check.status === "unknown" ? "" : `Previous ${check.status} (${check.evidence}). `}${check.detail}`))),
         el("li", { class: "muted" }, el("span"), `Checked ${new Date(sandbox.lastVerify.at).toLocaleString()}.`)))
     }
     list.append(panel)

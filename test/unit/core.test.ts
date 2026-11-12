@@ -59,6 +59,28 @@ async function core(provider: Provider) {
   return new Core([provider], { state: join(root, "state"), config: join(root, "config") }, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere")
 }
 
+test("stored verification is dated history with current properties unknown across every lifecycle change", async () => {
+  const { provider, state } = fakeProvider(); const paddock = await core(provider)
+  const made = await paddock.create({ name: "demo" })
+  expect(made.checks.find((check) => check.id === "kernel")?.status).toBe("pass")
+  const measured = made.sandbox.lastVerify!.at
+  const historical = async (instance = paddock) => {
+    const saved = (await instance.get("demo")).lastVerify!
+    expect(saved.at).toBe(measured)
+    expect(saved.results.every((check) => check.status === "unknown" && check.evidence === "none")).toBe(true)
+    expect(saved.results[0]!.detail).toContain(`Measured at ${measured}`)
+    expect(saved.results[0]!.detail).toContain("Historical")
+  }
+  await historical()
+  state.starts++; await historical()
+  await paddock.stop("demo"); await historical()
+  await paddock.start("demo"); await historical()
+  await historical(new Core([provider], paddock.dirs, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere"))
+  provider.checks = async () => { throw new Error("engine restarted or changed") }
+  await historical()
+  expect((await paddock.list())[0]!.lastVerify?.results[0]?.status).toBe("unknown")
+})
+
 test("a check the provider does not report is unknown, never a pass", () => {
   const results = complete([pass("hardening")], ["config"])
   expect(results.map((entry) => entry.id)).toEqual(["hardening", "mounts", "network-guard", "inbound", "forwards", "ssh", "limits", "disk", "template"])

@@ -50,6 +50,14 @@ is waived for it. A future microVM provider needs reviewed evidence or an explic
 "Verify" runs after every create and on `paddock verify`. A start runs the configuration and runtime checks. On a stopped sandbox, verify
 reports the configuration checks only and marks the rest as not checked.
 
+Verification results are measurements at the recorded `at` time, not continuing guarantees. Create and verify return
+their newly measured checks. Every stored `lastVerify` returned by list/get, including after create/start/stop/resize,
+is historical: its results have current status `unknown` and no current evidence, with the original time, status,
+evidence and detail in the description. The CLI and dashboard label this even with the checklist collapsed. The saved
+manifest retains the original measurement. This deliberately conservative rule also covers an engine restart with
+live restore, engine replacement/reconfiguration and a daemon restart without pretending that container start time
+alone proves continuity. Use verify for a new measurement; even a recent historical pass is not a claim about now.
+
 The isolated-kernel check also refuses a gVisor runtime registered with a flag that opens a path to the host or
 switches a limit off (`unsafeRuntimeArgs` in `core/providers/gvisor.ts`), and `paddock doctor` does not offer one.
 

@@ -58,14 +58,15 @@ test("the dashboard lists sandboxes, sends the token, and hides it from the addr
   expect(ui.text("#engines")).toContain("Kernel isolation: gvisor")
 })
 
-test("the checks show each result with the core's title, status and detail", async () => {
+test("past checks disclose the time even when collapsed and never show historical passes as current", async () => {
   const ui = await page({ ...base, list: () => [sandbox()] })
-  expect(ui.button("1 failed")).toBeDefined()
-  ui.button("1 failed").click(); await ui.settle()
+  expect(ui.text("#sandboxes")).toContain("Last measured 2026-11-10T10:00:00Z. Historical only; current checks unknown.")
+  ui.button("Past checks").click(); await ui.settle()
   const checks = ui.text("ul.checks")
-  expect(checks).toContain("✗Cannot reach the host — does not holdA connection reached the host. (probed)")
-  expect(checks).toContain("~Disk use is limited — holds in a weaker formWatched, not capped.")
-  expect(checks).toContain("✓Runs on an isolated kernel, not the host'sgVisor answers.")
+  expect(checks).toContain("?Cannot reach the host — current property unknownPrevious fail (probed). A connection reached the host.")
+  expect(checks).toContain("Previous weak (probed). Watched, not capped.")
+  expect(checks).toContain("Previous pass (probed). gVisor answers.")
+  expect(checks).not.toContain("✓")
 })
 
 test("verify, stop and remove call the API; remove sends the typed name as the confirmation", async () => {

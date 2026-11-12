@@ -51,6 +51,15 @@ test("text from a daemon reaches the terminal without control characters", async
   expect(err.trim().split("\n")).toHaveLength(1)
 }, 20_000)
 
+test("list describes saved verification as dated history with current checks unknown", async () => {
+  const paddock = await daemon({ list: { ok: true, data: [{ name: "demo", status: "running", engine: "fake", spec: { cpus: 1, memoryGb: 1 },
+    lastVerify: { at: "2026-11-10T10:00:00Z", results: [{ id: "kernel", status: "pass" }] } }] } })
+  const { out, code } = await paddock("list")
+  expect(code).toBe(0)
+  expect(out).toContain("last measured 2026-11-10T10:00:00Z; historical only, current checks unknown")
+  expect(out).not.toContain("0 failed")
+})
+
 test("an enrollment plan is shown as every command, file, download and restart, without the destination's control characters", async () => {
   // A destination that has Docker and two containers, one of them a sandbox of an earlier Paddock, and that answers
   // with text chosen to redraw a terminal.

@@ -73,7 +73,9 @@ export class Core {
       if (status === "stopped" && !stopReason) stopReason = await this.provider(manifest).stoppedWhy(manifest)
     } catch (error) { if (error instanceof PaddockError && error.code === "conflict") stopReason = error.message }
     return { name: manifest.name, machineId: this.machineId, sandboxId: manifest.id, status, engine: manifest.engine.label, spec: manifest.spec, createdAt: manifest.createdAt, capabilities: manifest.engine.capabilities,
-      lastVerify: manifest.lastVerify, stopReason, activity: this.activity.get(manifest.name), template: manifest.template }
+      lastVerify: manifest.lastVerify && { at: manifest.lastVerify.at, results: manifest.lastVerify.results.map((check) => ({ ...check, status: "unknown", evidence: "none",
+        detail: `Historical only. Measured at ${manifest.lastVerify!.at}: ${check.status} (${check.evidence}). ${check.detail} Current property unknown; run paddock verify ${manifest.name} for a new measurement.` })) },
+      stopReason, activity: this.activity.get(manifest.name), template: manifest.template }
   }
 
   async list(): Promise<SandboxView[]> {
