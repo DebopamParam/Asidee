@@ -201,8 +201,8 @@ container was already deleted.
 Dockerd's output is the container's, which the engine stores on its host, outside the watched limit. I22's control, a
 container whose cap is 1 GB, grew its host log from 38 MB to 75 MB with two 8 MiB writes while its own layer stayed the
 same (the engine stores each short line as a JSON record several times its size). A sandbox without Docker can do the
-same: its main process is `sleep`, but anything running as that process's user (root in Alpine) can write to
-`/proc/1/fd/1` (a user other than PID 1's was refused). Before the cap, two 8 MiB writes through `paddock exec` grew
+same: anything running as its main process's user (root in Alpine) can write to `/proc/1/fd/1` (a user other than
+PID 1's was refused; measured when that process was `sleep`, and I23 holds with the reaper below). Before the cap, two 8 MiB writes through `paddock exec` grew
 such a sandbox's host log to 75 MB and a third to 93 MB, where the engine's default rotation took over. Every sandbox therefore sets `json-file` logging with `max-size=10m` and `max-file=2`, and the limits check
 fails on any other setting. After two 16 MiB writes the host log was 15 MB, then 11 MB, both for a Docker sandbox
 (I22) and for one without Docker (I23); a replacement with a 1 GB cap is refused at start in both. This engine's own
@@ -216,8 +216,17 @@ checks and extension commands). A command that passes it is not returned cut off
 returns an error that names the limit and the stream. The engine leaves an exec's processes running when its client
 is killed (measured: a `yes` kept a CPU busy), so each exec carries a random `PADDOCK_EXEC` variable and the core ends
 every process that has it, as the same user (root inside gVisor cannot read another user's environment). A process
-that cleared its environment or changed its user is not found. Ended processes stay as zombies until the sandbox
-restarts, because `sleep`, its main process, does not reap them; they count against the task limit. U12: exactly
+that cleared its environment or changed its user is not found. A zombie holds a slot against the task limit, so
+the main process of a sandbox without Docker reaps: it is Paddock's static busybox (the relay, copied in before every
+start) running `sh -c 'while :; do busybox sleep … & wait; done'` as the image's user. The kernel hands every orphan to
+PID 1, and the shell's `wait` collects any child that ends. U13: twenty orphans left by five exec sessions ran as PID
+1's children and ended, and no zombie was left; with `sleep infinity` as PID 1 all twenty stayed. The engine's own
+`--init` also reaped them, but it mounts the engine host's `docker-init` read-only into the sandbox, a host file that
+the engine's mount list does not show, so Paddock does not use it. Sandboxes created before this change keep `sleep`
+until they are recreated. **A sandbox with Docker does not reap them:** dockerd is PID 1 and U13 found all twenty as
+zombies, beside eight `containerd-shim` zombies already left by the eval's earlier inner Docker work; they stay until the sandbox restarts and
+count against its task limit. Putting a reaper in front of dockerd would change how a stop's signal reaches it and
+what ends the sandbox, which has not been measured, so it is not done. U12: exactly
 16 MiB comes back whole; more on stdout, on stderr, and 1 GiB on stdout are each refused with the limit named, no
 flooding process is left running, and the same daemon answers afterwards.
 

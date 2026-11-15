@@ -1466,6 +1466,39 @@ ev("U12", "exec output past 16 MiB is refused with an error that names the limit
   return `exactly 16 MiB returned whole; 16 MiB+ on stdout, on stderr, and 1 GiB on stdout each refused naming the limit; no flooding process left running; same daemon (pid ${daemon}, ${Math.round(rss / 1024)} MiB resident) answered list`
 })
 
+ev("U13", "Processes an exec session leaves behind are reaped when they end in a sandbox without Docker; with Docker, dockerd as PID 1 leaves them as zombies, as the docs say", async () => {
+  const plain = `${PREFIX}-z`
+  const seen: string[] = []
+  try {
+    await fresh(plain); await ensureInner()
+    for (const name of [plain, INNER]) {
+      const table = async () => (await pdk(["exec", name, "--", "ps", "-o", "pid,ppid,stat,args"])).out.split("\n").slice(1).map((line) => line.trim().split(/\s+/)).filter((row) => row.length >= 4)
+      const zombies = async () => (await table()).filter((row) => row[2]!.startsWith("Z"))
+      const before = (await zombies()).length
+      // Each of five sessions leaves four sleeps whose parent shells have exited; the kernel hands them to PID 1. Their
+      // odd duration marks them. The daemon runs one exec of a sandbox at a time, so the sessions take a few seconds.
+      const marker = "sleep 15.25"
+      for (let i = 0; i < 5; i++) await pdk(["exec", name, "--", "sh", "-c", `for i in 1 2 3 4; do (${marker} &); done; true`])
+      const pid1 = (await table()).find((row) => row[0] === "1")?.slice(3).join(" ")
+      // Control: the orphans exist, run and are PID 1's children, so whatever happens next happens to them.
+      const orphans = (await table()).filter((row) => row.slice(3).join(" ").includes(marker))
+      expect(orphans.length === 20 && orphans.every((row) => row[1] === "1" && !row[2]!.startsWith("Z")), `control: ${orphans.length} running orphans of PID 1 in ${name}, not 20: ${JSON.stringify(orphans)}`)
+      expect(await until(async () => !(await table()).some((row) => row.slice(3).join(" ").includes(marker)), 30), `the orphans in ${name} did not end`)
+      await Bun.sleep(1000)
+      const left = await zombies()
+      if (name === plain) {
+        expect(left.length === 0, `in ${name} (PID 1: ${pid1}) ${left.length} zombies remain after the orphans ended: ${JSON.stringify(left.slice(0, 5))}`)
+        seen.push(`without Docker, PID 1 \`${pid1}\`: 20 orphans ended and no zombie was left`)
+      } else {
+        const sleeps = left.filter((row) => row[3] === "[sleep]").length
+        expect(sleeps >= 20, `with Docker, PID 1 \`${pid1}\` reaped the orphans (${sleeps} sleep zombies); the docs say it does not`)
+        seen.push(`with Docker, PID 1 \`${pid1?.split(" ")[0]}\`: ${sleeps} sleep zombies, and ${left.length - sleeps} others (${[...new Set(left.filter((row) => row[3] !== "[sleep]").map((row) => row[3]))].join(", ") || "none"}; ${before} zombies before the orphans)`)
+      }
+    }
+    return seen.join("; ")
+  } finally { await pdk(["remove", plain, "--confirm", plain]) }
+})
+
 ev("U11", "The default image (no --image) makes a sandbox that passes every blocking check", async () => {
   const image = "docker/sandbox-templates:shell-docker"
   if ((await docker(["image", "inspect", image])).code !== 0) skip(`${image} is not on this engine, and the eval does not download it (it is large)`)

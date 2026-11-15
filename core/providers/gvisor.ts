@@ -36,6 +36,10 @@ mkdir -p /run/paddock-bin
 ln -sf "$(command -v iptables-legacy)" /run/paddock-bin/iptables
 ln -sf "$(command -v ip6tables-legacy)" /run/paddock-bin/ip6tables
 PATH=/run/paddock-bin:$PATH exec dockerd --config-file=/run/paddock-docker.json --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --storage-driver=${DOCKER_DRIVER} --iptables=false --ip6tables=false`
+// The main process of a sandbox without Docker: Paddock's busybox shell, waiting on a sleep. The kernel hands every
+// orphan to PID 1, and the shell's wait reaps any child that ends, so a finished process leaves no zombie holding a
+// task slot (U13; with `sleep infinity` as PID 1 every one stayed). The relay is copied in before every start.
+export const REAPER = `while :; do ${RELAY} sleep 2147483647 & wait; done`
 // What a sandbox's main process prints (dockerd's log, or anything written to /proc/1/fd/1, which a sandbox without
 // Docker can do too) is stored by the engine on its host, outside the watched disk limit (I22, I23).
 export const LOG_LIMIT = { "max-size": "10m", "max-file": "2" } as const
@@ -339,7 +343,7 @@ export class GvisorProvider implements Provider {
       "--cpus", String(spec.cpus), "--memory", memory, "--memory-swap", memory, "--pids-limit", String(spec.pids),
       "--log-driver", "json-file", ...Object.entries(LOG_LIMIT).flatMap(([key, value]) => ["--log-opt", `${key}=${value}`]),
       ...(spec.docker ? [...DOCKER_CAPABILITIES.flatMap((cap) => ["--cap-add", cap]), "--mount", `type=volume,src=${dockerVolume(manifest)},dst=/var/lib/docker,volume-nocopy`, "--user", "0", "--entrypoint", "sh", spec.image, "-c", DOCKER_START]
-        : ["--entrypoint", "sleep", spec.image, "infinity"]),
+        : ["--entrypoint", RELAY, spec.image, "sh", "-c", REAPER]),
     ], { timeoutMs: 1_800_000 }), `Creating ${name}`)
   }
 
