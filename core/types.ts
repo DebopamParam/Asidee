@@ -169,7 +169,7 @@ export interface Provider {
   removeTemplate(engine: Engine, name: string): Promise<{ imageId: string; dependants: string[] }>
 }
 
-export type ErrorCode = "usage" | "not-found" | "conflict" | "dependency" | "check-failed" | "runtime" | "offline" | "incompatible" | "identity-changed" | "outcome-unknown"
+export type ErrorCode = "usage" | "not-found" | "conflict" | "dependency" | "check-failed" | "probes-required" | "runtime" | "offline" | "incompatible" | "identity-changed" | "outcome-unknown"
 export class PaddockError extends Error {
   constructor(readonly code: ErrorCode, message: string, readonly details?: unknown) { super(message) }
 }

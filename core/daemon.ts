@@ -77,6 +77,8 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     hostRemove: { run: async (body) => machines?.remove(body), socketOnly: true },
     sessionTarget: { run: (body) => core.sessionTarget(body.name), socketOnly: true },
     sshPrepare: { run: (body) => core.sshSetup(String(body.name), false, typeof body.publicKey === "string" ? body.publicKey : ""), socketOnly: true },
+    configGet: { run: () => core.configGet() },
+    configSet: { run: (body) => core.configSet(body) },
     checklist: { run: async () => CHECKLIST },
     engines: { run: () => core.engines() },
     list: { run: () => core.list() },
@@ -103,7 +105,7 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
   }
 }
 
-const STATUS: Record<ErrorCode, number> = { usage: 400, "not-found": 404, conflict: 409, dependency: 424, "check-failed": 422, runtime: 500, offline: 503, incompatible: 409, "identity-changed": 409, "outcome-unknown": 504 }
+const STATUS: Record<ErrorCode, number> = { usage: 400, "not-found": 404, conflict: 409, dependency: 424, "check-failed": 422, "probes-required": 422, runtime: 500, offline: 503, incompatible: 409, "identity-changed": 409, "outcome-unknown": 504 }
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
 const refuse = (status: number, message: string) => json(status, { ok: false, error: { code: "usage", message } })
 

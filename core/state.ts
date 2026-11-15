@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { PaddockError, type Manifest, type SandboxSpec } from "./types"
@@ -96,22 +96,47 @@ export async function scanManifests(dirs: Dirs): Promise<{ manifests: Manifest[]
 }
 export const listManifests = async (dirs: Dirs) => (await scanManifests(dirs)).manifests
 
-export type Config = { defaults: Partial<typeof DEFAULT_SPEC>; engine?: string }
+export type Config = { defaults: Partial<typeof DEFAULT_SPEC>; engine?: string; requireProbes: boolean }
 // A config file with a mistake stops the request and says where, instead of being quietly ignored.
-export async function readConfig(dirs: Dirs): Promise<Config> {
+async function configFile(dirs: Dirs): Promise<Record<string, unknown>> {
+  const file = join(dirs.config, "config.json")
+  let text: string
+  try { text = await readFile(file, "utf8") } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {}
+    throw error
+  }
+  let data: unknown
+  try { data = JSON.parse(text) } catch { throw new PaddockError("usage", `${file} has a mistake: it is not valid JSON. Fix it or delete it.`) }
+  if (typeof data !== "object" || data === null || Array.isArray(data)) throw new PaddockError("usage", `${file} has a mistake: it must be a JSON object. Fix it or delete it.`)
+  return data as Record<string, unknown>
+}
+
+function parseConfig(dirs: Dirs, data: Record<string, unknown>): Config {
   const file = join(dirs.config, "config.json")
   const wrong = (problem: string): never => { throw new PaddockError("usage", `${file} has a mistake: ${problem}. Fix it or delete it.`) }
-  let text: string
-  try { text = await readFile(file, "utf8") } catch { return { defaults: {} } }
-  let data: unknown
-  try { data = JSON.parse(text) } catch (error) { wrong(`it is not valid JSON (${(error as Error).message})`) }
   const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
-  if (!isObject(data)) return wrong("it must be a JSON object")
+  if (data.requireProbes !== undefined && typeof data.requireProbes !== "boolean") wrong("requireProbes must be a boolean (true or false)")
   if (data.defaults !== undefined && !isObject(data.defaults)) wrong("defaults must be an object")
   if (data.engine !== undefined && typeof data.engine !== "string") wrong("engine must be an engine id, as `paddock doctor` prints it")
   const defaults = (data.defaults ?? {}) as Record<string, unknown>
   // The defaults pass the same validation as a request, so config cannot set what a request cannot.
   try { validSpec({ ...defaults, name: "x" }) } catch (error) { wrong(`in defaults, ${(error as Error).message.replace(/^./, (first) => first.toLowerCase()).replace(/\.$/, "")}`) }
   const known = Object.fromEntries(Object.entries(defaults).filter(([key]) => key in DEFAULT_SPEC))
-  return { defaults: known as Partial<typeof DEFAULT_SPEC>, engine: data.engine as string | undefined }
+  return { defaults: known as Partial<typeof DEFAULT_SPEC>, engine: data.engine as string | undefined, requireProbes: data.requireProbes !== false }
+}
+
+export async function readConfig(dirs: Dirs): Promise<Config> { return parseConfig(dirs, await configFile(dirs)) }
+
+// The daemon serializes settings writes. Preserve defaults, engine and fields owned by other config consumers.
+export async function writeConfig(dirs: Dirs, input: Record<string, unknown>): Promise<Config> {
+  if (Object.keys(input).some((key) => key !== "requireProbes") || typeof input.requireProbes !== "boolean")
+    throw new PaddockError("usage", "Set requireProbes to a boolean (true or false).")
+  const data = await configFile(dirs)
+  data.requireProbes = input.requireProbes
+  const config = parseConfig(dirs, data)
+  await mkdir(dirs.config, { recursive: true, mode: 0o700 })
+  const file = join(dirs.config, "config.json"); const temp = `${file}.tmp-${process.pid}`
+  try { await writeFile(temp, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 }); await chmod(temp, 0o600); await rename(temp, file) }
+  finally { await rm(temp, { force: true }) }
+  return config
 }

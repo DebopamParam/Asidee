@@ -16,7 +16,7 @@ import type { HostPlan } from "../core/hosts"
 import { hostOption, type FleetView, type HostView } from "../core/machines"
 import { bounded, PROTOCOL, transportStdio } from "../core/transport"
 import type { SshAccess } from "../core/ssh"
-import { checkSocketPath, defaultDirs, socketPath, streamSocketPath } from "../core/state"
+import { checkSocketPath, defaultDirs, socketPath, streamSocketPath, type Config } from "../core/state"
 import { dataFrames, frame, FrameReader, type OpenRequest, type EnrollmentRequest } from "../core/stream"
 import { PaddockError, type CheckResult, type Engine, type ErrorCode, type RunResult, type Template } from "../core/types"
 
@@ -26,6 +26,8 @@ const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, 
 
   paddock doctor                         engines on this machine and what each one needs
   paddock create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]
+  paddock config get                     settings on the selected machine
+  paddock config set require-probes on|off   require blocking isolation probes at create (default on)
   paddock list
   paddock list --all                      machines, including unavailable ones and unknown cached sandboxes
   paddock host list                       registered SSH daemons and their connection state
@@ -60,7 +62,7 @@ const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, 
 
   --host NAME   select a registered machine (unqualified names always mean local)
   --json   print {"ok":true,"data":…} or {"ok":false,"error":{code,message}}
-Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown.`
+Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed or required probes could not run, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown.`
 
 // Text from a daemon, which may be another machine's, on its way to a terminal: without control characters (an escape
 // sequence can redraw the screen or forge a check mark) and line breaks (a forged line), and bounded. lines keeps breaks
@@ -127,7 +129,7 @@ function detailLines(details: unknown): string[] {
 // A refused enrollment says what was changed and what was left, which is longer than other errors: all of it, on one line.
 const refusal = (message: string) => shown(message.replace(/\s+/g, " "), true)
 
-const EXIT: Record<ErrorCode, number> = { runtime: 1, usage: 2, "not-found": 3, conflict: 4, dependency: 5, "check-failed": 6, offline: 7, incompatible: 8, "identity-changed": 9, "outcome-unknown": 10 }
+const EXIT: Record<ErrorCode, number> = { runtime: 1, usage: 2, "not-found": 3, conflict: 4, dependency: 5, "check-failed": 6, "probes-required": 6, offline: 7, incompatible: 8, "identity-changed": 9, "outcome-unknown": 10 }
 let selectedHost: string | undefined
 const dirs = defaultDirs()
 const compiled = Bun.main.startsWith("/$bunfs/")
@@ -287,6 +289,14 @@ async function main(argv: string[]): Promise<void> {
 
   try {
     switch (command) {
+      case "config": {
+        const { positionals } = parse({})
+        const [action, key, value] = positionals
+        if (!((action === "get" && positionals.length === 1) || (action === "set" && positionals.length === 3 && key === "require-probes" && (value === "on" || value === "off"))))
+          throw new PaddockError("usage", "Use paddock config get or paddock config set require-probes on|off.")
+        const config = await call<Config>(action === "get" ? "configGet" : "configSet", action === "get" ? {} : { requireProbes: value === "on" })
+        return out(config, () => console.log(`require-probes ${config.requireProbes ? "on" : "off"}`))
+      }
       case "workspace": {
         if (selectedHost && selectedHost !== "local") throw new PaddockError("usage", "Workspaces run on this Mac; --host is not available.")
         if (process.platform !== "darwin") throw new PaddockError("dependency", "Workspaces are available only on macOS. A workspace is not a sandbox.")
@@ -593,6 +603,10 @@ async function main(argv: string[]): Promise<void> {
     else if (command === "host" && rest[0] === "add") {
       console.error(`paddock: ${refusal(message)}`)
       if (error instanceof PaddockError && error.details !== undefined) for (const line of detailLines(error.details)) console.error(line)
+    }
+    else if (code === "probes-required") {
+      console.error(`paddock: ${refusal(message)}`)
+      console.error(`To turn off the probe requirement on the selected machine: paddock${selectedHost && selectedHost !== "local" ? ` --host ${selectedHost}` : ""} config set require-probes off`)
     }
     else if (code === "check-failed" && error instanceof PaddockError && Array.isArray(error.details)) {
       console.error(`paddock: ${shown(message.split(": ")[0])}. These checks did not hold:`)

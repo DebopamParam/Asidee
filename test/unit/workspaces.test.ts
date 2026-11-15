@@ -60,7 +60,7 @@ test("workspace spec drops unknown fields, permits only open loopback, and refus
 test("workspace checks reuse blocker logic without weakening sandbox checks", () => {
   const missing = complete([], ["config", "runtime", "probe"], "missing", WORKSPACE_CHECKLIST)
   expect(missing.every((check) => check.status === "unknown")).toBe(true)
-  expect(blockers(missing, WORKSPACE_CHECKLIST).map((check) => check.id)).toEqual(["seatbelt", "processes"])
+  expect(blockers(missing, WORKSPACE_CHECKLIST, false).map((check) => check.id)).toEqual(["seatbelt", "processes"])
   expect(failures([{ id: "writes", status: "fail", evidence: "probed", detail: "outside write" }], WORKSPACE_CHECKLIST)).toHaveLength(1)
   expect(blockers([{ id: "kernel", status: "fail", evidence: "probed", detail: "host" }])).toHaveLength(1)
 })

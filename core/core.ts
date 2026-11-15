@@ -6,7 +6,7 @@ import { fieldValues, loadExtensions, runCommand } from "./extensions"
 import { boundPort, LEASE_TTL_MS, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
 import { OUTPUT_LIMIT } from "./run"
 import { addInclude, alias, editorKey, GUEST_SETUP, GUEST_SSH, includeLine, included, keyFingerprint, parseGuestSetup, userConfig, validPublicKey, writeClientFiles, type SshAccess } from "./ssh"
-import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSizes, validSpec, validTemplateName, writeManifest, type Dirs } from "./state"
+import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSizes, validSpec, validTemplateName, writeManifest, writeConfig, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
 import { PaddockError, type CheckResult, type Engine, type Limits, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage, type Template, type SshSetup } from "./types"
 
@@ -63,6 +63,9 @@ export class Core {
     if (!provider) throw new PaddockError("dependency", `${manifest.name} was made with the ${manifest.engine.provider} provider, which this build does not have.`)
     return provider
   }
+
+  configGet() { return readConfig(this.dirs) }
+  configSet(input: Record<string, unknown>) { return this.exclusive(":config", () => writeConfig(this.dirs, input)) }
 
   async engines(): Promise<Engine[]> { return (await Promise.all(this.providers.map((provider) => provider.detect()))).flat() }
 
@@ -138,13 +141,13 @@ export class Core {
     await this.clearEnforcement(manifest, stale)
   }
 
-  private async verifyNow(manifest: Manifest): Promise<{ checks: CheckResult[]; failed: CheckResult[] }> {
+  private async verifyNow(manifest: Manifest, requireProbes = false): Promise<{ checks: CheckResult[]; failed: CheckResult[] }> {
     const running = (await this.provider(manifest).status(manifest)) === "running"
     this.activity.set(manifest.name, running ? "Running the checks (live probes take a few seconds)" : "Checking the configuration")
     const checks = await this.stage(manifest, ["config", "runtime", "probe"], running)
     manifest.lastVerify = { at: new Date().toISOString(), results: checks }
     // A stopped sandbox is judged on its configuration alone: the rest was not checked, which is not a failure.
-    const failed = running ? blockers(checks) : blockers(checks).filter((entry) => entry.status === "fail")
+    const failed = running ? blockers(checks, CHECKLIST, requireProbes) : blockers(checks).filter((entry) => entry.status === "fail")
     if (failed.length && running) await this.stopBecause(manifest, `Stopped by verify: ${failed.map((entry) => titleOf(entry.id)).join("; ")}`)
     else await writeManifest(this.dirs, manifest)
     return { checks, failed }
@@ -181,8 +184,12 @@ export class Core {
         await provider.create(manifest)
       }
       await this.startChecked(manifest)
-      const { checks, failed } = await this.verifyNow(manifest)
-      if (failed.length) this.refuse(spec.name, failed, "was created but stopped, and is kept for diagnosis")
+      const { checks, failed } = await this.verifyNow(manifest, config.requireProbes)
+      if (failed.length) {
+        const unknown = failed.some((check) => check.status === "unknown" && CHECKLIST.find((item) => item.id === check.id)?.stage === "probe")
+        if (unknown) throw new PaddockError("probes-required", `${spec.name} was created but stopped, and is kept for diagnosis: ${failed.map((check) => `${titleOf(check.id)} (${check.detail})`).join("; ")}. Required isolation probes could not run. To allow creation without them, run \`paddock config set require-probes off\` on this machine, or turn off Require isolation probes in Settings.`, failed)
+        this.refuse(spec.name, failed, "was created but stopped, and is kept for diagnosis")
+      }
       return { manifest, checks }
     })
     // Hooks run once the sandbox is free again, so a hook may use any command on it (verify, stop, start).

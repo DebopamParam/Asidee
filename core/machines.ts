@@ -12,6 +12,7 @@ import { PaddockError, type CheckResult } from "./types"
 
 export const CATALOG = {
   version: ["dashboard", "read"], hello: ["socket", "read"], checklist: ["dashboard", "read"], summary: ["dashboard", "read"],
+  configGet: ["dashboard", "read"], configSet: ["dashboard", "write"],
   engines: ["dashboard", "read"], list: ["dashboard", "read"], get: ["dashboard", "read"], create: ["dashboard", "write"],
   start: ["dashboard", "write"], stop: ["dashboard", "write"], remove: ["dashboard", "write"], verify: ["dashboard", "write"],
   resize: ["dashboard", "write"], snapshot: ["dashboard", "write"], templateList: ["dashboard", "read"], templateRemove: ["dashboard", "write"],
@@ -197,6 +198,7 @@ export function parseSummary(value: unknown, hello: Hello): MachineSummary {
 const withRow = (shape: Shape) => (value: unknown, hello: Hello) => { shaped(shape)(value); return { ...(value as object), sandbox: parseRow((value as { sandbox: unknown }).sandbox, hello) } }
 const REPLIES: Partial<Record<MethodName, (value: unknown, hello: Hello) => unknown>> = {
   version: shaped({ version: "string" }), hello: (value) => parseHello(value), checklist: shaped([{ id: "string", title: "string" }]), summary: (value, hello) => parseSummary(value, hello),
+  configGet: shaped({ defaults: "object", requireProbes: "boolean" }), configSet: shaped({ defaults: "object", requireProbes: "boolean" }),
   engines: shaped([ENGINE]), list: (value, hello) => { if (!Array.isArray(value)) throw new Error("its shape"); return value.map((entry, index) => parseRow(entry, hello, index)) },
   get: (value, hello) => parseRow(value, hello), start: (value, hello) => parseRow(value, hello), stop: (value, hello) => parseRow(value, hello),
   create: withRow({ sandbox: "object", checks: [CHECK], hooks: [{ extension: "string", exitCode: "number", output: "string" }] }), remove: shaped({ removed: "string" }),

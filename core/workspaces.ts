@@ -367,14 +367,14 @@ export class Workspaces {
     add("not-covered", "info", "none", `${WORKSPACE_DISCLOSURE} ${manifest.backup}`)
     const checks = complete(results, ["config", "runtime", "probe"], "This workspace check could not be made.", WORKSPACE_CHECKLIST)
     manifest.lastVerify = { at: new Date().toISOString(), results: checks }; await this.save(manifest)
-    return { workspace: await this.view(manifest), checks, ok: blockers(checks, WORKSPACE_CHECKLIST).length === 0 }
+    return { workspace: await this.view(manifest), checks, ok: blockers(checks, WORKSPACE_CHECKLIST, false).length === 0 }
   }
   async verify(name: string): Promise<WorkspaceReport> { return this.exclusive(workspaceName(name), async () => this.verifyNow(await this.manifest(name))) }
   async open(name: string, argv: unknown, options: { tty: boolean; cols?: number; rows?: number }): Promise<WorkspaceSession> {
     const command = validArgv(argv)
     return this.exclusive(workspaceName(name), async () => {
       const manifest = await this.manifest(name)
-      const blocked = blockers(await this.blockingChecks(manifest), WORKSPACE_CHECKLIST)
+      const blocked = blockers(await this.blockingChecks(manifest), WORKSPACE_CHECKLIST, false)
       if (blocked.length) throw new PaddockError("check-failed", "Workspace execution refused by its checklist.", blocked)
       return this.launch(manifest, command, options.tty, options.cols, options.rows)
     })

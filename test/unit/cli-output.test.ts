@@ -187,3 +187,33 @@ test("transport stdio hands SSH every byte the daemon sent before it exits, even
   expect(received).toBe(piece.length * pieces)
   run.stdin.end()
 }, 30_000)
+
+test("config get/set route boolean settings and support JSON; invalid commands are refused", async () => {
+  const calls: unknown[] = []
+  const paddock = await daemon({ configGet: (body: unknown) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: true } } },
+    configSet: (body: { requireProbes: boolean }) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: body.requireProbes } } } })
+  expect(await paddock("config", "get")).toMatchObject({ code: 0, out: "require-probes on\n" })
+  expect(await paddock("config", "set", "require-probes", "off")).toMatchObject({ code: 0, out: "require-probes off\n" })
+  const json = await paddock("--host", "build", "config", "set", "require-probes", "on", "--json")
+  expect(JSON.parse(json.out)).toEqual({ ok: true, data: { defaults: {}, requireProbes: true } })
+  expect(calls).toEqual([{}, { requireProbes: false }, { host: "build", requireProbes: true }])
+  expect(JSON.parse((await paddock("config", "get", "--json")).out).data.requireProbes).toBe(true)
+  for (const args of [["get", "extra"], ["set", "require-probes", "false"], ["set", "require-probes"], ["set", "bogus", "on"]]) {
+    expect((await paddock("config", ...args)).code).toBe(2)
+  }
+})
+
+test("a required-probe refusal prints the reason and exact local or hosted command with exit 6", async () => {
+  const error = { code: "probes-required", message: "demo was created but stopped: Cannot reach the host (helper image unavailable). Required isolation probes could not run.", details: [{ id: "net-host", status: "unknown", evidence: "none", detail: "helper image unavailable" }] }
+  const paddock = await daemon({ create: { ok: false, error } })
+  for (const host of [[], ["--host", "build"]]) {
+    const refused = await paddock(...host, "create", "demo")
+    expect(refused.code).toBe(6)
+    expect(refused.err).toContain("Cannot reach the host (helper image unavailable)")
+    expect(refused.err).toContain(`paddock${host.length ? " --host build" : ""} config set require-probes off`)
+    const json = await paddock(...host, "create", "demo", "--json")
+    expect(json.code).toBe(6)
+    expect(JSON.parse(json.out)).toEqual({ ok: false, error })
+    expect(json.err).toBe("")
+  }
+})

@@ -23,7 +23,7 @@ export function bounded<T>(promise: Promise<T>, ms: number): Promise<T | undefin
   let clear = () => {}
   return Promise.race([promise, new Promise<undefined>((resolve) => { const timer = setTimeout(resolve, ms); clear = () => clearTimeout(timer) })]).finally(() => clear())
 }
-export const ERROR_CODES: readonly ErrorCode[] = ["usage", "not-found", "conflict", "dependency", "check-failed", "runtime", "offline", "incompatible", "identity-changed", "outcome-unknown"]
+export const ERROR_CODES: readonly ErrorCode[] = ["usage", "not-found", "conflict", "dependency", "check-failed", "probes-required", "runtime", "offline", "incompatible", "identity-changed", "outcome-unknown"]
 export const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
 export const shellQuote = (word: string) => `'${word.replaceAll("'", "'\\''")}'`
 

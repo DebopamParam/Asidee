@@ -1,10 +1,13 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { connect } from "node:net"
 import { join } from "node:path"
 import { blockers, CHECKLIST, complete } from "../../core/checks"
+import { createHandler, methods } from "../../core/daemon"
 import { Core, UNCHECKED_PASSES } from "../../core/core"
+import { CATALOG, Machines, type Hello } from "../../core/machines"
+import { object, parseReply } from "../../core/transport"
 import { DockerSandboxesProvider } from "../../core/providers/docker-sandboxes"
 import { fieldValues, loadExtensions, parseExtension } from "../../core/extensions"
 import { configChecks, DOCKER_CAPABILITIES, dockerVolume, gvisorSetup, network, unsafeRuntimeArgs, type GuardState } from "../../core/providers/gvisor"
@@ -123,12 +126,13 @@ test("a remote lease ends on its own when the primary stops renewing it, and las
   expect(renewedEnd).toContain("did not renew")
 })
 
-test("a failed blocking check blocks; an unknown probe and a weak disk limit do not", () => {
+test("a failed blocking check blocks; an unknown probe blocks by default and a weak disk limit does not", () => {
   const results: CheckResult[] = [
     { id: "net-host", status: "unknown", evidence: "none", detail: "" }, { id: "net-peers", status: "fail", evidence: "probed", detail: "" },
     { id: "disk", status: "weak", evidence: "inspected", detail: "" }, { id: "egress", status: "info", evidence: "probed", detail: "" },
   ]
-  expect(blockers(results).map((entry) => entry.id)).toEqual(["net-peers"])
+  expect(blockers(results).map((entry) => entry.id)).toEqual(["net-host", "net-peers"])
+  expect(blockers(results, CHECKLIST, false).map((entry) => entry.id)).toEqual(["net-peers"])
 })
 
 test("unsupported blocking properties refuse creation and name the missing promise", async () => {
@@ -545,13 +549,13 @@ test("a running sandbox that cannot be checked for several passes in a row is st
 
 test("a config file with a mistake is refused by name, and its defaults obey the same limits as a request", async () => {
   const root = await mkdtemp(join(tmpdir(), "paddock-config-")); const dirs = { state: join(root, "state"), config: root }
-  expect(await readConfig(dirs)).toEqual({ defaults: {} })
-  for (const bad of ["{ nope", "[]", "null", '{"defaults":"x"}', '{"engine":5}', '{"defaults":{"cpus":"lots"}}', '{"defaults":{"image":"--privileged"}}', '{"defaults":{"memoryGb":100000}}']) {
+  expect(await readConfig(dirs)).toEqual({ defaults: {}, requireProbes: true })
+  for (const bad of ["{ nope", "[]", "null", '{"defaults":"x"}', '{"engine":5}', '{"requireProbes":"off"}', '{"requireProbes":null}', '{"requireProbes":0}', '{"defaults":{"cpus":"lots"}}', '{"defaults":{"image":"--privileged"}}', '{"defaults":{"memoryGb":100000}}']) {
     await writeFile(join(root, "config.json"), bad)
     await expect(readConfig(dirs)).rejects.toThrow("config.json")
   }
   await writeFile(join(root, "config.json"), '{"defaults":{"image":"alpine:3","cpus":1,"privileged":true,"name":"x"},"engine":"gvisor:orbstack"}')
-  expect(await readConfig(dirs)).toEqual({ defaults: { image: "alpine:3", cpus: 1 }, engine: "gvisor:orbstack" })
+  expect(await readConfig(dirs)).toEqual({ defaults: { image: "alpine:3", cpus: 1 }, engine: "gvisor:orbstack", requireProbes: true })
 })
 
 test("a damaged state file is listed as damaged and the other sandboxes still work", async () => {
@@ -676,4 +680,126 @@ test("a sandbox made from a template records it and runs its image; removing the
   expect(removed).toMatchObject({ removed: "base", dependants: ["copy"] })
   expect(removed.note).toContain("keep working")
   await expect(paddock.templateRemove("base")).rejects.toMatchObject({ code: "not-found" })
+})
+
+test("create requires unknown blocking probes by default and keeps only a stopped sandbox for diagnosis", async () => {
+  const probes = allPass("probe").map((check): CheckResult => check.id === "net-host" || check.id === "net-peers"
+    ? { ...check, status: "unknown", evidence: "none", detail: `${check.id}: the helper control did not answer.` } : check)
+  const { provider, state } = fakeProvider({ probe: probes }); const paddock = await core(provider)
+  expect((await paddock.configGet()).requireProbes).toBe(true)
+  await expect(paddock.create({ name: "demo", requireProbes: false })).rejects.toMatchObject({ code: "probes-required", details: probes.filter((check) => check.status === "unknown"),
+    message: expect.stringContaining("paddock config set require-probes off") })
+  expect(state).toMatchObject({ starts: 1, stops: 1, running: false, exists: true })
+  const saved = await readManifest(paddock.dirs, "demo")
+  expect(saved.lastVerify?.results.filter((check) => check.status === "unknown")).toEqual(probes.filter((check) => check.status === "unknown"))
+  expect(saved.stopReason).toContain("Cannot reach the host; Cannot reach other sandboxes")
+  expect((await paddock.list())[0]?.status).toBe("stopped")
+})
+
+test("turning the requirement off permits unknown probes without inventing a pass; verify and start keep running", async () => {
+  const { provider, state } = fakeProvider({ probe: [] }); const paddock = await core(provider)
+  await paddock.configSet({ requireProbes: false })
+  const made = await paddock.create({ name: "demo" })
+  expect(state.running).toBe(true)
+  const unknown = made.checks.filter((check) => check.status === "unknown")
+  expect(unknown.map((check) => check.id)).toEqual(CHECKLIST.filter((item) => item.stage === "probe").map((item) => item.id))
+  expect(unknown.every((check) => check.evidence === "none")).toBe(true)
+  expect((await paddock.list())[0]?.lastVerify?.results.find((check) => check.id === "net-host")?.detail).toContain("unknown (none)")
+  await paddock.configSet({ requireProbes: true })
+  const verified = await paddock.verify("demo")
+  expect(verified.ok).toBe(true); expect(verified.sandbox.status).toBe("running")
+  expect(verified.checks.filter((check) => check.status === "unknown")).toEqual(unknown)
+  await paddock.stop("demo")
+  const checks = provider.checks
+  provider.checks = async (manifest, stage) => { if (stage === "probe") throw new Error("start must not probe"); return checks(manifest, stage) }
+  expect((await paddock.start("demo")).status).toBe("running")
+  await paddock.enforce()
+  expect(state.running).toBe(true)
+})
+
+test("failed and unsupported blocking probes stop creation in both modes; nonblocking unknown probes never block", async () => {
+  for (const requireProbes of [true, false]) {
+    for (const status of ["fail", "unsupported"] as const) {
+      const probes = allPass("probe").map((check): CheckResult => check.id === "net-host" ? { ...check, status, detail: "Isolation was not provided." } : check)
+      const { provider, state } = fakeProvider({ probe: probes }); const paddock = await core(provider)
+      await paddock.configSet({ requireProbes })
+      await expect(paddock.create({ name: "demo" })).rejects.toMatchObject({ code: "check-failed", message: expect.stringContaining("Cannot reach the host (Isolation was not provided.)") })
+      expect(state).toMatchObject({ starts: 1, stops: 1, running: false, exists: true })
+    }
+    const { provider } = fakeProvider({ probe: allPass("probe").filter((check) => check.id !== "egress" && check.id !== "credentials") })
+    const paddock = await core(provider); await paddock.configSet({ requireProbes })
+    const made = await paddock.create({ name: "demo" })
+    expect(made.sandbox.status).toBe("running")
+    expect(made.checks.find((check) => check.id === "egress")?.status).toBe("unknown")
+  }
+})
+
+test("settings persist across core and daemon instances, preserve other config and take effect without restart", async () => {
+  const { provider, state } = fakeProvider({ probe: [] }); const paddock = await core(provider)
+  await mkdir(paddock.dirs.config, { recursive: true })
+  const file = join(paddock.dirs.config, "config.json")
+  const existing = { defaults: { cpus: 1, image: "alpine" }, engine: "fake:1", future: { keep: true } }
+  await writeFile(file, JSON.stringify(existing))
+  const table = methods(paddock, () => {})
+  expect(await table.configSet!.run({ requireProbes: false })).toMatchObject({ requireProbes: false, defaults: existing.defaults, engine: "fake:1" })
+  expect(JSON.parse(await readFile(file, "utf8"))).toEqual({ ...existing, requireProbes: false })
+  expect((await stat(file)).mode & 0o777).toBe(0o600)
+  const restarted = new Core([provider], paddock.dirs, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere")
+  expect(await methods(restarted, () => {}).configGet!.run({})).toMatchObject({ requireProbes: false })
+  expect((await restarted.create({ name: "demo" })).sandbox.status).toBe("running")
+  await table.configSet!.run({ requireProbes: true })
+  await expect(restarted.create({ name: "other" })).rejects.toMatchObject({ code: "probes-required" })
+  expect(state.running).toBe(false)
+})
+
+test("settings require a boolean and loopback writes require both token and trusted Host", async () => {
+  const { provider } = fakeProvider(); const paddock = await core(provider)
+  const answer = createHandler(methods(paddock, () => {}), "secret", paddock.dirs.config)
+  const post = (body: object, headers: Record<string, string> = {}) => new Request("http://127.0.0.1:7717/api/configSet", { method: "POST", headers: { host: "127.0.0.1:7717", authorization: "Bearer secret", ...headers }, body: JSON.stringify(body) })
+  for (const value of ["off", 0, null, [], {}, undefined]) {
+    expect((await answer(post({ requireProbes: value }), false, 7717)).status).toBe(400)
+  }
+  expect((await answer(post({ requireProbes: false, engine: "other" }), false, 7717)).status).toBe(400)
+  expect((await answer(post({ requireProbes: false }, { authorization: "" }), false, 7717)).status).toBe(401)
+  expect((await answer(post({ requireProbes: false }, { authorization: "Bearer wrong" }), false, 7717)).status).toBe(401)
+  expect((await answer(post({ requireProbes: false }, { host: "evil.example:7717" }), false, 7717)).status).toBe(403)
+  expect((await paddock.configGet()).requireProbes).toBe(true)
+  const response = await answer(post({ requireProbes: false }), false, 7717)
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({ ok: true, data: { requireProbes: false } })
+  expect((await paddock.configGet()).requireProbes).toBe(false)
+})
+
+test("routed create preserves the remote refusal text and code and uses only the remote probe setting", async () => {
+  const fake = fakeProvider({ probe: [] }); const target = await core(fake.provider)
+  const remote = new Core([fake.provider], target.dirs, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere", "d".repeat(32))
+  const local = await core(fakeProvider().provider)
+  await local.configSet({ requireProbes: false })
+  const hello: Hello = { machineId: "a".repeat(32), bootId: "b".repeat(32), buildDigest: "c".repeat(64), sourceDigest: "e".repeat(64), version: "0.4.0", protocols: [1], features: [], methods: Object.keys(CATALOG) }
+  const remoteHello = { ...hello, machineId: remote.machineId }
+  const remoteHandle = createHandler({ ...methods(remote, () => {}), hello: { run: async () => remoteHello } }, "remote-token", remote.dirs.config)
+  const machines = new Machines(local.dirs, hello, async () => ({ hello, sandboxes: [], checkedAt: new Date().toISOString() }), { connectPeer: () => ({ close: async () => {}, call: async (method, body = {}) =>
+    parseReply(await (await remoteHandle(new Request(`http://paddock/api/${method}`, { method: "POST", body: JSON.stringify(body) }), true, 0)).json()) }) })
+  await writeFile(join(local.dirs.config, "hosts.json"), JSON.stringify({ version: 1, hosts: [{ name: "build", ssh: "fixture", binary: "/fixture/paddock", stateDir: "/fixture/state", machineId: remote.machineId, addedAt: "2026-11-15", diskPolicy: "watched", service: "prepared" }] }))
+  const localHandle = createHandler(methods(local, () => {}, () => false, machines), "local-token", local.dirs.config, machines)
+  const request = (host?: string) => new Request("http://paddock/api/create", { method: "POST", body: JSON.stringify({ name: "demo", host }) })
+  const direct = await (await remoteHandle(request(), true, 0)).json()
+  expect(direct).toMatchObject({ ok: false, error: { code: "probes-required" } })
+  if (!object(direct) || !object(direct.error) || typeof direct.error.message !== "string") throw new Error("The refusal has no message.")
+  expect(direct.error.message).toContain("Cannot reach the host (The provider did not report this check.)")
+  expect(direct.error.message).toContain("Cannot reach other sandboxes (The provider did not report this check.)")
+  await remote.remove("demo", "demo")
+  const routed = await localHandle(request("build"), true, 0)
+  expect(routed.status).toBe(422)
+  expect(await routed.json()).toEqual(direct)
+  expect(fake.state.running).toBe(false)
+  expect((await local.list()).length).toBe(0)
+  expect(await machines.route("configGet", { host: "build" })).toMatchObject({ requireProbes: true })
+  await machines.route("configSet", { host: "build", requireProbes: false })
+  await local.configSet({ requireProbes: true })
+  await remote.remove("demo", "demo")
+  expect(await (await localHandle(request("build"), true, 0)).json()).toMatchObject({ ok: true, data: { sandbox: { status: "running" } } })
+  expect((await local.configGet()).requireProbes).toBe(true)
+  expect((await remote.configGet()).requireProbes).toBe(false)
+  await machines.close()
 })
