@@ -189,7 +189,7 @@ function render() {
   }
   const workspaceList = document.getElementById("workspaces"); workspaceList.replaceChildren()
   for (const workspace of workspaces) workspaceList.append(el("div", { class: "panel" },
-    el("div", {}, el("span", { class: "name" }, workspace.name), `: workspace, not a sandbox; ${workspace.status}, ${workspace.processes ?? "unknown"} processes`),
+    el("div", {}, el("span", { class: "name" }, workspace.name), `: workspace, not a sandbox; ${workspace.status}, host-temp ${workspace.spec ? workspace.spec.hostTemp ? "on (shared, weaker)" : "off" : "unknown"}, ${workspace.processes ?? "unknown"} processes`),
     el("div", { class: "muted" }, workspace.folder), workspace.problem ? el("div", { class: "error" }, workspace.problem) : null,
     el("div", { class: "muted" }, workspace.disclosure), el("div", { class: "muted" }, "Use paddock workspace in the CLI to stop, verify or remove. Workspace methods are socket-only.")))
   if (workspaceProblem) workspaceList.append(el("div", { class: "panel error" }, `Workspaces unknown: ${workspaceProblem}`))

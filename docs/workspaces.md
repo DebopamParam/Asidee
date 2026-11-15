@@ -51,6 +51,43 @@ Exec and shell run only blocking checks before launch. They do not run GPU/login
 the hard-link walk. Full informational checks run at creation and explicit verify. Verify only reads directories
 while looking for hard links; an unreadable subtree is unknown. Permission repair belongs to remove.
 
+## Allow the shared per-user temp folder
+
+`hostTemp` defaults to `false`, including manifests written before this setting existed. To allow Apple frameworks
+that use `DARWIN_USER_TEMP_DIR` instead of `$TMPDIR`, create with `--host-temp` or change an idle workspace:
+
+```sh
+paddock workspace create render --host-temp --no-logins
+paddock workspace stop render
+paddock workspace set render host-temp on
+paddock workspace set render host-temp off
+```
+
+Changing the setting refuses while any workspace processes run. Stop them first. The new profile applies to later
+shells and execs, and saved verification is cleared. If a partial update leaves the profile and manifest mismatched,
+execution refuses the integrity check. Save the setting again to recover.
+
+With the setting on, the profile allows reads, writes and Unix socket connections only in this user's canonical
+per-user `T` folder. The sibling `C` and `0` folders, `/private/tmp`, `/private/var/tmp`, and home remain denied.
+`$TMPDIR` still points at the workspace's own `tmp`. The `--read` refusal for shared temporary folders still applies.
+With the setting off, generated profile bytes and parameters are unchanged from the original profile.
+
+This weakens confinement. Other programs' temp files and sockets there are readable and writable by this workspace.
+Other workspaces with the setting on share that folder. Files left there are not removed by `workspace remove` and
+are not counted in workspace size. List, get, shell, exec, verification, removal and dashboard rows disclose the exception.
+Create and verify report `writes`, `home-closed` and `daemons` as `weak` when their checks succeed with this exception.
+Verify actually reads a host fixture and creates and reads back a file in `T`, with matching denial probes when off.
+It also checks the still-denied locations. A mismatch fails the check.
+
+`test/unit/workspaces.test.ts` includes live Seatbelt tests on macOS for both settings, real Unix socket access in
+`T`, actual denied writes in `C`, `0`, home and the two global temp folders, running-process refusal and retained
+host-temp files after removal. A small C program built with the installed Apple clang calls
+`confstr(_CS_DARWIN_USER_TEMP_DIR)` and creates, writes and reads a temporary file there, then deletes it. It fails
+with the setting off and succeeds with it on while `$TMPDIR` stays private. This measures the OS temp-path symptom;
+it does not measure PyTorch/MPS warning counts or CoreML inference. Those workloads were not rerun, and no packages
+were installed. Unit tests cover boolean validation, legacy defaults, original profile hash, CLI parsing and JSON,
+and dashboard DOM output. Dashboard appearance was not evaluated.
+
 ## Logins
 
 Creation imports the `default` Claude and Codex profiles unless explicitly selected otherwise. `--claude-profile work`
@@ -108,8 +145,8 @@ created workspace folders excluded, measured by K24; existing backups and other 
   declared-ports mode. Remote effects can outlive removal.
 - Reads outside home are open, including `/Applications`, `/nix`, `/opt/homebrew`, `/Users/Shared` and `/Volumes`.
   Other processes' command lines remain visible, measured using a known outside process in K19.
-- The profile closes named channels. Unix sockets outside the workspace are denied except mDNSResponder for DNS;
-  K10 tried Docker, nix and a controlled listener without sending daemon API requests. LaunchServices opening and
+- The profile closes named channels. Unix sockets outside the workspace are denied except mDNSResponder for DNS
+  and shared `T` when host-temp is on. K10 tried Docker, nix and a controlled listener without sending daemon API requests. LaunchServices opening and
   registration, launchd jobs, preferences, clipboard and outside-process signals and descriptors have controlled
   K probes. `at` and crontab installation were not tested because the eval does not change the user's queues.
 - **Apple events are not covered.** A deny rule or kernel decision alone does not establish a blocked side effect.
@@ -126,7 +163,7 @@ created workspace folders excluded, measured by K24; existing backups and other 
 
 ## Implementation and verification
 
-Workspaces have a separate spec, manifest directory and fixed checklist; they are not providers. All eight
+Workspaces have a separate spec, manifest directory and fixed checklist; they are not providers. All nine
 `workspace*` API methods are socket-only and local. The dashboard displays a separate **Workspaces: not sandboxes**
 section through the read-only summary. Its actions stay in the CLI. Non-macOS commands refuse before starting a daemon.
 Summary reads manifests and counts tagged processes, without repairing identity, changing modes or walking the tree.

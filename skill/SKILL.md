@@ -130,6 +130,8 @@ coverage and limits.
 ```sh
 paddock workspace create NAME --copy /absolute/project [--read PATH] [--path DIR] [--no-logins]
 paddock workspace create NAME --claude-profile work --codex-profile work
+paddock workspace create NAME --host-temp --no-logins
+paddock workspace set NAME host-temp on|off   # stop first; later processes use the changed profile
 paddock workspace shell NAME
 paddock workspace exec NAME [--stdin | --stream] -- COMMAND ARG…
 paddock workspace list
@@ -147,7 +149,17 @@ before its processes have been identified and ended.
 Always describe it as a workspace, not a sandbox. It has the same kernel and user, no resource limits, open internet,
 LAN, tailnet and loopback, and open reads outside home. Current listeners appear in create/verify; later listeners
 are reachable too. There is no declared-ports option. `--read ~/.ssh`, workspace/state/home ancestors and shared temp
-allowances are refused. Writes and installs outside the folder remain refused, including Docker and nix sockets.
+allowances are refused. By default, writes and installs outside the folder remain refused, including Docker and nix sockets.
+
+`--host-temp` at creation or `workspace set NAME host-temp on|off` opens only this user's shared per-user temp `T`
+folder for reads, writes and Unix socket connections. It defaults off, including old manifests. Changes refuse
+while processes run; use `workspace stop` first. `$TMPDIR` stays inside the workspace. Home, `/private/tmp`,
+`/private/var/tmp`, and sibling `C` and `0` folders remain denied. With it on, always disclose that other programs'
+temp files and sockets there are readable and writable, other enabled workspaces share it, and files left there
+survive remove and are excluded from workspace size. Successful boundary checks show `weak` for this exception.
+Live Seatbelt tests measure temp files, sockets, remaining denials and a `confstr(DARWIN_USER_TEMP_DIR)` file
+reproduction. Unit tests cover defaults, validation, profile bytes, CLI JSON and dashboard rows. PyTorch/MPS warning
+counts and CoreML inference were not rerun; do not claim those workloads were fixed.
 
 Creation imports `default` profiles unless the user selects named profiles. `--claude-profile work` reads
 `~/.claude-work`; `--codex-profile work` reads `~/.codex-work`. `--no-logins` reads/imports no logins. Daemon environment

@@ -655,7 +655,7 @@ functions with their own checklist. A workspace is not a sandbox or a `Provider`
 isolated-kernel, network or resource-limit checks. No sandbox check is skipped or reworded for it.
 
 The `workspaceList`, `workspaceGet`, `workspaceCreate`, `workspaceExec`, `workspaceShell`, `workspaceStop`,
-`workspaceRemove` and `workspaceVerify` methods are all socket-only and local. Shells and streamed exec use the
+`workspaceRemove`, `workspaceSet` and `workspaceVerify` methods are all socket-only and local. Shells and streamed exec use the
 existing stream socket with `kind: "workspace"`; remote routes and a requested user are refused. The dashboard's
 read-only summary carries a separate workspace inventory. Dashboard workspace actions remain unavailable to honor
 socket-only authority. Summary reads manifests and tagged-process counts without identity repair, chmod or tree
@@ -684,6 +684,14 @@ Keychain authentication are not established by a policy decision or the presence
 `PADDOCK_WORKSPACE_ONLY=1` disables providers for a daemon used solely for workspaces. The K-only runner sets this
 with private state, so it neither discovers engines nor connects to registered machines. A normal daemon retains its
 existing provider sweep and sandbox enforcement.
+
+`spec.hostTemp` is an explicit boolean, defaulting to false for legacy manifests. Only the on profile adds a
+parameter for the canonical per-user `T` folder with file and Unix socket allowances. The off profile is unchanged.
+`workspaceSet` refuses running processes and clears old verification before later launches use the regenerated
+profile. Verification probes real `T` reads and writes and still-denied sibling paths, reporting the disclosed
+exception as `weak`. Inventory and removal include its shared-file, socket, cleanup and size limits. The live
+Seatbelt and `confstr` tests in `test/unit/workspaces.test.ts` measure temp-path access, not PyTorch/MPS or CoreML
+workloads. See [shared temp configuration](workspaces.md#allow-the-shared-per-user-temp-folder).
 
 ## Adding a provider
 

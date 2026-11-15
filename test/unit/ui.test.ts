@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { Window } from "happy-dom"
+import { workspaceDisclosure, HOST_TEMP_DISCLOSURE } from "../../core/workspace-profile"
 import { CHECKLIST, historical } from "../../core/checks"
 import type { CheckResult } from "../../core/types"
 
@@ -178,4 +179,12 @@ test("an unavailable setting cannot be changed and a sandbox with unknown probes
   expect(ui.text("#sandboxes")).not.toContain("✓")
   ui.button("Past checks").click()
   expect(ui.text("ul.checks")).toContain("unknown (none). The control did not answer.")
+})
+
+
+test("each workspace row shows host-temp state and the shared-temp disclosure", async () => {
+  const ui = await page({ ...base, list: () => [], summary: () => ({ workspaces: [false, true].map((hostTemp) => ({ name: hostTemp ? "shared" : "closed", status: "idle", spec: { hostTemp }, disclosure: workspaceDisclosure(hostTemp) })) }) })
+  const rows = [...ui.window.document.querySelectorAll("#workspaces .panel")].map((row) => row.textContent)
+  expect(rows[0]).toContain("host-temp off"); expect(rows[0]).not.toContain(HOST_TEMP_DISCLOSURE)
+  expect(rows[1]).toContain("host-temp on (shared, weaker)"); expect(rows[1]).toContain(HOST_TEMP_DISCLOSURE)
 })
