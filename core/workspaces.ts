@@ -415,7 +415,14 @@ export class Workspaces {
       return this.launch(manifest, command, options.tty, options.cols, options.rows)
     })
   }
-  async exec(name: string, argv: unknown, stdin?: string | Uint8Array): Promise<RunResult> { return (await this.open(name, argv, { tty: false })).collect(stdin, 0) }
+  async exec(name: string, argv: unknown, stdin?: string | Uint8Array, signal?: AbortSignal): Promise<RunResult> {
+    const session = await this.open(name, argv, { tty: false })
+    const result = session.collect(stdin, 0)
+    const abort = () => session.close("The buffered exec client disconnected.")
+    signal?.addEventListener("abort", abort, { once: true })
+    if (signal?.aborted) abort()
+    try { return await result } finally { signal?.removeEventListener("abort", abort) }
+  }
   async setHostTemp(name: string, hostTemp: unknown): Promise<WorkspaceView> {
     if (typeof hostTemp !== "boolean") throw new PaddockError("usage", "hostTemp must be a boolean.")
     return this.exclusive(workspaceName(name), async () => {

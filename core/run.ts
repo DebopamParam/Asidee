@@ -18,6 +18,9 @@ export const systemRunner: Runner = async (argv, options = {}) => {
   } catch (error) {
     return { exitCode: 127, stdout: "", stderr: `${argv[0]}: ${(error as Error).message}` }
   }
+  const abort = () => { child.kill("SIGKILL") }
+  options.signal?.addEventListener("abort", abort, { once: true })
+  if (options.signal?.aborted) abort()
   const limit = options.maxOutputBytes ?? OUTPUT_LIMIT
   let overflow: "stdout" | "stderr" | undefined
   const collect = async (stream: ReadableStream<Uint8Array>, which: "stdout" | "stderr") => {
@@ -30,6 +33,7 @@ export const systemRunner: Runner = async (argv, options = {}) => {
     return Buffer.concat(chunks)
   }
   const [stdout, stderr, exitCode] = await Promise.all([collect(child.stdout, "stdout"), collect(child.stderr, "stderr"), child.exited])
+  options.signal?.removeEventListener("abort", abort)
   if (overflow) return { exitCode: 124, stdout: "", stderr: `${argv[0]} printed more than ${limit / 1024 ** 2} MiB on ${overflow} and was stopped; its output was discarded.`, overflow }
   return { exitCode: child.signalCode ? 124 : exitCode, stdout: stdout.toString("utf8"), stderr: child.signalCode ? `${stderr.toString("utf8")}\n(killed: ${child.signalCode})`.trim() : stderr.toString("utf8"),
     ...(options.binary ? { raw: new Uint8Array(stdout) } : {}) }

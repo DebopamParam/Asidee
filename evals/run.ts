@@ -1523,6 +1523,25 @@ ev("U17", "Starting over a watched disk limit warns in text and JSON while allow
   } finally { await pdk(["remove", name, "--confirm", name]) }
 })
 
+ev("U16", "A disconnected buffered exec client ends its command; a connected client receives its result", async () => {
+  await ensure(A)
+  const control = await pdk(["exec", A, "--", "sh", "-c", "sleep 1; echo connected; exit 3"])
+  expect(control.code === 3 && control.out === "connected\n", `connected control: ${control.out}${control.err}`)
+  const file = "/root/disconnected-exec.pid"
+  const client = Bun.spawn([BIN, "exec", A, "--", "sh", "-c", `echo $$ > ${file}; exec sleep 120`], { env: { ...process.env, ...env }, stdout: "ignore", stderr: "ignore" })
+  let pid = ""
+  try {
+    expect(await until(async () => { pid = (await docker(["exec", containerOf(A), "cat", file])).out.trim(); return /^\d+$/.test(pid) }, 10), "command never started")
+    expect((await docker(["exec", containerOf(A), "sh", "-c", `kill -0 ${pid}`])).code === 0, "control: command was not alive")
+    client.kill("SIGKILL"); await client.exited
+    expect(await until(async () => (await docker(["exec", containerOf(A), "sh", "-c", `! kill -0 ${pid} 2>/dev/null || grep -q '^State:.*Z' /proc/${pid}/status`])).code === 0, 10), `command PID ${pid} still runs after its CLI client died`)
+    return "connected client received output and exit 3; disconnected client's sleeping command ended within 10 s"
+  } finally {
+    client.kill("SIGKILL")
+    if (/^\d+$/.test(pid)) await docker(["exec", containerOf(A), "sh", "-c", `kill -KILL ${pid} 2>/dev/null || true; rm -f ${file}`])
+  }
+})
+
 ev("U15", "An unavailable image leaves no record, network or Docker volume, and the name can be retried", async () => {
   const name = `${PREFIX}-badimage`
   try {

@@ -268,6 +268,22 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
     } finally { decoy.kill("SIGKILL"); await decoy.exited; await drop(ws); await drop(other) }
   })
 
+  ev("K30", "A disconnected buffered workspace client ends its command; a connected client receives its result", async () => {
+    const ws = await make()
+    const file = join(ws.folder, "work", "client.pid")
+    const client = Bun.spawn([binary, "workspace", "exec", ws.name, "--", "/bin/sh", "-c", "echo $$ > client.pid; exec /bin/sleep 120"], { env, stdout: "ignore", stderr: "ignore" })
+    try {
+      expect(await wait(async () => Bun.file(file).exists()), "command never started")
+      const pid = Number(await readFile(file, "utf8"))
+      expect(workspacePids(ws.folder).includes(pid), "control: command was not alive in workspace")
+      client.kill("SIGKILL"); await client.exited
+      expect(await wait(async () => !workspacePids(ws.folder).includes(pid), 10_000), `workspace command PID ${pid} still runs after its CLI client died`)
+      const control = await pdk(["workspace", "exec", ws.name, "--", "/bin/sh", "-c", "sleep 1; echo connected; exit 3"])
+      expect(control.code === 3 && control.out === "connected\n", `connected control: ${control.out}${control.err}`)
+      return "disconnected client's command ended within 10 s; connected client received output and exit 3"
+    } finally { client.kill("SIGKILL"); await json(["stop", ws.name]); await drop(ws) }
+  })
+
   ev("K16", "Confirmed remove deletes its folder, unregisters its app and reports shared hard links", async () => {
     const ws = await make(); const outside = join(root, "hard-link-original"); await writeFile(outside, "original")
     const app = await bundle(join(ws.folder, "work"), `k${process.pid}remove`)

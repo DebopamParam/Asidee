@@ -52,7 +52,7 @@ export function execStdin(body: Body): string | Uint8Array | undefined {
   if (Buffer.byteLength(body.stdin) > OUTPUT_LIMIT) throw new PaddockError("usage", limit)
   return body.stdin
 }
-type Method = { run: (body: Body) => Promise<unknown>; socketOnly?: boolean }
+type Method = { run: (body: Body, signal?: AbortSignal) => Promise<unknown>; socketOnly?: boolean }
 
 // The whole API. The CLI, the UI and extensions all come through this table, so each has exactly these abilities.
 // keepSandboxes: the daemon is being replaced (an upgrade), not stopped, so the sandboxes it watches keep running.
@@ -65,7 +65,7 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     workspaceGet: { run: (body) => workspaces.get(String(body.name), body.withSize !== false), socketOnly: true },
     workspaceSet: { run: (body) => workspaces.setHostTemp(String(body.name), body.hostTemp), socketOnly: true },
     workspaceCreate: { run: (body) => workspaces.create(body), socketOnly: true },
-    workspaceExec: { run: (body) => workspaces.exec(String(body.name), body.argv, execStdin(body)), socketOnly: true },
+    workspaceExec: { run: (body, signal) => workspaces.exec(String(body.name), body.argv, execStdin(body), signal), socketOnly: true },
     workspaceShell: { run: async (body) => ({ workspace: await workspaces.get(String(body.name), false), stream: "workspace", argv: ["/bin/zsh", "-l"] }), socketOnly: true },
     workspaceStop: { run: (body) => workspaces.stop(String(body.name)), socketOnly: true },
     workspaceRemove: { run: (body) => workspaces.remove(String(body.name), body.confirm), socketOnly: true },
@@ -93,7 +93,7 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     snapshot: { run: (body) => core.snapshot(String(body.name), body.as) },
     templateList: { run: () => core.templateList() },
     templateRemove: { run: (body) => core.templateRemove(body.name, body.engine) },
-    exec: { run: (body) => core.exec(String(body.name), body.argv, { user: typeof body.user === "string" ? body.user : undefined, stdin: execStdin(body) }) },
+    exec: { run: (body, signal) => core.exec(String(body.name), body.argv, { user: typeof body.user === "string" ? body.user : undefined, stdin: execStdin(body), signal }) },
     extensions: { run: () => core.extensions() },
     action: { run: (body) => core.runAction(body.extension, body.action, body.sandbox, body.values) },
     forwardAdd: { run: (body) => core.forwardAdd(String(body.name), body.port, body.localPort) },
@@ -150,7 +150,7 @@ export function createHandler(table: Record<string, Method>, token: string, conf
           if (payload.machineId !== undefined && payload.machineId !== machines.hello.machineId) throw new PaddockError("identity-changed", "The request names another machine identity.")
         } else if (payload.host !== undefined && payload.host !== "local") throw new PaddockError("dependency", "Machine routing is unavailable.")
         const { host: _host, machineId: _identity, ...local } = payload
-        return json(200, { ok: true, data: await method.run(local) })
+        return json(200, { ok: true, data: await method.run(local, request.signal) })
       } catch (error) {
         const code: ErrorCode = error instanceof PaddockError ? error.code : error instanceof SyntaxError ? "usage" : "runtime"
         return json(STATUS[code], { ok: false, error: { code, message: (error as Error).message, details: error instanceof PaddockError ? error.details : undefined } })

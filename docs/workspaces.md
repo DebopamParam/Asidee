@@ -46,7 +46,8 @@ status and limits each output stream to 16 MiB. It waits for the command however
 uses the existing private stream socket and is the byte-exact path for output. `shell` uses a PTY when the caller has a
 terminal and carries terminal input and resize. PTY output waiting for a slow client is capped at 1 MiB; exceeding
 that ends the session with an error. A closed session ends its identified starter. Detached descendants remain
-tracked until `workspace stop` or `remove`. A daemon restart does not remove a workspace or its detached processes.
+tracked until `workspace stop` or `remove`. A daemon restart does not remove a workspace or its detached processes. A disconnected buffered exec client also
+closes its session and ends its command's starter. Detached descendants still require `workspace stop` or `remove`.
 Exec and shell run only blocking checks before launch. They do not run GPU/login probes, `lsof`, `tmutil`, `du`, or
 the hard-link walk. Full informational checks run at creation and explicit verify. Verify only reads directories
 while looking for hard links; an unreadable subtree is unknown. Permission repair belongs to remove.

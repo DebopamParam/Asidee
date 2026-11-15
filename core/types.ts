@@ -110,7 +110,7 @@ export type SshSetup = { user: string; home: string; unlocked: boolean; sshd: st
 // overflow: the command printed more than its output limit on that stream, was killed, and its output was discarded.
 // raw: stdout's bytes, when asked for with `binary`.
 export type RunResult = { exitCode: number; stdout: string; stderr: string; overflow?: "stdout" | "stderr"; raw?: Uint8Array }
-export type RunOptions = { stdin?: string | Uint8Array; timeoutMs?: number; env?: Record<string, string>; cwd?: string; maxOutputBytes?: number; binary?: boolean }
+export type RunOptions = { stdin?: string | Uint8Array; timeoutMs?: number; env?: Record<string, string>; cwd?: string; maxOutputBytes?: number; binary?: boolean; signal?: AbortSignal }
 // Every external command goes through a Runner, so tests run without an engine.
 export type Runner = (argv: readonly string[], options?: RunOptions) => Promise<RunResult>
 
@@ -143,7 +143,7 @@ export interface Provider {
   stop(manifest: Manifest): Promise<void>
   remove(manifest: Manifest, createdOnly?: boolean): Promise<void>
   status(manifest: Manifest): Promise<"running" | "stopped" | "missing">
-  exec(manifest: Manifest, argv: readonly string[], options?: { user?: string; stdin?: string | Uint8Array }): Promise<RunResult>
+  exec(manifest: Manifest, argv: readonly string[], options?: { user?: string; stdin?: string | Uint8Array; signal?: AbortSignal }): Promise<RunResult>
   // A command whose bytes are relayed as they come, for shells, binary exec and anything long-lived.
   openExec(manifest: Manifest, argv: readonly string[], options: { user?: string; tty: boolean; cols?: number; rows?: number }): Promise<Session>
   // Which run of the sandbox is running now, or undefined when it is not. A restart or a recreated container differs.

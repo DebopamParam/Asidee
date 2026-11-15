@@ -249,6 +249,16 @@ seconds returned its output and exit code. The CLI asks its daemon without Bun's
 ended such a request after 360 seconds with "The operation timed out."; a local exec has no deadline, and a routed one
 has the 45-minute mutation deadline below.
 
+A local buffered exec also receives the HTTP request's abort signal. A disconnected client kills its engine client
+and runs the same `PADDOCK_EXEC` cleanup as an output-limit failure. U16 kills the CLI after its sleeping command is
+confirmed alive inside, requires that command to end within ten seconds, and checks that a connected client receives
+its output and exit code. Commands that clear their environment or change user retain the cleanup limits above.
+A buffered workspace exec closes its existing workspace session on disconnect, ending the command's starter. As
+with a closed workspace stream, detached descendants remain tracked until `workspace stop` or `remove`; this does
+not stop every process in that workspace. K30 measures a disconnected sleeper and a connected output/exit control.
+Routed calls still close their SSH connection and report an unknown mutation outcome; target-side cancellation
+across machines has not been measured for this change.
+
 Buffered input is bytes: `--stdin` reads the caller's stdin whole and sends it as `stdinBase64`, which the daemon
 decodes after checking that it is canonical base64 of at most 16 MiB (`execStdin` in `core/daemon.ts`); a request
 with a string `stdin` is still accepted and sent as UTF-8, and one with both is refused. A routed request carries the

@@ -580,11 +580,11 @@ export class GvisorProvider implements Provider {
     return { imageId: template.imageId, dependants: template.dependants }
   }
 
-  async exec(manifest: Manifest, argv: readonly string[], options: { user?: string; stdin?: string | Uint8Array } = {}): Promise<RunResult> {
+  async exec(manifest: Manifest, argv: readonly string[], options: { user?: string; stdin?: string | Uint8Array; signal?: AbortSignal } = {}): Promise<RunResult> {
     if ((await this.status(manifest)) !== "running") throw new PaddockError("conflict", `${manifest.name} is not running. Start it first.`)
     const tag = randomBytes(8).toString("hex")
-    const ran = await this.docker(manifest.engine, ["exec", ...(options.stdin === undefined ? [] : ["-i"]), ...(options.user ? ["-u", options.user] : []), "-e", `PADDOCK_EXEC=${tag}`, container(manifest.name), ...argv], { stdin: options.stdin })
-    if (!ran.overflow) return ran
+    const ran = await this.docker(manifest.engine, ["exec", ...(options.stdin === undefined ? [] : ["-i"]), ...(options.user ? ["-u", options.user] : []), "-e", `PADDOCK_EXEC=${tag}`, container(manifest.name), ...argv], { stdin: options.stdin, signal: options.signal })
+    if (!ran.overflow && !options.signal?.aborted) return ran
     // The engine leaves an exec's processes running when its client is killed (measured: one kept a CPU busy), so they
     // are found by the variable they inherited and ended, as the same user: even root cannot read another user's
     // environment inside the sandbox. A process that cleared its environment or changed its user is not found.
