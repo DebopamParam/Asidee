@@ -219,7 +219,8 @@ mac("launch runs blocking checks only and verify reads hard-link directories wit
     commands.length = 0
     expect((await workspaces.exec("launch", ["/usr/bin/true"])).exitCode).toBe(0)
     expect(await Bun.file(join(home, "information-called")).exists()).toBe(false)
-    expect(commands.map((argv) => argv[0])).toEqual(["/usr/bin/nc"])
+    // Only the two unconfined listener controls: the private fixture and shared host temp T.
+    expect(commands.map((argv) => argv[0])).toEqual(["/usr/bin/nc", "/usr/bin/nc"])
     expect((await stat(closed)).mode & 0o777).toBe(0)
     expect((await workspaces.manifest("launch")).lastVerify?.at).toBe(m.lastVerify?.at)
     const verified = await workspaces.verify("launch")
@@ -297,14 +298,15 @@ test("host temp defaults closed, validates booleans and leaves the original prof
   const open = workspaceProfile({ ...manifest, spec: { hostTemp: true } })
   expect(open.params).toContain(`HOST_TEMP=${manifest.userVar}/T`)
   expect(open.text).toContain('(allow file-read* file-write* (subpath (param "HOST_TEMP")))')
-  expect(open.text).toContain('(remote unix-socket (subpath (param "HOST_TEMP")))')
+  // Host temp opens files only; Unix socket connections there stay under the base profile's denial.
+  expect(open.text.split("\n").filter((line) => !closed.text.split("\n").includes(line))).toEqual(['(allow file-read* file-write* (subpath (param "HOST_TEMP")))'])
   expect(open.text).not.toContain(manifest.userVar)
   expect(workspaceDisclosure(false)).toBe(WORKSPACE_DISCLOSURE)
   expect(workspaceDisclosure(true)).toContain(HOST_TEMP_DISCLOSURE)
   expect(workspaceEnvironment({ folder: manifest.folder, name: "temp", spec: validWorkspaceSpec({ name: "temp", hostTemp: true }) }).TMPDIR).toBe(`${manifest.folder}/tmp/`)
 })
 
-mac("host temp opens only T, discloses weaker checks, refuses live changes and survives removal", async () => {
+mac("host temp opens only T to files, refuses socket connections there, discloses weaker checks, refuses live changes and survives removal", async () => {
   const { root, workspaces, clean } = await fixture()
   const temp = await realpath(Bun.spawnSync(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"]).stdout.toString().trim())
   const outside = await mkdtemp(join(temp, "paddock-host-temp-test-"))
@@ -316,7 +318,7 @@ mac("host temp opens only T, discloses weaker checks, refuses live changes and s
     expect(made.ok).toBe(true)
     for (const id of ["writes", "home-closed", "daemons"]) {
       expect(made.checks.find((check) => check.id === id)).toMatchObject({ status: "weak" })
-      expect(made.checks.find((check) => check.id === id)?.detail).toContain(id === "daemons" ? "Sockets in shared host temp are open" : HOST_TEMP_DISCLOSURE)
+      expect(made.checks.find((check) => check.id === id)?.detail).toContain(id === "daemons" ? "In shared host temp T, with host-temp on, a listener control answered; confined connect refused." : HOST_TEMP_DISCLOSURE)
     }
     expect(made.checks.find((check) => check.id === "not-covered")?.detail).toContain(HOST_TEMP_DISCLOSURE)
     for (const view of [await workspaces.get("host-temp"), ...(await workspaces.list()), ...(await workspaces.summary())]) {
@@ -325,7 +327,18 @@ mac("host temp opens only T, discloses weaker checks, refuses live changes and s
     const m = await workspaces.manifest("host-temp")
     const socket = join(outside, "listener.sock")
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socket, resolve) })
-    expect(await workspaces.exec("host-temp", ["/usr/bin/nc", "-w", "1", "-U", socket])).toMatchObject({ exitCode: 0, stdout: "shared-temp-socket" })
+    // The unconfined control connects; the workspace is refused, though it can delete the socket file and listen there.
+    expect(await systemRunner(["/usr/bin/nc", "-w", "1", "-U", socket])).toMatchObject({ exitCode: 0, stdout: "shared-temp-socket" })
+    expect(await workspaces.exec("host-temp", ["/usr/bin/nc", "-w", "1", "-U", socket])).toMatchObject({ exitCode: 1, stdout: "" })
+    const left = join(outside, "left.sock"); const leftServer = createServer()
+    await new Promise<void>((resolve, reject) => { leftServer.once("error", reject); leftServer.listen(left, resolve) })
+    try { expect((await workspaces.exec("host-temp", ["/bin/rm", left])).exitCode).toBe(0) } finally { await new Promise<void>((resolve) => leftServer.close(() => resolve())) }
+    expect(await Bun.file(left).exists()).toBe(false)
+    const own = join(outside, "own.sock")
+    const listening = workspaces.exec("host-temp", ["/usr/bin/nc", "-lU", own])
+    for (let i = 0; i < 100 && !await lstat(own).catch(() => undefined); i++) await Bun.sleep(20)
+    expect((await systemRunner(["/usr/bin/nc", "-w", "1", "-U", own], { stdin: "from-outside" })).exitCode).toBe(0)
+    expect(await listening).toMatchObject({ exitCode: 0, stdout: "from-outside" })
     const target = join(outside, "file")
     const write = ["/bin/sh", "-c", 'printf live-temp > "$1" && cat "$1"', "probe", target]
     expect(await workspaces.exec("host-temp", write)).toMatchObject({ exitCode: 0, stdout: "live-temp" })
@@ -344,11 +357,16 @@ mac("host temp opens only T, discloses weaker checks, refuses live changes and s
     await workspaces.stop("host-temp"); await session.finished; session = undefined
     const closed = await workspaces.setHostTemp("host-temp", false)
     expect(closed.spec?.hostTemp).toBe(false); expect(closed.lastVerify).toBeUndefined()
-    expect((await workspaces.exec("host-temp", ["/usr/bin/nc", "-w", "1", "-U", socket])).exitCode).not.toBe(0)
+    expect(await workspaces.exec("host-temp", ["/usr/bin/nc", "-w", "1", "-U", socket])).toMatchObject({ exitCode: 1, stdout: "" })
     expect((await workspaces.exec("host-temp", ["/bin/cat", target])).exitCode).not.toBe(0)
     expect((await workspaces.exec("host-temp", write)).exitCode).not.toBe(0)
+    expect((await workspaces.exec("host-temp", ["/usr/bin/nc", "-lU", join(outside, "closed.sock")])).exitCode).not.toBe(0)
+    expect(await Bun.file(join(outside, "closed.sock")).exists()).toBe(false)
+    expect((await workspaces.exec("host-temp", ["/bin/rm", socket])).exitCode).not.toBe(0)
+    expect(await lstat(socket).catch(() => undefined)).toBeDefined()
     const verified = await workspaces.verify("host-temp")
-    for (const id of ["writes", "home-closed"]) expect(verified.checks.find((check) => check.id === id)?.status).toBe("pass")
+    for (const id of ["writes", "home-closed", "daemons"]) expect(verified.checks.find((check) => check.id === id)?.status).toBe("pass")
+    expect(verified.checks.find((check) => check.id === "daemons")?.detail).toContain("In shared host temp T, with host-temp off, a listener control answered; confined connect refused.")
     expect(verified.workspace.disclosure).not.toContain(HOST_TEMP_DISCLOSURE)
     // Old manifests acquire the default without rewriting their profile.
     const file = join(root, "state/workspaces/host-temp.json")

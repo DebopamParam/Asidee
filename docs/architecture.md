@@ -664,7 +664,7 @@ walks. CLI list/get alone request live size measurements. The 30-second enforcem
 Launch runs only blocking checks. Create and verify additionally inspect listeners, logins, hard links, Time Machine
 and an available ffmpeg hardware-only encode. Verify does not repair directory permissions for its hard-link walk;
 remove does. Policy controls use confined processes with same-operation allowed decisions, and the daemon/socket
-check includes a real listener with a working outside control. A `--` separator prevents command arguments from
+check includes real listeners, in a private fixture and in shared `T`, each with a working outside control. A `--` separator prevents command arguments from
 changing sandbox-exec's parameters.
 
 Credential reading and Claude's state allowlist live in `core/credentials.ts`, reused by the login extension.
@@ -686,11 +686,12 @@ with private state, so it neither discovers engines nor connects to registered m
 existing provider sweep and sandbox enforcement.
 
 `spec.hostTemp` is an explicit boolean, defaulting to false for legacy manifests. Only the on profile adds a
-parameter for the canonical per-user `T` folder with file and Unix socket allowances. The off profile is unchanged.
-`workspaceSet` refuses running processes and clears old verification before later launches use the regenerated
-profile. Verification probes real `T` reads and writes and still-denied sibling paths, reporting the disclosed
-exception as `weak`. Inventory and removal include its shared-file, socket, cleanup and size limits. The live
-Seatbelt and `confstr` tests in `test/unit/workspaces.test.ts` measure temp-path access, not PyTorch/MPS or CoreML
+parameter for the canonical per-user `T` folder, with a file read and write allowance and no network allowance. The
+off profile is unchanged. `workspaceSet` refuses running processes and clears old verification before later launches
+use the regenerated profile. Verification probes real `T` reads and writes, still-denied sibling paths, and a refused
+confined connection to a real listener in `T` beside an unconfined control, reporting the disclosed exception as
+`weak`. Inventory and removal include its shared-file, socket-file, cleanup and size limits. The live Seatbelt and
+`confstr` tests in `test/unit/workspaces.test.ts` measure temp-path and socket access, not PyTorch/MPS or CoreML
 workloads. See [shared temp configuration](workspaces.md#allow-the-shared-per-user-temp-folder).
 
 ## Adding a provider

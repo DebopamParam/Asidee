@@ -67,24 +67,30 @@ Changing the setting refuses while any workspace processes run. Stop them first.
 shells and execs, and saved verification is cleared. If a partial update leaves the profile and manifest mismatched,
 execution refuses the integrity check. Save the setting again to recover.
 
-With the setting on, the profile allows reads, writes and Unix socket connections only in this user's canonical
-per-user `T` folder. The sibling `C` and `0` folders, `/private/tmp`, `/private/var/tmp`, and home remain denied.
-`$TMPDIR` still points at the workspace's own `tmp`. The `--read` refusal for shared temporary folders still applies.
-With the setting off, generated profile bytes and parameters are unchanged from the original profile.
+With the setting on, the profile adds one rule: file reads and writes only in this user's canonical per-user `T`
+folder. It adds no network rule, so connecting to a Unix socket there stays refused by the profile's general Unix
+socket denial. The sibling `C` and `0` folders, `/private/tmp`, `/private/var/tmp`, and home remain denied. `$TMPDIR`
+still points at the workspace's own `tmp`. The `--read` refusal for shared temporary folders still applies. With the
+setting off, generated profile bytes and parameters are unchanged from the original profile.
 
-This weakens confinement. Other programs' temp files and sockets there are readable and writable by this workspace.
-Other workspaces with the setting on share that folder. Files left there are not removed by `workspace remove` and
-are not counted in workspace size. List, get, shell, exec, verification, removal and dashboard rows disclose the exception.
-Create and verify report `writes`, `home-closed` and `daemons` as `weak` when their checks succeed with this exception.
-Verify actually reads a host fixture and creates and reads back a file in `T`, with matching denial probes when off.
-It also checks the still-denied locations. A mismatch fails the check.
+This weakens confinement. Other programs' temp files there are readable and writable by this workspace. Socket files
+are directory entries: the workspace can delete another program's socket file in `T`, and can create its own
+listening socket there, which an outside program can connect to. Other workspaces with the setting on share that
+folder. Files left there are not removed by `workspace remove` and are not counted in workspace size. List, get,
+shell, exec, verification, removal and dashboard rows disclose the exception. Create and verify report `writes`,
+`home-closed` and `daemons` as `weak` when their checks succeed with this exception. Verify actually reads a host
+fixture and creates and reads back a file in `T`, with matching denial probes when off. It also checks the
+still-denied locations. With the setting on or off, the `daemons` check starts a real listener in `T`: an unconfined
+control must receive its reply and a confined connect must be refused. A mismatch fails the check; a failed control
+makes it unknown.
 
-`test/unit/workspaces.test.ts` includes live Seatbelt tests on macOS for both settings, real Unix socket access in
-`T`, actual denied writes in `C`, `0`, home and the two global temp folders, running-process refusal and retained
-host-temp files after removal. A small C program built with the installed Apple clang calls
-`confstr(_CS_DARWIN_USER_TEMP_DIR)` and creates, writes and reads a temporary file there, then deletes it. It fails
-with the setting off and succeeds with it on while `$TMPDIR` stays private. This measures the OS temp-path symptom;
-it does not measure PyTorch/MPS warning counts or CoreML inference. Those workloads were not rerun, and no packages
+`test/unit/workspaces.test.ts` includes live Seatbelt tests on macOS for both settings: refused confined connections
+to a listener in `T` beside a working unconfined control, deletion of another listener's socket file and a confined
+listener in `T` reached from outside with the setting on (both refused with it off), actual denied writes in `C`, `0`,
+home and the two global temp folders, running-process refusal and retained host-temp files after removal. A small C
+program built with the installed Apple clang calls `confstr(_CS_DARWIN_USER_TEMP_DIR)` and creates, writes and reads a
+temporary file there, then deletes it. It fails with the setting off and succeeds with it on while `$TMPDIR` stays
+private. This measures the OS temp-path symptom; it does not measure PyTorch/MPS warning counts or CoreML inference. Those workloads were not rerun, and no packages
 were installed. Unit tests cover boolean validation, legacy defaults, original profile hash, CLI parsing and JSON,
 and dashboard DOM output. Dashboard appearance was not evaluated.
 
@@ -145,8 +151,9 @@ created workspace folders excluded, measured by K24; existing backups and other 
   declared-ports mode. Remote effects can outlive removal.
 - Reads outside home are open, including `/Applications`, `/nix`, `/opt/homebrew`, `/Users/Shared` and `/Volumes`.
   Other processes' command lines remain visible, measured using a known outside process in K19.
-- The profile closes named channels. Unix sockets outside the workspace are denied except mDNSResponder for DNS
-  and shared `T` when host-temp is on. K10 tried Docker, nix and a controlled listener without sending daemon API requests. LaunchServices opening and
+- The profile closes named channels. Unix sockets outside the workspace are denied except mDNSResponder for DNS;
+  sockets in shared `T` stay denied when host-temp is on. K10 tried Docker, nix and a controlled listener without
+  sending daemon API requests. LaunchServices opening and
   registration, launchd jobs, preferences, clipboard and outside-process signals and descriptors have controlled
   K probes. `at` and crontab installation were not tested because the eval does not change the user's queues.
 - **Apple events are not covered.** A deny rule or kernel decision alone does not establish a blocked side effect.
@@ -172,8 +179,9 @@ enforcement pass does no workspace inventory work. Full check results retain the
 
 Policy decision controls run inside confined processes. Read and write decisions have same-operation allowed
 controls on the workspace folder. Global denials use a second confined profile with the needed allows, running
-only a trusted `sleep`; unsupported operation names cannot establish a pass. Every blocking check also tries a real
-Unix listener in a private fixture folder: its unconfined control must answer and the confined connect must fail.
+only a trusted `sleep`; unsupported operation names cannot establish a pass. Every blocking check also tries real
+Unix listeners in a private fixture folder and in shared `T`: each unconfined control must answer and each confined
+connect must fail.
 Every launch inserts `--` after sandbox-exec's profile parameters. K27 demonstrates that the old unseparated
 `-D WS=/` form opened a controlled outside write, and that the product separator prevents it.
 

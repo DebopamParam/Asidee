@@ -276,7 +276,7 @@ export class Workspaces {
     let fixture: string | undefined
     let tempFixture: string | undefined
     let socketFixture: string | undefined
-    let server: ReturnType<typeof createServer> | undefined
+    const servers: Array<ReturnType<typeof createServer>> = []
     try {
       await this.restoreIdentity(manifest)
       const before = workspacePids(manifest.folder)
@@ -331,15 +331,21 @@ export class Workspaces {
         && (op !== "mach-lookup" || decision(probe!.pid, op, type, "com.apple.system.logger") === 0))
       const refuses = (checks: Array<[string, number, string]>) => checks.every(([op, type, arg]) => controlledDecision(probe!.pid, control!.pid, op, type, arg) === "denied")
       const launchChannels: Array<[string, number, string]> = [["lsopen", 0, ""], ["job-creation", 0, ""], ["mach-lookup", 2, "com.apple.lsd.modifydb"]]
+      // A real listener, answered by an unconfined control, in a private fixture and in shared host temp T, which the
+      // host-temp setting opens for files but not for connections.
+      const marker = "paddock-socket-control\n"
+      const listener = async (socket: string) => {
+        const server = createServer((connection) => connection.end(marker)); servers.push(server)
+        await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socket, resolve) })
+        const unconfined = await this.runHost(["/usr/bin/nc", "-w", "1", "-U", socket], { timeoutMs: 3000 })
+        const attempt = await this.run(manifest, ["/usr/bin/nc", "-w", "1", "-U", socket])
+        const answered = unconfined.exitCode === 0 && unconfined.stdout === marker; const denied = attempt.exitCode === 1 && attempt.stdout === ""
+        return { known: answered && (attempt.exitCode === 0 || denied), denied, control: answered ? "answered" : `failed (exit ${unconfined.exitCode})` }
+      }
       socketFixture = await mkdtemp("/private/tmp/paddock-check-")
-      const socket = join(socketFixture, "control.sock"); const marker = "paddock-socket-control\n"
-      server = createServer((connection) => connection.end(marker))
-      await new Promise<void>((resolve, reject) => { server!.once("error", reject); server!.listen(socket, resolve) })
-      const socketControl = await this.runHost(["/usr/bin/nc", "-w", "1", "-U", socket], { timeoutMs: 3000 })
-      const socketAttempt = await this.run(manifest, ["/usr/bin/nc", "-w", "1", "-U", socket])
-      const socketDenied = socketAttempt.exitCode === 1 && socketAttempt.stdout === ""
-      const socketsKnown = socketControl.exitCode === 0 && socketControl.stdout === marker && (socketAttempt.exitCode === 0 || socketDenied)
-      add("daemons", !controls(launchChannels) || !socketsKnown ? "unknown" : refuses(launchChannels) && socketDenied ? manifest.spec.hostTemp ? "weak" : "pass" : "fail", "probed", `A real Unix-socket listener control ${socketControl.exitCode === 0 && socketControl.stdout === marker ? "answered" : "failed (exit " + socketControl.exitCode + ")"}; confined connect ${socketDenied ? "refused" : "not established as refused"}. Allowed confined policy controls ${controls(launchChannels) ? "answered" : "unavailable"}; decisions ${launchChannels.map(([op, type, arg]) => op + "=" + controlledDecision(probe!.pid, control!.pid, op, type, arg)).join(", ")}. ${manifest.spec.hostTemp ? "Sockets in shared host temp are open by the host-temp setting. " : ""}Apple events are not covered.`)
+      const outside = await listener(join(socketFixture, "control.sock"))
+      const temp = await listener(join(tempFixture, "control.sock"))
+      add("daemons", !controls(launchChannels) || !outside.known || !temp.known ? "unknown" : refuses(launchChannels) && outside.denied && temp.denied ? manifest.spec.hostTemp ? "weak" : "pass" : "fail", "probed", `A real Unix-socket listener control ${outside.control}; confined connect ${outside.denied ? "refused" : "not established as refused"}. In shared host temp T, with host-temp ${manifest.spec.hostTemp ? "on" : "off"}, a listener control ${temp.control}; confined connect ${temp.denied ? "refused" : "not established as refused"}. Allowed confined policy controls ${controls(launchChannels) ? "answered" : "unavailable"}; decisions ${launchChannels.map(([op, type, arg]) => op + "=" + controlledDecision(probe!.pid, control!.pid, op, type, arg)).join(", ")}. ${manifest.spec.hostTemp ? "Host-temp lets this workspace delete socket files in T and create listeners there. " : ""}Apple events are not covered.`)
       const data: Array<[string, number, string]> = [["user-preference-read", 6, "com.apple.finder"], ["user-preference-write", 6, "com.apple.finder"], ["mach-lookup", 2, "com.apple.pasteboard.1"], ["signal", 0, ""], ["process-info-pidinfo", 0, ""]]
       add("user-data", !controls(data) ? "unknown" : refuses(data) ? "pass" : "fail", "probed", `Preferences, pasteboard lookup, signals and process-info-pidinfo allowed confined controls ${controls(data) ? "answered" : "unavailable"}; denials ${refuses(data) ? "confirmed" : "not established"}. End-to-end coverage is K11/K12.`)
     } catch (error) {
@@ -351,7 +357,7 @@ export class Workspaces {
     finally {
       if (probe) { probe.close(); await probe.finished }
       if (control) { control.close(); await control.finished }
-      if (server?.listening) await new Promise<void>((resolve) => server!.close(() => resolve()))
+      for (const server of servers) if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()))
       if (tempFixture) await rm(tempFixture, { recursive: true, force: true })
       if (socketFixture) await rm(socketFixture, { recursive: true, force: true })
       if (fixture) await rm(fixture, { recursive: true, force: true })

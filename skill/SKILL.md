@@ -152,14 +152,17 @@ are reachable too. There is no declared-ports option. `--read ~/.ssh`, workspace
 allowances are refused. By default, writes and installs outside the folder remain refused, including Docker and nix sockets.
 
 `--host-temp` at creation or `workspace set NAME host-temp on|off` opens only this user's shared per-user temp `T`
-folder for reads, writes and Unix socket connections. It defaults off, including old manifests. Changes refuse
-while processes run; use `workspace stop` first. `$TMPDIR` stays inside the workspace. Home, `/private/tmp`,
-`/private/var/tmp`, and sibling `C` and `0` folders remain denied. With it on, always disclose that other programs'
-temp files and sockets there are readable and writable, other enabled workspaces share it, and files left there
-survive remove and are excluded from workspace size. Successful boundary checks show `weak` for this exception.
-Live Seatbelt tests measure temp files, sockets, remaining denials and a `confstr(DARWIN_USER_TEMP_DIR)` file
-reproduction. Unit tests cover defaults, validation, profile bytes, CLI JSON and dashboard rows. PyTorch/MPS warning
-counts and CoreML inference were not rerun; do not claim those workloads were fixed.
+folder for file reads and writes. Connecting to Unix sockets there stays refused. It defaults off, including old
+manifests. Changes refuse while processes run; use `workspace stop` first. `$TMPDIR` stays inside the workspace. Home,
+`/private/tmp`, `/private/var/tmp`, and sibling `C` and `0` folders remain denied. With it on, always disclose that
+other programs' temp files there are readable and writable, that the workspace can delete their socket files and
+create listening sockets there that outside programs can connect to, that other enabled workspaces share it, and that
+files left there survive remove and are excluded from workspace size. Successful boundary checks show `weak` for this
+exception. Verify connects to a real listener in `T` from an unconfined control and from inside, with the setting on
+or off; the inside connection must be refused. Live Seatbelt tests measure temp files, refused socket connections,
+socket-file deletion and listening, remaining denials and a `confstr(DARWIN_USER_TEMP_DIR)` file reproduction.
+Unit tests cover defaults, validation, profile bytes, CLI JSON and dashboard rows. PyTorch/MPS warning counts and
+CoreML inference were not rerun; do not claim those workloads were fixed.
 
 Creation imports `default` profiles unless the user selects named profiles. `--claude-profile work` reads
 `~/.claude-work`; `--codex-profile work` reads `~/.codex-work`. `--no-logins` reads/imports no logins. Daemon environment
