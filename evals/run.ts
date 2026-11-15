@@ -741,9 +741,12 @@ ev("I18", "Inner containers inherit sandbox DNS; the engine resolver failure and
       const own = await innerDocker(INNER, ["run", "--rm", "--network", "eval-dns", "alpine:latest", "sh", "-c", "grep -E '^nameserver|ExtServers' /etc/resolv.conf; nslookup example.com"])
       expect(own.code === 0 && own.out.includes("nameserver 127.0.0.11") && own.out.includes("host(1.1.1.1) host(8.8.8.8)"), `an inner user-defined network did not resolve through the inner daemon: ${own.out}${own.err}`)
     } finally { await innerDocker(INNER, ["network", "rm", "eval-dns"]) }
+    // The DNS check carries the disclosure; the docker check only points to it.
     const checks = (await pdkJson(["verify", INNER])).reply.data.checks
-    const detail = checks.find((check: { id: string }) => check.id === "docker").detail
-    for (const word of ["fallback", "127.0.0.11", "1.1.1.1", "8.8.8.8"]) expect(detail.includes(word), `missing DNS disclosure: ${detail}`)
+    const dns = checks.find((check: { id: string }) => check.id === "dns")
+    expect(dns?.status === "pass", `the DNS check did not pass: ${JSON.stringify(dns)}`)
+    for (const word of ["fallback", "127.0.0.11", "1.1.1.1", "8.8.8.8"]) expect(dns.detail.includes(word), `missing DNS disclosure: ${dns.detail}`)
+    expect(checks.find((check: { id: string }) => check.id === "docker")?.detail.includes("the separate DNS check"), "the docker check does not point to the DNS check")
     return `engine assigned 127.0.0.11: runc resolved, gVisor refused; ${upstreamNote}; outer and inner use ${servers(inner.out)} and resolve successfully; an inner user-defined network resolves through the inner daemon's 127.0.0.11, which forwards to them`
   } finally { await docker(["rm", "-f", ...names]) }
 })
@@ -1316,24 +1319,47 @@ ev("U02", "Help lists every command, and errors say what to do next", async () =
   expect((await pdk(["start"])).err.includes("name"), "start without a name does not ask for one")
 })
 
-ev("U03", "The dashboard, in a real browser, shows each sandbox with the same check results the API gives", async () => {
+// The dashboard's check rows for one sandbox, compared with what list/get returns: stored verification is history, so
+// each row is marked unknown, says the current property is unknown, and shows the API's dated detail as it is.
+async function shownHistory(page: Awaited<ReturnType<typeof browser>>, name: string) {
+  const stored = (await view(name))?.lastVerify as { at: string; results: Array<{ id: string; status: string; evidence: string; detail: string }> } | undefined
+  expect(stored, `the API has no stored verification for ${name}`)
+  expect(await page.waitFor(`${panel(name)}?.innerText.includes(${JSON.stringify(`Last measured ${stored!.at}.`)}) && ${panel(name)}.querySelectorAll("ul.checks li[class]").length >= ${stored!.results.length}`, 10), `the dashboard does not show the verification measured at ${stored!.at}`)
+  const shown = await page.evaluate(`[...${panel(name)}.querySelectorAll("ul.checks li")].filter((node) => node.querySelector(".mark")).map((node) => ({ status: node.className, text: node.innerText, detail: node.querySelector(".detail").textContent }))`) as Array<{ status: string; text: string; detail: string }>
+  expect(shown.length === stored!.results.length, `${shown.length} checks shown, ${stored!.results.length} in the API`)
+  stored!.results.forEach((check, index) => {
+    const title = CHECKLIST.find((item) => item.id === check.id)!.title
+    expect(check.status === "unknown" && shown[index]!.status === "unknown" && shown[index]!.text.includes(title) && shown[index]!.text.includes("current property unknown") && shown[index]!.detail === check.detail,
+      `the dashboard shows "${shown[index]!.text.slice(0, 120)}" (${shown[index]!.status}) for ${check.id}, whose API row is ${check.status}: ${check.detail.slice(0, 120)}`)
+  })
+  expect(await page.evaluate(`${panel(name)}.querySelector(".badge.unknown")?.textContent === "Not verified"`), "the sandbox is not labelled Not verified")
+  return stored!
+}
+
+ev("U03", "The dashboard, in a real browser, shows each sandbox's measured checks as the API gives them, dated and not current", async () => {
   await ensure(A)
-  const api = (await socket("verify", { name: A })).reply.data.checks as Array<{ id: string; status: string; detail: string }>
+  const verified = await socket("verify", { name: A })
+  expect(verified.reply.ok, `verify failed: ${verified.reply.error?.message}`)
+  const live = verified.reply.data.checks as Array<{ id: string; status: string; evidence: string; detail: string }>
   const page = await browser((await pdkJson(["ui"])).reply.data.url)
   try {
     expect(await page.waitFor(`Boolean(${panel(A)})`, 15), `the sandbox never appeared: ${String(await page.evaluate("document.body.innerText")).slice(0, 300)}`)
     expect(await page.evaluate("location.hash === '' && !location.href.includes('token')"), "the token stays in the address bar")
     expect(await page.evaluate(`${panel(A)}.querySelector(".badge").textContent`) === "running", "the status badge is wrong")
-    await page.evaluate(`[...${panel(A)}.querySelectorAll("button")].find((button) => /Checks|failed|Not verified/.test(button.textContent)).click()`)
-    expect(await page.waitFor(`${panel(A)}.querySelectorAll("ul.checks li[class]").length >= ${api.length}`, 5), "the checks did not open")
-    const shown = await page.evaluate(`[...${panel(A)}.querySelectorAll("ul.checks li")].filter((node) => node.querySelector(".mark")).map((node) => ({ status: node.className, text: node.innerText }))`) as Array<{ status: string; text: string }>
-    expect(shown.length === api.length, `${shown.length} checks shown, ${api.length} in the API`)
-    api.forEach((check, index) => {
-      const title = CHECKLIST.find((item) => item.id === check.id)!.title
-      expect(shown[index]!.status === check.status && shown[index]!.text.includes(title) && shown[index]!.text.includes(check.detail), `the dashboard shows "${shown[index]!.text.slice(0, 80)}" (${shown[index]!.status}) for ${check.id} (${check.status})`)
-    })
+    expect(await page.evaluate(`${panel(A)}.querySelectorAll("ul.checks").length === 0`), "the checks are open before they were asked for")
+    await page.evaluate(`[...${panel(A)}.querySelectorAll("button")].find((button) => button.textContent === "Past checks").click()`)
+    const first = await shownHistory(page, A)
+    // What the rows date is exactly what verify measured and returned live.
+    expect(first.results.length === live.length && live.every((check, index) => first.results[index]!.detail === `Measured ${first.at}: ${check.status} (${check.evidence}). ${check.detail}`), "the stored history differs from what verify returned")
+    // A verify started from the dashboard replaces the rows with its own, still dated measurement.
+    await page.evaluate(`[...${panel(A)}.querySelectorAll("button")].find((button) => button.textContent === "Verify").click()`)
+    expect(await until(async () => (await view(A))?.lastVerify !== undefined && (await view(A))!.lastVerify!.results[0]!.detail !== first.results[0]!.detail, 60), "the dashboard's Verify did not record a new measurement")
+    expect(await page.waitFor(`[...${panel(A)}.querySelectorAll("button")].some((button) => button.textContent === "Verify")`, 30), "the Verify button stayed busy")
+    const second = await shownHistory(page, A)
+    expect(second.at !== first.at, "the rows still show the earlier measurement")
     expect(await page.evaluate(`document.getElementById("engines").innerText.includes("ready")`), "no engine is shown as ready")
     expect(await page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth"), "the page scrolls sideways")
+    return `${live.length} rows equal the API's dated history of the live verify, all shown as unknown now; a dashboard verify replaced them with the measurement at ${second.at}`
   } finally { await page.close() }
 })
 
@@ -1345,7 +1371,10 @@ ev("U04", "In a real browser, the dashboard creates a sandbox, refuses a mistype
     await page.evaluate(`document.getElementById("f-name").value = ${JSON.stringify(name)}; document.getElementById("create").requestSubmit(); true`)
     expect(await page.waitFor(`document.querySelector("#create button").textContent.includes("Creating")`, 3), "the button gives no sign that anything started")
     expect(await page.waitFor(`${panel(name)}?.querySelector(".badge").textContent === "running" && document.querySelector("#create button").textContent === "Create and verify"`, 120), `the sandbox never showed as running: ${await page.evaluate(`document.getElementById("create-error").textContent`)}`)
-    expect(await page.evaluate(`${panel(name)}.querySelectorAll("ul.checks li.pass").length`) >= 8, "a new sandbox's checks are not open")
+    // Create opens its checks; they are the creation's measurement, dated, with no row claiming a current pass.
+    const created = await shownHistory(page, name)
+    const passed = created.results.filter((check) => check.detail.startsWith(`Measured ${created.at}: pass `)).length
+    expect(passed >= 8, `only ${passed} checks were measured as passing at creation`)
     const remove = `[...${panel(name)}.querySelectorAll("button")].find((button) => button.textContent === "Remove").click()`
     page.answerPromptsWith("something else"); await page.evaluate(remove)
     expect(await page.waitFor(`${panel(name)}?.querySelector("pre")?.textContent.includes("Confirm")`, 10), "a mistyped name gave no error")
@@ -1355,6 +1384,8 @@ ev("U04", "In a real browser, the dashboard creates a sandbox, refuses a mistype
     expect(!await view(name), "the sandbox was not removed")
     await page.evaluate(`document.getElementById("f-name").value = "ok-name"; document.getElementById("f-image").value = "--privileged"; document.getElementById("create").requestSubmit(); true`)
     expect(await page.waitFor(`document.getElementById("create-error").textContent.includes("image")`, 10), "a refused create shows no error")
+    expect(!await view("ok-name"), "a refused create made a sandbox")
+    return `${created.results.length} creation checks shown as dated history (${passed} measured passes, none shown as current); a mistyped removal refused; removal and an invalid image handled`
   } finally { await page.close(); await socket("remove", { name, confirm: name }) }
 })
 
@@ -2073,16 +2104,27 @@ ev("P02", "The Linux binary, run on Linux, creates a sandbox that passes every b
   } finally { await docker(["exec", runner, "paddock", "remove", name, "--confirm", name]); await docker(["rm", "-f", runner]) }
 })
 
-ev("P03", "The core has no code that only works on one operating system", async () => {
+// Named capability gates: a feature that exists on one operating system only, switched off elsewhere with a
+// platform-neutral answer. Each must appear exactly as written, once; anything else still needs to name Windows.
+const CAPABILITY_GATES: Array<{ file: string; gate: string; why: string }> = [
+  { file: "core/daemon.ts", gate: 'process.platform === "darwin" ? await workspaces.summary() : []', why: "workspaces are macOS-only; elsewhere the summary lists none" },
+]
+
+ev("P03", "The core has no code that only works on one operating system, except named capability gates", async () => {
   const offenders: string[] = []
   for (const file of ["core/core.ts", "core/daemon.ts", "core/state.ts", "core/run.ts", "core/stream.ts", "core/forwards.ts", "core/ssh.ts", "core/extensions.ts", "core/checks.ts", "core/providers/gvisor.ts", "cli/cli.ts"]) {
-    const text = (await readFile(join(ROOT, file), "utf8")).replace(/\/\/.*$/gm, "")
+    let text = (await readFile(join(ROOT, file), "utf8")).replace(/\/\/.*$/gm, "")
+    for (const { gate } of CAPABILITY_GATES.filter((entry) => entry.file === file)) {
+      if (text.split(gate).length !== 2) offenders.push(`${file}: the capability gate \`${gate}\` is not there exactly once`)
+      text = text.replace(gate, "")
+    }
     for (const word of ["osascript", "pbcopy", "launchctl", "/opt/homebrew", "security find-", "vm_stat"]) if (text.includes(word)) offenders.push(`${file}: ${word}`)
     // Every platform branch must name Windows as well as macOS, or name neither.
     if (/process\.platform/.test(text) && !/win32/.test(text)) offenders.push(`${file}: a platform branch without Windows`)
   }
   expect(offenders.length === 0, offenders.join("; "))
   expect(!/"win32" \? \[?"start"/.test(await readFile(join(ROOT, "cli/cli.ts"), "utf8")), "on Windows `start` is a shell builtin, so `ui --open` cannot spawn it")
+  return CAPABILITY_GATES.map((entry) => `${entry.file}: ${entry.why}`).join("; ")
 })
 
 // E: claims nobody has measured. They are listed so the scorecard does not read as if they had been.

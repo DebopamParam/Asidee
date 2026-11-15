@@ -692,7 +692,7 @@ export class GvisorProvider implements Provider {
   // Read first and write only a file that differs, so a pass every 30 seconds does not rewrite it. Docker may reset this
   // engine-owned file across a restart, even with the container still running.
   private async dnsCheck(manifest: Manifest): Promise<CheckResult> {
-    const scope = "This checks configuration, not a live lookup or existing inner containers' resolver state."
+    const scope = "Under gVisor the engine's per-network resolver at 127.0.0.11 refuses queries. This checks configuration, not a live lookup or existing inner containers' resolver state."
     try {
       const found = await this.docker(manifest.engine, ["exec", "-u", "0", container(manifest.name), "cat", "/etc/resolv.conf"])
       if (found.exitCode === 0 && found.stdout === SANDBOX_DNS)

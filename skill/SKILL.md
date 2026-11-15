@@ -225,7 +225,9 @@ Other files in that folder are served next to it. The page calls `POST /api/METH
 `Authorization: Bearer TOKEN`; it reads the token from the `#token=` part of the link `paddock ui` prints. Methods:
 `checklist`, `engines`, `list`, `get`, `create`, `start`, `stop`, `remove`, `verify`, `resize`, `snapshot`, `templateList`,
 `templateRemove`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `sshAccess`, `extensions`, `action`, `summary`,
-`hostList`, `fleet`.
+`hostList`, `fleet`, `configGet`, `configSet`. `configGet` returns this machine's effective configuration. `configSet`
+accepts only `{ "requireProbes": boolean }`, saves it to `config.json` and returns the new effective configuration; it
+affects later creates, not running sandboxes.
 
 Requests can include `host` to select a registered machine. A sandbox's API address is `{host, name}` and its returned
 identity is `{machineId, sandboxId}`. Supply `machineId` too when acting on a previously selected machine: any routed
