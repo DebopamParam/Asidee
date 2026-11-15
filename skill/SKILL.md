@@ -97,10 +97,11 @@ persistence and automatic sandbox recovery are not measured.
   image named like it with another ID makes the network checks unknown. Less than 64 MiB of disk headroom yields
   unknown network checks with a disk reason. Free space and verify again. Every sandbox's host log (what its main
   process prints) is outside the watched limit and rotates at 10 MiB with two files, checked by the core.
-  Dockerd is the sandbox's main process. If it dies the sandbox stops; `paddock start NAME` starts it again.
-  Dockerd does not reap orphaned processes: each one that ends stays a zombie holding a task slot until the sandbox
-  restarts, and finished inner Docker work left `containerd-shim` zombies too. A sandbox without Docker reaps them (its main process is
-  Paddock's busybox shell; sandboxes created before that change keep `sleep` and do not reap until recreated).
+  Paddock's BusyBox shell is PID 1 and reaps orphaned processes, with dockerd as its child. It forwards stop signals
+  to dockerd and exits when dockerd dies, so the sandbox stops; `paddock start NAME` starts it again.
+  Docker sandboxes created before this change keep dockerd as PID 1 and leave finished orphans as zombies holding
+  task slots until restart. Recreate them to gain the reaper. Older sandboxes without Docker that still use `sleep`
+  as PID 1 also need recreation. A stop and start clears zombies but does not replace PID 1's command.
   `paddock doctor` reports whether the engine supports inner Docker. An engine lacking the capability refuses it.
 - `paddock resize` reports, for each limit, `now` (read back from the engine's host), `next start` or `unchanged`.
   Inside, gVisor does not show the new limits (`/proc/meminfo` keeps the old memory, `nproc` ignores the CPU limit);

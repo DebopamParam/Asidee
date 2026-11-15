@@ -507,9 +507,14 @@ ev("I06", "The checklist includes live network attempts from an inner container"
 
 ev("I07", "Inner Docker survives stop/start, a daemon enforce pass, and a daemon restart; its death stops the sandbox", async () => {
   await ensureInner()
+  let stopMs = 0
   expect((await innerDocker(INNER, ["create", "--name", "persisted", "alpine:latest", "echo", "persisted-ok"])).code === 0, "could not create a persistent inner container")
   try {
-    expect((await pdk(["stop", INNER])).code === 0 && (await pdk(["start", INNER])).code === 0, "stop/start failed")
+    const stopping = Date.now()
+    expect((await pdk(["stop", INNER])).code === 0, "stop failed")
+    stopMs = Date.now() - stopping
+    expect(stopMs < 10_000, `stop took ${stopMs} ms`)
+    expect((await pdk(["start", INNER])).code === 0, "start failed")
     const persisted = await innerDocker(INNER, ["start", "-a", "persisted"])
     expect(persisted.code === 0 && persisted.out.trim() === "persisted-ok", `Docker data did not survive: ${persisted.out}${persisted.err}`)
     await Bun.sleep(32_000)
@@ -518,12 +523,16 @@ ev("I07", "Inner Docker survives stop/start, a daemon enforce pass, and a daemon
     expect((await pdk(["list"])).code === 0 && (await innerDocker(INNER, ["info"])).code === 0, "Docker did not survive daemon recovery")
     expect((await innerRun(INNER, ["wget", "-T", "20", "-qO-", "https://example.com"])).code === 0, "HTTPS failed after the restart")
   } finally { await innerDocker(INNER, ["rm", "-f", "persisted"]) }
-  const kill = await docker(["exec", "-u", "0", containerOf(INNER), "sh", "-c", "kill -KILL 1"])
+  const kill = await docker(["exec", "-u", "0", containerOf(INNER), "sh", "-c", "kill -KILL $(pidof dockerd)"])
   expect(await until(async () => !await running(INNER), 15), `the sandbox stayed up after killing dockerd (exec exit ${kill.code}: ${kill.err})`)
   const dead = await inspect(INNER)
   expect(dead.State.ExitCode === 137 && !dead.State.OOMKilled, `dockerd did not exit from the requested kill: ${JSON.stringify(dead.State)}`)
-  expect(/Docker.*ended/.test((await view(INNER))?.stopReason ?? ""), "the stop reason does not name Docker")
+  const stopped = await view(INNER)
+  expect(/Docker.*ended/.test(stopped?.stopReason ?? ""), `the stop reason does not name Docker: ${JSON.stringify(stopped)}`)
   expect((await pdk(["start", INNER])).code === 0 && (await innerRun(INNER, ["echo", "recovered"])).out.trim() === "recovered", "start did not recover Docker")
+  const logs = await docker(["logs", containerOf(INNER)])
+  expect(/API listen/.test(logs.out + logs.err), "dockerd startup output did not reach the container log")
+  return `stop took ${stopMs} ms; inner container persisted across stop/start; Docker survived enforcement and daemon restart; killing dockerd stopped the sandbox with exit 137; restart recovered it; dockerd output reached the container log`
 })
 
 ev("I08", "An inner container cannot exceed the sandbox's memory limit, even with its own privileged mode", async () => {
@@ -1466,7 +1475,7 @@ ev("U12", "exec output past 16 MiB is refused with an error that names the limit
   return `exactly 16 MiB returned whole; 16 MiB+ on stdout, on stderr, and 1 GiB on stdout each refused naming the limit; no flooding process left running; same daemon (pid ${daemon}, ${Math.round(rss / 1024)} MiB resident) answered list`
 })
 
-ev("U13", "Processes an exec session leaves behind are reaped when they end in a sandbox without Docker; with Docker, dockerd as PID 1 leaves them as zombies, as the docs say", async () => {
+ev("U13", "Processes an exec session leaves behind are reaped when they end, with and without Docker", async () => {
   const plain = `${PREFIX}-z`
   const seen: string[] = []
   try {
@@ -1486,14 +1495,8 @@ ev("U13", "Processes an exec session leaves behind are reaped when they end in a
       expect(await until(async () => !(await table()).some((row) => row.slice(3).join(" ").includes(marker)), 30), `the orphans in ${name} did not end`)
       await Bun.sleep(1000)
       const left = await zombies()
-      if (name === plain) {
-        expect(left.length === 0, `in ${name} (PID 1: ${pid1}) ${left.length} zombies remain after the orphans ended: ${JSON.stringify(left.slice(0, 5))}`)
-        seen.push(`without Docker, PID 1 \`${pid1}\`: 20 orphans ended and no zombie was left`)
-      } else {
-        const sleeps = left.filter((row) => row[3] === "[sleep]").length
-        expect(sleeps >= 20, `with Docker, PID 1 \`${pid1}\` reaped the orphans (${sleeps} sleep zombies); the docs say it does not`)
-        seen.push(`with Docker, PID 1 \`${pid1?.split(" ")[0]}\`: ${sleeps} sleep zombies, and ${left.length - sleeps} others (${[...new Set(left.filter((row) => row[3] !== "[sleep]").map((row) => row[3]))].join(", ") || "none"}; ${before} zombies before the orphans)`)
-      }
+      expect(left.length === 0, `in ${name} (PID 1: ${pid1}) ${left.length} zombies remain after the orphans ended: ${JSON.stringify(left.slice(0, 5))}`)
+      seen.push(`${name === plain ? "without" : "with"} Docker, PID 1 \`${pid1}\`: 20 orphans ended and no zombie was left (${before} before)` )
     }
     return seen.join("; ")
   } finally { await pdk(["remove", plain, "--confirm", plain]) }

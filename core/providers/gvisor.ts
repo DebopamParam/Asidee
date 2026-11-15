@@ -36,6 +36,18 @@ mkdir -p /run/paddock-bin
 ln -sf "$(command -v iptables-legacy)" /run/paddock-bin/iptables
 ln -sf "$(command -v ip6tables-legacy)" /run/paddock-bin/ip6tables
 PATH=/run/paddock-bin:$PATH exec dockerd --config-file=/run/paddock-docker.json --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --storage-driver=${DOCKER_DRIVER} --iptables=false --ip6tables=false`
+// Busybox's wait also reaps adopted orphans. Forward a stop to dockerd and leave with its exit status; never restart it.
+export const DOCKER_REAPER = `docker_main() {
+${DOCKER_START}
+}
+docker_main &
+daemon=$!
+trap 'kill -TERM "$daemon" 2>/dev/null || true' TERM INT
+while :; do
+  wait "$daemon"
+  code=$?
+  kill -0 "$daemon" 2>/dev/null || exit "$code"
+done`
 // The main process of a sandbox without Docker: Paddock's busybox shell, waiting on a sleep. The kernel hands every
 // orphan to PID 1, and the shell's wait reaps any child that ends, so a finished process leaves no zombie holding a
 // task slot (U13; with `sleep infinity` as PID 1 every one stayed). The relay is copied in before every start.
@@ -336,13 +348,13 @@ export class GvisorProvider implements Provider {
     await this.prepare(manifest)
     const memory = `${Math.round(spec.memoryGb * 1024)}m`
     if (spec.docker) must(await this.docker(engine, ["volume", "create", "--label", `${LABEL_NAME}=${name}`, "--label", `${LABEL_ID}=${manifest.id}`, dockerVolume(manifest)]), "Creating Docker's private data volume")
-    // dockerd is PID 1 when requested: its exit stops the sandbox. No restart policy may bypass the guard and checks.
+    // The reaper exits with dockerd. No restart policy may bypass the guard and checks.
     must(await this.docker(engine, [
       "create", "--name", container(name), "--hostname", name, "--label", `${LABEL_NAME}=${name}`, "--label", `${LABEL_ID}=${manifest.id}`,
       "--runtime", engine.data.runtime!, "--network", network(name), "--restart", "no",
       "--cpus", String(spec.cpus), "--memory", memory, "--memory-swap", memory, "--pids-limit", String(spec.pids),
       "--log-driver", "json-file", ...Object.entries(LOG_LIMIT).flatMap(([key, value]) => ["--log-opt", `${key}=${value}`]),
-      ...(spec.docker ? [...DOCKER_CAPABILITIES.flatMap((cap) => ["--cap-add", cap]), "--mount", `type=volume,src=${dockerVolume(manifest)},dst=/var/lib/docker,volume-nocopy`, "--user", "0", "--entrypoint", "sh", spec.image, "-c", DOCKER_START]
+      ...(spec.docker ? [...DOCKER_CAPABILITIES.flatMap((cap) => ["--cap-add", cap]), "--mount", `type=volume,src=${dockerVolume(manifest)},dst=/var/lib/docker,volume-nocopy`, "--user", "0", "--entrypoint", RELAY, spec.image, "sh", "-c", DOCKER_REAPER]
         : ["--entrypoint", RELAY, spec.image, "sh", "-c", REAPER]),
     ], { timeoutMs: 1_800_000 }), `Creating ${name}`)
   }
@@ -371,7 +383,7 @@ export class GvisorProvider implements Provider {
     if (!state || state.Running || !state.FinishedAt || state.FinishedAt.startsWith("0001")) return undefined
     const at = `${state.FinishedAt.slice(0, 16).replace("T", " ")} UTC`
     if (state.OOMKilled) return `Killed by the engine at ${at}: it passed its memory limit of ${manifest.spec.memoryGb} GB.`
-    if (manifest.spec.docker) return `Docker (the sandbox's main process) ended at ${at} (exit code ${state.ExitCode}). Start the sandbox to run it again; memory and task limits can also end it.`
+    if (manifest.spec.docker) return `Docker ended at ${at} (exit code ${state.ExitCode}). Start the sandbox to run it again; memory and task limits can also end it.`
     // docker stop ends it with 137 or 143; anything else is the sandbox's own doing.
     if (state.ExitCode === 137 || state.ExitCode === 143 || state.ExitCode === 0) return undefined
     return `Ended on its own at ${at} (exit code ${state.ExitCode}). A gVisor sandbox that runs out of its task limit of ${manifest.spec.pids} ends this way.`

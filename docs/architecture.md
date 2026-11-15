@@ -151,7 +151,8 @@ creation is denied. With only `NET_ADMIN`, overlayfs image extraction cannot mou
 pass the entire workload; no further capabilities were needed. This is an inclusion-minimal set for the measured
 image and engine relative to Docker's unchanged defaults, not a minimum for every Docker implementation.
 
-The provider starts dockerd as the sandbox's main process, as root, on each start. Its fixed configuration enables the
+The provider starts Paddock's BusyBox shell as PID 1, with dockerd as its root child, on each start. The shell reaps
+orphaned processes, forwards TERM and INT to dockerd, and exits with dockerd's status. It never restarts dockerd. Its fixed configuration enables the
 containerd snapshotter and names `--storage-driver=overlayfs`, so dockerd fails to start rather than fall back to a
 driver that copies layers; it adds `--iptables=false` and `--ip6tables=false`. The runtime check rejects any driver but
 overlayfs. I01 runs this same start command for every capability subset. I15 measures allocated bytes from the engine
@@ -223,10 +224,12 @@ PID 1, and the shell's `wait` collects any child that ends. U13: twenty orphans 
 1's children and ended, and no zombie was left; with `sleep infinity` as PID 1 all twenty stayed. The engine's own
 `--init` also reaped them, but it mounts the engine host's `docker-init` read-only into the sandbox, a host file that
 the engine's mount list does not show, so Paddock does not use it. Sandboxes created before this change keep `sleep`
-until they are recreated. **A sandbox with Docker does not reap them:** dockerd is PID 1 and U13 found all twenty as
-zombies, beside eight `containerd-shim` zombies already left by the eval's earlier inner Docker work; they stay until the sandbox restarts and
-count against its task limit. Putting a reaper in front of dockerd would change how a stop's signal reaches it and
-what ends the sandbox, which has not been measured, so it is not done. U12: exactly
+until they are recreated. A sandbox with Docker also uses Paddock's BusyBox shell as PID 1, waiting for its dockerd
+child instead of a sleep. U13 requires zero zombies in both kinds of sandbox, including after inner Docker work.
+I07 measures a stop under ten seconds, retained inner container state across stop and start, and a stopped sandbox
+when dockerd is killed. Dockerd's output still reaches the container log, with I22's rotation cap.
+Docker sandboxes created before this change keep dockerd as PID 1 and do not reap these orphans until recreated;
+a stop and start clears their zombies but does not change their main process. U12: exactly
 16 MiB comes back whole; more on stdout, on stderr, and 1 GiB on stdout are each refused with the limit named, no
 flooding process is left running, and the same daemon answers afterwards. U14: a buffered exec whose command ran 400
 seconds returned its output and exit code. The CLI asks its daemon without Bun's default fetch timeout, which had
