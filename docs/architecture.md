@@ -22,10 +22,33 @@
 out as "could not be checked", never as a pass.
 
 A blocking check reported as `unsupported` refuses create/start and stops a running sandbox on enforcement or verify,
-including a probe. Its error names the missing property. An `unknown` probe remains a disclosure and does not block;
-an engine known to lack a promised property is different from an attempt that could not measure it. Nonblocking
-unsupported checks remain disclosures. The gVisor provider must satisfy the whole blocking checklist. Docker Sandboxes
-is detection-only and not ready in this build; create is refused before any sandbox is made. No gVisor-specific check
+including a probe. Its error names the missing property. By default, an `unknown` blocking probe also refuses create.
+The sandbox is stopped and retained for diagnosis, exactly as for a failed blocking probe. The error names each
+unmeasured probe and its reason, with code `probes-required` (HTTP 422, CLI exit 6). Its `details` remains an array of
+check results. Nonblocking unknown or unsupported checks remain disclosures.
+
+`config.json` has a boolean `requireProbes`, default `true`. `paddock config get` reads the effective configuration;
+`paddock config set require-probes on|off` changes this one setting. Both support `--json` and `--host NAME`.
+With `requireProbes: false`, create accepts unknown blocking probes and reports them as unknown, never as passes.
+Failed and unsupported blocking probes still refuse create. The dashboard's **Settings** section has the same toggle.
+A create refused for unknown probes offers **Open settings**, which navigates and focuses the toggle without changing it.
+The sandbox list labels current isolation as **Not verified**; saved checks remain dated history.
+
+The daemon API exposes `configGet` and `configSet`; the latter accepts only `{ "requireProbes": boolean }`.
+A settings write atomically replaces `config.json` with mode 0600, preserving defaults, engine selection and other fields.
+Writes are serialized within the daemon, and each create reads the current file without a daemon restart.
+Both methods are available over the user socket and on loopback with the dashboard token and accepted Host header.
+They use the same handler checks as create; a cross-site page without that token, or using another Host, cannot change them.
+Each daemon uses its own machine's configuration. A routed create uses the remote setting, and routing preserves its
+error text, code and details. For example, `paddock --host build config set require-probes off` changes only build.
+This setting affects future create requests. It does not rerun probes or alter running sandboxes.
+
+Explicit verify on a running sandbox still reports an unknown probe without stopping the sandbox, in either mode.
+Its `ok` means no blocking failure was found, not that unknown probes passed. Start runs no probes, and enforcement's
+four-pass budget is unchanged. These paths and the HTTP and CLI behavior are covered by unit fixtures; engine behavior
+and browser appearance have not been measured for this change.
+
+The gVisor provider must satisfy the whole blocking checklist. Docker Sandboxes is detection-only and not ready in this build; create is refused before any sandbox is made. No gVisor-specific check
 is waived for it. A future microVM provider needs reviewed evidence or an explicit checklist decision before becoming ready.
 
 | Check | Blocking | When | How the gVisor provider checks it |

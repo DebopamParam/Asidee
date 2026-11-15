@@ -771,6 +771,7 @@ ev("I19", "Verify removes a probe image it loaded and preserves a pre-existing p
 })
 
 ev("I20", "Verify on a nearly full sandbox reports unknown with a disk reason and loads no probe image", async () => {
+  expect((await socket("configGet", {})).reply.data.requireProbes === true, "this eval requires requireProbes on")
   const name = `${PREFIX}-ifull`
   await ensure(name, { image: DOCKER_IMAGE, docker: true, diskGb: 1 })
   try {
@@ -922,7 +923,9 @@ ev("I24", "Verify needs no registry: with the inner Docker cut off from Docker H
     // An image under the helper's name with another ID is not used, and is left alone.
     const impostor = (await docker(["exec", "-u", "0", containerOf(name), "sh", "-ec", `mkdir -p /tmp/empty; tar -C /tmp/empty -c . | docker import - ${HELPER_IMAGE}`])).out.trim()
     expect(/^sha256:/.test(impostor) && impostor !== helperId, `could not make the impostor: ${impostor}`)
+    expect((await socket("configGet", {})).reply.data.requireProbes === true, "this eval requires requireProbes on")
     const refused = await pdkJson(["verify", name])
+    expect(refused.reply.ok && await running(name), "explicit verify stopped the sandbox for unknown probes")
     for (const id of ["net-host", "net-peers", "net-private"]) {
       const check = refused.reply.data?.checks.find((entry: { id: string }) => entry.id === id)
       expect(check?.status === "unknown" && /not Paddock's helper/.test(check.detail), `an impostor probe image was accepted for ${id}: ${JSON.stringify(check)}`)
@@ -1021,12 +1024,14 @@ ev("T07", "A privileged container wearing a sandbox's labels is refused at start
   } finally { await docker(["rm", "-f", containerOf(name)]); await pdk(["remove", name, "--confirm", name]) }
 })
 
-ev("T08", "Checks still give an answer after the helper image is deleted", async () => {
+ev("T08", "With required probes on, explicit verify still answers and keeps a sandbox running after the helper image is deleted", async () => {
+  expect((await socket("configGet", {})).reply.data.requireProbes === true, "this eval requires requireProbes on")
   await ensure(A)
   await docker(["rmi", "-f", HELPER_IMAGE])
   try {
     const guard = (await socket("verify", { name: A })).reply.data.checks.find((check: { id: string }) => check.id === "network-guard")
     expect(guard.status === "pass", `the guard check says ${guard.status}: ${guard.detail}`)
+    expect(await running(A), "explicit verify stopped the sandbox for an unavailable probe")
   } finally { await docker(["build", "-q", "-t", HELPER_IMAGE, "-"], { stdin: HELPER_DOCKERFILE }) }
 })
 
@@ -1188,7 +1193,7 @@ ev("F04", "Defaults in config.json are used, and a config file with a mistake is
   } finally { await pdk(["remove", name, "--confirm", name]) }
   const config = join(env.PADDOCK_CONFIG_DIR, "config.json"); const good = await readFile(config, "utf8")
   try {
-    for (const bad of ["{ not json", JSON.stringify({ defaults: { cpus: "lots" } }), JSON.stringify({ defaults: { image: "--privileged" } }), JSON.stringify({ defaults: "x" }), JSON.stringify({ engine: 5 }), "[]", "null"]) {
+    for (const bad of ["{ not json", JSON.stringify({ defaults: { cpus: "lots" } }), JSON.stringify({ defaults: { image: "--privileged" } }), JSON.stringify({ defaults: "x" }), JSON.stringify({ engine: 5 }), JSON.stringify({ requireProbes: "off" }), JSON.stringify({ requireProbes: null }), "[]", "null"]) {
       await writeFile(config, bad)
       const reply = await socket("create", { name: `${PREFIX}-x` })
       await socket("remove", { name: `${PREFIX}-x`, confirm: `${PREFIX}-x` })
@@ -4026,7 +4031,7 @@ console.error(`Building, and starting a Paddock of its own in ${tmp} (sandboxes 
 const build = await sh([BUN, "build", "--compile", "--minify", "--outfile", BIN, "cli/cli.ts"], { cwd: ROOT })
 if (build.code !== 0) { console.error(build.err); process.exit(1) }
 await mkdir(env.PADDOCK_CONFIG_DIR, { recursive: true })
-await writeFile(join(env.PADDOCK_CONFIG_DIR, "config.json"), JSON.stringify({ defaults: { image: "alpine:latest", cpus: 0.5, memoryGb: 0.5, diskGb: 1 } }))
+await writeFile(join(env.PADDOCK_CONFIG_DIR, "config.json"), JSON.stringify({ requireProbes: true, defaults: { image: "alpine:latest", cpus: 0.5, memoryGb: 0.5, diskGb: 1 } }))
 const engines = (await pdkJson(["doctor"])).reply.data as Array<{ id: string; label: string; ready: boolean; data: { context: string; runtime: string }; capabilities?: { diskLimit: string } }>
 const engine = engines.find((entry) => entry.ready)
 if (!engine) { console.error("No engine is ready. Run `paddock doctor`."); process.exit(1) }

@@ -17,6 +17,8 @@ Add `--json` to any command for `{"ok":true,"data":…}` or `{"ok":false,"error"
 paddock doctor                              # engines and what each needs
 paddock create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--pids N] [--disk GB]
 paddock list
+paddock config get                         # effective settings on the selected machine
+paddock config set require-probes on|off    # require blocking isolation probes at create, default on
 paddock exec NAME [--stdin] -- COMMAND ARG… # exit code, stdout and stderr are the command's; output as text
 paddock exec NAME --stream -- COMMAND ARG…  # raw bytes in and out, no size limit
 paddock start NAME | paddock stop NAME
@@ -31,7 +33,7 @@ paddock template list | paddock template remove TEMPLATE
 paddock remove NAME --confirm NAME          # deletes everything in it; ask the user first
 ```
 
-Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown.
+Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed or required probes could not run, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown.
 
 Prepared remote daemons can be attached with `paddock host attach NAME --ssh DEST --binary PATH --state-dir PATH`.
 This installs nothing. `paddock host list` refreshes their availability. Add `--host NAME` to buffered sandbox commands
@@ -67,6 +69,13 @@ persistence and automatic sandbox recovery are not measured.
 
 - A name is lowercase letters, digits and hyphens.
 - `exec` needs a running sandbox; it does not start one.
+- Create requires blocking isolation probes by default. If one is unknown, create returns `probes-required` (exit 6),
+  names the probe and why it could not run, and keeps the sandbox stopped for diagnosis. The dashboard's **Open settings**
+  button focuses **Require isolation probes** without changing it. `paddock config set require-probes off` allows future
+  creates with unknown probes; those sandboxes show as **Not verified**, with historical checks disclosed as unknown.
+  Failed or unsupported blocking probes still block. Settings persist without a daemon restart and apply per machine.
+  With `--host NAME`, that daemon uses its own config. Explicit verify never stops a running sandbox for an unknown
+  probe, start runs no probes, and the enforcement budget remains four passes.
 - If a check fails, report the check's title and detail to the user as they are. Do not work around it.
 - A sandbox can be stopped without you asking: by a failed check, by the disk watch, because the daemon stopped, or
   by the engine when it passes its memory or task limit.

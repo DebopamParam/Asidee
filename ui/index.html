@@ -39,6 +39,11 @@
   <h1>Paddock</h1>
   <p class="sub">Sandboxes for coding agents. Each line under a sandbox is a check the core ran, not a setting.</p>
   <div id="notice"></div>
+  <nav class="row" aria-label="Sections">
+    <button id="sandboxes-tab" type="button" aria-pressed="true" aria-controls="sandbox-section">Sandboxes</button>
+    <button id="settings-tab" type="button" aria-pressed="false" aria-controls="settings-section">Settings</button>
+  </nav>
+  <section id="sandbox-section" aria-labelledby="sandboxes-tab">
   <h2>Sandboxes</h2>
   <div id="sandboxes"></div>
   <h2>Workspaces: not sandboxes</h2>
@@ -58,6 +63,16 @@
   </form>
   <h2>Engines</h2>
   <div id="engines"></div>
+  </section>
+  <section id="settings-section" aria-labelledby="settings-tab" hidden>
+    <h2>Settings</h2>
+    <div class="panel">
+      <label for="require-probes"><input id="require-probes" type="checkbox" disabled aria-describedby="require-probes-help"> Require isolation probes</label>
+      <p id="require-probes-help" class="muted">On by default. When off, sandboxes can be created without their isolation probes having run; they show as not verified. Failed or unsupported blocking probes still refuse creation.</p>
+      <p class="muted">Applies to this machine's daemon and future creates. A remote daemon uses its own setting. Changing this does not rerun checks or restart sandboxes.</p>
+      <div id="settings-error" class="error" role="status"></div>
+    </div>
+  </section>
 </main>
 <script>
 // A client of the daemon's API and nothing more. To change this dashboard, copy it to CONFIG/ui/index.html (see the
@@ -72,7 +87,7 @@ let checklist = [], extensions = [], open = new Set(), busy = new Set(), output 
 async function api(method, body = {}) {
   const response = await fetch(`/api/${method}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(body) })
   const reply = await response.json()
-  if (!reply.ok) throw new Error(reply.error.message)
+  if (!reply.ok) throw Object.assign(new Error(reply.error.message), { code: reply.error.code, details: reply.error.details })
   return reply.data
 }
 const el = (tag, attrs = {}, ...children) => {
@@ -81,6 +96,35 @@ const el = (tag, attrs = {}, ...children) => {
   node.append(...children.filter((child) => child !== null && child !== undefined && child !== false))
   return node
 }
+let settings, savingSettings = false
+const probeToggle = document.getElementById("require-probes")
+function section(name) {
+  for (const key of ["sandboxes", "settings"]) {
+    document.getElementById(key === "sandboxes" ? "sandbox-section" : "settings-section").hidden = key !== name
+    document.getElementById(`${key}-tab`).setAttribute("aria-pressed", String(key === name))
+  }
+}
+document.getElementById("sandboxes-tab").addEventListener("click", () => section("sandboxes"))
+document.getElementById("settings-tab").addEventListener("click", () => section("settings"))
+async function readSettings() {
+  if (savingSettings) return
+  try {
+    const config = await api("configGet")
+    if (savingSettings) return
+    settings = config; probeToggle.checked = settings.requireProbes; probeToggle.disabled = false
+    document.getElementById("settings-error").textContent = ""
+  } catch (error) {
+    probeToggle.disabled = true
+    document.getElementById("settings-error").textContent = `Settings unavailable: ${error.message}`
+  }
+}
+probeToggle.addEventListener("change", async () => {
+  savingSettings = true; probeToggle.disabled = true
+  const error = document.getElementById("settings-error"); error.textContent = ""
+  try { settings = await api("configSet", { requireProbes: probeToggle.checked }) }
+  catch (failure) { error.textContent = failure.message }
+  probeToggle.checked = settings.requireProbes; probeToggle.disabled = false; savingSettings = false
+})
 const title = (id) => checklist.find((item) => item.id === id)?.title ?? id
 
 async function act(name, key, task) {
@@ -121,7 +165,7 @@ function render() {
     const button = (label, key, task, extra = {}) => el("button", { ...extra, ...(is(key) ? { disabled: "" } : {}), onclick: () => act(sandbox.name, key, task) }, is(key) ? "Working…" : label)
     const panel = el("div", { class: "panel" },
       el("div", { class: "row" },
-        el("div", { class: "grow" }, el("span", { class: "name" }, sandbox.name), " ", el("span", { class: `badge ${sandbox.status}` }, sandbox.status),
+        el("div", { class: "grow" }, el("span", { class: "name" }, sandbox.name), " ", el("span", { class: `badge ${sandbox.status}` }, sandbox.status), " ", el("span", { class: "badge unknown" }, "Not verified"),
           el("div", { class: "muted" }, `${sandbox.spec.cpus} CPU · ${sandbox.spec.memoryGb} GB memory · ${sandbox.spec.diskGb} GB disk · ${sandbox.engine}`),
           sandbox.activity ? el("div", { class: "muted" }, `${sandbox.activity}…`) : null,
           sandbox.lastVerify ? el("div", { class: "muted" }, `Last measured ${sandbox.lastVerify.at}. Historical only; current checks unknown.`) : null,
@@ -169,6 +213,7 @@ async function refresh() {
   } catch (error) {
     document.getElementById("notice").replaceChildren(el("div", { class: "panel error" }, token ? error.message : "Open this page with the link that `paddock ui` prints."))
   }
+  await readSettings()
   render()
 }
 
@@ -177,7 +222,10 @@ document.getElementById("create").addEventListener("submit", async (event) => {
   const form = event.target; const button = form.querySelector("button"); const error = document.getElementById("create-error")
   button.disabled = true; button.textContent = "Creating…"; error.textContent = ""
   try { const made = await api("create", Object.fromEntries(new FormData(form))); open.add(made.sandbox.name); form.reset() }
-  catch (failure) { error.textContent = failure.message }
+  catch (failure) {
+    error.textContent = failure.message
+    if (failure.code === "probes-required") error.append(" ", el("button", { type: "button", onclick: () => { section("settings"); probeToggle.focus() } }, "Open settings"))
+  }
   button.disabled = false; button.textContent = "Create and verify"; await refresh()
 })
 

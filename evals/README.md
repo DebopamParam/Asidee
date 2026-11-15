@@ -14,6 +14,13 @@ calls ready. Sandboxes it makes are named `evXXXX-…` and removed at the end. I
 sandboxes run on the engine, because the tamper evals change the firewall guard they share. It needs Docker, Bun, and
 for a few evals `python3` and a Chromium-based browser; an eval that lacks what it needs is reported as not measured.
 
+The run's private config explicitly sets `requireProbes: true`. A create with an unknown blocking probe now fails
+and retains a stopped sandbox for diagnosis; the runner does not silently opt out to continue. No existing eval
+intentionally creates with unknown blocking probes. T08, I20 and I24 make probes unavailable during explicit verify
+of an already running sandbox and require that it stays running with the requirement on. F04 also rejects nonboolean
+`requireProbes` config values. These changed expectations have unit coverage; the revised engine evals have not been run
+for this change. Existing scorecards do not establish the new create policy.
+
 Each scorecard records its engine, runtime, OS, architecture, and source revision. When running a source archive
 without Git metadata, set `PADDOCK_EVAL_REVISION` to its revision and archive checksum. Separate labels retain results
 from multiple machines. A run establishes claims only on the engine and OS it names.

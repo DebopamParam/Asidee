@@ -25,7 +25,7 @@ async function page(replies: Record<string, (body: any) => unknown>, url = "http
     const method = path.slice(5); const body = JSON.parse(init.body)
     calls.push({ method, body, authorization: init.headers.authorization ?? null })
     try { return { json: async () => ({ ok: true, data: await (replies[method] ?? (() => { throw new Error(`no reply for ${method}`) }))(body) }) } }
-    catch (error) { return { json: async () => ({ ok: false, error: { message: (error as Error).message } }) } }
+    catch (error) { return { json: async () => ({ ok: false, error: { message: (error as Error).message, code: (error as { code?: string }).code } }) } }
   }
   const prompts: string[] = []
   const globals = { window, document: window.document, location: window.location, history: window.history, sessionStorage: window.sessionStorage, fetch,
@@ -38,7 +38,7 @@ async function page(replies: Record<string, (body: any) => unknown>, url = "http
   return { window, calls, prompts, settle, text, button }
 }
 
-const base = { checklist: () => CHECKLIST, engines: () => [{ id: "fake:1", label: "Fake engine", ready: true, problems: [], capabilities: { kernelIsolation: "gvisor", networkGuard: true, diskLimit: "watched" } }], extensions: () => ({ extensions: [extension], errors: [] }) }
+const base = { configGet: () => ({ defaults: {}, requireProbes: true }), checklist: () => CHECKLIST, engines: () => [{ id: "fake:1", label: "Fake engine", ready: true, problems: [], capabilities: { kernelIsolation: "gvisor", networkGuard: true, diskLimit: "watched" } }], extensions: () => ({ extensions: [extension], errors: [] }) }
 
 test("workspaces appear separately with their disclosure, and unavailable inventory is unknown", async () => {
   const ui = await page({ ...base, list: () => [], summary: () => ({ workspaces: [{ name: "render", status: "idle", processes: 0, folder: "/fixture/render", disclosure: "Workspace, not a sandbox. Loopback open; no limits." }] }) })
@@ -132,4 +132,50 @@ test("a refresh that changes nothing leaves a half-filled form alone", async () 
   // The page's own refresh, as its timer would call it.
   await (ui.window as any).paddockRefresh(); await ui.settle()
   expect(ui.window.document.contains(input)).toBe(true)
+})
+
+test("an unknown-probe create refusal opens Settings and focuses the toggle without changing the requirement", async () => {
+  const ui = await page({ ...base, list: () => [], create: () => { throw Object.assign(new Error("Cannot reach the host: helper unavailable. Use paddock config set require-probes off."), { code: "probes-required" }) } })
+  const form = ui.window.document.getElementById("create") as any
+  form.elements.namedItem("name").value = "demo"
+  form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  expect(ui.text("#create-error")).toContain("helper unavailable")
+  const toggle = ui.window.document.getElementById("require-probes") as any
+  expect(toggle.checked).toBe(true)
+  ui.button("Open settings").click(); await ui.settle()
+  expect(ui.window.document.getElementById("settings-section")!.hasAttribute("hidden")).toBe(false)
+  expect(ui.window.document.getElementById("sandbox-section")!.hasAttribute("hidden")).toBe(true)
+  expect(ui.window.document.activeElement).toBe(toggle)
+  expect(toggle.checked).toBe(true)
+  expect(ui.calls.some((call) => call.method === "configSet")).toBe(false)
+  ui.button("Sandboxes").click()
+  expect(ui.window.document.getElementById("sandbox-section")!.hasAttribute("hidden")).toBe(false)
+})
+
+test("Settings reads the daemon value, changes only on input, and restores the value on a refused write", async () => {
+  let requireProbes = false
+  const ui = await page({ ...base, list: () => [], configGet: () => ({ requireProbes }), configSet: (body) => {
+    if (body.requireProbes === false) throw new Error("Settings could not be saved.")
+    requireProbes = body.requireProbes; return { requireProbes }
+  } })
+  ui.button("Settings").click()
+  expect(ui.text("#settings-section")).toContain("sandboxes can be created without their isolation probes having run; they show as not verified")
+  const toggle = ui.window.document.getElementById("require-probes") as any
+  expect(toggle.checked).toBe(false); expect(toggle.disabled).toBe(false)
+  toggle.checked = true; toggle.dispatchEvent(new ui.window.Event("change")); await ui.settle()
+  expect(ui.calls.filter((call) => call.method === "configSet").map((call) => call.body)).toEqual([{ requireProbes: true }])
+  expect(toggle.checked).toBe(true)
+  toggle.checked = false; toggle.dispatchEvent(new ui.window.Event("change")); await ui.settle()
+  expect(ui.text("#settings-error")).toBe("Settings could not be saved.")
+  expect(toggle.checked).toBe(true); expect(toggle.disabled).toBe(false)
+})
+
+test("an unavailable setting cannot be changed and a sandbox with unknown probes is visibly not verified", async () => {
+  const ui = await page({ ...base, configGet: () => { throw new Error("config unreadable") }, list: () => [sandbox({ lastVerify: historical({ at: "2026-11-15T00:00:00Z", results: [{ id: "net-host", status: "unknown", evidence: "none", detail: "The control did not answer." }] }) })] })
+  expect((ui.window.document.getElementById("require-probes") as any).disabled).toBe(true)
+  expect(ui.text("#settings-error")).toContain("config unreadable")
+  expect(ui.text("#sandboxes")).toContain("Not verified")
+  expect(ui.text("#sandboxes")).not.toContain("✓")
+  ui.button("Past checks").click()
+  expect(ui.text("ul.checks")).toContain("unknown (none). The control did not answer.")
 })
