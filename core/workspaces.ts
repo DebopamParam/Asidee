@@ -255,7 +255,7 @@ export class Workspaces {
   private async launch(manifest: WorkspaceManifest, argv: string[], tty = false, cols?: number, rows?: number): Promise<WorkspaceSession> {
     await this.restoreIdentity(manifest)
     const profile = workspaceProfile(manifest)
-    if (profile.hash !== manifest.profileHash || await readFile(this.profileFile(manifest.name), "utf8") !== profile.text) throw new PaddockError("check-failed", "The workspace profile changed; execution refused.")
+    if (profile.hash !== manifest.profileHash || await readFile(this.profileFile(manifest.name), "utf8") !== profile.text) throw new PaddockError("check-failed", `The workspace profile changed; execution refused. To regenerate it from this workspace's saved settings (Paddock updates can change it), stop the workspace and run: paddock workspace set ${manifest.name} host-temp ${manifest.spec.hostTemp ? "on" : "off"}`)
     for (const path of [manifest.home, manifest.userVar, ...manifest.reads.map((read) => read.canonical), ...manifest.spec.path])
       if (await realpath(path) !== path) throw new PaddockError("check-failed", "A canonical profile path changed; execution refused.")
     if (manifest.spec.hostTemp && await realpath(join(manifest.userVar, "T")) !== join(manifest.userVar, "T")) throw new PaddockError("check-failed", "The host temp folder is no longer canonical.")

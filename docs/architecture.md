@@ -686,13 +686,16 @@ with private state, so it neither discovers engines nor connects to registered m
 existing provider sweep and sandbox enforcement.
 
 `spec.hostTemp` is an explicit boolean, defaulting to false for legacy manifests. Only the on profile adds a
-parameter for the canonical per-user `T` folder, with a file read and write allowance and no network allowance. The
-off profile is unchanged. `workspaceSet` refuses running processes and clears old verification before later launches
-use the regenerated profile. Verification probes real `T` reads and writes, still-denied sibling paths, and a refused
+parameter for the canonical per-user `T` folder, with a file read and write allowance and no network allowance, and
+a `file-read-metadata` allowance for the literal folder that contains `T` (its listing and its `C` and `0` stay
+denied), which tools that create folders under `T` need. The off profile is unchanged. `workspaceSet` refuses running
+processes and clears old verification before later launches use the regenerated profile; setting the current value
+again rewrites a profile that a Paddock update changed, and launch's refusal names that command. Verification probes real `T` reads and writes, still-denied sibling paths, and a refused
 confined connection to a real listener in `T` beside an unconfined control, reporting the disclosed exception as
 `weak`. Inventory and removal include its shared-file, socket-file, cleanup and size limits. The live Seatbelt and
-`confstr` tests in `test/unit/workspaces.test.ts` measure temp-path and socket access, not PyTorch/MPS or CoreML
-workloads. See [shared temp configuration](workspaces.md#allow-the-shared-per-user-temp-folder).
+`confstr` tests in `test/unit/workspaces.test.ts` measure temp-path, metadata and socket access, not PyTorch/MPS or
+CoreML workloads. ONNX Runtime's CoreML provider running an ML Program on the GPU with the metadata rule was measured
+by hand outside the test suite, with a profile that still allowed Unix socket connections in `T`. See [shared temp configuration](workspaces.md#allow-the-shared-per-user-temp-folder).
 
 ## Adding a provider
 

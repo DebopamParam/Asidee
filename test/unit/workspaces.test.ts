@@ -298,8 +298,9 @@ test("host temp defaults closed, validates booleans and leaves the original prof
   const open = workspaceProfile({ ...manifest, spec: { hostTemp: true } })
   expect(open.params).toContain(`HOST_TEMP=${manifest.userVar}/T`)
   expect(open.text).toContain('(allow file-read* file-write* (subpath (param "HOST_TEMP")))')
-  // Host temp opens files only; Unix socket connections there stay under the base profile's denial.
-  expect(open.text.split("\n").filter((line) => !closed.text.split("\n").includes(line))).toEqual(['(allow file-read* file-write* (subpath (param "HOST_TEMP")))'])
+  // Host temp opens files only, and the user-var folder's own metadata for tools that walk T's ancestors; Unix socket
+  // connections there stay under the base profile's denial.
+  expect(open.text.split("\n").filter((line) => !closed.text.split("\n").includes(line))).toEqual(['(allow file-read* file-write* (subpath (param "HOST_TEMP")))', '(allow file-read-metadata (literal (param "USER_VAR")))'])
   expect(open.text).not.toContain(manifest.userVar)
   expect(workspaceDisclosure(false)).toBe(WORKSPACE_DISCLOSURE)
   expect(workspaceDisclosure(true)).toContain(HOST_TEMP_DISCLOSURE)
@@ -389,6 +390,38 @@ mac("host temp opens only T to files, refuses socket connections there, disclose
   }
 }, 60_000)
 
+
+mac("host temp opens the user-var folder's metadata only, and a stale saved profile names the command that rewrites it", async () => {
+  const { root, workspaces, clean } = await fixture()
+  try {
+    await workspaces.create({ name: "user-var", hostTemp: true, logins: { kind: "none" } })
+    const m = await workspaces.manifest("user-var")
+    const stat = (path: string) => workspaces.exec("user-var", ["/usr/bin/stat", "-f", "%p", path])
+    // A stat of the user-var folder is what tools creating folders under T need; listing it, and its C and 0, stay refused.
+    expect(await stat(m.userVar)).toMatchObject({ exitCode: 0 })
+    expect(await stat(join(m.userVar, "T"))).toMatchObject({ exitCode: 0 })
+    expect((await workspaces.exec("user-var", ["/bin/ls", m.userVar])).stderr).toContain("Operation not permitted")
+    for (const child of ["C", "0"]) {
+      const refused = await stat(join(m.userVar, child))
+      expect(refused.exitCode).not.toBe(0); expect(refused.stderr).toContain("Operation not permitted")
+    }
+    // A workspace saved by a generator without the rule: launch refuses and says how to rewrite it.
+    const file = join(root, "state/workspaces/user-var.sb"); const manifestFile = join(root, "state/workspaces/user-var.json")
+    const old = (await readFile(file, "utf8")).replace('(allow file-read-metadata (literal (param "USER_VAR")))\n', "")
+    const saved = JSON.parse(await readFile(manifestFile, "utf8"))
+    saved.profileHash = new Bun.CryptoHasher("sha256").update(old).digest("hex")
+    await writeFile(file, old); await writeFile(manifestFile, JSON.stringify(saved))
+    const refused = await workspaces.exec("user-var", ["/usr/bin/true"]).then(() => undefined, (error) => error)
+    expect(refused?.message).toBe("Workspace execution refused by its checklist.")
+    expect(refused?.details.find((check: { id: string }) => check.id === "seatbelt")?.detail).toContain("paddock workspace set user-var host-temp on")
+    // Setting the same value again rewrites the profile from the saved settings.
+    await workspaces.setHostTemp("user-var", true)
+    expect(await stat(m.userVar)).toMatchObject({ exitCode: 0 })
+    await workspaces.setHostTemp("user-var", false)
+    const closed = await stat(m.userVar)
+    expect(closed.exitCode).not.toBe(0); expect(closed.stderr).toContain("Operation not permitted")
+  } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
+}, 30_000)
 
 mac("confstr temp file creation fails closed and succeeds with host-temp without changing TMPDIR", async () => {
   const { workspaces, clean } = await fixture()

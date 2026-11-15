@@ -5,7 +5,7 @@ import base from "./workspace.sb" with { type: "text" }
 
 export const WORKSPACE_DISCLOSURE = "Workspace, not a sandbox. Same Mac kernel and user; no CPU, memory, disk, GPU or process limits. Use workspace shell/exec; entering the folder alone does not confine programs. Internet, LAN, tailnet and loopback are open, including services started later. Reads outside home are open. Outside command lines are visible. Inner sandboxes may fail; Paddock passes no agent flags. Homebrew and nix daemon installs outside the folder are refused. Remote effects, unified logs and backups can survive removal. Apple events, TCC services, camera, microphone, Keychain additions, other IOKit devices, Bluetooth and Spotlight retention are not covered. Hard links placed from outside can share changes. Unnamed daemon channels are not covered."
 
-export const HOST_TEMP_DISCLOSURE = "Shared host temp is open to files by this workspace's host-temp setting. Other programs' temp files there are readable and writable by this workspace, which can also delete their socket files and create listening sockets there that outside programs can connect to. Connecting to Unix sockets there stays refused. Other workspaces with host-temp on share it. Files left there are not removed by workspace remove and are not counted in its size."
+export const HOST_TEMP_DISCLOSURE = "Shared host temp is open to files by this workspace's host-temp setting. Other programs' temp files there are readable and writable by this workspace, which can also delete their socket files and create listening sockets there that outside programs can connect to. Connecting to Unix sockets there stays refused. The folder that contains it shows its own attributes, not its contents. Other workspaces with host-temp on share it. Files left there are not removed by workspace remove and are not counted in its size."
 export const workspaceDisclosure = (hostTemp: boolean) => hostTemp ? `${WORKSPACE_DISCLOSURE} ${HOST_TEMP_DISCLOSURE}` : WORKSPACE_DISCLOSURE
 
 export const within = (path: string, parent: string) => path === parent || path.startsWith(`${parent === "/" ? "" : parent}/`)
@@ -15,7 +15,9 @@ export function workspaceProfile(manifest: Pick<WorkspaceManifest, "folder" | "h
   const lines = [base]
   if (manifest.spec?.hostTemp) {
     params.push(`HOST_TEMP=${join(manifest.userVar, "T")}`)
-    lines.push('(allow file-read* file-write* (subpath (param "HOST_TEMP")))')
+    // Tools that make folders under T walk its ancestors with stat(); a refused stat of the user-var folder makes ONNX
+    // Runtime's CoreML provider fail with EEXIST. The literal opens that folder's own metadata only, not C or 0.
+    lines.push('(allow file-read* file-write* (subpath (param "HOST_TEMP")))', '(allow file-read-metadata (literal (param "USER_VAR")))')
   }
   manifest.reads.forEach((read, index) => {
     params.push(`READ_${index}=${read.canonical}`)

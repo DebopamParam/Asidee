@@ -161,8 +161,13 @@ files left there survive remove and are excluded from workspace size. Successful
 exception. Verify connects to a real listener in `T` from an unconfined control and from inside, with the setting on
 or off; the inside connection must be refused. Live Seatbelt tests measure temp files, refused socket connections,
 socket-file deletion and listening, remaining denials and a `confstr(DARWIN_USER_TEMP_DIR)` file reproduction.
-Unit tests cover defaults, validation, profile bytes, CLI JSON and dashboard rows. PyTorch/MPS warning counts and
-CoreML inference were not rerun; do not claim those workloads were fixed.
+With it on, the folder containing `T` is also open to `stat` (not listing); tools that create folders under `T` need
+that. A live test measures that `stat` and the refusals beside it. Unit tests cover defaults, validation, profile
+bytes, CLI JSON and dashboard rows. ONNX Runtime's CoreML provider ran an ML Program on the GPU with this rule in one
+hand measurement outside the test suite (M5, macOS 26.7.1), with a profile that still allowed socket connections in
+`T`; it was not repeated with the current profile. PyTorch/MPS warning counts were not rerun; claim nothing beyond
+that. A workspace whose saved profile predates a Paddock update refuses to launch and names the fix: stop it, then
+`paddock workspace set NAME host-temp on` (its current value).
 
 Creation imports `default` profiles unless the user selects named profiles. `--claude-profile work` reads
 `~/.claude-work`; `--codex-profile work` reads `~/.codex-work`. `--no-logins` reads/imports no logins. Daemon environment
