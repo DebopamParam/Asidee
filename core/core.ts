@@ -186,7 +186,8 @@ export class Core {
       await this.startChecked(manifest)
       const { checks, failed } = await this.verifyNow(manifest, config.requireProbes)
       if (failed.length) {
-        const unknown = failed.some((check) => check.status === "unknown" && CHECKLIST.find((item) => item.id === check.id)?.stage === "probe")
+        // Only when turning the requirement off would let this create through: a failure beside an unknown probe is a failed check.
+        const unknown = failed.every((check) => check.status === "unknown" && CHECKLIST.find((item) => item.id === check.id)?.stage === "probe")
         if (unknown) throw new PaddockError("probes-required", `${spec.name} was created but stopped, and is kept for diagnosis: ${failed.map((check) => `${titleOf(check.id)} (${check.detail})`).join("; ")}. Required isolation probes could not run. To allow creation without them, run \`paddock config set require-probes off\` on this machine, or turn off Require isolation probes in Settings.`, failed)
         this.refuse(spec.name, failed, "was created but stopped, and is kept for diagnosis")
       }

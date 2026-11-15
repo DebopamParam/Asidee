@@ -725,6 +725,10 @@ test("failed and unsupported blocking probes stop creation in both modes; nonblo
       await paddock.configSet({ requireProbes })
       await expect(paddock.create({ name: "demo" })).rejects.toMatchObject({ code: "check-failed", message: expect.stringContaining("Cannot reach the host (Isolation was not provided.)") })
       expect(state).toMatchObject({ starts: 1, stops: 1, running: false, exists: true })
+      // A failure beside an unknown probe is a failed check: turning the requirement off would not let it through.
+      const mixed = probes.map((check): CheckResult => check.id === "net-peers" ? { ...check, status: "unknown", evidence: "none", detail: "The control did not answer." } : check)
+      const other = await core(fakeProvider({ probe: mixed }).provider); await other.configSet({ requireProbes })
+      await expect(other.create({ name: "demo" })).rejects.toMatchObject({ code: "check-failed" })
     }
     const { provider } = fakeProvider({ probe: allPass("probe").filter((check) => check.id !== "egress" && check.id !== "credentials") })
     const paddock = await core(provider); await paddock.configSet({ requireProbes })
