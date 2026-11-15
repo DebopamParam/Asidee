@@ -412,7 +412,9 @@ mac("host temp opens the user-var folder's metadata only, and a stale saved prof
     saved.profileHash = new Bun.CryptoHasher("sha256").update(old).digest("hex")
     await writeFile(file, old); await writeFile(manifestFile, JSON.stringify(saved))
     const refused = await workspaces.exec("user-var", ["/usr/bin/true"]).then(() => undefined, (error) => error)
-    expect(refused?.message).toBe("Workspace execution refused by its checklist.")
+    // The message carries the command too, for stream sessions, which show only the message.
+    expect(refused?.message).toStartWith("Workspace execution refused by its checklist: ")
+    expect(refused?.message).toContain("paddock workspace set user-var host-temp on")
     expect(refused?.details.find((check: { id: string }) => check.id === "seatbelt")?.detail).toContain("paddock workspace set user-var host-temp on")
     // Setting the same value again rewrites the profile from the saved settings.
     await workspaces.setHostTemp("user-var", true)

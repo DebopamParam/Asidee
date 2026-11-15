@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { CHECKLIST, WORKSPACE_CHECKLIST } from "../../core/checks"
 import { VERSION } from "../../core/daemon"
 import { enrollmentOptions, GVISOR, GVISOR_FILES, GVISOR_RELEASE, installationPlan, type HostProbe } from "../../core/hosts"
 import { socketPath, streamSocketPath } from "../../core/state"
@@ -247,4 +248,38 @@ test("workspace host-temp parses create/set, reports state and disclosure in tex
   expect((await paddock("workspace", "verify", "render", "--host-temp")).code).toBe(2)
   expect((await paddock("workspace", "exec", "render", "--", "true")).err).toContain(HOST_TEMP_DISCLOSURE)
   expect((await paddock("help")).out).toContain("workspace set NAME host-temp on|off")
+})
+
+test("a refused workspace launch ends its sentence once and names workspace checks by their titles", async () => {
+  const details = [
+    { id: "seatbelt", status: "fail", evidence: "none", detail: "The workspace profile changed; execution refused. Run: paddock workspace set render host-temp on" },
+    { id: "processes", status: "unknown", evidence: "none", detail: "This workspace check could not be made." },
+    // In both checklists, with different titles.
+    { id: "credentials", status: "unknown", evidence: "none", detail: "Not measured." },
+  ]
+  const error = { code: "check-failed", message: "Workspace execution refused by its checklist: Runs under its workspace profile (fail): The workspace profile changed.", details }
+  const paddock = await daemon({ workspaceExec: { ok: false, error }, workspaceGet: { ok: true, data: { kind: "workspace", name: "render", status: "idle", spec: { hostTemp: false }, disclosure: WORKSPACE_DISCLOSURE } } })
+  const refused = await paddock("workspace", "exec", "render", "--", "true")
+  expect(refused.code).toBe(6)
+  expect(refused.err).toContain("paddock: Workspace execution refused by its checklist. These checks did not hold:\n")
+  expect(refused.err).not.toContain("..")
+  for (const id of ["seatbelt", "processes", "credentials"]) expect(refused.err).toContain(WORKSPACE_CHECKLIST.find((item) => item.id === id)!.title)
+  expect(refused.err).not.toContain(CHECKLIST.find((item) => item.id === "credentials")!.title)
+  expect(refused.err).toContain("paddock workspace set render host-temp on")
+  expect(refused.err).not.toMatch(/^\s+\S+ (seatbelt|processes|credentials)$/m)
+})
+
+test("workspace status lines leave size out where it was not measured and say unknown only where it was tried", async () => {
+  const view = (sizeBytes?: number) => ({ kind: "workspace", name: "render", folder: "/w/render", status: "idle", processes: 0, spec: { hostTemp: false }, disclosure: WORKSPACE_DISCLOSURE, ...(sizeBytes === undefined ? {} : { sizeBytes }) })
+  const report = { workspace: view(), ok: true, checks: [] }
+  const paddock = await daemon({ workspaceCreate: { ok: true, data: report }, workspaceVerify: { ok: true, data: report }, workspaceSet: { ok: true, data: view() },
+    workspaceStop: { ok: true, data: view() }, workspaceGet: { ok: true, data: view() }, workspaceList: { ok: true, data: [view(3 * 1024 ** 2)] } })
+  for (const args of [["create", "render"], ["verify", "render"], ["set", "render", "host-temp", "off"], ["stop", "render"]]) {
+    const { out, code } = await paddock("workspace", ...args)
+    expect(code).toBe(0)
+    expect(out).toContain("render: workspace, not a sandbox; idle, host-temp off, 0 processes\n")
+    expect(out).not.toContain("size")
+  }
+  expect((await paddock("workspace", "get", "render")).out).toContain("0 processes, size unknown")
+  expect((await paddock("workspace", "list")).out).toContain("0 processes, 3.0 MiB")
 })

@@ -228,7 +228,10 @@ zombies, beside eight `containerd-shim` zombies already left by the eval's earli
 count against its task limit. Putting a reaper in front of dockerd would change how a stop's signal reaches it and
 what ends the sandbox, which has not been measured, so it is not done. U12: exactly
 16 MiB comes back whole; more on stdout, on stderr, and 1 GiB on stdout are each refused with the limit named, no
-flooding process is left running, and the same daemon answers afterwards.
+flooding process is left running, and the same daemon answers afterwards. U14: a buffered exec whose command ran 400
+seconds returned its output and exit code. The CLI asks its daemon without Bun's default fetch timeout, which had
+ended such a request after 360 seconds with "The operation timed out."; a local exec has no deadline, and a routed one
+has the 45-minute mutation deadline below.
 
 Buffered input is bytes: `--stdin` reads the caller's stdin whole and sends it as `stdinBase64`, which the daemon
 decodes after checking that it is canonical base64 of at most 16 MiB (`execStdin` in `core/daemon.ts`); a request

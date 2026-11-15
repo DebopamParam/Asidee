@@ -84,7 +84,8 @@ persistence and automatic sandbox recovery are not measured.
 - A sandbox has no host folders. Send a file in with `paddock exec NAME --stream -- sh -c 'cat > FILE' < local-file`,
   and read one out with `paddock exec NAME --stream -- cat FILE > local-file`. `--stream` carries any bytes of any size
   and keeps stderr apart. Without it, one exec returns at most 16 MiB on each of stdout and stderr; past that it fails
-  with an error naming the limit and the command is ended.
+  with an error naming the limit and the command is ended. A buffered exec waits for its command however long it runs
+  (one routed to another machine gives up after 45 minutes, with its outcome unknown).
 - To run containers inside, create with `--docker` and the default image. Then use
   `paddock exec NAME -- docker run --rm alpine:latest echo inner-ok`. This private daemon adds exactly `NET_ADMIN`
   and `SYS_ADMIN` inside gVisor. Its containers use the sandbox's guarded network and share its outer limits.

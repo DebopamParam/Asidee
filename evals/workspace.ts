@@ -461,6 +461,18 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
     } finally { if (child) { child.kill("SIGKILL"); await child.exited }; await drop(ws) }
   })
 
+  // Bun's fetch gives up after 360 seconds unless told otherwise, which ended a longer exec's CLI while its command went on.
+  ev("K29", "A buffered workspace exec waits past Bun's 360-second fetch default and returns its command's output and exit code", async () => {
+    const ws = await make()
+    try {
+      const began = Date.now()
+      const long = await sh([binary, "workspace", "exec", ws.name, "--", "/bin/sh", "-c", "sleep 400; echo waited; exit 3"], { env, timeout: 480_000 })
+      const seconds = (Date.now() - began) / 1000
+      expect(long.code === 3 && long.out === "waited\n" && seconds >= 400, `after ${seconds.toFixed(1)} s: exit ${long.code}, out ${JSON.stringify(long.out)}, err ${long.err.slice(0, 300)}`)
+      return `exit 3 and its output after ${seconds.toFixed(1)} s`
+    } finally { await drop(ws) }
+  })
+
   return { evals, async close() {
     if (!root) return
     for (const finish of cleanup.reverse()) await finish()

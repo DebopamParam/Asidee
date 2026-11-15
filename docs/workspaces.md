@@ -42,7 +42,7 @@ readable. npm global, pip user and uv tool installs were measured with local fix
 Homebrew's outside Cellar or through the nix daemon is refused. SwiftPM remains unsupported by the current profile.
 
 Buffered `exec` uses pipes, carries stdin with `--stdin` byte for byte (up to 16 MiB), preserves the command's exit
-status and limits each output stream to 16 MiB. Its output is returned as text: invalid UTF-8 is replaced. `--stream`
+status and limits each output stream to 16 MiB. It waits for the command however long it runs (K29: 400 seconds). Its output is returned as text: invalid UTF-8 is replaced. `--stream`
 uses the existing private stream socket and is the byte-exact path for output. `shell` uses a PTY when the caller has a
 terminal and carries terminal input and resize. PTY output waiting for a slow client is capped at 1 MiB; exceeding
 that ends the session with an error. A closed session ends its identified starter. Detached descendants remain
@@ -191,7 +191,8 @@ Workspaces have a separate spec, manifest directory and fixed checklist; they ar
 `workspace*` API methods are socket-only and local. The dashboard displays a separate **Workspaces: not sandboxes**
 section through the read-only summary. Its actions stay in the CLI. Non-macOS commands refuse before starting a daemon.
 Summary reads manifests and counts tagged processes, without repairing identity, changing modes or walking the tree.
-An unavailable folder/tag stays unknown. Only explicit CLI list/get measure size with `du`. The 30-second sandbox
+An unavailable folder/tag stays unknown. Only explicit CLI list/get measure size with `du`; the lines create, verify,
+set and stop print leave size out, and `size unknown` means a measurement was tried and failed. The 30-second sandbox
 enforcement pass does no workspace inventory work. Full check results retain their verification timestamp.
 
 Policy decision controls run inside confined processes. Read and write decisions have same-operation allowed

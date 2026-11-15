@@ -410,7 +410,8 @@ export class Workspaces {
     return this.exclusive(workspaceName(name), async () => {
       const manifest = await this.manifest(name)
       const blocked = blockers(await this.blockingChecks(manifest), WORKSPACE_CHECKLIST, false)
-      if (blocked.length) throw new PaddockError("check-failed", "Workspace execution refused by its checklist.", blocked)
+      // The checks go in the message too: a stream session (shell, exec --stream) carries only the message.
+      if (blocked.length) throw new PaddockError("check-failed", `Workspace execution refused by its checklist: ${blocked.map((check) => `${WORKSPACE_CHECKLIST.find((item) => item.id === check.id)?.title ?? check.id} (${check.status}): ${check.detail}`).join(" ")}`, blocked)
       return this.launch(manifest, command, options.tty, options.cols, options.rows)
     })
   }

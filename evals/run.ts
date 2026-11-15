@@ -1499,6 +1499,17 @@ ev("U13", "Processes an exec session leaves behind are reaped when they end in a
   } finally { await pdk(["remove", plain, "--confirm", plain]) }
 })
 
+// Bun's fetch gives up after 360 seconds unless told otherwise; the CLI asked the daemon over fetch, so a longer exec
+// came back as "The operation timed out." while its command went on.
+ev("U14", "A buffered exec waits past Bun's 360-second fetch default and returns its command's output and exit code", async () => {
+  await ensure(A)
+  const began = Date.now()
+  const long = await pdk(["exec", A, "--", "sh", "-c", "sleep 400; echo waited; exit 3"], { timeoutMs: 480_000 })
+  const seconds = (Date.now() - began) / 1000
+  expect(long.code === 3 && long.out === "waited\n" && seconds >= 400, `after ${seconds.toFixed(1)} s: exit ${long.code}, out ${JSON.stringify(long.out)}, err ${long.err.slice(0, 300)}`)
+  return `exit 3 and its output after ${seconds.toFixed(1)} s`
+})
+
 ev("U11", "The default image (no --image) makes a sandbox that passes every blocking check", async () => {
   const image = "docker/sandbox-templates:shell-docker"
   if ((await docker(["image", "inspect", image])).code !== 0) skip(`${image} is not on this engine, and the eval does not download it (it is large)`)

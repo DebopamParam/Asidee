@@ -138,8 +138,10 @@ const compiled = Bun.main.startsWith("/$bunfs/")
 const self = compiled ? [process.execPath] : [process.execPath, Bun.main]
 const cliDir = compiled ? dirname(process.execPath) : join(dirname(Bun.main), "..", "bin")
 
+// Bun's fetch gives up after 360 seconds by default, and an exec runs as long as its command does: the daemon's own
+// deadlines (none locally, 45 minutes for a remote mutation) are the ones that apply.
 async function request<T>(method: string, body: object = {}): Promise<T> {
-  const response = await fetch(`http://paddock/api/${method}`, { unix: socketPath(dirs), method: "POST", body: JSON.stringify(body) } as RequestInit)
+  const response = await fetch(`http://paddock/api/${method}`, { unix: socketPath(dirs), method: "POST", body: JSON.stringify(body), timeout: false } as RequestInit)
   const reply = await response.json() as { ok: true; data: T } | { ok: false; error: { code: ErrorCode; message: string; details?: unknown } }
   if (!reply.ok) throw new PaddockError(reply.error.code, reply.error.message, reply.error.details)
   return reply.data
@@ -312,11 +314,12 @@ async function main(argv: string[]): Promise<void> {
         if (values["host-temp"] !== undefined && action !== "create") throw new PaddockError("usage", "--host-temp is a create option. Use workspace set NAME host-temp on|off to change it.")
         const localPath = (path: string) => path === "~" || path.startsWith("~/") ? path : resolve(path)
         if (values["no-logins"] && (values["claude-profile"] !== undefined || values["codex-profile"] !== undefined)) throw new PaddockError("usage", "Choose --no-logins or named login profiles, not both.")
-        const show = (view: WorkspaceView) => console.log(`${shown(view.name)}: workspace, not a sandbox; ${shown(view.status)}, host-temp ${view.spec ? view.spec.hostTemp ? "on (shared, weaker)" : "off" : "unknown"}, ${view.processes ?? "unknown"} processes, ${view.sizeBytes === undefined ? "size unknown" : `${(view.sizeBytes / 1024 ** 2).toFixed(1)} MiB`}${view.folder ? `\n  ${shown(view.folder)}` : ""}${view.problem ? `\n  ${shown(view.problem)}` : ""}`)
+        // Only list and get measure size; elsewhere the field is left out rather than shown as unknown.
+        const show = (view: WorkspaceView, measured = false) => console.log(`${shown(view.name)}: workspace, not a sandbox; ${shown(view.status)}, host-temp ${view.spec ? view.spec.hostTemp ? "on (shared, weaker)" : "off" : "unknown"}, ${view.processes ?? "unknown"} processes${view.sizeBytes !== undefined ? `, ${(view.sizeBytes / 1024 ** 2).toFixed(1)} MiB` : measured ? ", size unknown" : ""}${view.folder ? `\n  ${shown(view.folder)}` : ""}${view.problem ? `\n  ${shown(view.problem)}` : ""}`)
         const disclose = (disclosure = WORKSPACE_DISCLOSURE) => console.log(`\n${shown(disclosure)}`)
         if (action === "list") {
           const workspaces = await call<WorkspaceView[]>("workspaceList")
-          return out(workspaces, () => { for (const workspace of workspaces) { show(workspace); if (workspace.spec?.hostTemp) console.log(shown(workspace.disclosure)) } if (!workspaces.length) console.log("No workspaces."); disclose() })
+          return out(workspaces, () => { for (const workspace of workspaces) { show(workspace, true); if (workspace.spec?.hostTemp) console.log(shown(workspace.disclosure)) } if (!workspaces.length) console.log("No workspaces."); disclose() })
         }
         const name = need(positionals[0], "a workspace name")
         if (action === "create" || action === "verify") {
@@ -334,7 +337,7 @@ async function main(argv: string[]): Promise<void> {
           const view = await call<WorkspaceView>("workspaceSet", { name, hostTemp: positionals[2] === "on" })
           return out(view, () => { show(view); disclose(view.disclosure) })
         }
-        if (action === "get" || action === "stop") { const view = await call<WorkspaceView>(action === "get" ? "workspaceGet" : "workspaceStop", { name }); return out(view, () => { show(view); disclose(view.disclosure) }) }
+        if (action === "get" || action === "stop") { const view = await call<WorkspaceView>(action === "get" ? "workspaceGet" : "workspaceStop", { name }); return out(view, () => { show(view, action === "get"); disclose(view.disclosure) }) }
         if (action === "remove") {
           const removed = await call<WorkspaceRemoval>("workspaceRemove", { name, confirm: values.confirm })
           return out(removed, () => { console.log(`Removed workspace ${shown(removed.removed)}, not a sandbox.`); for (const path of removed.hardLinks) console.log(`Multiple hard links: ${shown(path)}`); for (const issue of [...removed.launchServices, ...removed.launchd]) console.log(shown(issue)); console.log(`Not removed or not covered: ${removed.notRemoved.map((item) => shown(item)).join("; ")}.`); disclose(removed.disclosure) })
@@ -620,8 +623,10 @@ async function main(argv: string[]): Promise<void> {
       console.error(`To turn off the probe requirement on the selected machine: paddock${selectedHost && selectedHost !== "local" ? ` --host ${selectedHost}` : ""} config set require-probes off`)
     }
     else if (code === "check-failed" && error instanceof PaddockError && Array.isArray(error.details)) {
-      console.error(`paddock: ${shown(message.split(": ")[0])}. These checks did not hold:`)
-      for (const check of error.details as CheckResult[]) console.error(`  ${MARK[check.status] ?? "?"} ${CHECKLIST.find((entry) => entry.id === check.id)?.title ?? shown(check.id)}\n      ${shown(check.detail)}`)
+      // Workspaces have their own checklist; some ids (credentials) are in both with different titles.
+      const checklist = command === "workspace" ? WORKSPACE_CHECKLIST : CHECKLIST
+      console.error(`paddock: ${shown(message.split(": ")[0]!.replace(/\.$/, ""))}. These checks did not hold:`)
+      for (const check of error.details as CheckResult[]) console.error(`  ${MARK[check.status] ?? "?"} ${checklist.find((entry) => entry.id === check.id)?.title ?? shown(check.id)}\n      ${shown(check.detail)}`)
     } else console.error(`paddock: ${shown(message)}`)
     process.exit(EXIT[code])
   }
