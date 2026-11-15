@@ -7,7 +7,7 @@ import { createInterface } from "node:readline/promises"
 import { parseArgs } from "node:util"
 import { CHECKLIST, WORKSPACE_CHECKLIST } from "../core/checks"
 import type { WorkspaceReport, WorkspaceView, WorkspaceRemoval } from "../core/workspaces"
-import { WORKSPACE_DISCLOSURE } from "../core/workspace-profile"
+import { HOST_TEMP_DISCLOSURE, WORKSPACE_DISCLOSURE } from "../core/workspace-profile"
 import type { ResizeChange, SandboxView } from "../core/core"
 import { BUILD, readDaemonFile, runDaemon, VERSION } from "../core/daemon"
 import type { Extension } from "../core/extensions"
@@ -47,10 +47,12 @@ const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, 
   paddock ssh setup NAME [--write-config]   sshd inside, reached as NAME.paddock through the daemon, no port
   paddock ssh access NAME                   the alias, user and home an editor uses, and whether it is ready
   paddock remove NAME --confirm NAME
-  paddock workspace create NAME [--copy PATH] [--read PATH]… [--path DIR]… [--no-logins | --claude-profile NAME --codex-profile NAME]
+  paddock workspace create NAME [--host-temp] [--copy PATH] [--read PATH]… [--path DIR]… [--no-logins | --claude-profile NAME --codex-profile NAME]
+                                         --host-temp opens shared per-user temp (default off); TMPDIR stays private
   paddock workspace shell NAME [-- COMMAND…]   workspace, not a sandbox; macOS only
   paddock workspace exec NAME [--stdin | --stream] -- COMMAND…
   paddock workspace list | get NAME | stop NAME | verify NAME
+  paddock workspace set NAME host-temp on|off   stop first; applies to later processes; shared host temp weakens confinement
   paddock workspace remove NAME --confirm NAME
   paddock snapshot NAME --as TEMPLATE    save the sandbox's files, minus the usual logins, as a template
   paddock template list | template remove TEMPLATE [--engine ID]   sandboxes made from it keep working
@@ -304,49 +306,58 @@ async function main(argv: string[]): Promise<void> {
         const { values, positionals } = (() => {
           try { return parseArgs({ args: rest.slice(1), allowPositionals: true, options: {
             read: { type: "string", multiple: true }, path: { type: "string", multiple: true }, copy: { type: "string" }, loopback: { type: "string" }, confirm: { type: "string" }, stdin: { type: "boolean" }, stream: { type: "boolean" },
-            "no-logins": { type: "boolean" }, "claude-profile": { type: "string" }, "codex-profile": { type: "string" },
+            "host-temp": { type: "boolean" }, "no-logins": { type: "boolean" }, "claude-profile": { type: "string" }, "codex-profile": { type: "string" },
           } }) } catch (error) { throw new PaddockError("usage", (error as Error).message) }
         })()
+        if (values["host-temp"] !== undefined && action !== "create") throw new PaddockError("usage", "--host-temp is a create option. Use workspace set NAME host-temp on|off to change it.")
         const localPath = (path: string) => path === "~" || path.startsWith("~/") ? path : resolve(path)
         if (values["no-logins"] && (values["claude-profile"] !== undefined || values["codex-profile"] !== undefined)) throw new PaddockError("usage", "Choose --no-logins or named login profiles, not both.")
-        const show = (view: WorkspaceView) => console.log(`${shown(view.name)}: workspace, not a sandbox; ${shown(view.status)}, ${view.processes ?? "unknown"} processes, ${view.sizeBytes === undefined ? "size unknown" : `${(view.sizeBytes / 1024 ** 2).toFixed(1)} MiB`}${view.folder ? `\n  ${shown(view.folder)}` : ""}${view.problem ? `\n  ${shown(view.problem)}` : ""}`)
-        const disclose = () => console.log(`\n${WORKSPACE_DISCLOSURE}`)
+        const show = (view: WorkspaceView) => console.log(`${shown(view.name)}: workspace, not a sandbox; ${shown(view.status)}, host-temp ${view.spec ? view.spec.hostTemp ? "on (shared, weaker)" : "off" : "unknown"}, ${view.processes ?? "unknown"} processes, ${view.sizeBytes === undefined ? "size unknown" : `${(view.sizeBytes / 1024 ** 2).toFixed(1)} MiB`}${view.folder ? `\n  ${shown(view.folder)}` : ""}${view.problem ? `\n  ${shown(view.problem)}` : ""}`)
+        const disclose = (disclosure = WORKSPACE_DISCLOSURE) => console.log(`\n${shown(disclosure)}`)
         if (action === "list") {
           const workspaces = await call<WorkspaceView[]>("workspaceList")
-          return out(workspaces, () => { for (const workspace of workspaces) show(workspace); if (!workspaces.length) console.log("No workspaces."); disclose() })
+          return out(workspaces, () => { for (const workspace of workspaces) { show(workspace); if (workspace.spec?.hostTemp) console.log(shown(workspace.disclosure)) } if (!workspaces.length) console.log("No workspaces."); disclose() })
         }
         const name = need(positionals[0], "a workspace name")
         if (action === "create" || action === "verify") {
           const report = await call<WorkspaceReport>(action === "create" ? "workspaceCreate" : "workspaceVerify", { name,
-            ...(action === "create" ? { reads: values.read?.map(localPath), path: values.path?.map(localPath), copy: values.copy ? localPath(values.copy) : undefined, loopback: values.loopback,
+            ...(action === "create" ? { hostTemp: values["host-temp"] ?? false, reads: values.read?.map(localPath), path: values.path?.map(localPath), copy: values.copy ? localPath(values.copy) : undefined, loopback: values.loopback,
               logins: values["no-logins"] ? { kind: "none" } : { kind: "profiles", claude: values["claude-profile"] ?? "default", codex: values["codex-profile"] ?? "default" } } : {}) })
           out(report, () => { show(report.workspace); printChecks(report.checks, WORKSPACE_CHECKLIST); for (const path of report.pathSuggestions ?? []) console.log(`Tool folder under home, closed unless declared with --read: ${shown(path)}`)
             // The not-covered check already carries the disclosure when verification reached it.
-            if (!report.checks.some((check) => check.detail.includes(WORKSPACE_DISCLOSURE))) disclose() })
+            if (!report.checks.some((check) => check.detail.includes(WORKSPACE_DISCLOSURE))) disclose(report.workspace.disclosure) })
           if (!report.ok) process.exit(EXIT["check-failed"])
           return
         }
-        if (action === "get" || action === "stop") { const view = await call<WorkspaceView>(action === "get" ? "workspaceGet" : "workspaceStop", { name }); return out(view, () => { show(view); disclose() }) }
+        if (action === "set") {
+          if (positionals.length !== 3 || positionals[1] !== "host-temp" || !["on", "off"].includes(positionals[2]!)) throw new PaddockError("usage", "Use paddock workspace set NAME host-temp on|off. Stop the workspace first.")
+          const view = await call<WorkspaceView>("workspaceSet", { name, hostTemp: positionals[2] === "on" })
+          return out(view, () => { show(view); disclose(view.disclosure) })
+        }
+        if (action === "get" || action === "stop") { const view = await call<WorkspaceView>(action === "get" ? "workspaceGet" : "workspaceStop", { name }); return out(view, () => { show(view); disclose(view.disclosure) }) }
         if (action === "remove") {
           const removed = await call<WorkspaceRemoval>("workspaceRemove", { name, confirm: values.confirm })
-          return out(removed, () => { console.log(`Removed workspace ${shown(removed.removed)}, not a sandbox.`); for (const path of removed.hardLinks) console.log(`Multiple hard links: ${shown(path)}`); for (const issue of [...removed.launchServices, ...removed.launchd]) console.log(shown(issue)); console.log(`Not removed or not covered: ${removed.notRemoved.map((item) => shown(item)).join("; ")}.`); disclose() })
+          return out(removed, () => { console.log(`Removed workspace ${shown(removed.removed)}, not a sandbox.`); for (const path of removed.hardLinks) console.log(`Multiple hard links: ${shown(path)}`); for (const issue of [...removed.launchServices, ...removed.launchd]) console.log(shown(issue)); console.log(`Not removed or not covered: ${removed.notRemoved.map((item) => shown(item)).join("; ")}.`); disclose(removed.disclosure) })
         }
         if (action === "exec") {
           if (!tail.length) throw new PaddockError("usage", "Give the workspace command after --.")
           if (values.stream && (asJson || values.stdin)) throw new PaddockError("usage", "--stream takes neither --json nor --stdin.")
-          if (!asJson) console.error("Workspace, not a sandbox. Network and loopback open; no resource limits.")
+          if (!asJson) {
+            const view = await call<WorkspaceView>("workspaceGet", { name, withSize: false })
+            console.error(`Workspace, not a sandbox. Network and loopback open; no resource limits.${view.spec?.hostTemp ? ` ${HOST_TEMP_DISCLOSURE}` : ""}`)
+          }
           if (values.stream) return await session({ kind: "workspace", name, argv: tail, tty: false })
           return printRun(await call<RunResult>("workspaceExec", { name, argv: tail, ...(values.stdin ? await stdinBytes() : {}) }), asJson)
         }
         if (action === "shell") {
           if (asJson) throw new PaddockError("usage", "An interactive workspace shell does not support --json.")
-          const prepared = await call<{ argv: string[] }>("workspaceShell", { name })
-          console.error(WORKSPACE_DISCLOSURE)
+          const prepared = await call<{ argv: string[]; workspace: WorkspaceView }>("workspaceShell", { name })
+          console.error(shown(prepared.workspace.disclosure))
           const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY)
           return await session({ kind: "workspace", name, argv: tail.length ? tail : prepared.argv, tty,
             ...(tty && process.stdout.columns > 0 && process.stdout.rows > 0 ? { cols: process.stdout.columns, rows: process.stdout.rows } : {}) })
         }
-        throw new PaddockError("usage", "Use paddock workspace create|shell|exec|list|get|stop|remove|verify.")
+        throw new PaddockError("usage", "Use paddock workspace create|set|shell|exec|list|get|stop|remove|verify.")
       }
       case undefined: case "help": case "--help": case "-h": return out({ help: HELP }, () => console.log(HELP))
       case "version": case "--version": return out({ version: VERSION }, () => console.log(VERSION))

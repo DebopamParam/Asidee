@@ -8,9 +8,9 @@ import { claudeState, credentialFiles, profileName, readCredential, type Host } 
 import { must, systemRunner } from "./run"
 import type { Dirs } from "./state"
 import { object } from "./transport"
-import { PaddockError, type CheckResult, type RunResult, type Session, type Runner, type WorkspaceManifest, type WorkspaceSpec } from "./types"
+import { PaddockError, type CheckResult, type RunResult, type Runner, type WorkspaceManifest, type WorkspaceSpec } from "./types"
 import { belongs, controlledDecision, decision, requireMac, stopWorkspaceProcesses, workspacePids } from "./workspace-processes"
-import { within, WORKSPACE_DISCLOSURE, workspaceEnvironment, workspaceProfile } from "./workspace-profile"
+import { within, WORKSPACE_DISCLOSURE, HOST_TEMP_DISCLOSURE, workspaceDisclosure, workspaceEnvironment, workspaceProfile } from "./workspace-profile"
 import { WorkspaceSession } from "./workspace-session"
 import controlProfile from "./workspace-control.sb" with { type: "text" }
 
@@ -33,12 +33,13 @@ function strings(value: unknown, label: string): string[] {
 }
 export function validWorkspaceSpec(input: Record<string, unknown>): WorkspaceSpec {
   if (input.loopback !== undefined && input.loopback !== "open") throw new PaddockError("usage", "Workspace loopback is open. Declared ports are not available in this version.")
+  if (input.hostTemp !== undefined && typeof input.hostTemp !== "boolean") throw new PaddockError("usage", "hostTemp must be a boolean.")
   const copy = input.copy === undefined ? undefined : strings([input.copy], "copy")[0]
   const selected = input.logins ?? { kind: "profiles", claude: "default", codex: "default" }
   if (!object(selected) || (selected.kind !== "none" && selected.kind !== "profiles")) throw new PaddockError("usage", "logins must select named profiles or none.")
   const profile = (value: unknown) => { if (typeof value !== "string") throw new PaddockError("usage", "Choose a named login profile."); try { return profileName(value) } catch { throw new PaddockError("usage", "A login profile is 1 to 48 letters, digits, underscores or hyphens.") } }
   const logins: WorkspaceSpec["logins"] = selected.kind === "none" ? { kind: "none" } : { kind: "profiles", claude: profile(selected.claude), codex: profile(selected.codex) }
-  return { name: workspaceName(input.name), reads: strings(input.reads, "reads"), path: strings(input.path, "path"), loopback: "open", ...(copy ? { copy } : {}), logins }
+  return { name: workspaceName(input.name), hostTemp: input.hostTemp ?? false, reads: strings(input.reads, "reads"), path: strings(input.path, "path"), loopback: "open", ...(copy ? { copy } : {}), logins }
 }
 export const validArgv = (value: unknown): string[] => {
   if (!Array.isArray(value) || !value.length || !value.every((arg) => typeof arg === "string" && !arg.includes("\0"))) throw new PaddockError("usage", "workspace exec needs a command after --.")
@@ -92,7 +93,7 @@ export async function copyTimesAndModes(source: string, target: string): Promise
 
 export class Workspaces {
   private readonly locks = new Map<string, Promise<unknown>>()
-  private readonly sessions = new Set<Session>()
+  private readonly sessions = new Map<WorkspaceSession, string>()
   constructor(readonly dirs: Dirs, private readonly env: NodeJS.ProcessEnv = process.env, private readonly loginHost?: Host, private readonly runHost: Runner = systemRunner) {}
   private exclusive<T>(name: string, task: () => Promise<T>): Promise<T> {
     const next = (this.locks.get(name) ?? Promise.resolve()).then(task, task)
@@ -151,7 +152,7 @@ export class Workspaces {
     const size = withSize ? await this.runHost(["/usr/bin/du", "-sk", manifest.folder], { timeoutMs: 10_000 }) : undefined
     const kb = size?.exitCode === 0 ? Number(size.stdout.trim().split(/\s/)[0]) : NaN
     return { kind: "workspace", name: manifest.name, folder: manifest.folder, status: processes === undefined ? "unknown" : processes ? "running" : "idle", processes,
-      ...(Number.isFinite(kb) ? { sizeBytes: kb * 1024 } : {}), spec: manifest.spec, createdAt: manifest.createdAt, lastVerify: historical(manifest.lastVerify), disclosure: WORKSPACE_DISCLOSURE, problem }
+      ...(Number.isFinite(kb) ? { sizeBytes: kb * 1024 } : {}), spec: manifest.spec, createdAt: manifest.createdAt, lastVerify: historical(manifest.lastVerify), disclosure: workspaceDisclosure(manifest.spec.hostTemp), problem }
   }
   private async inventory(withSize: boolean): Promise<WorkspaceView[]> {
     await this.locations()
@@ -218,6 +219,7 @@ export class Workspaces {
       const source = spec.copy ? await realpath(expand(spec.copy, home)) : undefined
       if (source && (!(await lstat(source)).isDirectory() || within(folder, source) || within(source, root) || within(source, state))) throw new PaddockError("usage", "--copy must be a project directory separate from workspace and state folders.")
       const temp = must(await this.runHost(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"]), "Finding this user's temp folder").stdout.trim()
+      if (spec.hostTemp && await realpath(temp) !== join(await realpath(dirname(temp)), "T")) throw new PaddockError("check-failed", "DARWIN_USER_TEMP_DIR is not the canonical per-user T folder.")
       const manifest: WorkspaceManifest = { version: 1, kind: "workspace", name: spec.name, id: randomBytes(16).toString("hex"), spec, folder, tag: join(folder, ".paddock-tag"), home,
         userVar: await realpath(dirname(temp)), reads, profileHash: "", macOS: must(await this.runHost(["/usr/bin/sw_vers", "-productVersion"]), "Reading macOS version").stdout.trim(), createdAt: new Date().toISOString(), logins: [], backup: "Time Machine exclusion not measured." }
       await mkdir(root, { recursive: true, mode: 0o700 }); await mkdir(folder, { mode: 0o700 })
@@ -256,9 +258,10 @@ export class Workspaces {
     if (profile.hash !== manifest.profileHash || await readFile(this.profileFile(manifest.name), "utf8") !== profile.text) throw new PaddockError("check-failed", "The workspace profile changed; execution refused.")
     for (const path of [manifest.home, manifest.userVar, ...manifest.reads.map((read) => read.canonical), ...manifest.spec.path])
       if (await realpath(path) !== path) throw new PaddockError("check-failed", "A canonical profile path changed; execution refused.")
+    if (manifest.spec.hostTemp && await realpath(join(manifest.userVar, "T")) !== join(manifest.userVar, "T")) throw new PaddockError("check-failed", "The host temp folder is no longer canonical.")
     const session = new WorkspaceSession({ argv: ["/usr/bin/sandbox-exec", "-f", this.profileFile(manifest.name), ...profile.params.flatMap((value) => ["-D", value]), "--", ...argv],
       env: workspaceEnvironment(manifest, this.env), cwd: join(manifest.folder, "work"), folder: manifest.folder, tty, cols, rows })
-    this.sessions.add(session); session.on("end", () => this.sessions.delete(session))
+    this.sessions.set(session, manifest.folder); session.on("end", () => this.sessions.delete(session))
     return session
   }
   private async run(manifest: WorkspaceManifest, argv: string[], stdin?: string | Uint8Array, timeoutMs = 20_000): Promise<RunResult> {
@@ -271,6 +274,7 @@ export class Workspaces {
     let probe: WorkspaceSession | undefined
     let control: WorkspaceSession | undefined
     let fixture: string | undefined
+    let tempFixture: string | undefined
     let socketFixture: string | undefined
     let server: ReturnType<typeof createServer> | undefined
     try {
@@ -295,15 +299,34 @@ export class Workspaces {
       const writeRefused = write.exitCode !== 0 && await readFile(target, "utf8") === "control"
       add("writes", writeRefused && insideWrite.exitCode === 0 ? "pass" : "fail", "probed", `Sibling write ${writeRefused ? "refused" : "not refused"}; inside write ${insideWrite.exitCode === 0 ? "succeeded" : "failed"}. Home/shared-temp decisions use same-operation allowed controls in a confined profile.`)
       const read = await this.run(manifest, ["/bin/cat", target])
-      const closed = [manifest.home, "/private/tmp", "/private/var/tmp", manifest.userVar]
+      const closed = [manifest.home, "/private/tmp", "/private/var/tmp", manifest.userVar, join(manifest.userVar, "C"), join(manifest.userVar, "0"), ...(!manifest.spec.hostTemp ? [join(manifest.userVar, "T")] : [])]
       const readControl = decision(probe.pid, "file-read-data", 1, manifest.folder) === 0 && closed.every((path) => controlledDecision(probe!.pid, control!.pid, "file-read-data", 1, path) !== "unknown")
       const denied = closed.every((path) => controlledDecision(probe!.pid, control!.pid, "file-read-data", 1, path) === "denied")
       add("home-closed", !readControl ? "unknown" : read.exitCode !== 0 && denied ? "pass" : "fail", "probed", `Sibling home read ${read.exitCode !== 0 ? "refused" : "allowed"}; allowed confined controls ${readControl ? "answered" : "unavailable"}; shared-temp decisions ${denied ? "denied" : "not established as denied"}. Read allowances: ${manifest.reads.map((read) => read.canonical).join(", ") || "none"}.`)
-      const writeTargets = [manifest.home, "/private/tmp", manifest.userVar]
+      const writeTargets = closed
       const writeAnswers = writeTargets.map((path) => decision(probe!.pid, "file-write-create", 1, path))
       if (decision(probe.pid, "file-write-create", 1, manifest.folder) !== 0 || writeAnswers.some((answer) => answer !== 0 && answer !== 1))
         results[results.findIndex((result) => result.id === "writes")] = { id: "writes", status: "unknown", evidence: "probed", detail: "A live write control or kernel decision for home/shared temp could not be established." }
       else if (writeAnswers.includes(0)) results[results.findIndex((result) => result.id === "writes")] = { id: "writes", status: "fail", evidence: "probed", detail: "An outside file-write-create decision was allowed beside the same-operation allowed control inside the workspace." }
+      const tempChecks = results.filter((check) => check.id === "writes" || check.id === "home-closed").map((check) => ({ check, status: check.status, detail: check.detail }))
+      for (const { check } of tempChecks) {
+        check.status = "unknown"
+        check.detail += ` Host temp probe required. ${manifest.spec.hostTemp ? HOST_TEMP_DISCLOSURE : "host-temp is off."}`
+      }
+      tempFixture = await mkdtemp(join(manifest.userVar, "T", "paddock-check-"))
+      const tempSource = join(tempFixture, "source"); const tempTarget = join(tempFixture, "created")
+      await writeFile(tempSource, "host-temp-control")
+      const tempRead = await this.run(manifest, ["/bin/cat", tempSource])
+      const tempWrite = await this.run(manifest, ["/bin/sh", "-c", 'printf host-temp-created > "$1" && cat "$1"', "probe", tempTarget])
+      const tempOpen = tempRead.exitCode === 0 && tempRead.stdout === "host-temp-control" && tempWrite.exitCode === 0 && tempWrite.stdout === "host-temp-created"
+      const tempClosed = tempRead.exitCode !== 0 && tempWrite.exitCode !== 0 && !await stat(tempTarget).catch(() => undefined)
+      for (const { check: result, status, detail } of tempChecks) {
+        result.status = status; result.detail = detail
+        const expected = manifest.spec.hostTemp ? tempOpen : tempClosed
+        if (!expected) result.status = "fail"
+        else if (manifest.spec.hostTemp && result.status === "pass") result.status = "weak"
+        result.detail += ` Host temp T read/create/read-back ${expected ? "matched" : "did not match"} host-temp ${manifest.spec.hostTemp ? "on" : "off"}; home, /private/tmp, /private/var/tmp, user-var parent, C and 0 decisions checked. ${manifest.spec.hostTemp ? HOST_TEMP_DISCLOSURE : "Shared host temp remains closed."}`
+      }
       const controls = (checks: Array<[string, number, string]>) => checks.every(([op, type, arg]) => controlledDecision(probe!.pid, control!.pid, op, type, arg) !== "unknown"
         && (op !== "mach-lookup" || decision(probe!.pid, op, type, "com.apple.system.logger") === 0))
       const refuses = (checks: Array<[string, number, string]>) => checks.every(([op, type, arg]) => controlledDecision(probe!.pid, control!.pid, op, type, arg) === "denied")
@@ -316,14 +339,20 @@ export class Workspaces {
       const socketAttempt = await this.run(manifest, ["/usr/bin/nc", "-w", "1", "-U", socket])
       const socketDenied = socketAttempt.exitCode === 1 && socketAttempt.stdout === ""
       const socketsKnown = socketControl.exitCode === 0 && socketControl.stdout === marker && (socketAttempt.exitCode === 0 || socketDenied)
-      add("daemons", !controls(launchChannels) || !socketsKnown ? "unknown" : refuses(launchChannels) && socketDenied ? "pass" : "fail", "probed", `A real Unix-socket listener control ${socketControl.exitCode === 0 && socketControl.stdout === marker ? "answered" : "failed (exit " + socketControl.exitCode + ")"}; confined connect ${socketDenied ? "refused" : "not established as refused"}. Allowed confined policy controls ${controls(launchChannels) ? "answered" : "unavailable"}; decisions ${launchChannels.map(([op, type, arg]) => op + "=" + controlledDecision(probe!.pid, control!.pid, op, type, arg)).join(", ")}. Apple events are not covered.`)
+      add("daemons", !controls(launchChannels) || !socketsKnown ? "unknown" : refuses(launchChannels) && socketDenied ? manifest.spec.hostTemp ? "weak" : "pass" : "fail", "probed", `A real Unix-socket listener control ${socketControl.exitCode === 0 && socketControl.stdout === marker ? "answered" : "failed (exit " + socketControl.exitCode + ")"}; confined connect ${socketDenied ? "refused" : "not established as refused"}. Allowed confined policy controls ${controls(launchChannels) ? "answered" : "unavailable"}; decisions ${launchChannels.map(([op, type, arg]) => op + "=" + controlledDecision(probe!.pid, control!.pid, op, type, arg)).join(", ")}. ${manifest.spec.hostTemp ? "Sockets in shared host temp are open by the host-temp setting. " : ""}Apple events are not covered.`)
       const data: Array<[string, number, string]> = [["user-preference-read", 6, "com.apple.finder"], ["user-preference-write", 6, "com.apple.finder"], ["mach-lookup", 2, "com.apple.pasteboard.1"], ["signal", 0, ""], ["process-info-pidinfo", 0, ""]]
       add("user-data", !controls(data) ? "unknown" : refuses(data) ? "pass" : "fail", "probed", `Preferences, pasteboard lookup, signals and process-info-pidinfo allowed confined controls ${controls(data) ? "answered" : "unavailable"}; denials ${refuses(data) ? "confirmed" : "not established"}. End-to-end coverage is K11/K12.`)
-    } catch (error) { add("seatbelt", "fail", "none", (error as Error).message) }
+    } catch (error) {
+      const failed: CheckResult = { id: "seatbelt", status: "fail", evidence: "none", detail: (error as Error).message }
+      const index = results.findIndex((check) => check.id === "seatbelt")
+      if (index < 0) results.push(failed)
+      else results[index] = failed
+    }
     finally {
       if (probe) { probe.close(); await probe.finished }
       if (control) { control.close(); await control.finished }
       if (server?.listening) await new Promise<void>((resolve) => server!.close(() => resolve()))
+      if (tempFixture) await rm(tempFixture, { recursive: true, force: true })
       if (socketFixture) await rm(socketFixture, { recursive: true, force: true })
       if (fixture) await rm(fixture, { recursive: true, force: true })
     }
@@ -364,7 +393,7 @@ export class Workspaces {
     catch { add("hard-links", "unknown", "none", "Could not walk all workspace files.") }
     const backup = await this.runHost(["/usr/bin/tmutil", "isexcluded", manifest.folder], { timeoutMs: 5000 })
     manifest.backup = backup.exitCode === 0 && backup.stdout.includes("[Excluded]") ? "Time Machine reports this folder excluded now; existing backups are not removed." : "Time Machine exclusion could not be verified; backups may retain files."
-    add("not-covered", "info", "none", `${WORKSPACE_DISCLOSURE} ${manifest.backup}`)
+    add("not-covered", "info", "none", `${workspaceDisclosure(manifest.spec.hostTemp)} ${manifest.backup}`)
     const checks = complete(results, ["config", "runtime", "probe"], "This workspace check could not be made.", WORKSPACE_CHECKLIST)
     manifest.lastVerify = { at: new Date().toISOString(), results: checks }; await this.save(manifest)
     return { workspace: await this.view(manifest), checks, ok: blockers(checks, WORKSPACE_CHECKLIST, false).length === 0 }
@@ -380,6 +409,25 @@ export class Workspaces {
     })
   }
   async exec(name: string, argv: unknown, stdin?: string | Uint8Array): Promise<RunResult> { return (await this.open(name, argv, { tty: false })).collect(stdin, 0) }
+  async setHostTemp(name: string, hostTemp: unknown): Promise<WorkspaceView> {
+    if (typeof hostTemp !== "boolean") throw new PaddockError("usage", "hostTemp must be a boolean.")
+    return this.exclusive(workspaceName(name), async () => {
+      const manifest = await this.manifest(name)
+      await this.restoreIdentity(manifest)
+      if ([...this.sessions.values()].includes(manifest.folder) || workspacePids(manifest.folder).length) throw new PaddockError("conflict", "Stop the workspace before changing host-temp; running processes retain their launch policy.")
+      if (hostTemp) {
+        const temp = must(await this.runHost(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"]), "Finding this user's temp folder").stdout.trim()
+        if (await realpath(temp) !== join(manifest.userVar, "T")) throw new PaddockError("check-failed", "The host temp folder is no longer canonical or belongs to another user-var folder.")
+      }
+      manifest.spec.hostTemp = hostTemp
+      const profile = workspaceProfile(manifest)
+      await writeFile(this.profileFile(name), profile.text, { mode: 0o600 })
+      manifest.profileHash = profile.hash
+      delete manifest.lastVerify
+      await this.save(manifest)
+      return this.view(manifest)
+    })
+  }
   async stop(name: string): Promise<WorkspaceView> {
     return this.exclusive(workspaceName(name), async () => { const manifest = await this.manifest(name); await this.restoreIdentity(manifest); await stopWorkspaceProcesses(manifest.folder); return this.view(manifest) })
   }
@@ -415,8 +463,8 @@ status=("\${PIPESTATUS[@]}")
       }
       await rm(this.profileFile(name), { force: true }); await rm(this.file(name), { force: true })
       return { removed: name, kind: "workspace", hardLinks: links, launchServices: issues, launchd,
-        notRemoved: ["Unified system logs", "Existing Time Machine or other backups", "Remote pushes, API calls, uploads and other network effects", "Changes through hard links supplied from outside", "Spotlight retention, Keychain additions and unnamed channels are not covered"], disclosure: WORKSPACE_DISCLOSURE }
+        notRemoved: ["Unified system logs", "Existing Time Machine or other backups", "Remote pushes, API calls, uploads and other network effects", "Changes through hard links supplied from outside", "Spotlight retention, Keychain additions and unnamed channels are not covered"], disclosure: workspaceDisclosure(manifest.spec.hostTemp) }
     })
   }
-  closeSessions(): void { for (const session of this.sessions) session.close("The daemon stopped.") }
+  closeSessions(): void { for (const session of this.sessions.keys()) session.close("The daemon stopped.") }
 }

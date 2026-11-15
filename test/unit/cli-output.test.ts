@@ -7,7 +7,7 @@ import { join } from "node:path"
 import { VERSION } from "../../core/daemon"
 import { enrollmentOptions, GVISOR, GVISOR_FILES, GVISOR_RELEASE, installationPlan, type HostProbe } from "../../core/hosts"
 import { socketPath, streamSocketPath } from "../../core/state"
-import { WORKSPACE_DISCLOSURE } from "../../core/workspace-profile"
+import { WORKSPACE_DISCLOSURE, workspaceDisclosure, HOST_TEMP_DISCLOSURE } from "../../core/workspace-profile"
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanups.splice(0)) await close() })
@@ -42,7 +42,7 @@ test("buffered exec and JSON preserve inherited file offsets on both output stre
   expect(await build.exited).toBe(0)
   const result = { exitCode: 0, stdout: `Xé\u0000${"x".repeat(100_000)}\n`, stderr: "Eé\n" }
   for (const executable of [undefined, binary]) {
-    const paddock = await daemon({ exec: { ok: true, data: result }, workspaceExec: { ok: true, data: result } }, executable)
+    const paddock = await daemon({ exec: { ok: true, data: result }, workspaceExec: { ok: true, data: result }, workspaceGet: { ok: true, data: { spec: { hostTemp: false } } } }, executable)
     for (const workspace of [false, true]) for (const json of [false, true]) {
       const out = join(root, "out"); const err = join(root, "err")
       const script = 'task_out=$1; task_err=$2; shift 2; { printf b1; printf e1 >&2; "$@"; printf b2; printf e2 >&2; } > "$task_out" 2> "$task_err"'
@@ -216,4 +216,35 @@ test("a required-probe refusal prints the reason and exact local or hosted comma
     expect(JSON.parse(json.out)).toEqual({ ok: false, error })
     expect(json.err).toBe("")
   }
+})
+
+
+test("workspace host-temp parses create/set, reports state and disclosure in text and JSON", async () => {
+  const calls: unknown[] = []
+  const view = (hostTemp: boolean) => ({ kind: "workspace", name: "render", status: "idle", spec: { hostTemp }, disclosure: workspaceDisclosure(hostTemp) })
+  const paddock = await daemon({
+    workspaceCreate: (body: { hostTemp: boolean }) => { calls.push(body); return { ok: true, data: { workspace: view(body.hostTemp), checks: [], ok: true } } },
+    workspaceSet: (body: { hostTemp: boolean }) => { calls.push(body); return { ok: true, data: view(body.hostTemp) } },
+    workspaceExec: { ok: true, data: { exitCode: 0, stdout: "", stderr: "" } },
+    workspaceGet: { ok: true, data: view(true) }, workspaceList: { ok: true, data: [view(true), { ...view(false), name: "closed" }] },
+  })
+  expect((await paddock("workspace", "create", "render", "--host-temp")).out).toContain(HOST_TEMP_DISCLOSURE)
+  expect(calls[0]).toMatchObject({ name: "render", hostTemp: true })
+  await paddock("workspace", "create", "render")
+  expect(calls[1]).toMatchObject({ name: "render", hostTemp: false })
+  expect((await paddock("workspace", "set", "render", "host-temp", "on")).out).toContain("host-temp on (shared, weaker)")
+  const json = await paddock("workspace", "set", "render", "host-temp", "off", "--json")
+  expect(JSON.parse(json.out).data.spec.hostTemp).toBe(false)
+  expect(calls[3]).toEqual({ name: "render", hostTemp: false })
+  for (const args of [["render", "bogus", "on"], ["render", "host-temp", "yes"], ["render", "host-temp"], ["render", "host-temp", "off", "extra"]]) expect((await paddock("workspace", "set", ...args)).code).toBe(2)
+  for (const action of ["list", "get"]) {
+    const text = await paddock("workspace", action, ...(action === "get" ? ["render"] : []))
+    expect(text.out).toContain("host-temp on (shared, weaker)")
+    expect(text.out).toContain(HOST_TEMP_DISCLOSURE)
+    const result = JSON.parse((await paddock("workspace", action, ...(action === "get" ? ["render"] : []), "--json")).out).data
+    expect((action === "list" ? result[0] : result).spec.hostTemp).toBe(true)
+  }
+  expect((await paddock("workspace", "verify", "render", "--host-temp")).code).toBe(2)
+  expect((await paddock("workspace", "exec", "render", "--", "true")).err).toContain(HOST_TEMP_DISCLOSURE)
+  expect((await paddock("help")).out).toContain("workspace set NAME host-temp on|off")
 })

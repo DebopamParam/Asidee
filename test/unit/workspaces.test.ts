@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, utimes, writeFile } from "node:fs/promises"
+import { createServer } from "node:net"
 import { userInfo } from "node:os"
 import { dirname, join } from "node:path"
 import { blockers, complete, failures, WORKSPACE_CHECKLIST } from "../../core/checks"
@@ -7,7 +8,7 @@ import { belongs, controlledDecision, decision, requireMac, signalWorkspacePid, 
 import { systemRunner } from "../../core/run"
 import type { Runner } from "../../core/types"
 import controlProfile from "../../core/workspace-control.sb" with { type: "text" }
-import { WORKSPACE_DISCLOSURE, workspaceEnvironment, workspaceProfile } from "../../core/workspace-profile"
+import { WORKSPACE_DISCLOSURE, HOST_TEMP_DISCLOSURE, workspaceDisclosure, workspaceEnvironment, workspaceProfile } from "../../core/workspace-profile"
 import { canonical, validateRead, validWorkspaceSpec, Workspaces } from "../../core/workspaces"
 
 const mac = process.platform === "darwin" ? test : test.skip
@@ -51,7 +52,7 @@ mac("K15 finder control: empty workspace matches zero, known processes match exa
 })
 
 test("workspace spec drops unknown fields, permits only open loopback, and refuses unsupported platforms", () => {
-  expect(validWorkspaceSpec({ name: "render", reads: ["/a"], privileged: true })).toEqual({ name: "render", reads: ["/a"], path: [], loopback: "open", logins: { kind: "profiles", claude: "default", codex: "default" } })
+  expect(validWorkspaceSpec({ name: "render", reads: ["/a"], privileged: true })).toEqual({ name: "render", hostTemp: false, reads: ["/a"], path: [], loopback: "open", logins: { kind: "profiles", claude: "default", codex: "default" } })
   expect(() => validWorkspaceSpec({ name: "../outside" })).toThrow()
   expect(() => validWorkspaceSpec({ name: "render", loopback: [80] })).toThrow("Declared ports")
   expect(() => requireMac("linux")).toThrow("only on macOS")
@@ -281,3 +282,125 @@ mac("a missing or misspelled decision control cannot establish denial", async ()
     expect(ws.checks.find((check) => check.id === "daemons")?.status).toBe("pass")
   } finally { if (child) { child.kill("SIGKILL"); await child.exited }; for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
 }, 15_000)
+
+
+test("host temp defaults closed, validates booleans and leaves the original profile bytes intact", () => {
+  expect(validWorkspaceSpec({ name: "temp" }).hostTemp).toBe(false)
+  expect(validWorkspaceSpec({ name: "temp", hostTemp: true }).hostTemp).toBe(true)
+  for (const hostTemp of ["on", 1, null, []]) expect(() => validWorkspaceSpec({ name: "temp", hostTemp })).toThrow("boolean")
+  const manifest = { folder: "/Users/me/Paddock/temp", home: "/Users/me", userVar: "/private/var/folders/xx/user", tag: "/Users/me/Paddock/temp/.paddock-tag", reads: [] }
+  const original = workspaceProfile(manifest)
+  // Captured from the original generator, before host-temp support.
+  expect(original.hash).toBe("92f58a5a5c52b7a7a1b258243b4ce2aa602a4cccddc531c10f1f2c34a2a2d29c")
+  const closed = workspaceProfile({ ...manifest, spec: { hostTemp: false } })
+  expect(closed).toEqual(original)
+  const open = workspaceProfile({ ...manifest, spec: { hostTemp: true } })
+  expect(open.params).toContain(`HOST_TEMP=${manifest.userVar}/T`)
+  expect(open.text).toContain('(allow file-read* file-write* (subpath (param "HOST_TEMP")))')
+  expect(open.text).toContain('(remote unix-socket (subpath (param "HOST_TEMP")))')
+  expect(open.text).not.toContain(manifest.userVar)
+  expect(workspaceDisclosure(false)).toBe(WORKSPACE_DISCLOSURE)
+  expect(workspaceDisclosure(true)).toContain(HOST_TEMP_DISCLOSURE)
+  expect(workspaceEnvironment({ folder: manifest.folder, name: "temp", spec: validWorkspaceSpec({ name: "temp", hostTemp: true }) }).TMPDIR).toBe(`${manifest.folder}/tmp/`)
+})
+
+mac("host temp opens only T, discloses weaker checks, refuses live changes and survives removal", async () => {
+  const { root, workspaces, clean } = await fixture()
+  const temp = await realpath(Bun.spawnSync(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"]).stdout.toString().trim())
+  const outside = await mkdtemp(join(temp, "paddock-host-temp-test-"))
+  let session: Awaited<ReturnType<Workspaces["open"]>> | undefined
+  const server = createServer((socket) => socket.end("shared-temp-socket"))
+  try {
+    await expect(workspaces.setHostTemp("host-temp", "on")).rejects.toThrow("boolean")
+    const made = await workspaces.create({ name: "host-temp", hostTemp: true, logins: { kind: "none" } })
+    expect(made.ok).toBe(true)
+    for (const id of ["writes", "home-closed", "daemons"]) {
+      expect(made.checks.find((check) => check.id === id)).toMatchObject({ status: "weak" })
+      expect(made.checks.find((check) => check.id === id)?.detail).toContain(id === "daemons" ? "Sockets in shared host temp are open" : HOST_TEMP_DISCLOSURE)
+    }
+    expect(made.checks.find((check) => check.id === "not-covered")?.detail).toContain(HOST_TEMP_DISCLOSURE)
+    for (const view of [await workspaces.get("host-temp"), ...(await workspaces.list()), ...(await workspaces.summary())]) {
+      expect(view.spec?.hostTemp).toBe(true); expect(view.disclosure).toContain(HOST_TEMP_DISCLOSURE)
+    }
+    const m = await workspaces.manifest("host-temp")
+    const socket = join(outside, "listener.sock")
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socket, resolve) })
+    expect(await workspaces.exec("host-temp", ["/usr/bin/nc", "-w", "1", "-U", socket])).toMatchObject({ exitCode: 0, stdout: "shared-temp-socket" })
+    const target = join(outside, "file")
+    const write = ["/bin/sh", "-c", 'printf live-temp > "$1" && cat "$1"', "probe", target]
+    expect(await workspaces.exec("host-temp", write)).toMatchObject({ exitCode: 0, stdout: "live-temp" })
+    for (const location of ["/private/tmp", "/private/var/tmp", join(m.userVar, "C"), join(m.userVar, "0"), m.home]) {
+      const denied = join(location, `paddock-denied-${m.id}`)
+      try {
+        expect((await workspaces.exec("host-temp", ["/bin/sh", "-c", 'printf escaped > "$1"', "probe", denied])).exitCode).not.toBe(0)
+        expect(await Bun.file(denied).exists()).toBe(false)
+      } finally { await rm(denied, { force: true }) }
+    }
+    session = await workspaces.open("host-temp", ["/bin/sleep", "60"], { tty: false }); session.resume()
+    await expect(workspaces.setHostTemp("host-temp", false)).rejects.toThrow("Stop the workspace")
+    expect((await workspaces.manifest("host-temp")).spec.hostTemp).toBe(true)
+    for (let i = 0; i < 100 && !belongs(session.pid, m.folder); i++) await Bun.sleep(10)
+    expect(belongs(session.pid, m.folder)).toBe(true)
+    await workspaces.stop("host-temp"); await session.finished; session = undefined
+    const closed = await workspaces.setHostTemp("host-temp", false)
+    expect(closed.spec?.hostTemp).toBe(false); expect(closed.lastVerify).toBeUndefined()
+    expect((await workspaces.exec("host-temp", ["/usr/bin/nc", "-w", "1", "-U", socket])).exitCode).not.toBe(0)
+    expect((await workspaces.exec("host-temp", ["/bin/cat", target])).exitCode).not.toBe(0)
+    expect((await workspaces.exec("host-temp", write)).exitCode).not.toBe(0)
+    const verified = await workspaces.verify("host-temp")
+    for (const id of ["writes", "home-closed"]) expect(verified.checks.find((check) => check.id === id)?.status).toBe("pass")
+    expect(verified.workspace.disclosure).not.toContain(HOST_TEMP_DISCLOSURE)
+    // Old manifests acquire the default without rewriting their profile.
+    const file = join(root, "state/workspaces/host-temp.json")
+    const legacy = JSON.parse(await readFile(file, "utf8")); delete legacy.spec.hostTemp
+    await writeFile(file, JSON.stringify(legacy))
+    expect((await workspaces.manifest("host-temp")).spec.hostTemp).toBe(false)
+    expect((await workspaces.exec("host-temp", ["/usr/bin/true"])).exitCode).toBe(0)
+    legacy.spec.hostTemp = "on"; await writeFile(file, JSON.stringify(legacy))
+    await expect(workspaces.manifest("host-temp")).rejects.toThrow("boolean")
+    delete legacy.spec.hostTemp; await writeFile(file, JSON.stringify(legacy))
+    await workspaces.setHostTemp("host-temp", true)
+    const removed = await workspaces.remove("host-temp", "host-temp")
+    expect(removed.disclosure).toContain(HOST_TEMP_DISCLOSURE)
+    expect(await readFile(target, "utf8")).toBe("live-temp")
+  } finally {
+    if (session) { session.close(); await session.finished }
+    for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name)
+    if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()))
+    await rm(outside, { recursive: true, force: true }); await clean()
+  }
+}, 60_000)
+
+
+mac("confstr temp file creation fails closed and succeeds with host-temp without changing TMPDIR", async () => {
+  const { workspaces, clean } = await fixture()
+  try {
+    const made = await workspaces.create({ name: "confstr", logins: { kind: "none" } })
+    const source = join(made.workspace.folder, "work/temp.c"); const binary = join(made.workspace.folder, "work/temp")
+    await writeFile(source, `#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+int main(void) {
+  char path[4096];
+  if (!confstr(_CS_DARWIN_USER_TEMP_DIR, path, sizeof(path))) return 2;
+  printf("host=%s\\nTMPDIR=%s\\n", path, getenv("TMPDIR"));
+  strncat(path, "paddock-confstr-XXXXXX", sizeof(path) - strlen(path) - 1);
+  int fd = mkstemp(path);
+  if (fd < 0) { perror("mkstemp"); return 3; }
+  char bytes[5] = {0};
+  int ok = write(fd, "temp", 4) == 4 && lseek(fd, 0, SEEK_SET) == 0 && read(fd, bytes, 4) == 4 && strcmp(bytes, "temp") == 0;
+  close(fd); unlink(path);
+  return ok ? 0 : 4;
+}
+`)
+    const compile = await systemRunner(["/usr/bin/env", "-u", "DEVELOPER_DIR", "-u", "SDKROOT", "/usr/bin/xcrun", "clang", source, "-o", binary], { timeoutMs: 10_000 })
+    expect(compile.exitCode).toBe(0)
+    const closed = await workspaces.exec("confstr", [binary])
+    expect(closed.exitCode).toBe(3); expect(closed.stderr).toContain("Operation not permitted")
+    await workspaces.setHostTemp("confstr", true)
+    const open = await workspaces.exec("confstr", [binary])
+    expect(open.exitCode).toBe(0)
+    expect(open.stdout).toContain("/T/"); expect(open.stdout).toContain(`TMPDIR=${made.workspace.folder}/tmp/`)
+  } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
+}, 20_000)
