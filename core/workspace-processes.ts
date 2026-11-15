@@ -55,6 +55,16 @@ export function belongs(pid: number, folder: string): boolean {
     && decision(pid, "file-write-create", 1, folder) === 0 && decision(pid, "file-read-data", 1, join(folder, ".paddock-tag")) === 1
 }
 
+// The facts belongs() weighs, in words, for a refusal that has to say why a pid did not qualify.
+export function profileEvidence(pid: number, folder: string): string {
+  const info = new Uint8Array(64)
+  if (!Number.isSafeInteger(pid) || pid <= 1 || lib().proc.symbols.proc_pidinfo(pid, 13, 0, ptr(info), info.byteLength) !== info.byteLength) return `pid ${pid} not found`
+  const answer = (value: number) => value === 0 ? "allowed" : value === 1 ? "denied" : `unknown (${value})`
+  return `pid ${pid} uid ${new DataView(info.buffer).getUint32(36, true)} (Paddock's ${process.getuid?.()}); sandboxed ${decision(pid, null) === 1 ? "yes" : "no"}; `
+    + `folder read ${answer(decision(pid, "file-read-data", 1, folder))} and write ${answer(decision(pid, "file-write-create", 1, folder))} (expected allowed); `
+    + `tag read ${answer(decision(pid, "file-read-data", 1, join(folder, ".paddock-tag")))} (expected denied)`
+}
+
 export function workspacePids(folder: string): number[] {
   paths(folder)
   for (let attempt = 0; attempt < 4; attempt++) {

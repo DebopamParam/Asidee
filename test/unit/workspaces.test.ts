@@ -9,7 +9,8 @@ import { systemRunner } from "../../core/run"
 import type { Runner } from "../../core/types"
 import controlProfile from "../../core/workspace-control.sb" with { type: "text" }
 import { WORKSPACE_DISCLOSURE, HOST_TEMP_DISCLOSURE, workspaceDisclosure, workspaceEnvironment, workspaceProfile } from "../../core/workspace-profile"
-import { canonical, validateRead, validWorkspaceSpec, Workspaces } from "../../core/workspaces"
+import { acquire, canonical, validateRead, validWorkspaceSpec, Workspaces } from "../../core/workspaces"
+import { WorkspaceSession } from "../../core/workspace-session"
 
 const mac = process.platform === "darwin" ? test : test.skip
 const fixture = async () => {
@@ -457,3 +458,19 @@ int main(void) {
     expect(open.stdout).toContain("/T/"); expect(open.stdout).toContain(`TMPDIR=${made.workspace.folder}/tmp/`)
   } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
 }, 20_000)
+
+mac("a starter that never carries its profile is refused with what was seen", async () => {
+  const folder = await mkdtemp(join(import.meta.dir, "../../dist/workspace-acquire-"))
+  try {
+    const ended = new WorkspaceSession({ argv: ["/bin/sh", "-c", "echo boom >&2; exit 3"], cwd: folder, env: { PATH: "/usr/bin:/bin" }, folder, tty: false })
+    const failed = await acquire(ended, folder, "The live probe").then(() => "", (error: Error) => error.message)
+    expect(failed).toMatch(/^The live probe did not acquire its expected profile after \d+ ms: it ended \(exit 3\); stderr "boom"; pid \d+ not found\. The cause of this refusal is not known yet\.$/)
+    const running = new WorkspaceSession({ argv: ["/bin/sleep", "30"], cwd: folder, env: { PATH: "/usr/bin:/bin" }, folder, tty: false })
+    try {
+      const refused = await acquire(running, folder, "The confined decision control").then(() => "", (error: Error) => error.message)
+      expect(refused).toContain("it was still running; no stderr;")
+      expect(refused).toContain(`uid ${process.getuid!()} (Paddock's ${process.getuid!()}); sandboxed no;`)
+      expect(Number(/after (\d+) ms/.exec(refused)?.[1])).toBeGreaterThanOrEqual(1000)
+    } finally { process.kill(running.pid, "SIGKILL"); await running.finished }
+  } finally { await rm(folder, { recursive: true, force: true }) }
+})

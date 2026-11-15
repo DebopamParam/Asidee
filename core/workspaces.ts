@@ -9,7 +9,7 @@ import { must, systemRunner } from "./run"
 import type { Dirs } from "./state"
 import { object } from "./transport"
 import { PaddockError, type CheckResult, type RunResult, type Runner, type WorkspaceManifest, type WorkspaceSpec } from "./types"
-import { belongs, controlledDecision, decision, requireMac, stopWorkspaceProcesses, workspacePids } from "./workspace-processes"
+import { belongs, controlledDecision, decision, profileEvidence, requireMac, stopWorkspaceProcesses, workspacePids } from "./workspace-processes"
 import { within, WORKSPACE_DISCLOSURE, HOST_TEMP_DISCLOSURE, workspaceDisclosure, workspaceEnvironment, workspaceProfile } from "./workspace-profile"
 import { WorkspaceSession } from "./workspace-session"
 import controlProfile from "./workspace-control.sb" with { type: "text" }
@@ -44,6 +44,19 @@ export function validWorkspaceSpec(input: Record<string, unknown>): WorkspaceSpe
 export const validArgv = (value: unknown): string[] => {
   if (!Array.isArray(value) || !value.length || !value.every((arg) => typeof arg === "string" && !arg.includes("\0"))) throw new PaddockError("usage", "workspace exec needs a command after --.")
   return value
+}
+
+// Waits up to about a second for a starter to carry its profile. A rare refusal here has no known cause yet, so it says what was seen.
+export async function acquire(session: WorkspaceSession, folder: string, what: string): Promise<void> {
+  const started = Date.now(); let stderr = ""; let exit: { code?: number; error?: string } | undefined
+  session.on("output", (which: "stdout" | "stderr", bytes: Uint8Array) => { if (which === "stderr" && stderr.length < 2000) stderr += Buffer.from(bytes).toString("utf8") })
+  session.once("end", (ended: { code?: number; error?: string }) => { exit = ended })
+  session.resume()
+  for (let i = 0; i < 100 && !belongs(session.pid, folder); i++) { if (session.ended) break; await Bun.sleep(10) }
+  if (belongs(session.pid, folder)) return
+  const ended = !session.ended ? "it was still running" : exit?.error ? `it ended (${exit.error})` : `it ended (exit ${exit?.code ?? "unknown"})`
+  const said = stderr.trim() ? `stderr ${JSON.stringify(stderr.trim().slice(0, 500))}` : "no stderr"
+  throw new Error(`${what} did not acquire its expected profile after ${Date.now() - started} ms: ${ended}; ${said}; ${profileEvidence(session.pid, folder)}. The cause of this refusal is not known yet.`)
 }
 
 // Resolve even a not-yet-created path through its nearest existing ancestor.
@@ -281,8 +294,7 @@ export class Workspaces {
       await this.restoreIdentity(manifest)
       const before = workspacePids(manifest.folder)
       probe = await this.launch(manifest, ["/bin/sleep", "30"])
-      for (let i = 0; i < 100 && !belongs(probe.pid, manifest.folder); i++) { if (probe.ended) break; await Bun.sleep(10) }
-      if (!belongs(probe.pid, manifest.folder)) throw new Error("The live probe did not acquire the expected workspace profile.")
+      await acquire(probe, manifest.folder, "The live probe")
       add("seatbelt", "pass", "inspected", `Profile sha256 ${manifest.profileHash}; canonical -D parameters; macOS ${manifest.macOS} at creation.`)
       const pids = workspacePids(manifest.folder)
       add("processes", pids.includes(probe.pid) ? "pass" : "fail", "probed", `${before.length} processes before the known probe; finder ${pids.length} including its pid. Kernel tag criterion and uid checked. K15 supplies the independent empty-workspace control.`)
@@ -291,8 +303,7 @@ export class Workspaces {
       const controlFile = join(fixture, "control.sb"); await writeFile(controlFile, controlProfile, { mode: 0o600 })
       control = new WorkspaceSession({ argv: ["/usr/bin/sandbox-exec", "-f", controlFile, "-D", `WS=${manifest.folder}`, "-D", `TAGFILE=${manifest.tag}`, "--", "/bin/sleep", "30"],
         env: workspaceEnvironment(manifest, this.env), cwd: join(manifest.folder, "work"), folder: manifest.folder, tty: false })
-      for (let i = 0; i < 100 && !belongs(control.pid, manifest.folder); i++) { if (control.ended) break; await Bun.sleep(10) }
-      if (!belongs(control.pid, manifest.folder)) throw new Error("The confined decision control did not acquire its expected profile.")
+      await acquire(control, manifest.folder, "The confined decision control")
       await writeFile(target, "control")
       const write = await this.run(manifest, ["/bin/sh", "-c", 'printf changed > "$1"', "probe", target])
       const insideWrite = await this.run(manifest, ["/bin/sh", "-c", 'printf inside > "$TMPDIR/paddock-write-probe" && rm "$TMPDIR/paddock-write-probe"'])
