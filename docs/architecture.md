@@ -111,6 +111,12 @@ keeps a visible in-memory warning naming that failure, which cannot survive its 
 is unknown, not a missing sandbox. A failure of the whole pass is also written to the daemon's stderr as a structured
 enforcement-error event. Unit fixtures cover these failures; no live engine failure was induced for this change.
 
+A successful `start` clears the old stop reason and measures disk use when the engine's limit is watched. Measured
+use above the limit adds `diskWarning` to the start result, with `usedBytes`, `limitBytes` and a message. CLI text
+prints that message too: the sandbox runs so space can be freed with `paddock exec NAME -- …`, but will be stopped
+again within about 30 seconds unless space is freed or its limit is raised with `paddock resize NAME --disk N`.
+The warning describes that start's measurement and is not stored as a stop reason. An under-limit start omits it.
+
 ### How the guard is compared
 
 The helper loads the shipped rules into an empty network namespace of its own, lists them, and compares that listing

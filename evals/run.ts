@@ -1502,6 +1502,27 @@ ev("U13", "Processes an exec session leaves behind are reaped when they end, wit
   } finally { await pdk(["remove", plain, "--confirm", plain]) }
 })
 
+ev("U17", "Starting over a watched disk limit warns in text and JSON while allowing cleanup; an under-limit start has no warning", async () => {
+  const name = `${PREFIX}-diskstart`
+  try {
+    await ensure(name)
+    await pdk(["stop", name])
+    const under = await pdkJson(["start", name])
+    expect(under.reply.ok && !under.reply.data.diskWarning, "under-limit start warned")
+    expect((await pdk(["exec", name, "--", "dd", "if=/dev/zero", "of=/root/full", "bs=1048576", "count=1300"])).code === 0, "disk write failed")
+    expect(await until(async () => (await view(name))?.status === "stopped", 45), "disk watch did not stop it")
+    expect(/disk watch/.test((await view(name))?.stopReason ?? ""), "not a disk-watch stop")
+    const text = await pdk(["start", name])
+    expect(text.code === 0 && /uses 1\.[0-9]+ GB of its 1 GB/.test(text.out) && /30 seconds/.test(text.out) && text.out.includes(`paddock exec ${name} --`) && text.out.includes(`paddock resize ${name} --disk N`), `start warning: ${text.out}${text.err}`)
+    const over = await pdkJson(["start", name])
+    expect(over.reply.ok && over.reply.data.status === "running" && !over.reply.data.stopReason && over.reply.data.diskWarning?.usedBytes > over.reply.data.diskWarning?.limitBytes, `JSON warning missing: ${over.out}`)
+    expect((await pdk(["exec", name, "--", "rm", "/root/full"])).code === 0, "could not free space while running")
+    const freed = await pdkJson(["start", name])
+    expect(freed.reply.ok && !freed.reply.data.diskWarning, "warning remained after freeing space")
+    return `under limit: no warning; over limit: ${JSON.stringify(over.reply.data.diskWarning)}; after cleanup: no warning`
+  } finally { await pdk(["remove", name, "--confirm", name]) }
+})
+
 ev("U15", "An unavailable image leaves no record, network or Docker volume, and the name can be retried", async () => {
   const name = `${PREFIX}-badimage`
   try {

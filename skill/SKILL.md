@@ -103,6 +103,10 @@ persistence and automatic sandbox recovery are not measured.
   task slots until restart. Recreate them to gain the reaper. Older sandboxes without Docker that still use `sleep`
   as PID 1 also need recreation. A stop and start clears zombies but does not replace PID 1's command.
   `paddock doctor` reports whether the engine supports inner Docker. An engine lacking the capability refuses it.
+- `paddock start NAME` allows an over-limit sandbox to run so you can free space. With a watched disk limit, it
+  measures use and warns in text and JSON (`diskWarning`) when still over: it will be stopped again within about
+  30 seconds unless space is freed with `paddock exec NAME -- …` or resized with `paddock resize NAME --disk N`.
+  The old stopped-state reason is cleared; the warning is a current measurement returned by start.
 - `paddock resize` reports, for each limit, `now` (read back from the engine's host), `next start` or `unchanged`.
   Inside, gVisor does not show the new limits (`/proc/meminfo` keeps the old memory, `nproc` ignores the CPU limit);
   trust resize's report, not those. Lowering

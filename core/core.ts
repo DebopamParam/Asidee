@@ -28,6 +28,7 @@ export type SandboxView = {
   machineId?: string; sandboxId?: string
   capabilities?: Engine["capabilities"]; lastVerify?: Manifest["lastVerify"]; stopReason?: string
   enforcementProblem?: Manifest["enforcementProblem"]
+  diskWarning?: { usedBytes: number; limitBytes: number; message: string }
   // What a long operation on it is doing right now.
   activity?: string
   template?: Manifest["template"]
@@ -220,7 +221,18 @@ export class Core {
   }
 
   start(name: string): Promise<SandboxView> {
-    return this.exclusive(validName(name), async () => { const manifest = await readManifest(this.dirs, name); await this.startChecked(manifest); return this.view(manifest) })
+    return this.exclusive(validName(name), async () => {
+      const manifest = await readManifest(this.dirs, name)
+      await this.startChecked(manifest)
+      const sandbox = await this.view(manifest)
+      if (manifest.engine.capabilities?.diskLimit === "watched") {
+        const usedBytes = await this.provider(manifest).diskUsedBytes(manifest)
+        const limitBytes = manifest.spec.diskGb * 1024 ** 3
+        if (usedBytes !== undefined && usedBytes > limitBytes) sandbox.diskWarning = { usedBytes, limitBytes,
+          message: `${name} uses ${(usedBytes / 1024 ** 3).toFixed(2)} GB of its ${manifest.spec.diskGb} GB disk limit. It will be stopped again within about 30 seconds unless space is freed or the disk is resized. Run \`paddock exec ${name} -- …\` to free space, or \`paddock resize ${name} --disk N\` to raise the limit.` }
+      }
+      return sandbox
+    })
   }
 
   stop(name: string): Promise<SandboxView> {

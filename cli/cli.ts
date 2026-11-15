@@ -257,6 +257,7 @@ function printChecks(checks: CheckResult[], checklist = CHECKLIST): void {
 
 function printSandbox(view: SandboxView): void {
   console.log(`${displayName(view.name)}: ${shown(view.status)} on ${shown(view.engine)}${view.stopReason ? `\n  ${shown(view.stopReason)}` : ""}`)
+  if (view.diskWarning) console.log(`  ${shown(view.diskWarning.message)}`)
   if (view.enforcementProblem) console.log(`  Enforcement problem at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}`)
 }
 const displayName = (name: string) => shown(selectedHost && selectedHost !== "local" ? `${selectedHost}/${name}` : name)

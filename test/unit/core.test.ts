@@ -825,3 +825,17 @@ test("a failed create whose cleanup fails keeps its record and names the removal
   await expect(paddock.create({ name: "demo" })).rejects.toThrow("paddock remove demo --confirm demo")
   expect((await paddock.list())[0]?.status).toBe("missing")
 })
+
+test("starting above a watched disk limit reports current use without retaining a stale stop reason", async () => {
+  const { provider } = fakeProvider(); const paddock = await core(provider)
+  await paddock.create({ name: "demo", diskGb: 1 })
+  await paddock.stop("demo")
+  expect(await paddock.start("demo")).not.toHaveProperty("diskWarning")
+  provider.diskUsedBytes = async () => 1.3 * 1024 ** 3
+  await paddock.enforce()
+  expect((await paddock.get("demo")).stopReason).toContain("disk watch")
+  expect(await paddock.start("demo")).toMatchObject({ status: "running", stopReason: undefined,
+    diskWarning: { usedBytes: 1.3 * 1024 ** 3, limitBytes: 1024 ** 3, message: expect.stringContaining("paddock resize demo --disk N") } })
+  await paddock.enforce()
+  expect((await paddock.get("demo")).status).toBe("stopped")
+})

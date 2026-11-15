@@ -172,10 +172,16 @@ export function parseRow(entry: unknown, hello: Hello, index = 0): SandboxView {
       if (!object(entry.enforcementProblem) || typeof entry.enforcementProblem.at !== "string" || typeof entry.enforcementProblem.message !== "string") throw new Error("its enforcement warning")
       enforcementProblem = { at: entry.enforcementProblem.at, message: entry.enforcementProblem.message }
     }
+    let diskWarning: SandboxView["diskWarning"]
+    if (entry.diskWarning !== undefined) {
+      const warning = entry.diskWarning
+      if (!object(warning) || typeof warning.usedBytes !== "number" || !Number.isFinite(warning.usedBytes) || typeof warning.limitBytes !== "number" || !Number.isFinite(warning.limitBytes) || typeof warning.message !== "string") throw new Error("its disk warning")
+      diskWarning = { usedBytes: warning.usedBytes, limitBytes: warning.limitBytes, message: warning.message }
+    }
     const spec = entry.status === "damaged" ? damagedSpec(name) : validSpec(entry.spec.template ? { ...entry.spec, image: undefined } : entry.spec)
     if (entry.status !== "damaged" && entry.spec.template && typeof entry.spec.image === "string") spec.image = entry.spec.image
     return { name, status: entry.status as SandboxView["status"], machineId: hello.machineId, ...(id(entry.sandboxId) ? { sandboxId: entry.sandboxId } : {}), engine: entry.engine, createdAt: entry.createdAt, spec,
-      lastVerify, enforcementProblem, ...(typeof entry.stopReason === "string" ? { stopReason: entry.stopReason } : {}), ...(typeof entry.activity === "string" ? { activity: entry.activity } : {}) }
+      lastVerify, enforcementProblem, ...(diskWarning ? { diskWarning } : {}), ...(typeof entry.stopReason === "string" ? { stopReason: entry.stopReason } : {}), ...(typeof entry.activity === "string" ? { activity: entry.activity } : {}) }
   } catch (error) {
     return { name, status: "damaged", machineId: hello.machineId, ...(id(entry.sandboxId) ? { sandboxId: entry.sandboxId } : {}), engine: typeof entry.engine === "string" ? entry.engine : "", createdAt: "", spec: damagedSpec(name),
       stopReason: `The remote daemon reported this sandbox in a form this Paddock cannot read (${(error as Error).message}). See it with that machine's own Paddock.` }
