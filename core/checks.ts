@@ -7,7 +7,7 @@ export type ChecklistItem = { id: CheckId; title: string; stage: Stage; blocking
 
 export const CHECKLIST: readonly ChecklistItem[] = [
   { id: "kernel", title: "Runs on an isolated kernel, not the host's", stage: "runtime", blocking: true },
-  { id: "docker", title: "Inner Docker is available when requested", stage: "runtime", blocking: true },
+  { id: "docker", title: "Docker inside the sandbox", stage: "runtime", blocking: true },
   { id: "dns", title: "Public DNS fallback is configured", stage: "runtime", blocking: true },
   { id: "hardening", title: "No privileged mode, host namespaces, undeclared capabilities or devices", stage: "config", blocking: true },
   { id: "mounts", title: "No host folders are mounted", stage: "config", blocking: true },

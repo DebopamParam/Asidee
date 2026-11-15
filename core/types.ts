@@ -83,7 +83,7 @@ export type CheckStatus = "pass" | "weak" | "fail" | "unsupported" | "unknown" |
 export type Evidence = "probed" | "inspected" | "none"
 export type CheckResult = { id: CheckId; status: CheckStatus; evidence: Evidence; detail: string }
 
-// config: readable before the sandbox starts. runtime: needs it running. probe: live attempts, a few seconds.
+// config: readable before the sandbox starts. runtime: needs it running. probe: live attempts, measured at 15 to 40 seconds.
 export type Stage = "config" | "runtime" | "probe"
 
 export type Manifest = {

@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events"
 import type { Server } from "node:net"
 import { blockers, CHECKLIST, complete, failures, historical, titleOf } from "./checks"
 import { fieldValues, loadExtensions, runCommand } from "./extensions"
-import { boundPort, LEASE_TTL_MS, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
+import { boundPort, FORWARD_REACH, LEASE_TTL_MS, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
 import { OUTPUT_LIMIT } from "./run"
 import { addInclude, alias, editorKey, GUEST_SETUP, GUEST_SSH, includeLine, included, keyFingerprint, parseGuestSetup, userConfig, validPublicKey, writeClientFiles, type SshAccess } from "./ssh"
 import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSizes, validSpec, validTemplateName, writeManifest, writeConfig, type Dirs } from "./state"
@@ -144,7 +144,7 @@ export class Core {
 
   private async verifyNow(manifest: Manifest, requireProbes = false): Promise<{ checks: CheckResult[]; failed: CheckResult[] }> {
     const running = (await this.provider(manifest).status(manifest)) === "running"
-    this.activity.set(manifest.name, running ? "Running the checks (live probes take a few seconds)" : "Checking the configuration")
+    this.activity.set(manifest.name, running ? "Running the checks (the live network tests take about 15 to 40 seconds)" : "Checking the configuration")
     const checks = await this.stage(manifest, ["config", "runtime", "probe"], running)
     manifest.lastVerify = { at: new Date().toISOString(), results: checks }
     // A stopped sandbox is judged on its configuration alone: the rest was not checked, which is not a failure.
@@ -204,7 +204,7 @@ export class Core {
       if (failed.length) {
         // Only when turning the requirement off would let this create through: a failure beside an unknown probe is a failed check.
         const unknown = failed.every((check) => check.status === "unknown" && CHECKLIST.find((item) => item.id === check.id)?.stage === "probe")
-        if (unknown) throw new PaddockError("probes-required", `${spec.name} was created but stopped, and is kept for diagnosis: ${failed.map((check) => `${titleOf(check.id)} (${check.detail})`).join("; ")}. Required isolation probes could not run. To allow creation without them, run \`paddock config set require-probes off\` on this machine, or turn off Require isolation probes in Settings.`, failed)
+        if (unknown) throw new PaddockError("probes-required", `${spec.name} was created but stopped, and is kept for diagnosis: ${failed.map((check) => `${titleOf(check.id)} (${check.detail})`).join("; ")}. Required isolation probes could not run. To try again: \`paddock remove ${spec.name} --confirm ${spec.name}\`, then create it again. Only to allow creation without them: run \`paddock config set require-probes off\` on this machine, or turn off Require isolation probes in Settings.`, failed)
         this.refuse(spec.name, failed, "was created but stopped, and is kept for diagnosis")
       }
       return { manifest, checks }
@@ -248,7 +248,7 @@ export class Core {
   remove(name: string, confirm: unknown): Promise<{ removed: string }> {
     return this.exclusive(validName(name), async () => {
       const manifest = await readManifest(this.dirs, name)
-      if (confirm !== name) throw new PaddockError("usage", `Removing ${name} deletes everything in it. Confirm by repeating its name.`)
+      if (confirm !== name) throw new PaddockError("usage", `Removing ${name} deletes everything in it.${typeof confirm === "string" && confirm ? ` --confirm ${confirm} does not match ${name}; nothing was removed.` : ""} To confirm: \`paddock remove ${name} --confirm ${name}\`.`)
       this.activity.set(name, "Removing")
       this.endSessions(name, `The session ended: ${name} was removed.`)
       await this.provider(manifest).remove(manifest); await deleteManifest(this.dirs, name)
@@ -424,7 +424,7 @@ export class Core {
 
   async sessionTarget(name: unknown): Promise<{ name: string; machineId: string; sandboxId: string; generation: string }> {
     const manifest = await readManifest(this.dirs, validName(name)); const generation = await this.provider(manifest).generation(manifest)
-    if (!generation) throw new PaddockError("conflict", `${manifest.name} is not running.`)
+    if (!generation) throw new PaddockError("conflict", `${manifest.name} is not running. Start it with \`paddock start ${manifest.name}\`.`)
     return { name: manifest.name, machineId: this.machineId, sandboxId: manifest.id, generation }
   }
 
@@ -495,7 +495,7 @@ export class Core {
     if (leases.length) return { id: "forwards", status: "info", evidence: "inspected", detail: `${leases.map(([id, lease]) => `SSH lease ${id} to sandbox loopback port ${lease.port}`).join(", ")}. This daemon checked the sandbox run and port. The primary's loopback listener address and current reachability are unknown here; \`paddock --host HOST forward list\` on the primary shows its listener. The lease ends with its control stream or sandbox run, or ${this.leaseTtlMs / 1000} seconds after the primary last renewed it.` }
     if (!mine.length) return { id: "forwards", status: "info", evidence: "inspected", detail: "None. A forward added with `paddock forward add` listens on 127.0.0.1 only and ends when the sandbox stops." }
     const listed = mine.map((forward) => { const address = forward.server.address(); return `${typeof address === "object" && address ? `${address.address}:${address.port}` : "not listening"} to port ${forward.view.port} (${forward.view.id})` })
-    return { id: "forwards", status: "info", evidence: "inspected", detail: `${listed.join(", ")}. Any process on this machine can connect to these, and so can whatever the engine relays to its loopback: on OrbStack, the engine's host and its other containers, through host.docker.internal.` }
+    return { id: "forwards", status: "info", evidence: "inspected", detail: `${listed.join(", ")}. ${FORWARD_REACH}` }
   }
 
   // Prepares sshd inside, trusts only this machine's editor key there, and writes the alias and its host key here. Run

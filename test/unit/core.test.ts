@@ -10,7 +10,7 @@ import { CATALOG, Machines, type Hello } from "../../core/machines"
 import { object, parseReply } from "../../core/transport"
 import { DockerSandboxesProvider } from "../../core/providers/docker-sandboxes"
 import { fieldValues, loadExtensions, parseExtension } from "../../core/extensions"
-import { configChecks, DOCKER_CAPABILITIES, dockerVolume, gvisorSetup, network, unsafeRuntimeArgs, type GuardState } from "../../core/providers/gvisor"
+import { configChecks, DOCKER_CAPABILITIES, dockerVolume, GvisorProvider, gvisorSetup, network, unsafeRuntimeArgs, type GuardState } from "../../core/providers/gvisor"
 import { OUTPUT_LIMIT, systemRunner } from "../../core/run"
 import { readConfig, readManifest, validSizes, validSpec, validTemplateName } from "../../core/state"
 import { PaddockError, type CheckResult, type Engine, type Limits, type Manifest, type Provider, type Stage, type Template } from "../../core/types"
@@ -838,4 +838,25 @@ test("starting above a watched disk limit reports current use without retaining 
     diskWarning: { usedBytes: 1.3 * 1024 ** 3, limitBytes: 1024 ** 3, message: expect.stringContaining("paddock resize demo --disk N") } })
   await paddock.enforce()
   expect((await paddock.get("demo")).status).toBe("stopped")
+})
+
+test("the limits check counts one CPU in the singular, and the template check does not claim the credentials check sees every secret", () => {
+  const limits = (cpus: number) => configChecks(inspect((value) => { value.HostConfig.NanoCpus = cpus * 1e9 }), { ...manifest, spec: { ...manifest.spec, cpus } }, "intact", "pdk123").find((entry) => entry.id === "limits")!.detail
+  expect(limits(1)).toContain(" 1 CPU. ")
+  expect(limits(2)).toContain(" 2 CPUs. ")
+  const templated: Manifest = { ...manifest, template: { name: "base", imageId: "sha256:t", source: "src", createdAt: "2026-11-11T00:00:00Z" } }
+  const detail = configChecks(inspect((value) => { (value as any).Image = "sha256:t" }), templated, "intact", "pdk123", undefined, { Id: "sha256:t", RepoTags: ["paddock-template-own:base"], Config: { Labels: {} } }, "own").find((entry) => entry.id === "template")!.detail
+  expect(detail).not.toContain("the credentials check says what is inside")
+  expect(detail).toContain("other secrets saved in it (.env files, shell history, tokens) are not looked for")
+})
+
+test("a refused removal and a command on a stopped sandbox name the command to run", async () => {
+  const { provider } = fakeProvider(); const paddock = await core(provider)
+  await paddock.create({ name: "demo" })
+  await expect(paddock.remove("demo", undefined)).rejects.toThrow("Removing demo deletes everything in it. To confirm: `paddock remove demo --confirm demo`.")
+  await expect(paddock.remove("demo", "other")).rejects.toThrow("--confirm other does not match demo; nothing was removed.")
+  await paddock.remove("demo", "demo")
+  const stopped = new GvisorProvider(async () => ({ exitCode: 1, stdout: "", stderr: "Error: No such object: paddock-demo" }))
+  for (const attempt of [() => stopped.exec(manifest, ["true"]), () => stopped.openExec(manifest, ["true"], { tty: false }), () => stopped.prepareLoopback(manifest)])
+    await expect(attempt()).rejects.toThrow("demo is not running. Start it with `paddock start demo`.")
 })

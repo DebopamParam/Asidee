@@ -33,6 +33,9 @@ paddock template list | paddock template remove TEMPLATE
 paddock remove NAME --confirm NAME          # deletes everything in it; ask the user first
 ```
 
+Text output of `create` and `resize` counts the checks that held and prints every other check in full; read
+`--json` or run `verify` for each check. Every command takes `--help`.
+
 Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed or required probes could not run, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown.
 
 Prepared remote daemons can be attached with `paddock host attach NAME --ssh DEST --binary PATH --state-dir PATH`.

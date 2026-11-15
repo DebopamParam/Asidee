@@ -8,6 +8,9 @@ export type ForwardView = {
   localAddress: "127.0.0.1"; localPort: number; port: number; connections: number; createdAt: string
 }
 
+// Who can reach a forward's listener, said wherever one is added or listed.
+export const FORWARD_REACH = "Any process on this machine can connect to these, and so can whatever the engine relays to its loopback: on OrbStack, the engine's host and its other containers, through host.docker.internal."
+
 // A hosted forward's lease, on both of its ends. The primary renews it every LEASE_RENEW_MS on the control stream and the
 // remote daemon sends a byte as often; either end that hears nothing for LEASE_TTL_MS ends it, so a silent or
 // partitioned link cannot keep a lease (or the remote `transport stdio` that carries it) open.

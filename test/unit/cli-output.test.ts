@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test"
 import { statSync } from "node:fs"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -282,4 +282,119 @@ test("workspace status lines leave size out where it was not measured and say un
   }
   expect((await paddock("workspace", "get", "render")).out).toContain("0 processes, size unknown")
   expect((await paddock("workspace", "list")).out).toContain("0 processes, 3.0 MiB")
+})
+
+test("help is grouped by task, and each command answers --help with its own usage", async () => {
+  const paddock = await daemon({})
+  const top = await paddock("help")
+  for (const group of ["Start here", "Use a sandbox", "Reach in", "Change a sandbox", "Settings", "Other machines"]) expect(top.out).toContain(`\n${group}`)
+  const usage = async (...args: string[]) => { const result = await paddock(...args); expect(result.code).toBe(0); return result.out }
+  for (const [args, has, lacks] of [
+    [["create", "--help"], "paddock create NAME", "paddock remove"],
+    [["create", "demo", "-h"], "paddock create NAME", "paddock remove"],
+    [["help", "stop"], "paddock stop NAME", "workspace"],
+    [["forward", "remove", "--help"], "forward remove ID", "forward add"],
+    [["workspace", "set", "--help"], "workspace set NAME host-temp on|off", "workspace create"],
+    [["workspace", "--help"], "workspace create NAME", "paddock create NAME"],
+    [["rm", "--help"], "paddock remove NAME --confirm NAME", "workspace"],
+  ] as const) {
+    const text = await usage(...args)
+    expect(text).toContain(has); expect(text).not.toContain(lacks); expect(text).toContain("--help   after any command")
+  }
+  const unknown = await paddock("bogus", "--help")
+  expect(unknown.code).toBe(2); expect(unknown.err).toContain("Unknown command bogus")
+})
+
+test("argument errors name the option and point to the command's help", async () => {
+  const paddock = await daemon({})
+  for (const [args, message] of [
+    [["create", "demo", "--bogus"], "paddock: paddock create has no option --bogus. See `paddock create --help`."],
+    [["forward", "add", "demo", "--port"], "paddock: --port needs a value. See `paddock forward add --help`."],
+    [["create", "demo", "--docker=yes"], "paddock: --docker takes no value. See `paddock create --help`."],
+    [["workspace", "create", "w", "--copy"], "paddock: --copy needs a value. See `paddock workspace create --help`."],
+    [["ext", "run", "--bogus"], "paddock: paddock ext run has no option --bogus. See `paddock ext run --help`."],
+  ] as const) {
+    const result = await paddock(...args)
+    expect(result.code).toBe(2)
+    expect(result.err.trim()).toBe(message)
+  }
+})
+
+test("create counts the checks that held, prints every other result in full, a legend of the marks shown and the next step", async () => {
+  const check = (id: string, status: string, detail: string) => ({ id, status, evidence: "inspected", detail })
+  const checks = [check("kernel", "pass", "gVisor answered."), check("mounts", "pass", "No mounts."), check("limits", "pass", "4 GB."),
+    check("disk", "weak", "Watched, not capped."), check("egress", "info", "Open: anything inside can be sent out.")]
+  const sandbox = { name: "demo", status: "running", engine: "Fake", spec: { cpus: 1, memoryGb: 1 } }
+  const paddock = await daemon({ create: { ok: true, data: { sandbox, checks, hooks: [] } }, verify: { ok: true, data: { sandbox, checks, ok: true } },
+    resize: { ok: true, data: { sandbox, changes: [], checks } } })
+  const made = await paddock("create", "demo")
+  expect(made.code).toBe(0)
+  expect(made.out).toContain("  ✓ 3 checks hold. Each one is listed by `paddock verify demo`.\n")
+  for (const title of ["Runs on an isolated kernel", "No host folders are mounted"]) expect(made.out).not.toContain(title)
+  expect(made.out).toContain("~ Disk use is limited [weak]\n      Watched, not capped. (inspected)")
+  expect(made.out).toContain("i Internet access\n      Open: anything inside can be sent out. (inspected)")
+  expect(made.out).toContain("  ✓ holds   ~ holds in a weaker form   i for your information\n")
+  expect(made.out).not.toContain("not available on this engine")
+  expect(made.out.trimEnd().endsWith("Next: paddock shell demo")).toBe(true)
+  expect((await paddock("resize", "demo", "--memory", "2")).out).toContain("  ✓ 3 checks hold. Each one is listed by `paddock verify demo`.")
+  const verified = await paddock("verify", "demo")
+  for (const title of ["Runs on an isolated kernel", "No host folders are mounted", "Memory, process and CPU limits are set"]) expect(verified.out).toContain(title)
+  expect(verified.out).not.toContain("checks hold")
+})
+
+test("a refused create names the command that removes what it kept", async () => {
+  const failed = [{ id: "net-host", status: "fail", evidence: "probed", detail: "A connection reached the host." }]
+  const paddock = await daemon({ create: { ok: false, error: { code: "check-failed", message: "demo was created but stopped, and is kept for diagnosis: Cannot reach the host (A connection reached the host.)", details: failed } } })
+  const refused = await paddock("create", "demo")
+  expect(refused.code).toBe(6)
+  expect(refused.err.trimEnd().endsWith("Remove it: paddock remove demo --confirm demo")).toBe(true)
+})
+
+test("template and forward times are shown in UTC whatever offset the engine reported", async () => {
+  const template = { name: "tpl", engine: "Fake", imageId: "sha256:t", source: "a", sourceImage: "img", createdAt: "2026-11-16T01:46:52+05:30", sizeBytes: 0, loginsRemoved: [], dependants: [] }
+  const forward = { id: "f1", name: "demo", sandboxId: "s", generation: "g", localAddress: "127.0.0.1", localPort: 5000, port: 3000, connections: 0, createdAt: "2026-11-15T20:16:00.000Z" }
+  const paddock = await daemon({ templateList: { ok: true, data: [template] }, forwardList: { ok: true, data: [forward] } })
+  expect((await paddock("template", "list")).out).toContain("2026-11-15 20:16 UTC")
+  expect((await paddock("forward", "list")).out).toContain("since 2026-11-15 20:16 UTC")
+})
+
+test("forward add says who can connect and how to remove it", async () => {
+  const forward = { id: "f1", name: "demo", sandboxId: "s", generation: "g", localAddress: "127.0.0.1", localPort: 5000, port: 3000, connections: 0, createdAt: "2026-11-15T20:16:00.000Z" }
+  const paddock = await daemon({ forwardAdd: { ok: true, data: forward } })
+  const { out } = await paddock("forward", "add", "demo", "--port", "3000")
+  expect(out).toContain("Any process on this machine can connect to it, and so can whatever the engine relays to its loopback")
+  expect(out).toContain("Remove it: paddock forward remove f1")
+  expect(out).not.toContain("the sandbox run,")
+})
+
+test("ssh access says why it is not ready and what to run", async () => {
+  const access = (user: string) => ({ alias: "demo.paddock", user, home: user ? "/home/agent" : "", batchReady: false, loopbackForwarding: Boolean(user) })
+  const unset = await (await daemon({ sshAccess: { ok: true, data: access("") } }))("ssh", "access", "demo")
+  expect(unset.out.trim()).toBe("demo.paddock: not set up; not ready: run `paddock ssh setup demo`")
+  const stopped = await (await daemon({ sshAccess: { ok: true, data: access("agent") }, get: { ok: true, data: { name: "demo", status: "stopped" } } }))("ssh", "access", "demo")
+  expect(stopped.out.trim()).toBe("demo.paddock: agent, home /home/agent; not ready: demo is stopped. Start it with `paddock start demo`")
+})
+
+test("ui and daemon status say there is no dashboard instead of printing port 0", async () => {
+  const paddock = await daemon({})
+  await writeFile(join(paddock.env.PADDOCK_STATE_DIR, "daemon.json"), JSON.stringify({ pid: 1, port: 0, token: "t", version: VERSION }))
+  const ui = await paddock("ui")
+  expect(ui.code).toBe(0)
+  expect(ui.out.trim()).toBe("No dashboard: this daemon was started with PADDOCK_SOCKET_ONLY=1, so it answers on its socket only.")
+  expect((await paddock("daemon", "status")).out).toContain("no dashboard (socket only)")
+})
+
+test("start says what it checked and did not, and doctor and workspace create end with the next command", async () => {
+  const sandbox = { name: "demo", status: "running", engine: "Fake", spec: { cpus: 1, memoryGb: 1 } }
+  const workspace = { kind: "workspace", name: "render", folder: "/w/render", status: "idle", processes: 0, spec: { hostTemp: false }, disclosure: WORKSPACE_DISCLOSURE }
+  const engine = (ready: boolean) => ({ id: "fake:1", provider: "fake", label: "Fake", ready, problems: [], data: {} })
+  const paddock = await daemon({ start: { ok: true, data: sandbox }, engines: { ok: true, data: [engine(true)] },
+    workspaceCreate: { ok: true, data: { workspace, ok: true, checks: [{ id: "seatbelt", status: "pass", evidence: "inspected", detail: "ok" }] } } })
+  expect((await paddock("start", "demo")).out).toContain("Its configuration and runtime were checked before it started; its network was not tested. To test it: paddock verify demo")
+  expect((await paddock("doctor")).out.trimEnd().endsWith("Next: paddock create NAME")).toBe(true)
+  const created = await paddock("workspace", "create", "render", "--no-logins")
+  expect(created.out).toContain("✓ 1 check holds. Each one is listed by `paddock workspace verify render`.")
+  expect(created.out.trimEnd().endsWith("Next: paddock workspace shell render")).toBe(true)
+  const none = await (await daemon({ engines: { ok: true, data: [engine(false)] } }))("doctor")
+  expect(none.out).not.toContain("Next:")
 })

@@ -5,7 +5,7 @@
     {
       "id": "info",
       "label": "System info",
-      "description": "Prints the sandbox's kernel and free disk space.",
+      "description": "Prints the sandbox's kernel and the disk sizes df reports inside it, which are not its disk limit.",
       "scope": "sandbox",
       "run": ["./info.sh"]
     },

@@ -11,61 +11,112 @@ import { HOST_TEMP_DISCLOSURE, WORKSPACE_DISCLOSURE } from "../core/workspace-pr
 import type { ResizeChange, SandboxView } from "../core/core"
 import { BUILD, readDaemonFile, runDaemon, VERSION } from "../core/daemon"
 import type { Extension } from "../core/extensions"
-import type { ForwardView } from "../core/forwards"
+import { FORWARD_REACH, type ForwardView } from "../core/forwards"
 import type { HostPlan } from "../core/hosts"
 import { hostOption, type FleetView, type HostView } from "../core/machines"
 import { bounded, PROTOCOL, transportStdio } from "../core/transport"
-import type { SshAccess } from "../core/ssh"
+import { included, userConfig, type SshAccess } from "../core/ssh"
 import { checkSocketPath, defaultDirs, socketPath, streamSocketPath, type Config } from "../core/state"
 import { dataFrames, frame, FrameReader, type OpenRequest, type EnrollmentRequest } from "../core/stream"
 import { PaddockError, type CheckResult, type Engine, type ErrorCode, type RunResult, type Template } from "../core/types"
 
 // A thin client: every command is one call to the daemon, which is started on first use.
 
+// The help, grouped by task. `paddock COMMAND --help` prints the lines for that command.
+const GROUPS: Array<[string, string[]]> = [
+  ["Start here", [
+    "paddock doctor                         engines on this machine and what each one needs",
+    "paddock create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]",
+    "paddock shell NAME [-- COMMAND…]       a shell, or one command on a terminal, inside the sandbox",
+    "paddock list                           your sandboxes",
+    "paddock list --all                     machines, including unavailable ones and unknown cached sandboxes",
+  ]],
+  ["Use a sandbox", [
+    "paddock exec NAME [--user USER] [--stdin] -- COMMAND…   --stdin sends this command's input, bytes exact, up to 16 MiB;",
+    "                                                        output comes back as text (invalid UTF-8 replaced)",
+    "paddock exec NAME --stream [--user USER] -- COMMAND…    bytes in and out as they come, any size",
+    "paddock verify NAME                    run every check against the sandbox and list each result",
+    "paddock start NAME",
+    "paddock stop NAME",
+    "paddock remove NAME --confirm NAME     deletes the sandbox and everything in it",
+  ]],
+  ["Reach in", [
+    "paddock forward add NAME --port PORT [--local-port PORT]   127.0.0.1 here to PORT on the sandbox's loopback",
+    "paddock forward list [NAME] | forward remove ID            a forward ends when its sandbox stops",
+    "paddock ssh setup NAME [--write-config]   sshd inside, reached as NAME.paddock through the daemon, no port",
+    "paddock ssh access NAME                   the alias, user and home an editor uses, and whether it is ready",
+  ]],
+  ["Change a sandbox", [
+    "paddock resize NAME [--cpus N] [--memory GB] [--pids N] [--disk GB]   says which limits apply now and which at the next start",
+    "paddock snapshot NAME --as TEMPLATE    save the sandbox's files, minus the usual logins, as a template",
+    "paddock template list | template remove TEMPLATE [--engine ID]   sandboxes made from it keep working",
+  ]],
+  ["Settings", [
+    "paddock config get                     settings on the selected machine",
+    "paddock config set require-probes on|off   require blocking isolation probes at create (default on)",
+  ]],
+  ["Workspaces: on this Mac's own kernel, not a sandbox (macOS only)", [
+    "paddock workspace create NAME [--host-temp] [--copy PATH] [--read PATH]… [--path DIR]… [--no-logins | --claude-profile NAME --codex-profile NAME]",
+    "                                       --host-temp opens shared per-user temp (default off); TMPDIR stays private",
+    "paddock workspace shell NAME [-- COMMAND…]",
+    "paddock workspace exec NAME [--stdin | --stream] -- COMMAND…",
+    "paddock workspace list | get NAME | stop NAME | verify NAME",
+    "paddock workspace set NAME host-temp on|off   stop first; applies to later processes; shared host temp weakens confinement",
+    "paddock workspace remove NAME --confirm NAME",
+  ]],
+  ["Other machines", [
+    "paddock host list                       registered SSH daemons and their connection state",
+    "paddock host add NAME --ssh DEST --artifact PATH --sha256 HASH [--docker] [--sudo ask|never] [--disk-policy watched] [--accept-plan HASH]",
+    "                                        plans, shows the plan, and installs only once it is accepted; --docker lets its sandboxes run Docker inside",
+    "paddock host attach NAME --ssh DEST --binary PATH --state-dir PATH   attach an already prepared daemon",
+    "paddock host remove NAME --confirm NAME  forget a prepared host; remote files and service stay",
+  ]],
+  ["Extensions, dashboard and daemon", [
+    "paddock ext list",
+    "paddock ext run EXTENSION ACTION [SANDBOX] [--set FIELD=VALUE]…",
+    "paddock ui [--open]                    the dashboard's address",
+    "paddock daemon status | stop | run",
+    "paddock transport stdio --protocol 1 [--stream]   internal SSH socket relay; starts nothing",
+  ]],
+]
+const OPTIONS = `  --host NAME   select a registered machine (unqualified names always mean local)
+  --json   print {"ok":true,"data":…} or {"ok":false,"error":{code,message}}
+  --help   after any command, that command's usage`
+const EXITS = "Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed or required probes could not run, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown."
 const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, not assumed
 
-  paddock doctor                         engines on this machine and what each one needs
-  paddock create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]
-  paddock config get                     settings on the selected machine
-  paddock config set require-probes on|off   require blocking isolation probes at create (default on)
-  paddock list
-  paddock list --all                      machines, including unavailable ones and unknown cached sandboxes
-  paddock host list                       registered SSH daemons and their connection state
-  paddock host add NAME --ssh DEST --artifact PATH --sha256 HASH [--docker] [--sudo ask|never] [--disk-policy watched] [--accept-plan HASH]
-                                         plans, shows the plan, and installs only once it is accepted; --docker lets its sandboxes run Docker inside
-  paddock host attach NAME --ssh DEST --binary PATH --state-dir PATH   attach an already prepared daemon
-  paddock host remove NAME --confirm NAME  forget a prepared host; remote files and service stay
-  paddock resize NAME [--cpus N] [--memory GB] [--pids N] [--disk GB]   says which limits apply now and which at the next start
-  paddock start NAME | stop NAME
-  paddock verify NAME                    run every check against the sandbox
-  paddock exec NAME [--user USER] [--stdin] -- COMMAND…   --stdin sends this command's input, bytes exact, up to 16 MiB;
-                                                         output comes back as text (invalid UTF-8 replaced)
-  paddock exec NAME --stream [--user USER] -- COMMAND…    bytes in and out as they come, any size
-  paddock shell NAME [-- COMMAND…]
-  paddock forward add NAME --port PORT [--local-port PORT]   127.0.0.1 here to PORT on the sandbox's loopback
-  paddock forward list [NAME] | forward remove ID            a forward ends when its sandbox stops
-  paddock ssh setup NAME [--write-config]   sshd inside, reached as NAME.paddock through the daemon, no port
-  paddock ssh access NAME                   the alias, user and home an editor uses, and whether it is ready
-  paddock remove NAME --confirm NAME
-  paddock workspace create NAME [--host-temp] [--copy PATH] [--read PATH]… [--path DIR]… [--no-logins | --claude-profile NAME --codex-profile NAME]
-                                         --host-temp opens shared per-user temp (default off); TMPDIR stays private
-  paddock workspace shell NAME [-- COMMAND…]   workspace, not a sandbox; macOS only
-  paddock workspace exec NAME [--stdin | --stream] -- COMMAND…
-  paddock workspace list | get NAME | stop NAME | verify NAME
-  paddock workspace set NAME host-temp on|off   stop first; applies to later processes; shared host temp weakens confinement
-  paddock workspace remove NAME --confirm NAME
-  paddock snapshot NAME --as TEMPLATE    save the sandbox's files, minus the usual logins, as a template
-  paddock template list | template remove TEMPLATE [--engine ID]   sandboxes made from it keep working
-  paddock ext list
-  paddock ext run EXTENSION ACTION [SANDBOX] [--set FIELD=VALUE]…
-  paddock ui [--open]                    the dashboard's address
-  paddock daemon status | stop | run
-  paddock transport stdio --protocol 1 [--stream]   internal SSH socket relay; starts nothing
+${GROUPS.map(([group, lines]) => `${group}\n${lines.map((line) => `  ${line}`).join("\n")}`).join("\n")}
 
-  --host NAME   select a registered machine (unqualified names always mean local)
-  --json   print {"ok":true,"data":…} or {"ok":false,"error":{code,message}}
-Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed or required probes could not run, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown.`
-
+${OPTIONS}
+${EXITS}`
+// A command's lines, with the continuation lines under them. An action narrows workspace, host and the other nouns
+// when it names one of their lines.
+function commandHelp(words: string[]): string | undefined {
+  const aliases: Record<string, string> = { ls: "list", rm: "remove", templates: "template", init: "doctor" }
+  const command = aliases[words[0] ?? ""] ?? words[0]
+  const action = words[1] && !words[1].startsWith("-") ? aliases[words[1]] ?? words[1] : undefined
+  const pick = (match: (usage: string) => boolean) => {
+    const picked: string[] = []; let taking = false
+    for (const line of GROUPS.flatMap(([, lines]) => lines)) {
+      if (line.startsWith("paddock ")) taking = match(`${line.slice(8).split("   ")[0]} `)
+      if (taking) picked.push(line)
+    }
+    return picked
+  }
+  if (!command) return undefined
+  const narrowed = action ? pick((usage) => usage.startsWith(`${command} `) && (usage.startsWith(`${command} ${action} `) || usage.includes(`| ${action} `) || usage.includes(`| ${command} ${action} `))) : []
+  const lines = narrowed.length ? narrowed : pick((usage) => usage.startsWith(`${command} `))
+  return lines.length ? `${lines.map((line) => `  ${line}`).join("\n")}\n\n${OPTIONS}` : undefined
+}
+// parseArgs explains its own syntax; a person needs the option it stopped at and where the usage is.
+function argumentError(error: unknown, words: string): PaddockError {
+  const message = (error as Error).message
+  const option = /'(-[^' ]+)/.exec(message)?.[1]
+  const code = (error as NodeJS.ErrnoException).code
+  const see = `See \`paddock ${words} --help\`.`
+  return new PaddockError("usage", !option ? `${message} ${see}` : code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" ? `paddock ${words} has no option ${option}. ${see}`
+    : /does not take an argument/.test(message) ? `${option} takes no value. ${see}` : `${option} needs a value. ${see}`)
+}
 // Text from a daemon, which may be another machine's, on its way to a terminal: without control characters (an escape
 // sequence can redraw the screen or forge a check mark) and line breaks (a forged line), and bounded. lines keeps breaks
 // for output that is several lines by nature, such as an extension's.
@@ -247,12 +298,18 @@ async function session(request: OpenRequest | EnrollmentRequest): Promise<never>
 const APPLIES: Record<ResizeChange["applies"], string> = { now: "now", "next start": "at the next start", unchanged: "unchanged", "not enforced": "recorded, not enforced" }
 const LIMIT: Record<ResizeChange["limit"], string> = { cpus: "CPUs", memoryGb: "memory (GB)", pids: "task limit", diskGb: "disk (GB)" }
 const MARK: Record<CheckResult["status"], string> = { pass: "✓", weak: "~", fail: "✗", unsupported: "–", unknown: "?", info: "i" }
-function printChecks(checks: CheckResult[], checklist = CHECKLIST): void {
-  for (const check of checks) {
+const MEANING: Record<CheckResult["status"], string> = { pass: "holds", weak: "holds in a weaker form", fail: "does not hold", unsupported: "not available on this engine", unknown: "could not be checked", info: "for your information" }
+// full lists every check; otherwise the passes are counted on one line, with the command that lists them, and every
+// other result is printed in full. The legend names only the marks shown.
+function printChecks(checks: CheckResult[], checklist = CHECKLIST, full: string | true = true): void {
+  const passed = checks.filter((check) => check.status === "pass")
+  if (full !== true && passed.length) console.log(`  ✓ ${passed.length} ${passed.length === 1 ? "check holds" : "checks hold"}. Each one is listed by \`${full}\`.`)
+  for (const check of full === true ? checks : checks.filter((check) => check.status !== "pass")) {
     const item = checklist.find((entry) => entry.id === check.id)
     console.log(`  ${MARK[check.status] ?? "?"} ${item?.title ?? shown(check.id)}${check.status === "pass" || check.status === "info" ? "" : ` [${shown(check.status)}]`}\n      ${shown(check.detail)}${check.evidence === "none" ? "" : ` (${shown(check.evidence)})`}`)
   }
-  console.log("\n  ✓ holds   ~ holds in a weaker form   ✗ does not hold   – not available on this engine   ? could not be checked   i for your information")
+  const shownMarks = (Object.keys(MARK) as Array<CheckResult["status"]>).filter((status) => checks.some((check) => check.status === status))
+  if (shownMarks.length) console.log(`\n  ${shownMarks.map((status) => `${MARK[status]} ${MEANING[status]}`).join("   ")}`)
 }
 
 function printSandbox(view: SandboxView): void {
@@ -261,6 +318,10 @@ function printSandbox(view: SandboxView): void {
   if (view.enforcementProblem) console.log(`  Enforcement problem at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}`)
 }
 const displayName = (name: string) => shown(selectedHost && selectedHost !== "local" ? `${selectedHost}/${name}` : name)
+// A command to run next, on the machine this one addressed.
+const next = (...words: string[]) => `paddock${selectedHost && selectedHost !== "local" ? ` --host ${selectedHost}` : ""} ${words.map((word) => shown(word)).join(" ")}`
+// Engines report times with their own offset; shown in UTC, as labelled.
+const utc = (at: string) => { const date = new Date(at); return Number.isNaN(date.getTime()) ? shown(at) : `${date.toISOString().slice(0, 16).replace("T", " ")} UTC` }
 
 // Buffered input travels as base64 so every byte arrives as it was; a string would lose bytes that are not UTF-8.
 const stdinBytes = async () => ({ stdinBase64: Buffer.from(await Bun.stdin.arrayBuffer()).toString("base64") })
@@ -288,11 +349,19 @@ async function main(argv: string[]): Promise<void> {
   const watching = (name: string) => asJson ? undefined : name
   const parse = (options: Record<string, { type: "string" | "boolean" }>, args = rest) => {
     try { return parseArgs({ args, options, allowPositionals: true }) }
-    catch (error) { throw new PaddockError("usage", (error as Error).message) }
+    catch (error) { throw argumentError(error, args === rest ? command! : `${command} ${rest[0]}`) }
   }
+  // The sandbox a create was making, for the next steps of a refusal.
+  let creating: string | undefined
   const need = (value: string | boolean | undefined, what: string) => { if (typeof value !== "string" || !value) throw new PaddockError("usage", `Missing ${what}. See \`paddock help\`.`); return value }
 
   try {
+    const asked = command === "help" || command === "--help" || command === "-h" ? rest : rest.includes("--help") || rest.includes("-h") ? [command!, ...rest.filter((arg) => arg !== "--help" && arg !== "-h")] : []
+    if (asked.length) {
+      const text = commandHelp(asked)
+      if (!text) throw new PaddockError("usage", `Unknown command ${asked[0]}. See \`paddock help\`.`)
+      return out({ help: text }, () => console.log(text))
+    }
     switch (command) {
       case "config": {
         const { positionals } = parse({})
@@ -310,7 +379,7 @@ async function main(argv: string[]): Promise<void> {
           try { return parseArgs({ args: rest.slice(1), allowPositionals: true, options: {
             read: { type: "string", multiple: true }, path: { type: "string", multiple: true }, copy: { type: "string" }, loopback: { type: "string" }, confirm: { type: "string" }, stdin: { type: "boolean" }, stream: { type: "boolean" },
             "host-temp": { type: "boolean" }, "no-logins": { type: "boolean" }, "claude-profile": { type: "string" }, "codex-profile": { type: "string" },
-          } }) } catch (error) { throw new PaddockError("usage", (error as Error).message) }
+          } }) } catch (error) { throw argumentError(error, `workspace ${action}`) }
         })()
         if (values["host-temp"] !== undefined && action !== "create") throw new PaddockError("usage", "--host-temp is a create option. Use workspace set NAME host-temp on|off to change it.")
         const localPath = (path: string) => path === "~" || path.startsWith("~/") ? path : resolve(path)
@@ -327,9 +396,10 @@ async function main(argv: string[]): Promise<void> {
           const report = await call<WorkspaceReport>(action === "create" ? "workspaceCreate" : "workspaceVerify", { name,
             ...(action === "create" ? { hostTemp: values["host-temp"] ?? false, reads: values.read?.map(localPath), path: values.path?.map(localPath), copy: values.copy ? localPath(values.copy) : undefined, loopback: values.loopback,
               logins: values["no-logins"] ? { kind: "none" } : { kind: "profiles", claude: values["claude-profile"] ?? "default", codex: values["codex-profile"] ?? "default" } } : {}) })
-          out(report, () => { show(report.workspace); printChecks(report.checks, WORKSPACE_CHECKLIST); for (const path of report.pathSuggestions ?? []) console.log(`Tool folder under home, closed unless declared with --read: ${shown(path)}`)
+          out(report, () => { show(report.workspace); printChecks(report.checks, WORKSPACE_CHECKLIST, action === "create" ? `paddock workspace verify ${shown(name)}` : true); for (const path of report.pathSuggestions ?? []) console.log(`Tool folder under home, closed unless declared with --read: ${shown(path)}`)
             // The not-covered check already carries the disclosure when verification reached it.
-            if (!report.checks.some((check) => check.detail.includes(WORKSPACE_DISCLOSURE))) disclose(report.workspace.disclosure) })
+            if (!report.checks.some((check) => check.detail.includes(WORKSPACE_DISCLOSURE))) disclose(report.workspace.disclosure)
+            if (report.ok && action === "create") console.log(`\nNext: paddock workspace shell ${shown(name)}`) })
           if (!report.ok) process.exit(EXIT["check-failed"])
           return
         }
@@ -375,16 +445,18 @@ async function main(argv: string[]): Promise<void> {
             for (const problem of engine.problems) console.log(`    ${shown(problem)}`)
             if (engine.fix) console.log(`    Fix: ${shown(engine.fix)}`)
           }
+          if (engines.some((engine) => engine.ready)) console.log(`Next: ${next("create", "NAME")}`)
         })
       }
       case "create": {
         const { values, positionals } = parse({ docker: { type: "boolean" }, image: { type: "string" }, template: { type: "string" }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" }, pids: { type: "string" }, engine: { type: "string" } })
-        const name = need(positionals[0], "a name")
+        const name = need(positionals[0], "a name"); creating = name
         const made = await call<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }> }>("create",
           { name, docker: values.docker, image: values.image, template: values.template, cpus: values.cpus, memoryGb: values.memory, diskGb: values.disk, pids: values.pids, engine: values.engine }, watching(name))
         return out(made, () => {
-          printSandbox(made.sandbox); printChecks(made.checks)
+          printSandbox(made.sandbox); printChecks(made.checks, CHECKLIST, next("verify", name))
           for (const hook of made.hooks) console.log(`\n  ${shown(hook.extension)} (after create): ${hook.exitCode === 0 ? "done" : `failed with exit ${hook.exitCode}`}${hook.output ? `\n${shown(hook.output, true)}` : ""}`)
+          console.log(`\nNext: ${next("shell", name)}`)
         })
       }
       case "list": case "ls": {
@@ -412,7 +484,10 @@ async function main(argv: string[]): Promise<void> {
       }
       case "start": case "stop": {
         const view = await call<SandboxView>(command, { name: need(rest[0], "a name") }, watching(rest[0]!))
-        return out(view, () => printSandbox(view))
+        return out(view, () => {
+          printSandbox(view)
+          if (command === "start") console.log(`  Its configuration and runtime were checked before it started; its network was not tested. To test it: ${next("verify", view.name)}`)
+        })
       }
       case "verify": {
         const report = await call<{ sandbox: SandboxView; checks: CheckResult[]; ok: boolean }>("verify", { name: need(rest[0], "a name") }, watching(rest[0]!))
@@ -427,7 +502,7 @@ async function main(argv: string[]): Promise<void> {
         return out(resized, () => {
           printSandbox(resized.sandbox)
           for (const change of resized.changes) console.log(`  ${LIMIT[change.limit]}: ${change.from === change.to ? change.to : `${change.from} -> ${change.to}`}, ${APPLIES[change.applies]}${change.note ? `\n      ${shown(change.note)}` : ""}`)
-          console.log(""); printChecks(resized.checks)
+          console.log(""); printChecks(resized.checks, CHECKLIST, next("verify", name))
         })
       }
       case "snapshot": {
@@ -446,7 +521,7 @@ async function main(argv: string[]): Promise<void> {
           const list = await call<Template[]>("templateList")
           return out(list, () => {
             if (!list.length) console.log("No templates. Save one with `paddock snapshot NAME --as TEMPLATE`.")
-            for (const template of list) console.log(`${shown(template.name).padEnd(24)} from ${shown(template.source)} (${shown(template.sourceImage)}), ${shown(template.createdAt.slice(0, 16).replace("T", " "))} UTC, ${(template.sizeBytes / 1024 ** 2).toFixed(0)} MB, ${shown(template.engine)}${template.dependants.length ? `\n    used by ${shown(template.dependants.join(", "))}` : ""}`)
+            for (const template of list) console.log(`${shown(template.name).padEnd(24)} from ${shown(template.source)} (${shown(template.sourceImage)}), ${utc(template.createdAt)}, ${(template.sizeBytes / 1024 ** 2).toFixed(0)} MB, ${shown(template.engine)}${template.dependants.length ? `\n    used by ${shown(template.dependants.join(", "))}` : ""}`)
           })
         }
         if (rest[0] === "remove" || rest[0] === "rm") {
@@ -477,13 +552,17 @@ async function main(argv: string[]): Promise<void> {
         const { values, positionals } = parse({ port: { type: "string" }, "local-port": { type: "string" } }, rest.slice(1))
         if (rest[0] === "add") {
           const made = await call<ForwardView>("forwardAdd", { name: need(positionals[0], "a name"), port: need(values.port, "--port"), localPort: values["local-port"] })
-          return out(made, () => console.log(`Forwarding 127.0.0.1:${made.localPort} to port ${made.port} in ${displayName(made.name)} (forward ${shown(made.id)}). It ends when the sandbox run, either daemon or the SSH link ends; a silent control link closes it after 15 seconds without a heartbeat. Then add it again.`))
+          return out(made, () => {
+            console.log(`Forwarding 127.0.0.1:${made.localPort} to port ${made.port} in ${displayName(made.name)} (forward ${shown(made.id)}). It ends when the sandbox stops or the daemon stops; for a sandbox on another machine, also when either daemon stops or its SSH link is silent for 15 seconds. Then add it again.`)
+            console.log(`  ${FORWARD_REACH.replace("these", "it")}`)
+            console.log(`Remove it: ${next("forward", "remove", made.id)}`)
+          })
         }
         if (rest[0] === "list" || rest[0] === undefined) {
           const list = await call<ForwardView[]>("forwardList", { name: positionals[0] })
           return out(list, () => {
             if (!list.length) console.log("No forwards. Add one with `paddock forward add NAME --port PORT`.")
-            for (const forward of list) console.log(`${shown(forward.id)}  127.0.0.1:${forward.localPort} -> ${shown(forward.name)}:${forward.port}  ${forward.connections} open, since ${shown(forward.createdAt.slice(0, 16).replace("T", " "))} UTC`)
+            for (const forward of list) console.log(`${shown(forward.id)}  127.0.0.1:${forward.localPort} -> ${shown(forward.name)}:${forward.port}  ${forward.connections} open, since ${utc(forward.createdAt)}`)
           })
         }
         if (rest[0] === "remove" || rest[0] === "rm") {
@@ -503,8 +582,18 @@ async function main(argv: string[]): Promise<void> {
             : `Set up. Add this line at the top of ${done.config}, or run again with --write-config:\n  ${done.include}\nThen \`ssh ${shown(done.alias)}\` logs in as ${shown(done.user)} with the key ${shown(done.editorKey)}.`))
         }
         if (rest[0] === "access") {
-          const access = await call<SshAccess>("sshAccess", { name: need(positionals[0], "a name") })
-          return out(access, () => console.log(`${shown(access.alias)}: ${access.user ? `${shown(access.user)}, home ${shown(access.home)}` : "not set up"}; ${access.batchReady ? "ready" : "not ready"}`))
+          const name = need(positionals[0], "a name")
+          const access = await call<SshAccess>("sshAccess", { name })
+          // Why not, in the order a person fixes it: set up, running, included.
+          const why = async () => {
+            if (!access.user) return `: run \`${next("ssh", "setup", name)}\``
+            const view = await call<SandboxView>("get", { name }).catch(() => undefined)
+            if (view && view.status !== "running") return `: ${shown(name)} is ${shown(view.status)}. Start it with \`${next("start", name)}\``
+            if (!await included(dirs)) return `: ${userConfig()} does not include Paddock's file. Run \`${next("ssh", "setup", name, "--write-config")}\`, or add the line it prints`
+            return ""
+          }
+          const reason = asJson || access.batchReady ? "" : await why()
+          return out(access, () => console.log(`${shown(access.alias)}: ${access.user ? `${shown(access.user)}, home ${shown(access.home)}` : "not set up"}; ${access.batchReady ? "ready" : `not ready${reason}`}`))
         }
         throw new PaddockError("usage", "Use `paddock ssh setup NAME [--write-config]` or `paddock ssh access NAME`.")
       }
@@ -522,7 +611,7 @@ async function main(argv: string[]): Promise<void> {
         }
         if (rest[0] !== "run") throw new PaddockError("usage", "Use `paddock ext list` or `paddock ext run EXTENSION ACTION [SANDBOX]`.")
         let parsed
-        try { parsed = parseArgs({ args: rest.slice(1), options: { set: { type: "string", multiple: true } }, allowPositionals: true }) } catch (error) { throw new PaddockError("usage", (error as Error).message) }
+        try { parsed = parseArgs({ args: rest.slice(1), options: { set: { type: "string", multiple: true } }, allowPositionals: true }) } catch (error) { throw argumentError(error, "ext run") }
         const { values, positionals } = parsed
         const fields = Object.fromEntries((values.set ?? []).map((pair) => { const at = pair.indexOf("="); return at < 0 ? [pair, "true"] : [pair.slice(0, at), pair.slice(at + 1)] }))
         const output = await call<RunResult>("action", { extension: need(positionals[0], "an extension"), action: need(positionals[1], "an action"), sandbox: positionals[2], values: fields })
@@ -534,6 +623,7 @@ async function main(argv: string[]): Promise<void> {
         const daemon = await readDaemonFile(dirs)
         if (!daemon) throw new PaddockError("runtime", "The daemon is not running.")
         const url = `http://127.0.0.1:${daemon.port}/#token=${daemon.token}`
+        if (!daemon.port) return out({ url }, () => console.log("No dashboard: this daemon was started with PADDOCK_SOCKET_ONLY=1, so it answers on its socket only."))
         // On Windows `start` is part of cmd, not a program; its first quoted argument is a window title.
         if (rest.includes("--open")) Bun.spawn(process.platform === "darwin" ? ["open", url] : process.platform === "win32" ? ["cmd", "/c", "start", "", url] : ["xdg-open", url])
         return out({ url }, () => console.log(url))
@@ -553,7 +643,7 @@ async function main(argv: string[]): Promise<void> {
         }
         const version = await request<{ version: string }>("version").catch(() => undefined)
         const daemon = version ? await readDaemonFile(dirs) : undefined
-        return out({ running: Boolean(version), ...daemon, token: undefined }, () => console.log(version ? `Running: version ${version.version}, pid ${daemon?.pid}, dashboard on port ${daemon?.port}.` : "Not running. It starts with the first command."))
+        return out({ running: Boolean(version), ...daemon, token: undefined }, () => console.log(version ? `Running: version ${version.version}, pid ${daemon?.pid}, ${daemon?.port ? `dashboard on port ${daemon.port}` : "no dashboard (socket only)"}.` : "Not running. It starts with the first command."))
       }
       case "host": {
         if (selectedHost && selectedHost !== "local") throw new PaddockError("usage", "The host registry belongs to the primary machine.")
@@ -628,6 +718,7 @@ async function main(argv: string[]): Promise<void> {
       const checklist = command === "workspace" ? WORKSPACE_CHECKLIST : CHECKLIST
       console.error(`paddock: ${shown(message.split(": ")[0]!.replace(/\.$/, ""))}. These checks did not hold:`)
       for (const check of error.details as CheckResult[]) console.error(`  ${MARK[check.status] ?? "?"} ${checklist.find((entry) => entry.id === check.id)?.title ?? shown(check.id)}\n      ${shown(check.detail)}`)
+      if (creating) console.error(`Remove it: ${next("remove", creating, "--confirm", creating)}`)
     } else console.error(`paddock: ${shown(message)}`)
     process.exit(EXIT[code])
   }

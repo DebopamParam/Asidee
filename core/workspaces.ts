@@ -218,18 +218,22 @@ export class Workspaces {
       if (await lstat(this.file(spec.name)).catch(() => undefined) || await lstat(folder).catch(() => undefined)) throw new PaddockError("conflict", `Workspace ${spec.name} or its folder already exists.`)
       const existing = (await Promise.all((await this.names()).map((name) => this.manifest(name)))).map((entry) => entry.folder)
       const protectedPaths = { home, root, state, workspaces: existing, ssh: await canonical(join(home, ".ssh")) }
+      // Still exit 1, as a raw ENOENT was; only the words change.
+      const real = (given: string, flag: string) => realpath(expand(given, home)).catch((error: NodeJS.ErrnoException) => {
+        throw error.code === "ENOENT" ? new PaddockError("runtime", `${flag} ${given} does not exist on this Mac; nothing was created.`) : error
+      })
       const reads: WorkspaceManifest["reads"] = []
       for (const given of spec.reads) {
-        const path = await realpath(expand(given, home)); validateRead(path, protectedPaths)
+        const path = await real(given, "--read"); validateRead(path, protectedPaths)
         reads.push({ given, canonical: path, resolvedAt: new Date().toISOString() })
       }
       for (const path of spec.path) {
-        const canonicalPath = await realpath(expand(path, home))
+        const canonicalPath = await real(path, "--path")
         if (!(await lstat(canonicalPath)).isDirectory() || canonicalPath.includes(":")) throw new PaddockError("usage", "--path must be a directory without a colon.")
         if (within(canonicalPath, home) && !reads.some((read) => within(canonicalPath, read.canonical))) throw new PaddockError("usage", "A --path directory under home also needs an allowed --read.")
       }
       spec.path = await Promise.all(spec.path.map((path) => realpath(expand(path, home))))
-      const source = spec.copy ? await realpath(expand(spec.copy, home)) : undefined
+      const source = spec.copy ? await real(spec.copy, "--copy") : undefined
       if (source && (!(await lstat(source)).isDirectory() || within(folder, source) || within(source, root) || within(source, state))) throw new PaddockError("usage", "--copy must be a project directory separate from workspace and state folders.")
       const temp = must(await this.runHost(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"]), "Finding this user's temp folder").stdout.trim()
       if (spec.hostTemp && await realpath(temp) !== join(await realpath(dirname(temp)), "T")) throw new PaddockError("check-failed", "DARWIN_USER_TEMP_DIR is not the canonical per-user T folder.")

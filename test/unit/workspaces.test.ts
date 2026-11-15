@@ -6,7 +6,7 @@ import { dirname, join } from "node:path"
 import { blockers, complete, failures, WORKSPACE_CHECKLIST } from "../../core/checks"
 import { belongs, controlledDecision, decision, requireMac, signalWorkspacePid, workspacePids } from "../../core/workspace-processes"
 import { systemRunner } from "../../core/run"
-import type { Runner } from "../../core/types"
+import { PaddockError, type Runner } from "../../core/types"
 import controlProfile from "../../core/workspace-control.sb" with { type: "text" }
 import { WORKSPACE_DISCLOSURE, HOST_TEMP_DISCLOSURE, workspaceDisclosure, workspaceEnvironment, workspaceProfile } from "../../core/workspace-profile"
 import { acquire, canonical, validateRead, validWorkspaceSpec, Workspaces } from "../../core/workspaces"
@@ -473,4 +473,17 @@ mac("a starter that never carries its profile is refused with what was seen", as
       expect(Number(/after (\d+) ms/.exec(refused)?.[1])).toBeGreaterThanOrEqual(1000)
     } finally { process.kill(running.pid, "SIGKILL"); await running.finished }
   } finally { await rm(folder, { recursive: true, force: true }) }
+})
+
+mac("a --copy, --read or --path that does not exist is refused in plain words, with nothing created", async () => {
+  const { root, workspaces, clean } = await fixture()
+  try {
+    const missing = join(root, "nowhere")
+    for (const [input, flag] of [[{ copy: missing }, "--copy"], [{ reads: [missing] }, "--read"], [{ path: [missing] }, "--path"]] as const) {
+      const refused = await workspaces.create({ name: "absent", ...input }).then(() => undefined, (error: PaddockError) => error)
+      expect(refused).toBeInstanceOf(PaddockError)
+      expect([refused!.code, refused!.message]).toEqual(["runtime", `${flag} ${missing} does not exist on this Mac; nothing was created.`])
+    }
+    expect(await lstat(join(root, "workspaces", "absent")).catch(() => undefined)).toBeUndefined()
+  } finally { await clean() }
 })

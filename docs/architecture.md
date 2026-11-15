@@ -61,7 +61,7 @@ is waived for it. A future microVM provider needs reviewed evidence or an explic
 | Check | Blocking | When | How the gVisor provider checks it |
 |---|---|---|---|
 | Isolated kernel | yes | after start | The runtime is gVisor, and the kernel inside identifies as gVisor. |
-| Inner Docker is available when requested | yes | after start | Its Unix socket answers, its data root is /var/lib/docker, and its driver is the copy-on-write `overlayfs`. The detail discloses the public DNS fallback. Not requested is a disclosure. |
+| Docker inside the sandbox | yes | after start | Its Unix socket answers, its data root is /var/lib/docker, and its driver is the copy-on-write `overlayfs`. The detail discloses the public DNS fallback. Not requested is a disclosure. |
 | Public DNS fallback is configured | yes | after start | Reads /etc/resolv.conf; only if it is not 1.1.1.1 and 8.8.8.8, rewrites it, reads it back and says it was restored. This measures configuration, not live resolution. |
 | No privileged mode, host namespaces, undeclared capabilities or devices | yes | before start | Engine configuration. With Docker, exactly NET_ADMIN and SYS_ADMIN added inside gVisor; otherwise no additions. |
 | No host folders | yes | before start | Engine configuration; with Docker, volume driver options and ownership too. |

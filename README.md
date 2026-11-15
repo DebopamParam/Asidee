@@ -11,6 +11,9 @@ it has no host folders, it cannot reach the host, other sandboxes or the LAN, an
 check does not run. `paddock verify demo` runs the checklist again at any time, and the daemon repeats the cheap half of
 it every 30 seconds and stops a sandbox that stopped holding.
 
+In text, `create` and `resize` count the checks that held on one line and print every other result in full;
+`verify` and `--json` list every check. Every command takes `--help`.
+
 Each check reports one of six results, and says whether it was probed (tried against the live sandbox) or inspected (read
 from the engine's configuration):
 

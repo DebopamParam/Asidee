@@ -227,7 +227,7 @@ export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardS
   ].filter(Boolean)
   out.push(unlimited.length ? result("limits", "fail", "inspected", `No limit on ${unlimited.join(", ")}.`)
     : differ.length ? result("limits", "fail", "inspected", `The engine's limits are not the ones Paddock set: ${differ.join("; ")}.`)
-    : result("limits", "pass", "inspected", `${host.Memory / 1024 ** 3} GB memory, ${host.PidsLimit} tasks (gVisor's own threads count, so fewer processes than that fit), ${host.NanoCpus / 1e9} CPUs. A sandbox that passes its memory or task limit is killed. What its main process prints${manifest.spec.docker ? " (dockerd's log)" : ""} is kept on the engine's host, outside the watched disk limit, in two files of at most 10 MiB.`))
+    : result("limits", "pass", "inspected", `${host.Memory / 1024 ** 3} GB memory, ${host.PidsLimit} tasks (gVisor's own threads count, so fewer processes than that fit), ${host.NanoCpus / 1e9} ${host.NanoCpus === 1e9 ? "CPU" : "CPUs"}. A sandbox that passes its memory or task limit is killed. What its main process prints${manifest.spec.docker ? " (dockerd's log)" : ""} is kept on the engine's host, outside the watched disk limit, in two files of at most 10 MiB.`))
 
   const disk = manifest.engine.capabilities?.diskLimit
   out.push(disk === "hard" ? result("disk", "pass", "inspected", `${manifest.spec.diskGb} GB; writes fail at the limit.`)
@@ -239,7 +239,7 @@ export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardS
   const tagged = Boolean(recorded && (image?.RepoTags ?? []).includes(`${templateRepository(owner)}:${recorded.name}`))
   out.push(recorded && inspect.Image !== recorded.imageId ? result("template", "fail", "inspected", `The container runs the image ${short(inspect.Image) || "(unknown)"}, not template ${recorded.name}'s image ${short(recorded.imageId)}.`)
     : recorded && !image ? result("template", "unknown", "none", `Recorded as made from template ${recorded.name} (image ${short(recorded.imageId)}), but the engine could not describe that image.`)
-    : recorded ? result("template", "info", "inspected", `Template ${recorded.name}, saved from the sandbox ${recorded.source} on ${recorded.createdAt.slice(0, 10)}; the container runs its image ${short(recorded.imageId)}.${tagged ? "" : " The template has been removed since; its image stays on the engine until the last sandbox made from it is removed."} It holds the files of the sandbox it was saved from, except the usual login files; the credentials check says what is inside.`)
+    : recorded ? result("template", "info", "inspected", `Template ${recorded.name}, saved from the sandbox ${recorded.source} on ${recorded.createdAt.slice(0, 10)}; the container runs its image ${short(recorded.imageId)}.${tagged ? "" : " The template has been removed since; its image stays on the engine until the last sandbox made from it is removed."} It holds the files of the sandbox it was saved from, except the usual login files. The credentials check looks only for those login files; other secrets saved in it (.env files, shell history, tokens) are not looked for.`)
     : labels[LABEL_TEMPLATE] && labels[LABEL_TEMPLATE_OWNER] === owner ? result("template", "info", "inspected", `None recorded, but its image ${short(inspect.Image)} is Paddock template ${labels[LABEL_TEMPLATE]}'s, given as a plain image.`)
     : result("template", "info", "inspected", `None: made from the image ${manifest.spec.image}.`))
   return out
@@ -581,7 +581,7 @@ export class GvisorProvider implements Provider {
   }
 
   async exec(manifest: Manifest, argv: readonly string[], options: { user?: string; stdin?: string | Uint8Array; signal?: AbortSignal } = {}): Promise<RunResult> {
-    if ((await this.status(manifest)) !== "running") throw new PaddockError("conflict", `${manifest.name} is not running. Start it first.`)
+    if ((await this.status(manifest)) !== "running") throw new PaddockError("conflict", `${manifest.name} is not running. Start it with \`paddock start ${manifest.name}\`.`)
     const tag = randomBytes(8).toString("hex")
     const ran = await this.docker(manifest.engine, ["exec", ...(options.stdin === undefined ? [] : ["-i"]), ...(options.user ? ["-u", options.user] : []), "-e", `PADDOCK_EXEC=${tag}`, container(manifest.name), ...argv], { stdin: options.stdin, signal: options.signal })
     if (!ran.overflow && !options.signal?.aborted) return ran
@@ -610,7 +610,7 @@ export class GvisorProvider implements Provider {
 
   async openExec(manifest: Manifest, argv: readonly string[], options: { user?: string; tty: boolean; cols?: number; rows?: number }): Promise<Session> {
     const inspect = await this.inspect(manifest)
-    if (!inspect?.State.Running || !inspect.Id) throw new PaddockError("conflict", `${manifest.name} is not running. Start it first.`)
+    if (!inspect?.State.Running || !inspect.Id) throw new PaddockError("conflict", `${manifest.name} is not running. Start it with \`paddock start ${manifest.name}\`.`)
     const socket = await this.endpoint(manifest.engine)
     const tag = randomBytes(8).toString("hex")
     // By the container's id, which inspect has just tied to this sandbox's label.
@@ -671,7 +671,7 @@ export class GvisorProvider implements Provider {
 
   async prepareLoopback(manifest: Manifest): Promise<void> {
     const inspect = await this.inspect(manifest)
-    if (!inspect?.State.Running || !inspect.Id) throw new PaddockError("conflict", `${manifest.name} is not running. Start it first.`)
+    if (!inspect?.State.Running || !inspect.Id) throw new PaddockError("conflict", `${manifest.name} is not running. Start it with \`paddock start ${manifest.name}\`.`)
     await this.copyRelay(manifest, inspect.Id)
     // A guest that removed the relay while running cannot see the new copy; say so rather than relay the engine's error.
     const tried = await this.exec(manifest, [RELAY, "true"])
