@@ -2562,14 +2562,16 @@ async function templateImages(): Promise<Array<{ id: string; tags: string[]; sou
 const imageExists = async (id: string) => (await docker(["image", "inspect", id])).code === 0
 const templateOf = async (name: string) => ((await pdkJson(["template", "list"])).reply.data as Array<{ name: string; imageId: string; dependants: string[] }>).find((entry) => entry.name === name)
 
-ev("C01", "A sandbox made from a template has the files its source had when saved, home folders included; /dev/shm and an in-memory /tmp do not carry", async () => {
+ev("C01", "Templates carry layer files and home folders, exclude engine hosts and hostname files and memory, and start with Paddock DNS", async () => {
   await fresh(TS)
   const planted = await pdk(["exec", TS, "--", "sh", "-c", `echo carried > /root/marker; mkdir -p /home/dev /opt/app && echo dev > /home/dev/notes && echo app > /opt/app/marker
 echo shm > /dev/shm/marker; echo tmp > /tmp/marker; echo token > /root/.npmrc
 for f in ${LOGINS.join(" ")}; do mkdir -p "\${f%/*}"; echo secret > "$f"; done
 for f in /etc/hosts /etc/hostname /etc/resolv.conf; do echo "# ${PREFIX}-planted" >> "$f"; done
+grep -l "${PREFIX}-planted" /etc/hosts /etc/hostname /etc/resolv.conf
 grep -q " /tmp tmpfs" /proc/mounts && echo tmp-in-memory; sleep 600 >/dev/null 2>&1 &`])
   expect(planted.code === 0, `planting files failed: ${planted.err}`)
+  for (const file of ["/etc/hosts", "/etc/hostname", "/etc/resolv.conf"]) expect(planted.out.split("\n").includes(file), `control: ${file} never had the planted line`)
   // Control: gVisor's writes reach the engine's layer at once, and the in-memory ones are there inside. A forward puts
   // Paddock's relay in the source, which the template must not carry (C02).
   expect((await docker(["cp", `${containerOf(TS)}:/root/marker`, "-"])).code === 0, "control: the engine cannot see a file written in the source")
@@ -2578,8 +2580,12 @@ grep -q " /tmp tmpfs" /proc/mounts && echo tmp-in-memory; sleep 600 >/dev/null 2
   await pdk(["forward", "remove", forward.reply.data.id])
   expect((await pdk(["exec", TS, "--", "cat", "/dev/shm/marker", "/tmp/marker"])).out.includes("shm"), "control: the source cannot read its own /dev/shm")
   const etc = ["/etc/hosts", "/etc/hostname", "/etc/resolv.conf"]
+  // A start on a running sandbox restores DNS too; enforcement may already have done so. Measure that behavior
+  // explicitly instead of depending on whether the 30-second pass has happened since planting.
+  expect((await pdk(["start", TS])).code === 0, "start did not restore the source's DNS")
+  expect((await pdk(["exec", TS, "--", "cat", "/etc/resolv.conf"])).out === "nameserver 1.1.1.1\nnameserver 8.8.8.8\n", "source DNS was not restored")
   const planted_ = (await pdk(["exec", TS, "--", "grep", "-l", `${PREFIX}-planted`, ...etc])).out.trim().split("\n")
-  expect(planted_.length === 3, `control: the source's engine files do not have the planted line: ${planted_.join(", ")}`)
+  expect(JSON.stringify(planted_) === JSON.stringify(etc.slice(0, 2)), `control: source hosts/hostname markers changed, or DNS was not restored: ${planted_.join(", ")}`)
   const { Id: sourceId, State: { StartedAt: startedAt } } = await inspect(TS)
   // Recorded as they happen: the engine keeps only its latest events, and later evals make many.
   const watch = Bun.spawn(["docker", "--context", context, "events", "--filter", `container=${sourceId}`, "--format", "{{.Action}}"], { stdout: "pipe", stderr: "ignore" })
@@ -2601,11 +2607,12 @@ grep -q " /tmp tmpfs" /proc/mounts && echo tmp-in-memory; sleep 600 >/dev/null 2
   expect(/\/dev\/shm\/marker: No such file/.test(read.out), "/dev/shm carried into the template")
   const carried = (await pdk(["exec", TC, "--", "grep", "-l", `${PREFIX}-planted`, ...etc])).out.trim()
   expect(!carried, `the engine's files carried into the template: ${carried}`)
+  expect((await pdk(["exec", TC, "--", "cat", "/etc/resolv.conf"])).out === "nameserver 1.1.1.1\nnameserver 8.8.8.8\n", "template sandbox did not start with Paddock DNS")
   if (snapshotWindow.tmpInMemory) expect(/\/tmp\/marker: No such file/.test(read.out), "an in-memory /tmp carried into the template")
   else expect(!/\/tmp\/marker: No such file/.test(read.out), "/tmp was on the layer, yet did not carry")
   const check = made.reply.data.checks.find((entry: { id: string }) => entry.id === "template")
   expect(check.status === "info" && check.detail.includes(`Template ${TPL}`) && made.reply.data.sandbox.template?.name === TPL, `the template check says: ${check.status} ${check.detail}`)
-  return `/root, /home and /opt carried; /dev/shm did not; /tmp was ${snapshotWindow.tmpInMemory ? "in memory and did not" : "on the layer and did"}`
+  return `/root, /home and /opt carried; /dev/shm did not; /tmp was ${snapshotWindow.tmpInMemory ? "in memory and did not" : "on the layer and did"}; source hosts/hostname markers persisted until snapshot and did not carry; source DNS was restored before snapshot, new sandbox DNS is the public fallback`
 })
 
 ev("C02", "Login files are left out of a template, as seen from the engine; other files with secrets, such as .npmrc, are carried, as the snapshot says", async () => {

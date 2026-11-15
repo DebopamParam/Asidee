@@ -413,8 +413,13 @@ refuses a snapshot otherwise; no engine here lacks the flag, so that refusal is 
 consistent at the file level for that moment, as a power cut would leave a disk: a program halfway through writing a
 file is saved halfway.
 
-C01 (Alpine): files written under `/root`, `/home` and `/opt` carried; `/dev/shm`, `/tmp` and lines added to
-`/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` did not. C02: the three login files planted were absent from the
+C01 (Alpine): files written under `/root`, `/home` and `/opt` carried; `/dev/shm`, `/tmp` and source markers in
+`/etc/hosts` and `/etc/hostname` did not. All three engine files were marked and read back in the planting exec.
+A later start on the running source restored `/etc/resolv.conf` to the public fallback, leaving the hosts and
+hostname markers intact; the template sandbox also started with the fallback. Enforcement can restore DNS before
+that explicit start too. The eval therefore does not assume a resolver edit survives until snapshot, or claim that
+this marker proves resolver exclusion by the snapshot. A user's resolver edits have the same restoration behavior.
+C02: the three login files planted were absent from the
 image as the engine copies it out, the template says it left them out, the new sandbox's credentials check found none,
 `.npmrc` was there, and the image had neither the relay nor the snapshot's busybox. C05 (the default image): a Docker
 sandbox made from a Docker sandbox's template had its files, `/tmp` included, its own data volume and none of the

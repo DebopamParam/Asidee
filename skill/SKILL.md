@@ -114,8 +114,10 @@ persistence and automatic sandbox recovery are not measured.
 - A template holds every file of the sandbox it was saved from, home folders included: shell history, `.env` files and
   tokens other than the usual login files. Only the usual login files and Paddock's own files are removed. Before you
   snapshot a sandbox the user did not ask you to, or hand a template to anyone, tell the user this. Volumes are not
-  saved, so a `--docker` sandbox's inner images are not in its template. Removing a template does not affect the
-  sandboxes made from it.
+  saved, so a `--docker` sandbox's inner images are not in its template. Neither are processes, memory, tmpfs folders
+  or the engine's `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf`. Paddock restores edits to `/etc/resolv.conf`
+  on start and enforcement; template sandboxes start with its public DNS fallback. Removing a template does not
+  affect the sandboxes made from it.
 - To open a service that listens inside the sandbox, add a forward and use the `localPort` it reports; leave out
   `--local-port` to get a free one. It listens on this machine's 127.0.0.1 only, carries any bytes, and ends when it
   is removed, when the sandbox stops, restarts or is removed, and when the daemon stops; add it again after a restart.
