@@ -375,7 +375,11 @@ export class GvisorProvider implements Provider {
 
   async start(manifest: Manifest): Promise<void> {
     const { engine, name } = manifest
-    if (!(await this.inspect(manifest))?.State.Running) must(await this.docker(engine, ["start", container(name)]), `Starting ${name}`)
+    const inspect = await this.inspect(manifest)
+    if (!inspect?.State.Running) {
+      if (inspect?.Id) await this.copyRelay(manifest, inspect.Id)
+      must(await this.docker(engine, ["start", container(name)]), `Starting ${name}`)
+    }
     const dns = await this.dnsCheck(manifest)
     if (dns.status !== "pass") throw new PaddockError("runtime", `${name} started, but its DNS could not be set and read back: ${dns.detail}`)
     if (manifest.spec.docker) {
@@ -591,10 +595,10 @@ export class GvisorProvider implements Provider {
     return body.State.Running && body.Id ? `${body.Id.slice(0, 12)}@${body.State.StartedAt}` : undefined
   }
 
-  // The relay is the static busybox from Paddock's helper image (one file, no libraries), copied into each run of the
-  // sandbox through the engine's archive API, so it needs no tool from the sandbox's image and works with any of them.
-  // It is given only a number: `busybox nc 127.0.0.1 PORT`. The guest can replace the file, which changes nothing it
-  // could not already do with its own loopback.
+  // The relay is the static busybox from Paddock's helper image (one file, no libraries), copied into the sandbox through
+  // the engine's archive API, so it needs no tool from the sandbox's image and works with any of them. It is given only a
+  // number: `busybox nc 127.0.0.1 PORT`. The guest can replace the file, which changes nothing it could not already do
+  // with its own loopback.
   private readonly busyboxes = new Map<string, Promise<Uint8Array>>()
   private busybox(engine: Engine): Promise<Uint8Array> {
     const known = this.busyboxes.get(engine.id)
@@ -616,10 +620,20 @@ export class GvisorProvider implements Provider {
     if (response.status !== 200) throw new PaddockError("runtime", `The engine did not copy ${what}: ${(await response.text()).trim().slice(0, 300) || `HTTP ${response.status}`}`)
   }
 
+  // gVisor does not show a file the engine adds behind a running guest once the guest has looked in its folder (W10: one
+  // `ls /.paddock`, or even a listing of `/` for a new top-level folder), until the sandbox restarts. So the relay is
+  // copied in before every start, and again for each forward, which replaces a file the guest can still see.
+  private async copyRelay(manifest: Manifest, id: string): Promise<void> {
+    await this.copyIn(manifest.engine, id, [{ path: ".paddock/", mode: 0o755 }, { path: RELAY.slice(1), mode: 0o755, data: await this.busybox(manifest.engine) }], `the relay into ${manifest.name}`)
+  }
+
   async prepareLoopback(manifest: Manifest): Promise<void> {
     const inspect = await this.inspect(manifest)
     if (!inspect?.State.Running || !inspect.Id) throw new PaddockError("conflict", `${manifest.name} is not running. Start it first.`)
-    await this.copyIn(manifest.engine, inspect.Id, [{ path: ".paddock/", mode: 0o755 }, { path: RELAY.slice(1), mode: 0o755, data: await this.busybox(manifest.engine) }], `the relay into ${manifest.name}`)
+    await this.copyRelay(manifest, inspect.Id)
+    // A guest that removed the relay while running cannot see the new copy; say so rather than relay the engine's error.
+    const tried = await this.exec(manifest, [RELAY, "true"])
+    if (tried.exitCode !== 0) throw new PaddockError("runtime", `The relay at ${RELAY} does not run inside ${manifest.name}: something inside removed or replaced it while the sandbox ran, and a new copy is not visible until it restarts. Stop and start ${manifest.name}, then add the forward again. ${tried.stderr.trim().slice(0, 300)}`)
   }
 
   dialLoopback(manifest: Manifest, port: number): Promise<Session> {

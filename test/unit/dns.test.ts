@@ -1,17 +1,28 @@
-import { expect, test } from "bun:test"
+import { afterAll, expect, test } from "bun:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { GvisorProvider, LABEL_ID, bridge } from "../../core/providers/gvisor"
 import { validSpec } from "../../core/state"
 import type { Manifest, Runner } from "../../core/types"
+
+// The engine's archive API, where the relay is copied: each request is recorded in the calls of the fixture that made it.
+const folder = await mkdtemp(join(tmpdir(), "pdk-dns-"))
+let archived: string[][] = []
+const engine = Bun.serve({ unix: join(folder, "engine.sock"), fetch: (request) => { archived.push(["archive", request.method, new URL(request.url).pathname]); return new Response("") } })
+afterAll(async () => { engine.stop(true); await rm(folder, { recursive: true, force: true }) })
 
 function fixture(docker = false) {
   const manifest: Manifest = { version: 1, name: "demo", id: "owned", createdAt: "", spec: validSpec({ name: "demo", docker }),
     engine: { id: "fake", provider: "gvisor", label: "fake", ready: true, problems: [], data: { context: "fake", runtime: "runsc" } } }
   const state = { running: true, resolver: "nameserver 127.0.0.11\n", writable: true, readable: true, guard: "intact", network: true, writes: 0 }
-  const calls: string[][] = []
+  const calls: string[][] = []; archived = calls
   const runner: Runner = async (argv, options) => {
     calls.push([...argv]); const args = argv.slice(3)
     let stdout = "", exitCode = 0
-    if (args[0] === "inspect") stdout = JSON.stringify([{ State: { Running: state.running }, Config: { Labels: { [LABEL_ID]: manifest.id } }, HostConfig: { Runtime: "runsc" } }])
+    if (args[0] === "inspect") stdout = JSON.stringify([{ Id: "c0ffee", State: { Running: state.running }, Config: { Labels: { [LABEL_ID]: manifest.id } }, HostConfig: { Runtime: "runsc" } }])
+    else if (args[0] === "context") stdout = `unix://${join(folder, "engine.sock")}`
+    else if (args.includes("/bin/busybox.static")) return { stdout: "", stderr: "", exitCode: 0, raw: new Uint8Array([0x7f, 0x45, 0x4c, 0x46]) }
     else if (args[0] === "start") state.running = true
     else if (args[0] === "info") stdout = JSON.stringify({ runsc: { path: "/usr/bin/runsc", runtimeArgs: ["--net-raw", "--overlay2=none"] } })
     else if (args[0] === "network" && args[1] === "inspect") { stdout = bridge(manifest.name); exitCode = state.network ? 0 : 1 }
@@ -29,12 +40,17 @@ function fixture(docker = false) {
 }
 
 for (const docker of [false, true]) test(`start restores DNS on an already running sandbox, inner Docker ${docker}`, async () => {
-  const { provider, manifest, state } = fixture(docker)
+  const { provider, manifest, state, calls } = fixture(docker)
   await provider.start(manifest)
   expect(state.resolver).toBe("nameserver 1.1.1.1\nnameserver 8.8.8.8\n")
+  expect(calls.some((call) => call[0] === "archive")).toBe(false)
   state.running = false; state.resolver = "nameserver 172.20.0.1\n"
   await provider.start(manifest)
   expect(state.resolver).toContain("nameserver 1.1.1.1")
+  // The relay goes in before the guest runs, so nothing inside can have looked for it first (W10).
+  const copied = calls.findIndex((call) => call[0] === "archive"); const started = calls.findIndex((call) => call[3] === "start")
+  expect(calls[copied]).toEqual(["archive", "PUT", "/containers/c0ffee/archive"])
+  expect(copied).toBeGreaterThan(-1); expect(copied).toBeLessThan(started)
 })
 
 test("the enforcement runtime checks read DNS, restore it only when reset, and disclose an unreadable resolver", async () => {

@@ -264,7 +264,12 @@ tests passed before this defensive change too. The tester's runtime-specific cau
 system picks (no port is probed and assumed free; one in use is refused). Each connection it accepts opens a session
 that runs a relay on the sandbox's own loopback: `nc 127.0.0.1 P` from a static BusyBox the core copies into the
 sandbox at `/.paddock/busybox` through the engine's archive API, because the image may have no `nc`, `socat` or
-interpreter of its own. The relay gets the port as a number and nothing else. The engine publishes nothing and gets no
+interpreter of its own. It is copied before every start and again by each `forward add`. gVisor does not show a file
+the engine adds behind a running guest once the guest has looked in that folder, until the sandbox restarts: measured
+with one `ls /.paddock` before the first forward, and also for a new top-level folder after a listing of `/`. A copy
+made before the start exists before any guest process can look, and replacing a file the guest can see works. A guest
+that removes the relay while running hides any new copy, so `forward add` runs the relay once and refuses with the
+restart to make, instead of listening and relaying the engine's error. The relay gets the port as a number and nothing else. The engine publishes nothing and gets no
 listener on its host. Each direction waits for the other side. End of input passes on as a half-close: the relay
 stays while the port answers and is ended after ten minutes of silence, since a client that has gone after its FIN
 looks the same as one still waiting. W09 keeps a control connected
@@ -278,7 +283,10 @@ had the same listeners before and after; verify listed the forward. W02: the for
 other addresses or the engine host's, where control listeners did. W04: the listener was gone within 10 s of each
 ending condition, an engine restart included. W05: a recreated name had no forward. W06: an occupied explicit port
 was refused with exit 4 and nothing recorded. W07: 64 MiB of random bytes each way came back with the same hash. W08:
-50 connections at once each got their own 256 KiB back, and no relay process was left.
+50 connections at once each got their own 256 KiB back, and no relay process was left. W10: after the guest listed
+`/.paddock` before the first forward, the forward carried a nonce, as did a control where nothing looked (before this
+change the first failed with `failed to load /.paddock/busybox`); after the guest removed the relay, `forward add` was
+refused with the restart named and nothing recorded, and after a stop and start the forward worked.
 
 ### SSH for editors
 

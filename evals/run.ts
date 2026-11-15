@@ -2225,6 +2225,39 @@ ev("W09", "A closed forward connection leaves no nc relay within five seconds wh
   } finally { control.destroy(); dropped.destroy(); await pdk(["forward", "remove", forward.id]) }
 })
 
+ev("W10", "A forward carries bytes in a sandbox whose guest looked up the relay's path before the first forward, beside a control where nothing looked; a guest that removes the relay gets a refusal that names the restart, and a restart repairs it", async () => {
+  const looked = `${PREFIX}-wl`; const plain = `${PREFIX}-wc`
+  try {
+    await fresh(looked); await fresh(plain)
+    // What an agent's `ls`, or a guest on purpose, can do before Paddock copies the relay in.
+    const lookup = await pdk(["exec", looked, "--", "sh", "-c", "ls -la /.paddock /.paddock/busybox; stat /.paddock/busybox; true"])
+    const carried: string[] = []
+    for (const name of [plain, looked]) {
+      const nonce = `${PREFIX}-w10-${name}`
+      await nonceService(name, nonce)
+      expect((await pdk(["exec", name, "--", "nc", "-w", "2", "127.0.0.1", String(NONCE_PORT)])).out.includes(nonce), `control: the service does not answer inside ${name}`)
+      const forward = await forwardAdd(name, NONCE_PORT)
+      try {
+        const back = (await tcpRead("127.0.0.1", forward.localPort)).toString()
+        const seen = await pdk(["exec", name, "--", "sh", "-c", "ls -la /.paddock 2>&1; true"])
+        expect(back.includes(nonce), `${name === plain ? "control" : "after the lookup"}: the forward returned ${JSON.stringify(back)}; inside, ls /.paddock: ${seen.out.trim()}`)
+        carried.push(name === plain ? "the control" : "the sandbox that looked first")
+      } finally { await pdk(["forward", "remove", forward.id]) }
+    }
+    // Removing the relay while running hides any new copy until a restart: forward add must say so, not listen.
+    await pdk(["exec", looked, "--", "sh", "-c", "rm -rf /.paddock; ls /.paddock; true"])
+    const removed = await pdkJson(["forward", "add", looked, "--port", String(NONCE_PORT)])
+    expect(!removed.reply.ok && /Stop and start/.test(removed.reply.error?.message ?? ""), `after the guest removed the relay, forward add said ${JSON.stringify(removed.reply)}`)
+    expect(!(await forwardsOf(looked)).length, "a refused forward was recorded")
+    expect((await pdk(["stop", looked])).code === 0 && (await pdk(["start", looked])).code === 0, "stop and start failed")
+    const nonce = `${PREFIX}-w10-restarted`
+    await nonceService(looked, nonce)
+    const again = await forwardAdd(looked, NONCE_PORT)
+    try { expect((await tcpRead("127.0.0.1", again.localPort)).toString().includes(nonce), "after a restart the forward did not carry the nonce") } finally { await pdk(["forward", "remove", again.id]) }
+    return `the nonce came back through ${carried.join(" and ")}; the guest's lookup before the first forward said: ${(lookup.out + lookup.err).trim().split("\n")[0]}; after the guest removed the relay, forward add was refused (exit ${removed.code}) and worked after a restart`
+  } finally { for (const name of [looked, plain]) await pdk(["remove", name, "--confirm", name]) }
+})
+
 ev("A07", "Killing an SSH proxy client leaves no sshd -i within five seconds, while a connected proxy keeps its sshd", async () => {
   await sshReady(A)
   const proxy = () => Bun.spawn([BIN, "ssh", "proxy", A], { env: { ...process.env, ...env }, stdin: "pipe", stdout: "ignore", stderr: "ignore" })
