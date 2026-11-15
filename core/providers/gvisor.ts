@@ -340,7 +340,7 @@ export class GvisorProvider implements Provider {
     // A reading begun before the load may describe the tables it replaced; let it finish so the next one is new.
     await this.guardReads.get(engine.id)
     if ((await this.docker(engine, ["network", "inspect", network(name)])).exitCode !== 0)
-      must(await this.docker(engine, ["network", "create", "-o", `com.docker.network.bridge.name=${bridge(name)}`, network(name)]), "Creating the sandbox's network")
+      must(await this.docker(engine, ["network", "create", "--label", `${LABEL_ID}=${manifest.id}`, "-o", `com.docker.network.bridge.name=${bridge(name)}`, network(name)]), "Creating the sandbox's network")
   }
 
   async create(manifest: Manifest): Promise<void> {
@@ -349,14 +349,16 @@ export class GvisorProvider implements Provider {
     const memory = `${Math.round(spec.memoryGb * 1024)}m`
     if (spec.docker) must(await this.docker(engine, ["volume", "create", "--label", `${LABEL_NAME}=${name}`, "--label", `${LABEL_ID}=${manifest.id}`, dockerVolume(manifest)]), "Creating Docker's private data volume")
     // The reaper exits with dockerd. No restart policy may bypass the guard and checks.
-    must(await this.docker(engine, [
+    const made = await this.docker(engine, [
       "create", "--name", container(name), "--hostname", name, "--label", `${LABEL_NAME}=${name}`, "--label", `${LABEL_ID}=${manifest.id}`,
       "--runtime", engine.data.runtime!, "--network", network(name), "--restart", "no",
       "--cpus", String(spec.cpus), "--memory", memory, "--memory-swap", memory, "--pids-limit", String(spec.pids),
       "--log-driver", "json-file", ...Object.entries(LOG_LIMIT).flatMap(([key, value]) => ["--log-opt", `${key}=${value}`]),
       ...(spec.docker ? [...DOCKER_CAPABILITIES.flatMap((cap) => ["--cap-add", cap]), "--mount", `type=volume,src=${dockerVolume(manifest)},dst=/var/lib/docker,volume-nocopy`, "--user", "0", "--entrypoint", RELAY, spec.image, "sh", "-c", DOCKER_REAPER]
         : ["--entrypoint", RELAY, spec.image, "sh", "-c", REAPER]),
-    ], { timeoutMs: 1_800_000 }), `Creating ${name}`)
+    ], { timeoutMs: 1_800_000 })
+    must(made, /Unable to find image|No such image|pull access denied|manifest unknown|image.*not found|failed to resolve|failed to pull|pulling.*failed/i.test(made.stderr)
+      ? `The engine cannot download the image ${spec.image}` : `Creating ${name}`)
   }
 
   private async inspect(manifest: Manifest): Promise<Inspect | undefined> {
@@ -418,7 +420,28 @@ export class GvisorProvider implements Provider {
     must(await this.docker(manifest.engine, ["stop", "-t", "5", container(manifest.name)], { timeoutMs: 60_000 }), `Stopping ${manifest.name}`)
   }
 
-  async remove(manifest: Manifest): Promise<void> {
+  private async cleanupCreate(manifest: Manifest): Promise<void> {
+    const left: string[] = []
+    const resources: Array<["network" | "volume", string]> = [["network", network(manifest.name)]]
+    if (manifest.spec.docker) resources.push(["volume", dockerVolume(manifest)])
+    for (const [kind, name] of resources) {
+      const read = () => this.docker(manifest.engine, [kind, "inspect", "--format", `{{index .Labels "${LABEL_ID}"}}`, name])
+      const absent = (out: RunResult) => out.exitCode !== 0 && /(?:No such (?:network|volume)|(?:network|volume) .+ not found)/i.test(out.stderr)
+      try {
+        const before = await read()
+        if (absent(before)) continue
+        if (before.exitCode !== 0) { left.push(`${kind} ${name}: its presence could not be checked (${before.stderr.trim()})`); continue }
+        if (before.stdout.trim() !== manifest.id) continue
+        const removed = await this.docker(manifest.engine, [kind, "rm", name])
+        const after = await read()
+        if (!absent(after)) left.push(`${kind} ${name}${after.exitCode === 0 ? " remains" : ": removal could not be verified"} (${removed.stderr.trim() || after.stderr.trim() || "engine still reports it"})`)
+      } catch (error) { left.push(`${kind} ${name}: cleanup could not be verified (${error instanceof Error ? error.message : String(error)})`) }
+    }
+    if (left.length) throw new PaddockError("runtime", left.join("; "))
+  }
+
+  async remove(manifest: Manifest, createdOnly = false): Promise<void> {
+    if (createdOnly) return this.cleanupCreate(manifest)
     const { engine, name } = manifest
     if ((await this.inspect(manifest)) !== undefined) must(await this.docker(engine, ["rm", "-f", "-v", container(name)], { timeoutMs: 120_000 }), `Removing ${name}`)
     if (manifest.spec.docker) {
@@ -426,9 +449,12 @@ export class GvisorProvider implements Provider {
       if (volume.exitCode === 0) {
         if (volume.stdout.trim() !== manifest.id) throw new PaddockError("conflict", `The volume ${dockerVolume(manifest)} does not belong to ${name}; it was not removed.`)
         must(await this.docker(engine, ["volume", "rm", dockerVolume(manifest)]), "Removing Docker's private data volume")
-      }
+      } else if (!/No such volume/i.test(volume.stderr)) throw new PaddockError("runtime", `Could not check Docker's private volume ${dockerVolume(manifest)}: ${volume.stderr.trim()}`)
     }
-    await this.docker(engine, ["network", "rm", network(name)])
+    const removed = await this.docker(engine, ["network", "rm", network(name)])
+    const remaining = await this.docker(engine, ["network", "inspect", network(name)])
+    if (remaining.exitCode === 0 || !/(?:No such network|network .+ not found)/i.test(remaining.stderr))
+      throw new PaddockError("runtime", `Network ${network(name)} remains or its removal could not be verified: ${removed.stderr.trim() || remaining.stderr.trim()}`)
     await this.dropUnusedTemplates(engine)
   }
 

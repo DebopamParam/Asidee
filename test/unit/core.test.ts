@@ -807,3 +807,21 @@ test("routed create preserves the remote refusal text and code and uses only the
   expect((await remote.configGet()).requireProbes).toBe(false)
   await machines.close()
 })
+
+test("a create that fails before a container exists removes its record and permits retry", async () => {
+  const { provider } = fakeProvider(); const paddock = await core(provider)
+  const create = provider.create
+  provider.create = async () => { throw new Error("pull access denied") }
+  await expect(paddock.create({ name: "demo" })).rejects.toThrow("Nothing was kept")
+  expect(await paddock.list()).toEqual([])
+  provider.create = create
+  expect((await paddock.create({ name: "demo" })).sandbox.status).toBe("running")
+})
+
+test("a failed create whose cleanup fails keeps its record and names the removal command", async () => {
+  const { provider } = fakeProvider(); const paddock = await core(provider)
+  provider.create = async () => { throw new Error("pull access denied") }
+  provider.remove = async () => { throw new Error("network paddock-net-demo remains; engine unavailable") }
+  await expect(paddock.create({ name: "demo" })).rejects.toThrow("paddock remove demo --confirm demo")
+  expect((await paddock.list())[0]?.status).toBe("missing")
+})

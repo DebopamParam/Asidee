@@ -141,7 +141,7 @@ export interface Provider {
   prepare(manifest: Manifest): Promise<void>
   start(manifest: Manifest): Promise<void>
   stop(manifest: Manifest): Promise<void>
-  remove(manifest: Manifest): Promise<void>
+  remove(manifest: Manifest, createdOnly?: boolean): Promise<void>
   status(manifest: Manifest): Promise<"running" | "stopped" | "missing">
   exec(manifest: Manifest, argv: readonly string[], options?: { user?: string; stdin?: string | Uint8Array }): Promise<RunResult>
   // A command whose bytes are relayed as they come, for shells, binary exec and anything long-lived.

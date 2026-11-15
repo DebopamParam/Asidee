@@ -167,6 +167,21 @@ export class Core {
       // Written before the engine is touched, so a half-made sandbox can always be removed.
       const manifest: Manifest = { version: 1, name: spec.name, id: randomBytes(16).toString("hex"), engine, spec, createdAt: new Date().toISOString() }
       const provider = this.provider(manifest)
+      const createContainer = async () => {
+        try { await provider.create(manifest) }
+        catch (error) {
+          const reason = error instanceof Error ? error.message : String(error)
+          try {
+            if (await provider.status(manifest) !== "missing") throw new Error("the container exists and is kept for inspection")
+            await provider.remove(manifest, true)
+            if (await provider.status(manifest) !== "missing") throw new Error("the container remains after cleanup")
+            await deleteManifest(this.dirs, spec.name)
+          } catch (cleanup) {
+            throw new PaddockError("runtime", `${reason}. Cleanup incomplete: the record for ${spec.name} is kept; ${cleanup instanceof Error ? cleanup.message : String(cleanup)}. Run \`paddock remove ${spec.name} --confirm ${spec.name}\` to remove what remains.`)
+          }
+          throw new PaddockError("runtime", `${reason}. Nothing was kept for ${spec.name}.`)
+        }
+      }
       if (spec.template) {
         // Held until the container exists: from then on a removal of the template leaves its image to this sandbox.
         await this.exclusive(`template:${spec.template}`, async () => {
@@ -176,12 +191,12 @@ export class Core {
           manifest.template = { name: template.name, imageId: template.imageId, source: template.source, createdAt: template.createdAt }
           await writeManifest(this.dirs, manifest)
           this.activity.set(spec.name, `Creating from template ${template.name}`)
-          await provider.create(manifest)
+          await createContainer()
         })
       } else {
         await writeManifest(this.dirs, manifest)
         this.activity.set(spec.name, `Creating (downloading ${spec.image} if it is not here yet)`)
-        await provider.create(manifest)
+        await createContainer()
       }
       await this.startChecked(manifest)
       const { checks, failed } = await this.verifyNow(manifest, config.requireProbes)

@@ -1502,6 +1502,20 @@ ev("U13", "Processes an exec session leaves behind are reaped when they end, wit
   } finally { await pdk(["remove", plain, "--confirm", plain]) }
 })
 
+ev("U15", "An unavailable image leaves no record, network or Docker volume, and the name can be retried", async () => {
+  const name = `${PREFIX}-badimage`
+  try {
+    const failed = await pdkJson(["create", name, "--docker", "--image", "does-not-exist:1"])
+    const rows = (await pdkJson(["list"])).reply.data as Array<{ name: string }>
+    const net = await docker(["network", "inspect", `paddock-net-${name}`])
+    const volumes = await docker(["volume", "ls", "-q", "--filter", `label=dev.paddock.name=${name}`])
+    expect(!rows.some((row) => row.name === name) && net.code !== 0 && !volumes.out.trim(), `failed create kept record=${rows.some((row) => row.name === name)}, network=${net.code === 0}, volumes=${volumes.out.trim()}`)
+    expect(!failed.reply.ok && /cannot download.*image/i.test(failed.reply.error?.message ?? "") && /Nothing was kept/.test(failed.reply.error?.message ?? ""), `failure did not explain download and cleanup: ${failed.out}`)
+    await ensure(name)
+    expect(await running(name), "same name could not be created with a good image")
+  } finally { await pdk(["remove", name, "--confirm", name]) }
+})
+
 // Bun's fetch gives up after 360 seconds unless told otherwise; the CLI asked the daemon over fetch, so a longer exec
 // came back as "The operation timed out." while its command went on.
 ev("U14", "A buffered exec waits past Bun's 360-second fetch default and returns its command's output and exit code", async () => {

@@ -16,6 +16,13 @@
   mount, a capability, a runtime or a port. Each engine reports whether it supports `docker`; create refuses an
   unsupported request.
 
+A create failure before a container exists rolls back that attempt's labeled network and inner Docker data volume,
+verifies their removal and the absent container, then removes the record. Its error says nothing was kept for that
+name. Cached helper images and the shared guard remain engine setup. An image download failure names the image in
+plain words before the engine's error. If cleanup cannot be verified, the record stays and the error lists the
+remaining or uncertain objects with `paddock remove NAME --confirm NAME`. Objects labeled for another attempt are
+left alone. A container that was created and then failed a required check stays stopped for inspection.
+
 ## The checklist
 
 `core/checks.ts` lists the checks. Providers supply the evidence for each one; a check a provider does not report comes
