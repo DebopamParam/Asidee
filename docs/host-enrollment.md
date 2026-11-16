@@ -115,7 +115,8 @@ before registration.
 The primary registers the host only after inspecting the enabled service and matching the daemon's source, version,
 protocol, binary digest and listener, and after finding that the daemon would run sandboxes on `paddock-runsc`. Smoke
 verification needs every applicable blocking check to pass at creation and again after a real disk write measured from
-the host, followed by successful sandbox removal. The smoke sandbox has no links, so its `link-scope` result must be `info`;
+the host, followed by successful sandbox removal. `net-private` may be `weak` instead: a stand-in range the host already
+uses cannot be probed there, and rests on the loaded rules alone, which the result names. The smoke sandbox has no links, so its `link-scope` result must be `info`;
 enrollment does not claim to have measured a link. The pinned sandbox image and core helper are shown in the plan. Boot
 enablement is inspected; reboot persistence and automatic sandbox recovery are not measured.
 

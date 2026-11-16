@@ -975,17 +975,7 @@ export class GvisorProvider implements Provider {
         tried.push(ip)
         if (await anyReaches(ip, PROBE_PORT)) reached.push(ip)
       }
-      const rangeOf = (ip: string) => FAR_RANGES.find(([address]) => ip.startsWith(address))![1]
-      const untried = FAR_RANGES.filter(([address]) => !far.some((ip) => ip.startsWith(address))).map(([, range]) => range)
-      const rest = `${untried.length ? ` Not probed, because the engine's host already uses the stand-in address: ${untried.join("; ")}.` : ""}${failedControls.length ? ` Not probed, because the host control did not answer (not an address collision): ${failedControls.join(", ")}.` : ""} The metadata address did not answer. IPv6 is dropped by the same rules and was not probed. No device on your own LAN or tailnet was contacted.`
-      out.push(guard === "missing" || guard === "changed" ? result("net-private", "fail", "inspected", `The guard rules on the engine's host are ${guard}, so nothing is known to drop these destinations.`)
-        : reached.length ? result("net-private", "fail", "probed", `A connection from the sandbox's network reached ${reached.map((ip) => `${ip} (in ${rangeOf(ip)})`).join(", ")}.`)
-        : metadata ? result("net-private", "fail", "probed", "The cloud metadata address answered from the sandbox's network.")
-        : guard === "unknown" ? result("net-private", "unknown", "none", "The guard rules on the engine's host could not be read.")
-        : !innerOnline ? result("net-private", "unknown", "none", "The inner container did not reach the internet control, so its blocked attempts would prove nothing.")
-        : !probeAlive || (far.length > 0 && !tried.length) ? result("net-private", "unknown", "none", noControl("the stand-in listeners") + rest)
-        : tried.length ? result("net-private", "pass", "probed", `Stand-in listeners at ${tried.map((ip) => `${ip} (in ${rangeOf(ip)})`).join(", ")} answered the host and were unreachable from ${where}.${rest}`)
-        : result("net-private", "pass", "inspected", `The loaded rules match Paddock's, which drop private, tailnet, link-local and IPv6 destinations. No stand-in listener could be set up on the engine's host, so none of them was probed.`))
+      out.push(netPrivate({ guard, reached, metadata, innerOnline, probeAlive, far, tried, failedControls, where, noControl }))
 
       out.push(!probeAlive ? result("egress", "unknown", "none", noControl("the probe"))
         : innerOnline && await connects(probeC, "1.1.1.1", "443") ? result("egress", "info", "probed", `Open: ${manifest.spec.docker ? "the sandbox and an inner Docker container can" : "the sandbox can"} reach the internet, so anything inside it can be sent out.`)
@@ -1144,6 +1134,27 @@ class EngineSession extends EventEmitter implements Session {
     this.endProcesses()
     this.emit("end", { error: reason })
   }
+}
+
+// net-private from the probe's attempts. Pass needs every stand-in range probed; a range not probed rests on the loaded
+// rules alone, which the result says, as weak.
+export function netPrivate(seen: { guard: GuardState; reached: string[]; metadata: boolean; innerOnline: boolean; probeAlive: boolean; far: string[]; tried: string[]; failedControls: string[]; where: string; noControl: (what: string) => string }): CheckResult {
+  const { guard, reached, metadata, innerOnline, probeAlive, far, tried, failedControls, where, noControl } = seen
+  const rangeOf = (ip: string) => FAR_RANGES.find(([address]) => ip.startsWith(address))![1]
+  const untried = FAR_RANGES.filter(([address]) => !far.some((ip) => ip.startsWith(address))).map(([, range]) => range)
+  const rest = `${untried.length ? ` Not probed, because the engine's host already uses the stand-in address: ${untried.join("; ")}.` : ""}${failedControls.length ? ` Not probed, because the host control did not answer (not an address collision): ${failedControls.map((ip) => `${ip} (in ${rangeOf(ip)})`).join(", ")}.` : ""} The metadata address did not answer. IPv6 is dropped by the same rules and was not probed. No device on your own LAN or tailnet was contacted.`
+  // Weak, not pass, while any range rests on the loaded rules alone: the rules are read, and only a probe shows them working.
+  const someUnprobed = untried.length > 0 || failedControls.length > 0
+  const probed = `Stand-in listeners at ${tried.map((ip) => `${ip} (in ${rangeOf(ip)})`).join(", ")} answered the host and were unreachable from ${where}.`
+  return guard === "missing" || guard === "changed" ? result("net-private", "fail", "inspected", `The guard rules on the engine's host are ${guard}, so nothing is known to drop these destinations.`)
+    : reached.length ? result("net-private", "fail", "probed", `A connection from the sandbox's network reached ${reached.map((ip) => `${ip} (in ${rangeOf(ip)})`).join(", ")}.`)
+    : metadata ? result("net-private", "fail", "probed", "The cloud metadata address answered from the sandbox's network.")
+    : guard === "unknown" ? result("net-private", "unknown", "none", "The guard rules on the engine's host could not be read.")
+    : !innerOnline ? result("net-private", "unknown", "none", "The inner container did not reach the internet control, so its blocked attempts would prove nothing.")
+    : !probeAlive || (far.length > 0 && !tried.length) ? result("net-private", "unknown", "none", noControl("the stand-in listeners") + rest)
+    : tried.length && !someUnprobed ? result("net-private", "pass", "probed", `${probed}${rest}`)
+    : tried.length ? result("net-private", "weak", "probed", `${probed} The ranges not probed rest on the loaded rules alone, which match Paddock's.${rest}`)
+    : result("net-private", "weak", "inspected", `No range was probed: no stand-in listener could be set up on the engine's host. Every range rests on the loaded rules alone, which match Paddock's and drop private, tailnet, link-local and IPv6 destinations.`)
 }
 
 // What to do on an engine without a usable gVisor runtime. The OrbStack steps are the ones this was developed on.

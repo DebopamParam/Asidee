@@ -1637,7 +1637,9 @@ ev("U11", "The default image (no --image) makes a sandbox that passes every bloc
     expect(made.reply.ok, `create failed: ${made.reply.error?.message}`)
     const bad = (made.reply.data.checks as Array<{ id: string; status: string }>).filter((check) => CHECKLIST.find((item) => item.id === check.id)!.blocking && check.status !== "pass" && !(check.id === "docker" && check.status === "info" && !made.reply.data.sandbox.spec.docker)
       // With no links there is nothing to measure, which the check says instead of passing.
-      && !(check.id === "link-scope" && check.status === "info"))
+      && !(check.id === "link-scope" && check.status === "info")
+      // A stand-in range the host already uses is not probed and rests on the loaded rules, as enrollment accepts.
+      && !(check.id === "net-private" && check.status === "weak"))
     expect(bad.length === 0, `not passing: ${bad.map((check) => `${check.id} ${check.status}`).join(", ")}`)
     expect((await pdk(["exec", name, "--user", "agent", "--", "sh", "-c", "id -un && command -v git node"])).code === 0, "the image's agent user, git or node is missing")
   } finally { await socket("remove", { name, confirm: name }) }
@@ -2261,7 +2263,9 @@ ev("P02", "The Linux binary, run on Linux, creates a sandbox that passes every b
     expect(reply.ok, `create on Linux failed: ${reply.error?.message ?? made.err}`)
     const bad = reply.data.checks.filter((check: { id: string; status: string }) => CHECKLIST.find((item) => item.id === check.id)!.blocking && check.status !== "pass" && !(check.id === "docker" && check.status === "info" && !reply.data.sandbox.spec.docker)
       // With no links there is nothing to measure, which the check says instead of passing.
-      && !(check.id === "link-scope" && check.status === "info"))
+      && !(check.id === "link-scope" && check.status === "info")
+      // A stand-in range the host already uses is not probed and rests on the loaded rules, as enrollment accepts.
+      && !(check.id === "net-private" && check.status === "weak"))
     expect(bad.length === 0, `not passing: ${bad.map((check: { id: string; status: string }) => `${check.id} ${check.status}`).join(", ")}`)
     expect(/gvisor/i.test((await inside(["exec", name, "--", "cat", "/proc/version"])).out), "exec on Linux did not reach the sandbox")
     expect((await inside(["verify", name])).code === 0 && (await inside(["stop", name])).code === 0 && (await inside(["start", name])).code === 0, "verify, stop or start failed on Linux")

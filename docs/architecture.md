@@ -144,7 +144,9 @@ For the LAN and the tailnet there is nothing of yours to aim at safely, so the h
 scratch network namespace, routes one unused address from each private range (10/8, 172.16/12, 192.168/16) and from the
 tailnet range (100.64/10) to a listener inside it, and removes it all afterwards. From the sandbox's side these sit
 where a device on your LAN would: beyond the host, at a private address. A range whose stand-in address the host
-already routes somewhere is skipped and named in the result. Routes through a previous Paddock probe are awaited
+already routes somewhere is skipped and named in the result. The check is `pass` only when every range was probed; with
+any range skipped, or none set up, it is `weak` and says which ranges were probed and which rest on the loaded rules
+alone. `weak` does not stop the sandbox. Routes through a previous Paddock probe are awaited
 with a bounded deadline instead of being counted as occupied addresses. A probe returns only after its own veth,
 bridge and routes disappear. A teardown timeout fails the request instead of returning weaker evidence. A listener that was created but whose
 host control failed is reported separately from an occupied address. One probe runs per engine at a time.
@@ -774,7 +776,8 @@ primary's source stays usable even after a smoke failure. A daemon from another 
 
 Registration follows the artifact/source/protocol handshake, active/enabled service inspection, a ready local engine on
 the runtime `paddock-runsc`, all applicable blocking smoke checks at creation and again after a real disk write with
-host-side byte measurement, and smoke cleanup. The smoke sandbox has no links; enrollment requires its `link-scope`
+host-side byte measurement, and smoke cleanup. `net-private` may be `weak` there: a host that already uses a stand-in
+range cannot have that range probed, and the plan says so. The smoke sandbox has no links; enrollment requires its `link-scope`
 result to be `info`, without claiming a link measurement. `verify` returns `diskUsedBytes` when measurable and omits it otherwise.
 Disk enforcement remains watched. The daemon prefers `paddock-runsc` to any other gVisor runtime registered on its
 engine (N16). That runtime is registered without `--net-raw` and does not advertise inner Docker, unless the host is

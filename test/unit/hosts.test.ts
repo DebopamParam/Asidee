@@ -403,7 +403,7 @@ test("a failure says what was changed: nothing when no step ran, otherwise what 
   expect(reused.message).not.toContain("Completed steps")
 })
 
-test("every final smoke check must pass, and inner Docker's exactly when the plan registered it", () => {
+test("every final smoke check must pass, net-private may be weak, and inner Docker's exactly when the plan registered it", () => {
   const checks = (docker: string) => CHECKLIST.filter((item) => item.blocking).map((item) => ({ id: item.id, status: item.id === "link-scope" ? "info" : item.id === "docker" ? docker : "pass" }))
   expect(() => requireSmokeChecks(checks("info"), false)).not.toThrow()
   expect(() => requireSmokeChecks(checks("pass"), true)).not.toThrow()
@@ -415,6 +415,11 @@ test("every final smoke check must pass, and inner Docker's exactly when the pla
     expect(() => requireSmokeChecks(checks("info").map((check) => check.id === "kernel" ? { ...check, status } : check), false)).toThrow()
   expect(() => requireSmokeChecks(checks("info").filter((check) => check.id !== "kernel"), false)).toThrow()
   expect(() => requireSmokeChecks(undefined, false)).toThrow()
+  // net-private alone may be weak: a stand-in range the host already uses rests on the loaded rules.
+  const netPrivate = (status: string) => checks("info").map((check) => check.id === "net-private" ? { ...check, status } : check)
+  expect(() => requireSmokeChecks(netPrivate("weak"), false)).not.toThrow()
+  for (const status of ["fail", "unknown", "info"]) expect(() => requireSmokeChecks(netPrivate(status), false)).toThrow(/net-private .*expected pass or weak/)
+  for (const id of ["net-host", "net-peers", "kernel"]) expect(() => requireSmokeChecks(checks("info").map((check) => check.id === id ? { ...check, status: "weak" } : check), false)).toThrow()
 })
 
 test("smoke verification requires the managed runtime, a watched disk, the planned Docker capability and a final result that holds", () => {

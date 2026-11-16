@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { probeCleanupScript, WAIT_FOR_PROBE_ROUTES } from "../../core/providers/probe"
-import { GvisorProvider, LABEL_ID } from "../../core/providers/gvisor"
+import { GvisorProvider, LABEL_ID, netPrivate } from "../../core/providers/gvisor"
 import { validSpec } from "../../core/state"
 import type { Manifest, Runner } from "../../core/types"
 
@@ -57,4 +57,21 @@ for (const leftover of ["previous", "current"] as const) test(`a ${leftover} pro
     return { stdout, stderr, exitCode }
   }
   await expect(new GvisorProvider(runner).checks(manifest, "probe")).rejects.toThrow(/teardown|tearing down/)
+})
+
+test("net-private passes only when every stand-in range was probed, and is weak, naming the rest, when one was not", () => {
+  const all = ["10.255.255.25", "172.31.255.25", "192.168.255.25", "100.127.255.25"]
+  const seen = { guard: "intact" as const, reached: [], metadata: false, innerOnline: true, probeAlive: true, far: all, tried: all, failedControls: [], where: "the sandbox's network", noControl: (what: string) => `Not checked: ${what}.` }
+  expect(netPrivate(seen)).toMatchObject({ status: "pass", evidence: "probed" })
+  // The host already routes 192.168/16 somewhere, so no stand-in was set up there.
+  const occupied = netPrivate({ ...seen, far: all.filter((ip) => !ip.startsWith("192.")), tried: all.filter((ip) => !ip.startsWith("192.")) })
+  expect(occupied).toMatchObject({ status: "weak", evidence: "probed", detail: expect.stringMatching(/10\.255\.255\.25 \(in 10\.0\.0\.0\/8\).*rest on the loaded rules alone.*already uses the stand-in address: 192\.168\.0\.0\/16\./) })
+  // A stand-in whose host control did not answer was not probed either.
+  const silent = netPrivate({ ...seen, tried: all.slice(1), failedControls: all.slice(0, 1) })
+  expect(silent).toMatchObject({ status: "weak", detail: expect.stringMatching(/host control did not answer .*10\.255\.255\.25 \(in 10\.0\.0\.0\/8\)/) })
+  expect(netPrivate({ ...seen, far: [], tried: [] })).toMatchObject({ status: "weak", evidence: "inspected", detail: expect.stringContaining("No range was probed") })
+  // What was already a failure or unknown stays so.
+  expect(netPrivate({ ...seen, reached: ["10.255.255.25"] })).toMatchObject({ status: "fail" })
+  expect(netPrivate({ ...seen, tried: [], failedControls: all })).toMatchObject({ status: "unknown" })
+  expect(netPrivate({ ...seen, guard: "changed", far: [], tried: [] })).toMatchObject({ status: "fail" })
 })
