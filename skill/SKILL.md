@@ -331,3 +331,6 @@ one of these, say that Paddock does not offer it yet instead of reaching around 
 
 Ctrl-C during buffered create, workspace create, resize or snapshot exits 130. The daemon keeps
 finishing the work. The CLI prints the list and exact remove commands.
+
+When workspace stop, remove or the disk watch ends a command, its stderr says why before
+the session ends. Signal exits use 128 plus the signal number (137 for SIGKILL).

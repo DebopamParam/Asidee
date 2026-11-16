@@ -542,23 +542,27 @@ export class Workspaces {
       } catch (error) { this.watchProblems.set(name, { at: new Date().toISOString(), message: `The disk watch could not check it: ${(error as Error).message}` }) }
     }
   }
+  private async stopProcesses(manifest: WorkspaceManifest, reason: string): Promise<void> {
+    for (const [session, folder] of this.sessions) if (folder === manifest.folder) session.stopping(reason)
+    await stopWorkspaceProcesses(manifest.folder)
+  }
   private stopBecause(name: string, reason: string): Promise<void> {
     return this.exclusive(name, async () => {
       const manifest = await this.manifest(name)
       // Its processes may have ended while this pass measured; then there is nothing to stop or record.
       if (!workspacePids(manifest.folder).length) return
-      await this.restoreIdentity(manifest); await stopWorkspaceProcesses(manifest.folder)
+      await this.restoreIdentity(manifest); await this.stopProcesses(manifest, reason)
       manifest.stopReason = reason; await this.save(manifest)
       this.unmeasured.delete(name); this.watchProblems.delete(name)
     })
   }
   async stop(name: string): Promise<WorkspaceView> {
-    return this.exclusive(workspaceName(name), async () => { const manifest = await this.manifest(name); await this.restoreIdentity(manifest); await stopWorkspaceProcesses(manifest.folder); return this.view(manifest) })
+    return this.exclusive(workspaceName(name), async () => { const manifest = await this.manifest(name); await this.restoreIdentity(manifest); await this.stopProcesses(manifest, `Stopped by paddock workspace stop ${name}.`); return this.view(manifest) })
   }
   async remove(name: string, confirm: unknown): Promise<WorkspaceRemoval> {
     if (confirm !== workspaceName(name)) throw new PaddockError("usage", `Removing a workspace deletes its files. Give --confirm ${name}.`)
     return this.exclusive(name, async () => {
-      const manifest = await this.manifest(name); await this.restoreIdentity(manifest); await stopWorkspaceProcesses(manifest.folder)
+      const manifest = await this.manifest(name); await this.restoreIdentity(manifest); await this.stopProcesses(manifest, `Stopped by paddock workspace remove ${name}.`)
       const links = await hardLinks(manifest.folder, true)
       const bundles: string[] = []
       const walk = async (path: string) => { for (const entry of await readdir(path, { withFileTypes: true })) if (entry.isDirectory()) { const full = join(path, entry.name); if (entry.name.endsWith(".app")) bundles.push(full); else await walk(full) } }

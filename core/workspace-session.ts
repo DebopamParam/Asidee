@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
+import { constants } from "node:os"
 import { EventEmitter } from "node:events"
 import { OUTPUT_LIMIT } from "./run"
 import { PaddockError, type DiskWarning, type RunResult, type Session } from "./types"
@@ -33,7 +34,7 @@ export class WorkspaceSession extends EventEmitter implements Session {
         }, drain: () => this.emit("drain") })
       const child = Bun.spawn(options.argv, { cwd: options.cwd, env: options.env, terminal: this.terminal })
       this.pid = child.pid
-      void child.exited.then((code) => { this.resume(); finish({ code: child.signalCode ? 128 : code }) })
+      void child.exited.then((code) => { this.resume(); finish({ code: child.signalCode ? 128 + (typeof child.signalCode === "number" ? child.signalCode : constants.signals[child.signalCode]) : code }) })
     } else {
       const child = spawn(options.argv[0]!, options.argv.slice(1), { cwd: options.cwd, env: options.env, stdio: ["pipe", "pipe", "pipe"] })
       this.child = child; this.pid = child.pid ?? -1
@@ -42,8 +43,11 @@ export class WorkspaceSession extends EventEmitter implements Session {
       child.stderr.on("data", (bytes: Buffer) => this.emit("output", "stderr", bytes))
       child.stdin.on("drain", () => this.emit("drain")); child.stdin.on("error", () => {})
       child.once("error", () => finish({ error: "Could not start the workspace command." }))
-      child.once("close", (code, signal) => finish({ code: signal ? 128 : code ?? 1 }))
+      child.once("close", (code, signal) => finish({ code: signal ? 128 + constants.signals[signal] : code ?? 1 }))
     }
+  }
+  stopping(reason: string): void {
+    if (!this.ended) this.emit("output", "stderr", Buffer.from(`${reason}\n`))
   }
   write(bytes: Uint8Array): boolean {
     if (this.ended) return false

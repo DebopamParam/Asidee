@@ -624,3 +624,22 @@ mac("two measurements of one workspace never run at once", async () => {
     expect(views[0].sizeBytes).toBe(Math.round(0.1 * 1024 ** 2) * 1024)
   } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
 }, 15_000)
+
+mac("workspace stop, remove and disk watch deliver a reason before the command ends", async () => {
+  const { workspaces, fake, clean } = await fixture()
+  try {
+    for (const action of ["stop", "remove", "watch"] as const) {
+      fake.du = du(0)
+      await workspaces.create({ name: action, diskGb: 1, logins: { kind: "none" } })
+      const session = await workspaces.open(action, ["/bin/sleep", "60"], { tty: false })
+      const result = session.collect()
+      await running(workspaces, action)
+      if (action === "watch") { fake.du = du(2); await workspaces.watch() }
+      else if (action === "stop") await workspaces.stop(action)
+      else await workspaces.remove(action, action)
+      const ended = await result
+      expect(ended.exitCode).toBe(137)
+      expect(ended.stderr).toContain(action === "watch" ? "Stopped by the daemon" : `Stopped by paddock workspace ${action}`)
+    }
+  } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
+}, 30_000)
