@@ -4177,6 +4177,272 @@ print(json.dumps(dict(
   return `the planned archive installed; ${refusals.length} altered archives, a changed destination and a planted staging folder ran no step`
 })
 
+// J: links between two sandboxes on this machine. FROM is JA, TO is JB; a link carries one port, through the daemon.
+const JA = `${PREFIX}-ja`; const JB = `${PREFIX}-jb`; const JC = `${PREFIX}-jc`; const JD = `${PREFIX}-jd`
+const LINK_PORT = 5432; const LINK_ADDRESS = "127.77.0.2"
+const inside = (name: string, script: string, timeoutMs = 30_000) => pdk(["exec", name, "--", "sh", "-c", script], { timeoutMs })
+// A service on a sandbox's loopback (or every address) that greets first and then echoes, so a held connection shows it is open.
+const greeter = (name: string, port = LINK_PORT, everywhere = false, nc = "nc") =>
+  inside(name, `(${nc} -lk ${everywhere ? "" : "-s 127.0.0.1 "}-p ${port} -e sh -c 'echo ${name}-hi; exec cat' </dev/null >/dev/null 2>&1 &)`)
+// What one connection from inside `from` to host:port gets back after sending `send`.
+const through = async (from: string, host: string, port = LINK_PORT, send = "one\\ntwo\\n", nc = "nc") => (await inside(from, `printf '${send}' | ${nc} -w 3 ${host} ${port}`)).out
+const linkAdd = async (from: string, to: string, port = LINK_PORT) => {
+  const made = await pdkJson(["link", "add", from, to, "--port", String(port)], { timeoutMs: 120_000 })
+  expect(made.reply.ok, `link add ${from} ${to} --port ${port} failed: ${made.reply.error?.message}`)
+  return made.reply.data as { state: string; address: string; measured?: { status: string; detail: string }; trust: string }
+}
+const linksOf = async (name?: string) => (await pdkJson(["link", "list", ...(name ? [name] : [])])).reply.data as Array<{ from: string; to: string; port: number; state: string; reason?: string; connections: number }>
+const checkOf = (checks: Array<{ id: string; status: string; detail: string }> | undefined, id: string) => checks?.find((check) => check.id === id)
+// JA and JB running, JB's greeter on its loopback, and the link from JA to JB open.
+async function linkedPair(): Promise<void> {
+  await ensure(JA); await ensure(JB)
+  if (!(await through(JB, "127.0.0.1")).includes(`${JB}-hi`)) await greeter(JB)
+  expect(await until(async () => (await through(JB, "127.0.0.1")).includes(`${JB}-hi`), 10), `control: the greeter in ${JB} does not answer its own loopback`)
+  await linkAdd(JA, JB)
+}
+
+ev("J01", "A link carries bytes both ways on its port, listens only on the linking sandbox's loopback, adds no listener on the engine's host or this machine, and both checklists say what it trusts", async () => {
+  await ensure(JA); await ensure(JB); await greeter(JB)
+  const listening = async () => new Set((await asRoot("ss -ltnH")).out.split("\n").map((line) => line.trim().split(/\s+/)[3]).filter(Boolean))
+  const daemonListens = async () => (await sh(["lsof", "-nP", "-a", "-p", String((await daemonFile()).pid), "-iTCP", "-sTCP:LISTEN", "-Fn"])).out.split("\n").filter((line) => line.startsWith("n")).sort()
+  const engineBefore = await listening(); const daemonBefore = await daemonListens()
+  const added = await pdk(["link", "add", JA, JB, "--port", String(LINK_PORT)], { timeoutMs: 120_000 })
+  expect(added.code === 0, `link add failed: ${added.err}`)
+  expect(added.out.includes(`Linked: programs in ${JA} connect to ${JB}:${LINK_PORT} (${LINK_ADDRESS}:${LINK_PORT})`) && added.out.includes(`a service in ${JB} that trusts local connections trusts ${JA}.`) && added.out.includes("up to 64 connections"), `link add said: ${added.out}`)
+  const reply = await through(JA, JB)
+  expect(reply === `${JB}-hi\none\ntwo\n`, `through the link, ${JA} got ${JSON.stringify(reply)}`)
+  // A MiB of random bytes there and back, compared by hash inside JA.
+  const hashes = (await inside(JA, `head -c 1048576 /dev/urandom > /tmp/j.bin; nc -w 5 ${JB} ${LINK_PORT} < /tmp/j.bin > /tmp/j.out; tail -c +${JB.length + 5} /tmp/j.out | md5sum; md5sum < /tmp/j.bin; rm -f /tmp/j.bin /tmp/j.out`, 60_000)).out.split("\n").map((line) => line.split(/\s+/)[0]).filter(Boolean)
+  expect(hashes.length === 2 && hashes[0] === hashes[1], `1 MiB did not come back unchanged: ${hashes.join(" ")}`)
+  const sockets = (await inside(JA, `netstat -ltn | grep ':${LINK_PORT} '`)).out.trim()
+  expect(sockets.split("\n").length === 1 && sockets.includes(`${LINK_ADDRESS}:${LINK_PORT}`), `${JA} listens for the link on: ${sockets}`)
+  // TO sees the connection as its own loopback's.
+  await inside(JA, `( (sleep 6 | nc ${JB} ${LINK_PORT} >/dev/null) </dev/null >/dev/null 2>&1 &)`)
+  let peer = ""
+  await until(async () => { peer = (await inside(JB, `netstat -tn | grep ' 127.0.0.1:${LINK_PORT} ' | grep ESTABLISHED`)).out.trim(); return Boolean(peer) }, 5)
+  expect(/127\.0\.0\.1:5432\s+127\.0\.0\.1:\d+\s+ESTABLISHED/.test(peer), `${JB} saw the link's connection as: ${peer || "nothing"}`)
+  const engineAdded = [...await listening()].filter((address) => !engineBefore.has(address))
+  expect(engineAdded.length === 0, `new listeners on the engine's host: ${engineAdded.join(", ")}`)
+  const daemonAfter = await daemonListens()
+  expect(daemonAfter.join() === daemonBefore.join(), `the daemon's listeners changed: ${daemonBefore.join(", ")} -> ${daemonAfter.join(", ")}`)
+  const verdicts: string[] = []
+  for (const name of [JA, JB]) {
+    const verified = await pdkJson(["verify", name], { timeoutMs: 240_000 })
+    const checks = verified.reply.data?.checks as Array<{ id: string; status: string; detail: string }> | undefined
+    expect(verified.reply.ok && verified.reply.data?.ok, `verify ${name} did not pass: ${JSON.stringify(checks?.filter((check) => check.status !== "pass" && check.status !== "info"))}`)
+    expect(checkOf(checks, "links")?.detail.includes(`a service in ${JB} that trusts local connections trusts ${JA}.`), `${name}'s links check: ${checkOf(checks, "links")?.detail}`)
+    expect(checkOf(checks, "link-scope")?.status === "pass" && checkOf(checks, "net-peers")?.status === "pass", `${name}: link-scope ${checkOf(checks, "link-scope")?.status}, net-peers ${checkOf(checks, "net-peers")?.status}`)
+    verdicts.push(`${name}: link-scope pass, net-peers pass`)
+  }
+  return `greeting and two lines came back; 1 MiB hash ${hashes[0]} both ways; ${JA} listens only on ${LINK_ADDRESS}:${LINK_PORT}; ${JB} saw ${peer.split(/\s+/).slice(3, 5).join(" from ")}; engine host listeners ${engineBefore.size} before and after; daemon listeners unchanged (${daemonBefore.length}); ${verdicts.join("; ")}`
+})
+
+ev("J02", "Through a link, FROM reaches no other port of TO, not TO's network address, not a third sandbox, not the engine's host and not the daemon's API, each beside a working control", async () => {
+  await linkedPair(); await ensure(A); await hostHelper()
+  const tried: string[] = []
+  // Other ports of TO: one on its loopback, one on every address.
+  await inside(JB, `(nc -lk -s 127.0.0.1 -p 5435 -e echo ${REPLY} </dev/null >/dev/null 2>&1 &); (nc -lk -p 5433 -e echo ${REPLY} </dev/null >/dev/null 2>&1 &)`)
+  for (const port of [5433, 5435]) {
+    expect(await until(async () => (await through(JB, "127.0.0.1", port)).includes(REPLY), 10), `control: ${JB}'s port ${port} does not answer its own loopback`)
+    for (const host of [JB, LINK_ADDRESS]) expect(!(await through(JA, host, port)).includes(REPLY), `${JA} reached ${JB}'s port ${port} as ${host}:${port}`)
+    tried.push(`${JB}:${port}`)
+  }
+  const ip = await sandboxIp(JB)
+  expect(await fromHost(ip, "5433"), `control: the engine's host does not reach ${JB} at ${ip}:5433`)
+  expect(!await fromSandbox(JA, ip, "5433"), `${JA} reached ${JB} at its network address ${ip}:5433`)
+  tried.push(`${ip}:5433`)
+  // A third sandbox, on the link's own port.
+  await inside(A, `(nc -lk -p ${LINK_PORT} -e echo ${REPLY} </dev/null >/dev/null 2>&1 &)`)
+  const third = await sandboxIp(A)
+  expect(await until(() => fromHost(third, String(LINK_PORT)), 10), `control: the engine's host does not reach ${A} at ${third}:${LINK_PORT}`)
+  expect(!await fromSandbox(JA, third, String(LINK_PORT)), `${JA} reached the third sandbox ${A} at ${third}:${LINK_PORT}`)
+  expect((await through(JA, JB)).startsWith(`${JB}-hi`), `the link no longer answers with ${JB}'s greeter`)
+  tried.push(`${A} at ${third}:${LINK_PORT}`)
+  // A bracket keeps the pattern from matching this shell's own command line.
+  await inside(A, `pkill -f '[n]c -lk -p ${LINK_PORT}'`)
+  // The engine's host, at its gateway and its own addresses.
+  let hosts = 0
+  for (const address of [...new Set([await gatewayOf(JA), ...(await hostAddresses())])].slice(0, 6)) {
+    if (!await fromHost(address, HOST_PORT)) continue
+    hosts++
+    expect(!await fromSandbox(JA, address, HOST_PORT), `${JA} reached the engine's host at ${address}`)
+  }
+  expect(hosts > 0, "control: no address of the engine's host answered its own helper")
+  tried.push(`${hosts} engine host addresses`)
+  // The daemon's API, on this machine's loopback.
+  const port = String((await daemonFile()).port)
+  const request = `printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -w 2`
+  const control = await docker(["run", "--rm", "--runtime", "runc", HELPER_IMAGE, "sh", "-c", `${request} host.docker.internal ${port}`])
+  if (control.out.includes("HTTP/1.")) {
+    for (const host of ["host.docker.internal", LINK_ADDRESS, JB, "127.0.0.1"])
+      expect(!(await inside(JA, `${request} ${host} ${port}`)).out.includes("HTTP/"), `${JA} reached the daemon's API as ${host}:${port}`)
+    tried.push(`the daemon's API at ${port} (control: an ordinary container got an HTTP answer through host.docker.internal)`)
+  } else tried.push("the daemon's API not tried: an ordinary container could not reach it here, so there is no control")
+  return tried.join("; ")
+})
+
+ev("J03", "Nothing in TO reaches FROM through a link, and nothing outside FROM reaches the link's listener", async () => {
+  await linkedPair(); await ensure(A); await hostHelper()
+  await inside(JA, `(nc -lk -p 6000 -e echo ${REPLY} </dev/null >/dev/null 2>&1 &); (nc -lk -s 127.0.0.1 -p 6001 -e echo ${REPLY} </dev/null >/dev/null 2>&1 &)`)
+  const ip = await sandboxIp(JA)
+  expect(await until(async () => (await through(JA, "127.0.0.1", 6001)).includes(REPLY), 10), `control: ${JA}'s port 6001 does not answer its own loopback`)
+  expect(await fromHost(ip, "6000"), `control: the engine's host does not reach ${JA} at ${ip}:6000`)
+  for (const [host, port] of [[ip, 6000], [JA, 6000], [LINK_ADDRESS, 6001], [LINK_ADDRESS, LINK_PORT]] as const)
+    expect(!(await through(JB, host, port)).includes(REPLY), `${JB} reached ${JA} as ${host}:${port}`)
+  expect(!(await inside(JB, "grep -c paddock-link /etc/hosts")).out.trim().startsWith("1"), `${JB}'s /etc/hosts names a linked sandbox`)
+  expect(!await fromHost(ip, String(LINK_PORT)), `the engine's host reached the link's listener at ${ip}:${LINK_PORT}`)
+  expect(!await fromSandbox(A, ip, String(LINK_PORT)), `${A} reached the link's listener at ${ip}:${LINK_PORT}`)
+  expect((await through(JA, JB)).startsWith(`${JB}-hi`), "the link stopped working")
+  return `${JB} tried ${ip}:6000, ${JA}:6000, ${LINK_ADDRESS}:6001 and ${LINK_ADDRESS}:${LINK_PORT}; the engine's host and ${A} tried ${ip}:${LINK_PORT}; controls answered`
+})
+
+ev("J04", "Links carry bytes both ways when one side has --docker, in both directions", async () => {
+  await ensure(JB); await ensure(JD, { image: DOCKER_IMAGE, docker: true, diskGb: 2, memoryGb: 1 })
+  const RELAY = "/.paddock/busybox"
+  try {
+    await greeter(JB)
+    await greeter(JD, 7000, false, `${RELAY} nc`)
+    expect(await until(async () => (await through(JD, "127.0.0.1", 7000, "x\\n", `${RELAY} nc`)).includes(`${JD}-hi`), 10), `control: the greeter in ${JD} does not answer`)
+    const out = await linkAdd(JD, JB); const back = await linkAdd(JB, JD, 7000)
+    expect(out.state === "open" && back.state === "open", `states: ${out.state}, ${back.state}`)
+    const there = await through(JD, JB, LINK_PORT, "one\\ntwo\\n", `${RELAY} nc`)
+    expect(there === `${JB}-hi\none\ntwo\n`, `${JD} (Docker) to ${JB} got ${JSON.stringify(there)}`)
+    const home = await through(JB, JD, 7000)
+    expect(home === `${JD}-hi\none\ntwo\n`, `${JB} to ${JD} (Docker) got ${JSON.stringify(home)}`)
+    const verified = await pdkJson(["verify", JD], { timeoutMs: 360_000 })
+    const checks = verified.reply.data?.checks as Array<{ id: string; status: string; detail: string }> | undefined
+    expect(checkOf(checks, "link-scope")?.status === "pass" && checkOf(checks, "net-peers")?.status === "pass", `${JD}: link-scope ${checkOf(checks, "link-scope")?.detail}; net-peers ${checkOf(checks, "net-peers")?.detail}`)
+    return `${JD} (Docker) -> ${JB}:${LINK_PORT} and ${JB} -> ${JD}:7000 each returned the greeting and both lines; verify ${JD}: link-scope pass, net-peers pass (with its inner probes)`
+  } finally { await pdk(["remove", JD, "--confirm", JD]) }
+})
+
+ev("J05", "A link comes back after either sandbox stops and starts, and after the daemon is killed and started again; while the daemon is down the link is down", async () => {
+  await linkedPair()
+  await pdk(["stop", JB])
+  expect(!(await through(JA, JB)).includes("-hi"), `with ${JB} stopped, the link still answered`)
+  expect((await linksOf(JA))[0]?.state === "waiting", `with ${JB} stopped the link is ${JSON.stringify(await linksOf(JA))}`)
+  expect((await pdk(["start", JB])).code === 0, `${JB} did not start`)
+  await greeter(JB)
+  expect(await until(async () => (await through(JA, JB)).startsWith(`${JB}-hi`), 30), `after ${JB} started again the link did not carry its greeting`)
+  await pdk(["stop", JA])
+  expect((await pdk(["start", JA])).code === 0, `${JA} did not start`)
+  expect(await until(async () => (await through(JA, JB)).startsWith(`${JB}-hi`), 30), `after ${JA} started again the link did not carry its greeting`)
+  // Killed without a chance to close anything; the sandboxes keep running, asked directly through the engine.
+  process.kill((await daemonFile()).pid, "SIGKILL")
+  const direct = async () => (await docker(["exec", containerOf(JA), "/.paddock/busybox", "sh", "-c", `printf 'x\\n' | /.paddock/busybox nc -w 2 ${JB} ${LINK_PORT}`], { timeoutMs: 20_000 })).out
+  const downAt = Date.now()
+  expect(await until(async () => !(await direct()).includes("-hi"), 30), "with the daemon killed, the link still answered after 30 seconds")
+  const down = Math.round((Date.now() - downAt) / 1000)
+  expect(await running(JA) && await running(JB), "a sandbox stopped with the daemon")
+  await pdk(["list"])
+  const upAt = Date.now()
+  expect(await until(async () => (await direct()).startsWith(`${JB}-hi`), 90), "after a new daemon started, the link did not come back within 90 seconds")
+  return `down and up after stop/start of each side; with the daemon killed the link stopped answering within ${down} s; a new daemon reopened it in ${Math.round((Date.now() - upAt) / 1000)} s`
+})
+
+ev("J06", "Removing a link, or either of its sandboxes, ends its connections and its name, and a sandbox made again under the name inherits nothing", async () => {
+  await linkedPair()
+  const hold = (from: string, to: string) => inside(from, `rm -f /tmp/held; ( (sleep 120 | nc ${to} ${LINK_PORT} > /tmp/held) </dev/null >/dev/null 2>&1 &)`)
+  // The client's socket: ESTABLISHED while the link carries it. BusyBox nc keeps running after the far side closes
+  // while its input is open, so the socket's state, not the process, says whether the link ended it.
+  const established = async (from: string) => (await inside(from, "netstat -tn")).out.split("\n").filter((line) => / 127\.77\.0\.\d+:5432 +ESTABLISHED/.test(line)).length
+  const held = async (from: string, to: string) => (await inside(from, "cat /tmp/held")).out.includes(`${to}-hi`) && await established(from) === 1
+  const ended = (from: string) => until(async () => await established(from) === 0, 10)
+  const relays = async (to: string) => (await inside(to, "ps -o args")).out.split("\n").filter((line) => line.includes(`nc 127.0.0.1 ${LINK_PORT}`))
+  await hold(JA, JB)
+  expect(await until(() => held(JA, JB), 10), "control: the held connection did not open")
+  expect((await relays(JB)).length > 0, `control: no relay process for the held connection in ${JB}`)
+  const removed = await pdk(["link", "remove", JA, JB, "--port", String(LINK_PORT)], { timeoutMs: 60_000 })
+  expect(removed.code === 0 && removed.out.includes(`Measured: ${LINK_ADDRESS}:${LINK_PORT} now refuses connections inside ${JA}`), `link remove said: ${removed.out} ${removed.err}`)
+  expect(await ended(JA), "the held connection did not end within 10 seconds of link remove")
+  expect(await until(async () => (await relays(JB)).length === 0, 10), `relays left in ${JB}: ${(await relays(JB)).join("; ")}`)
+  expect(!(await through(JA, JB)).includes("-hi") && !(await through(JA, LINK_ADDRESS)).includes("-hi"), "the link still answered after removal")
+  expect(!(await inside(JA, "cat /etc/hosts")).out.includes("paddock-link") && !(await linksOf()).length, "the name or the record outlived the link")
+  // Removing TO.
+  await ensure(JC); await greeter(JC); await linkAdd(JA, JC)
+  await hold(JA, JC)
+  expect(await until(() => held(JA, JC), 10), `control: the held connection to ${JC} did not open`)
+  await pdk(["remove", JC, "--confirm", JC])
+  expect(await ended(JA), `the held connection did not end within 10 seconds of removing ${JC}`)
+  expect(!(await inside(JA, "cat /etc/hosts")).out.includes(JC) && !(await linksOf()).length, `${JC}'s name or record outlived it`)
+  await ensure(JC); await greeter(JC)
+  expect(!(await through(JA, JC)).includes("-hi") && !(await linksOf()).length, `a new ${JC} inherited the link`)
+  // Removing FROM.
+  await linkAdd(JC, JB)
+  await pdk(["remove", JC, "--confirm", JC])
+  expect(!(await linksOf()).length, `the link from the removed ${JC} is still listed`)
+  const shown = checkOf((await pdkJson(["verify", JB], { timeoutMs: 240_000 })).reply.data?.checks, "links")
+  expect(shown && !shown.detail.includes(JC), `${JB}'s links check still names ${JC}: ${shown?.detail}`)
+  return "link remove ended the held connection, TO's relay process and FROM's hosts line; removing TO ended the held connection and the hosts line, and a new TO under the name had no link; removing FROM removed the link from the list and from TO's checklist"
+})
+
+ev("J07", "A link holds 64 connections at once and refuses the 65th while the 64 stay open", async () => {
+  await linkedPair()
+  const lsof = async () => (await sh(["lsof", "-nP", "-p", String((await daemonFile()).pid)])).out.split("\n").length - 2
+  const files = await lsof()
+  // Ten a second, under the rate limit of twenty.
+  await inside(JA, `rm -f /tmp/c*; i=1; while [ $i -le 64 ]; do ( (sleep 300 | nc ${JB} ${LINK_PORT} > /tmp/c$i) </dev/null >/dev/null 2>&1 &); i=$((i+1)); sleep 0.1; done`, 60_000)
+  const open = async () => Number((await inside(JA, `grep -l ${JB}-hi /tmp/c* 2>/dev/null | wc -l`)).out.trim())
+  try {
+    expect(await until(async () => await open() === 64, 60), `only ${await open()} of 64 connections opened`)
+    expect((await linksOf(JA))[0]?.connections === 64, `the link reports ${(await linksOf(JA))[0]?.connections} connections`)
+    const peak = await lsof()
+    const extra = await through(JA, JB)
+    expect(!extra.includes("-hi"), `the 65th connection got ${JSON.stringify(extra)}`)
+    expect(await open() === 64 && (await linksOf(JA))[0]?.connections === 64, "the 64 did not stay open after the 65th was refused")
+    await inside(JA, "pkill sleep")
+    expect(await until(async () => (await linksOf(JA))[0]?.connections === 0, 20), `connections left after the clients ended: ${(await linksOf(JA))[0]?.connections}`)
+    expect((await through(JA, JB)).startsWith(`${JB}-hi`), "control: a connection after the 64 ended did not work")
+    return `64 held open, the 65th got nothing, the 64 stayed; a new one worked after they ended; the daemon's open files: ${files} before, ${peak} at 64, ${await lsof()} after`
+  } finally { await inside(JA, "pkill sleep; rm -f /tmp/c*") }
+})
+
+ev("J08", "A link broken on purpose fails its blocking check: verify cuts it and stops only the sandbox being verified", async () => {
+  await linkedPair()
+  expect((await through(JA, JB)).startsWith(`${JB}-hi`), "control: the link does not work before it is broken")
+  // Something in FROM names TO first in /etc/hosts, so the link's name leads nowhere.
+  await inside(JA, `{ echo '127.0.0.9 ${JB}'; cat /etc/hosts; } > /tmp/hosts && cat /tmp/hosts > /etc/hosts`)
+  const verified = await pdkJson(["verify", JA], { timeoutMs: 240_000 })
+  const scope = checkOf(verified.reply.data?.checks, "link-scope")
+  expect(scope?.status === "fail" && scope.detail.includes(`names ${JB} first`) && scope.detail.includes("The link was cut."), `link-scope: ${JSON.stringify(scope)}`)
+  expect(await until(async () => !await running(JA), 20), `${JA} kept running after its blocking check failed`)
+  expect(await running(JB), `${JB} was stopped too`)
+  const listed = (await linksOf(JA))[0]
+  expect(listed?.state === "cut", `the link is ${JSON.stringify(listed)}`)
+  expect((await pdk(["start", JA])).code === 0, `${JA} did not start`)
+  expect((await linksOf(JA))[0]?.state === "cut", "a start reopened a cut link")
+  expect(!(await through(JA, LINK_ADDRESS)).includes("-hi"), "a cut link still answered")
+  await inside(JA, `grep -v '^127.0.0.9' /etc/hosts > /tmp/hosts && cat /tmp/hosts > /etc/hosts`)
+  expect((await linkAdd(JA, JB)).state === "open" && (await through(JA, JB)).startsWith(`${JB}-hi`), "adding the link again did not measure and open it")
+  return `verify ${JA}: ${scope!.detail}`
+})
+
+ev("J09", "With two sandboxes linked both ways, the existing network evals still hold, and the link's port is not reachable at the other's network address", async () => {
+  await ensure(A); await ensure(B, { pids: 256 }); await hostHelper()
+  await linkAdd(A, B, 7777); await linkAdd(B, A, 7778)
+  try {
+    await inside(B, `(nc -lk -p 7777 -e echo ${REPLY} </dev/null >/dev/null 2>&1 &)`)
+    const ip = await sandboxIp(B)
+    try {
+      expect(await until(() => fromHost(ip, "7777"), 10), `control: the engine's host could not reach the listener in ${B}`)
+      expect(await fromSandbox(A, B, "7777"), `control: ${A} did not reach ${B}:7777 through the link`)
+      expect(!await fromSandbox(A, ip, "7777"), `${A} reached ${B} at ${ip}:7777, the port it is linked to`)
+    } finally { await inside(B, "pkill -f '[n]c -lk -p 7777'") }
+    const notes: string[] = []
+    for (const id of ["H02", "H03", "H04", "H05", "H06"]) {
+      const entry = evals.find((each) => each.id === id)!
+      try { notes.push(`${id}: ${await entry.run() ?? "holds"}`) }
+      catch (error) { if (error instanceof Skip) notes.push(`${id}: not measured (${error.message})`); else throw new Error(`${id} with the link: ${(error as Error).message}`) }
+    }
+    const checks = (await pdkJson(["verify", A], { timeoutMs: 240_000 })).reply.data?.checks as Array<{ id: string; status: string; detail: string }> | undefined
+    const failing = checks?.filter((check) => ["net-host", "net-peers", "net-private", "link-scope"].includes(check.id) && check.status !== "pass")
+    expect(checks && !failing?.length, `verify ${A}: ${JSON.stringify(failing)}`)
+    return `${A} reached ${B}:7777 by the link and not at ${ip}:7777; ${notes.join("; ")}; verify ${A}: network checks and link-scope pass`
+  } finally {
+    await pdk(["link", "remove", A, B, "--port", "7777"]); await pdk(["link", "remove", B, A, "--port", "7778"])
+  }
+})
+
 ev("Z01", "Nothing is left on the engine or this machine when the run ends", async () => {
   // Control: the scan sees this run's daemon while it runs, so an empty scan after teardown means none is left.
   await pdk(["list"])

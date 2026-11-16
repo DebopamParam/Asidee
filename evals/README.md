@@ -157,6 +157,7 @@ is regenerated. The [workspace reference](../docs/workspaces.md) describes remai
 | U | Can a person or an agent use it without reading the source? |
 | S | Do exec and shell sessions carry raw bytes both ways, bounded, only over this machine's socket? |
 | W | Does a forward reach the sandbox's loopback from this machine's loopback, and nothing else, for one run of it? |
+| J | Does a link between two sandboxes carry its one port, reach nothing else either way, come back after restarts, stay bounded, and end when either side goes? |
 | A | Does `ssh NAME.paddock` reach only that sandbox, with only this machine's editor key, through the daemon, without a port? |
 | L | Do resized limits hold on the engine's host when resize says they do, and are unsafe resizes refused? |
 | C | Does a template carry the sandbox's files, leave out the login files, and stay Paddock's own? |
