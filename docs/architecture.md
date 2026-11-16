@@ -215,7 +215,11 @@ mount options is accepted; a bind-backed volume still reports type `volume`, so 
 The Docker data volume must have the sandbox's ownership labels. An unreadable volume is unknown, not a pass. I14
 replaces the data volume with one backed by the engine host's `/tmp` and shows that start refuses it without running it.
 The disk measurement adds the writable layer and engine-side `du` of volumes mounted read-only in the trusted
-helper. It never asks the sandbox to report its own usage. Remove deletes the Docker volume even if the sandbox's
+helper, and of the engine's own `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` for the container (files on the
+engine's host, bound read-only into the helper by their `HostsPath`, `HostnamePath` and `ResolvConfPath`). The sandbox's
+root can grow those three files, and links and the DNS check write two of them from inside, so they stay writable and
+are counted instead (H15 writes 1.3 GB into `/etc/hosts` under a 1 GB limit and expects the stop). It never asks the
+sandbox to report its own usage. Remove deletes the Docker volume even if the sandbox's
 container was already deleted.
 
 Dockerd's output is the container's, which the engine stores on its host, outside the watched limit. I22's control, a
@@ -506,7 +510,8 @@ uses is deleted at once (C05, C07). A stopped sandbox can be saved without start
 - **The disk limit is watched, not capped,** on engines without a hard cap. A sandbox can write for up to 30 seconds
   past its limit before it is stopped. A clean daemon stop stops the watched sandboxes first; after a daemon crash
   nothing watches until a daemon runs again (its first act is a pass over every sandbox). Volumes an image declares,
-  and the inner Docker data volume, are counted. Inner Docker shares this limit with the sandbox.
+  the inner Docker data volume and the engine's `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` are counted. The
+  host log is not; it is bounded instead (two files of 10 MiB). Inner Docker shares this limit with the sandbox.
 - **Inner privileges belong to the sandbox.** `--docker` grants `NET_ADMIN` and `SYS_ADMIN` inside gVisor, including
   control of its inner network and mounts. It does not grant host namespaces or devices. An inner privileged container
   still shares the outer sandbox's limits and guard. The evals exercised its memory limit with an inner privileged

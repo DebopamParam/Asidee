@@ -202,6 +202,8 @@ type Inspect = {
     LogConfig?: { Type: string; Config: Record<string, string> | null }
   }
   Mounts: Array<{ Type: string; Source: string; Destination: string; Name?: string; RW?: boolean }> | null
+  // Files on the engine's host that it mounts into the container; empty before its first start.
+  HostsPath?: string; HostnamePath?: string; ResolvConfPath?: string
   NetworkSettings: { Networks: Record<string, { IPAddress: string }> | null }
 }
 
@@ -778,13 +780,19 @@ export class GvisorProvider implements Provider {
     const output = await this.docker(manifest.engine, ["inspect", "--size", "--format", "{{.SizeRw}}", container(manifest.name)], { timeoutMs: 120_000 })
     const layer = Number(output.stdout.trim())
     if (output.exitCode !== 0 || !Number.isFinite(layer)) return undefined
-    // Volumes an image declares are outside the writable layer. They are measured by the helper, not by the sandbox's
-    // own du, which an agent could replace.
-    const volumes = ((await this.inspect(manifest))?.Mounts ?? []).filter((mount) => mount.Type === "volume").map((mount) => mount.Destination)
-    if (!volumes.length) return layer
-    const du = await this.docker(manifest.engine, ["run", "--rm", "--runtime", "runc", "--network", "none", "--volumes-from", `${container(manifest.name)}:ro`, "--entrypoint", "du", HELPER_IMAGE, "-sk", ...volumes], { timeoutMs: 300_000 })
-    if (du.exitCode !== 0) return undefined
-    return layer + du.stdout.split("\n").filter(Boolean).reduce((sum, line) => sum + Number(line.split("\t")[0]) * 1024, 0)
+    // Outside the writable layer: volumes the image declares, and the engine's own /etc/hosts, /etc/hostname and
+    // /etc/resolv.conf, files on the engine's host that the sandbox's root can grow (measured: 1.3 GB in /etc/hosts went
+    // uncounted). They are measured by the helper, not by the sandbox's own du, which an agent could replace.
+    const inspect = await this.inspect(manifest)
+    const volumes = (inspect?.Mounts ?? []).filter((mount) => mount.Type === "volume").map((mount) => mount.Destination)
+    const files = [inspect?.HostsPath, inspect?.HostnamePath, inspect?.ResolvConfPath].filter((path): path is string => Boolean(path))
+    if (!volumes.length && !files.length) return layer
+    const du = await this.docker(manifest.engine, ["run", "--rm", "--runtime", "runc", "--network", "none", ...(volumes.length ? ["--volumes-from", `${container(manifest.name)}:ro`] : []),
+      ...files.flatMap((path, index) => ["--mount", `type=bind,src=${path},dst=/paddock-engine-files/${index},readonly`]),
+      "--entrypoint", "du", HELPER_IMAGE, "-sk", ...volumes, ...files.map((_, index) => `/paddock-engine-files/${index}`)], { timeoutMs: 300_000 })
+    const sizes = du.stdout.split("\n").filter(Boolean).map((line) => Number(line.split("\t")[0]) * 1024)
+    if (du.exitCode !== 0 || sizes.length !== volumes.length + files.length || !sizes.every(Number.isFinite)) return undefined
+    return layer + sizes.reduce((sum, size) => sum + size, 0)
   }
 
   // Probe helpers left behind by a daemon that died mid-probe.

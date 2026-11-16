@@ -343,6 +343,27 @@ ev("H11", "The disk limit is what the checklist says: a sandbox past it is stopp
   return `watched: stopped ${Math.round((Date.now() - started) / 1000)} s after the write ended`
 })
 
+ev("H15", "The disk limit counts the engine's /etc/hosts: a sandbox that grows it past the limit is stopped within a minute", async () => {
+  await ensure(B, { pids: 256 })
+  const disk = (await socket("verify", { name: B })).reply.data.checks.find((check: { id: string }) => check.id === "disk")
+  if (disk.status !== "weak") skip(`the disk limit here is ${disk.status}, not watched`)
+  const hostsPath = (await inspect(B)).HostsPath as string
+  const engineSize = async () => Number((await docker(["run", "--rm", "--runtime", "runc", "--network", "none", "--mount", `type=bind,src=${hostsPath},dst=/h,readonly`, "--entrypoint", "du", HELPER_IMAGE, "-k", "/h"])).out.split("\t")[0]) * 1024
+  // Written with the sandbox's own tools, through a file the engine keeps on its host, not in the container's layer.
+  await pdk(["exec", B, "--", "sh", "-c", "cp /etc/hosts /tmp/hosts.orig; dd if=/dev/zero bs=1M count=1300 2>/dev/null | tr '\\0' a >> /etc/hosts"], { timeoutMs: 240_000 })
+  const grown = await engineSize()
+  const started = Date.now()
+  try {
+    expect(grown > 1024 ** 3, `control: the engine's ${hostsPath} is ${grown} bytes, so the write did not reach it`)
+    expect(await until(async () => (await view(B))?.status === "stopped", 75), "the sandbox still ran 75 s after its /etc/hosts passed the limit")
+    expect(/disk/i.test((await view(B))?.stopReason ?? ""), `it stopped without saying it was the disk limit: ${(await view(B))?.stopReason}`)
+    return `the engine's /etc/hosts reached ${(grown / 1024 ** 3).toFixed(2)} GB; stopped by the disk watch ${Math.round((Date.now() - started) / 1000)} s after the write ended (a stop during the write ends it early)`
+  } finally {
+    if (!await running(B)) await socket("start", { name: B })
+    await pdk(["exec", B, "--", "sh", "-c", "[ -f /tmp/hosts.orig ] && cat /tmp/hosts.orig > /etc/hosts; rm -f /tmp/hosts.orig"])
+  }
+})
+
 ev("H12", "The disclosures are true: internet access and the logins found inside", async () => {
   await ensure(A)
   await pdk(["exec", A, "--stdin", "--", "sh", "-c", "cat > /root/.netrc"], { stdin: "machine example.com login x password y\n" })
