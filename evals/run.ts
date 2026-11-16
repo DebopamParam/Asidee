@@ -4509,6 +4509,9 @@ ev("J09", "With two sandboxes linked both ways, the existing network evals still
       try { notes.push(`${id}: ${await entry.run() ?? "holds"}`) }
       catch (error) { if (error instanceof Skip) notes.push(`${id}: not measured (${error.message})`); else throw new Error(`${id} with the link: ${(error as Error).message}`) }
     }
+    // The evals' own listeners take the stand-in addresses verify probes, as in H14; with them there, no range is probed.
+    await docker(["rm", "-f", HOST])
+    expect(await until(async () => !(await asRoot("ip -br link")).out.includes(`${PREFIX}a`), 15), "the evals' own listeners did not go away")
     const checks = (await pdkJson(["verify", A], { timeoutMs: 240_000 })).reply.data?.checks as Array<{ id: string; status: string; detail: string }> | undefined
     const failing = checks?.filter((check) => ["net-host", "net-peers", "net-private", "link-scope"].includes(check.id) && check.status !== "pass")
     expect(checks && !failing?.length, `verify ${A}: ${JSON.stringify(failing)}`)
