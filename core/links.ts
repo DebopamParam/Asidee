@@ -329,7 +329,7 @@ export class Links {
       if ((await fromSupport.dial(from, to.name, far)).received.includes(two)) reached.push(`${from.name} reached ${to.name}'s port ${far} through the link's address, which the link does not name`)
       if ((await fromSupport.dial(from, ip, far)).received.includes(two)) reached.push(`${from.name} reached ${to.name} at its network address ${ip}:${far}`)
       if (reached.length) return { at, status: "fail", fromOnly: stale && reached.length === 1, detail: `${reached.join("; ")}.` }
-      return { at, status: "pass", detail: `A test value on ${to.name}'s port ${near} came through the link from ${from.name}, and stopped once that test route closed; ${to.name}'s port ${far} answered ${to.name}'s own loopback and the engine's host, and did not answer from ${from.name} through the link's address or at ${ip}.` }
+      return { at, status: "pass", detail: `A test value on ${to.name}'s port ${near} came through the link from ${from.name}, and stopped once that test route closed; ${to.name}'s port ${far} answered ${to.name}'s own loopback and the engine's host, and did not answer from ${from.name} through the link's address or at ${ip}. The attempts from ${from.name} used programs inside it, which its root could replace. Independently, the daemon dials only the link's own port, and the guard drops traffic between sandbox networks (Cannot reach other sandboxes).` }
     } catch (error) {
       return unknown(`the test could not run (${(error as Error).message})`)
     } finally { for (const canary of canaries) canary.close("The link's test ended.") }

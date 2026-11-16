@@ -69,9 +69,9 @@ is waived for it. A future microVM provider needs reviewed evidence or an explic
 
 | Check | Blocking | When | How the gVisor provider checks it |
 |---|---|---|---|
-| Isolated kernel | yes | after start | The runtime is gVisor, and the kernel inside identifies as gVisor. |
-| Docker inside the sandbox | yes | after start | Its Unix socket answers, its data root is /var/lib/docker, and its driver is the copy-on-write `overlayfs`. The detail discloses the public DNS fallback. Not requested is a disclosure. |
-| Public DNS fallback is configured | yes | after start | Reads /etc/resolv.conf; only if it is not 1.1.1.1 and 8.8.8.8, rewrites it, reads it back and says it was restored. This measures configuration, not live resolution. |
+| Isolated kernel | yes | after start | The engine runs the container on a runtime registered at a gVisor binary. The kernel inside also identifies as gVisor, read with programs inside the sandbox, which its root could replace. |
+| Docker inside the sandbox | yes | after start | Its Unix socket answers, its data root is /var/lib/docker, and its driver is the copy-on-write `overlayfs`, read with programs inside the sandbox, which its root could replace; that it runs inside gVisor rests on the isolated-kernel check. The detail discloses the public DNS fallback. Not requested is a disclosure. |
+| Public DNS fallback is configured | yes | after start | Reads /etc/resolv.conf with programs inside the sandbox; only if it is not 1.1.1.1 and 8.8.8.8, rewrites it, reads it back and says it was restored. This measures configuration, not live resolution, and no isolation check depends on it. |
 | No privileged mode, host namespaces, undeclared capabilities or devices | yes | before start | Engine configuration. With Docker, exactly NET_ADMIN and SYS_ADMIN added inside gVisor; otherwise no additions. |
 | No host folders | yes | before start | Engine configuration; with Docker, volume driver options and ownership too. |
 | Own network, guard loaded | yes | before start | Engine configuration, and the loaded firewall rules compared rule for rule with the shipped ones. |
@@ -84,10 +84,10 @@ is waived for it. A future microVM provider needs reviewed evidence or an explic
 | The template it was made from | no | before start | The template recorded at creation and the image the container runs, which must be the template's; a disclosure. |
 | Cannot reach the host | yes | verify | Live probe with controls. |
 | Cannot reach other sandboxes | yes | verify | Live probe with controls. |
-| Links reach only the sandboxes and ports they name | yes | verify | Checked by the core: each open link from or to this sandbox is measured live (see Links); a fail cuts that link. Only a link that reaches what it does not name fails the check; one that does not carry what it names is reported and stops neither sandbox. |
+| Links reach only the sandboxes and ports they name | yes | verify | Checked by the core: each open link from or to this sandbox is measured live (see Links); a fail cuts that link. Only a link that reaches what it does not name fails the check; one that does not carry what it names is reported and stops neither sandbox. The attempts from FROM use programs inside FROM, which its root could replace; independently, the daemon dials only the link's own port, and the guard drops traffic between sandbox networks. |
 | Cannot reach LAN, tailnet, metadata, IPv6 | yes | verify | Live probe with controls of a stand-in address in each private range and the tailnet range; one attempt at the metadata address; IPv6 by the loaded rules. |
 | Internet access | no | verify | Live attempt; a disclosure. |
-| Logins inside | no | verify | Looks for the usual credential files; a disclosure. |
+| Logins inside | no | verify | Looks for the usual credential files with programs inside the sandbox, which its root could replace; a disclosure, not a guarantee. |
 
 "Verify" runs after every create and on `paddock verify`. A start runs the configuration and runtime checks. On a stopped sandbox, verify
 reports the configuration checks only and marks the rest as not checked.
@@ -159,7 +159,9 @@ The helper runs from an image built from `core/providers/helper.Dockerfile` (Alp
 sandbox's image, so a tampered image cannot fake a result or run as root on the engine's host.
 
 With `docker` enabled, verify also runs containers from the helper image inside the sandbox's Docker daemon. The
-network checks include their connection attempts. The image is the engine's own copy, read with `docker save` and
+network checks include their connection attempts. Those containers are started through the sandbox's own Docker,
+which its root could replace; the helper's attempt from the sandbox's network does not depend on it, and the details
+say which attempt was which. The image is the engine's own copy, read with `docker save` and
 loaded with `docker load` on exec's stdin as bytes, so no registry is asked: I24 blocks Docker Hub inside the sandbox
 (a control pull fails, HTTPS still works) and verify still probes. The inner probes run by the image's ID, which must
 equal the helper's on the engine; I24 records every inner container verify creates and finds only that ID. An image

@@ -136,6 +136,8 @@ test("a link opens measured, carries a connection to its port only, and says wha
   fake.boxes.get("db")!.services.add(5432)
   const made = await core.links.add("app", "db", "5432")
   expect(made).toMatchObject({ from: "app", to: "db", port: 5432, address: "127.77.0.2", state: "open", measured: { status: "pass" } })
+  // What app reported about itself is said to be so, beside what holds independently of it.
+  expect(made.measured!.detail).toContain("The attempts from app used programs inside it, which its root could replace. Independently, the daemon dials only the link's own port")
   expect(made.trust).toBe("db sees these connections as local (from 127.0.0.1 inside db), so a service in db that trusts local connections trusts app.")
   expect(fake.boxes.get("app")!.hosts).toEqual(["127.77.0.2\tdb\t# paddock-link"])
   // The test ran on two other ports and left nothing listening in app but the link's port.

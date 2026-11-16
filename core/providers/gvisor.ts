@@ -211,6 +211,8 @@ type Inspect = {
   NetworkSettings: { Networks: Record<string, { IPAddress: string }> | null }
 }
 
+// Said of a result read with the sandbox's own programs: its root could have made them report anything.
+const OWN = "programs inside the sandbox, which its root could replace"
 const result = (id: CheckResult["id"], status: CheckResult["status"], evidence: CheckResult["evidence"], detail: string): CheckResult => ({ id, status, evidence, detail })
 const isGvisor = (path: string | undefined) => (path ?? "").split("/").pop() === "runsc"
 export type GuardState = "intact" | "changed" | "missing" | "unknown"
@@ -835,7 +837,7 @@ export class GvisorProvider implements Provider {
       const dns = kernel.status === "pass" ? await this.dnsCheck(manifest) : result("dns", "unknown", "none", "DNS was not set or read because the isolated kernel check did not pass.")
       if (!manifest.spec.docker) return [kernel, dns, result("docker", "info", "inspected", "Not requested; no capabilities are added for inner Docker.")]
       const info = kernel.status === "pass" ? await this.dockerInfo(manifest) : undefined
-      return [kernel, dns, info?.exitCode === 0 && info.stdout.trim() === `/var/lib/docker ${DOCKER_DRIVER}` ? result("docker", "pass", "probed", `The private Docker daemon answers on its Unix socket inside gVisor, with its data in /var/lib/docker on the copy-on-write ${DOCKER_DRIVER} driver. It is the sandbox's main process; if it exits, the sandbox stops. Inner containers inherit the sandbox's public DNS fallback of 1.1.1.1 and 8.8.8.8 at creation; the separate DNS check reports its current configuration.`)
+      return [kernel, dns, info?.exitCode === 0 && info.stdout.trim() === `/var/lib/docker ${DOCKER_DRIVER}` ? result("docker", "pass", "probed", `The private Docker daemon answers on its Unix socket, with its data in /var/lib/docker on the copy-on-write ${DOCKER_DRIVER} driver, as read with ${OWN}; that it runs inside gVisor rests on the isolated-kernel check. It is the sandbox's main process; if it exits, the sandbox stops. Inner containers inherit the sandbox's public DNS fallback of 1.1.1.1 and 8.8.8.8 at creation; the separate DNS check reports its current configuration.`)
         : result("docker", "fail", "probed", `The requested inner Docker daemon did not answer with /var/lib/docker on the ${DOCKER_DRIVER} driver: ${info ? `${info.stdout.trim()} ${info.stderr.trim()}` : "the isolated kernel check did not pass"}`)]
     }
     const next = (this.probing.get(manifest.engine.id) ?? Promise.resolve()).then(() => this.probe(manifest, inspect))
@@ -850,15 +852,15 @@ export class GvisorProvider implements Provider {
   // Read first and write only a file that differs, so a pass every 30 seconds does not rewrite it. Docker may reset this
   // engine-owned file across a restart, even with the container still running.
   private async dnsCheck(manifest: Manifest): Promise<CheckResult> {
-    const scope = "Under gVisor the engine's per-network resolver at 127.0.0.11 refuses queries. This checks configuration, not a live lookup or existing inner containers' resolver state."
+    const scope = "Under gVisor the engine's per-network resolver at 127.0.0.11 refuses queries. This checks configuration, not a live lookup or existing inner containers' resolver state; no isolation check depends on it."
     try {
       const found = await this.docker(manifest.engine, ["exec", "-u", "0", container(manifest.name), "cat", "/etc/resolv.conf"])
       if (found.exitCode === 0 && found.stdout === SANDBOX_DNS)
-        return result("dns", "pass", "inspected", `Read /etc/resolv.conf: Paddock's public fallback resolvers 1.1.1.1 and 8.8.8.8, bypassing the engine's per-network resolver; nothing was written. ${scope}`)
+        return result("dns", "pass", "inspected", `Read /etc/resolv.conf with ${OWN}: Paddock's public fallback resolvers 1.1.1.1 and 8.8.8.8, bypassing the engine's per-network resolver; nothing was written. ${scope}`)
       const before = found.exitCode === 0 ? "had been reset to other content" : `could not be read (${found.stderr.trim()})`
       const dns = await this.docker(manifest.engine, ["exec", "-i", "-u", "0", container(manifest.name), "sh", "-c", "cat > /etc/resolv.conf && cat /etc/resolv.conf"], { stdin: SANDBOX_DNS })
       if (dns.exitCode !== 0) return result("dns", "unknown", "none", `/etc/resolv.conf ${before}, and the DNS fallback could not be set and read back: ${dns.stderr.trim()}`)
-      return dns.stdout === SANDBOX_DNS ? result("dns", "pass", "inspected", `/etc/resolv.conf ${before}; Paddock restored its public fallback resolvers 1.1.1.1 and 8.8.8.8 and read them back. ${scope}`)
+      return dns.stdout === SANDBOX_DNS ? result("dns", "pass", "inspected", `/etc/resolv.conf ${before}; Paddock restored its public fallback resolvers 1.1.1.1 and 8.8.8.8 and read them back, with ${OWN}. ${scope}`)
         : result("dns", "fail", "inspected", `/etc/resolv.conf ${before}, and the file read back after restoring it differs from Paddock's public DNS fallback.`)
     } catch (error) { return result("dns", "unknown", "none", `The DNS fallback could not be read, set and read back: ${(error as Error).message}`) }
   }
@@ -873,7 +875,7 @@ export class GvisorProvider implements Provider {
     if (manifest.spec.docker && !(hasRawNetwork(entry?.runtimeArgs) && seesWrites(entry?.runtimeArgs))) return result("kernel", "fail", "inspected", "Inner Docker needs a gVisor runtime with --net-raw and --overlay2=none, for its NAT and disk measurement.")
     const inside = await this.docker(engine, ["exec", container(name), "sh", "-c", "dmesg 2>/dev/null | head -n 3; cat /proc/version"])
     if (inside.exitCode !== 0) return result("kernel", "unknown", "inspected", `The runtime is gVisor (${inspect.HostConfig.Runtime}), but that could not be confirmed from inside: ${inside.stderr.trim()}`)
-    return /gvisor/i.test(inside.stdout) ? result("kernel", "pass", "probed", `gVisor (${inspect.HostConfig.Runtime}); its kernel answers inside the sandbox.`)
+    return /gvisor/i.test(inside.stdout) ? result("kernel", "pass", "probed", `gVisor (${inspect.HostConfig.Runtime}): the engine runs this container on that runtime, registered at a gVisor binary. Inside, the kernel identifies as gVisor too, read with ${OWN}.`)
       : result("kernel", "fail", "probed", "The kernel inside the sandbox does not identify as gVisor.")
   }
 
@@ -961,7 +963,8 @@ export class GvisorProvider implements Provider {
       const hostListening = probeAlive && innerOnline && await retry(() => reaches(hostC, gateway, hostPort))
       const peerListening = probeAlive && innerOnline && await retry(() => reaches(hostC, peerIp, PROBE_PORT))
       const anyReaches = async (ip: string, port: string) => await reaches(probeC, ip, port) || Boolean(manifest.spec.docker && (await inner(ip, port)).stdout.includes(PROBE_REPLY))
-      const where = manifest.spec.docker ? "the sandbox's network and an inner Docker container" : "the sandbox's network"
+      // The attempt from the sandbox's network is the helper's own; the inner container is started by the sandbox's Docker.
+      const where = manifest.spec.docker ? `the sandbox's network (by Paddock's helper) and an inner Docker container (started through the sandbox's own Docker, which its root could replace)` : "the sandbox's network"
       const noControl = (what: string) => `Not checked: ${!innerOnline ? "the inner container did not reach the internet control" : `${what} did not answer a control connection`}, so a blocked attempt would prove nothing.`
 
       out.push(!hostListening ? result("net-host", "unknown", "none", noControl(probeAlive ? "the listener on the host" : "the probe"))
@@ -1014,7 +1017,7 @@ export class GvisorProvider implements Provider {
     const files = found.stdout.split("\n").filter(Boolean)
     out.push(found.exitCode !== 0 ? result("credentials", "unknown", "none", `Could not look: ${found.stderr.trim()}`)
       : files.length ? result("credentials", "info", "probed", `Found ${files.join(", ")}. An agent in the sandbox can read these and send them out.`)
-      : result("credentials", "info", "probed", "None of the usual login files (Claude, Codex, GitHub, git, SSH keys, AWS, netrc) are present."))
+      : result("credentials", "info", "probed", `None of the usual login files (Claude, Codex, GitHub, git, SSH keys, AWS, netrc) are present, as seen with ${OWN}; a disclosure, not a guarantee.`))
     return out
   }
 }
