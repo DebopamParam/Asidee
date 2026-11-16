@@ -356,7 +356,12 @@ ending in `# paddock-link` in FROM's `/etc/hosts` names that address TO; Paddock
 when another line names TO first. Each accepted connection runs a small shell that makes two FIFOs in
 `/.paddock/links/ID.P` (mode 0700) and reports its process id on the listener's output. The daemon then opens two exec
 sessions in FROM that read and write those FIFOs, and dials TO the way a forward does (`nc 127.0.0.1 P` from the
-relay), joining the three. A connection costs TO one relay process and the daemon three engine sessions. The port
+relay), joining the three. A connection costs FROM five processes (the accepting shell, its two `cat`s and the two
+sessions' `cat`s), TO one relay process, and the daemon three engine sessions. FROM pays most, and not only while
+the connection lasts. Measured on OrbStack by an audit, not by an eval: FROM's task count, which its pid limit caps and
+which includes gVisor's own threads, rose to 958 with 64 held connections and stayed at 969 after they closed, since
+gVisor keeps threads it has made; a FROM limited to 256 tasks ended itself while opening 70; TO rose from 60 to 162.
+So a FROM with a small pid limit can be ended by connections over its own link. The port
 the daemon dials is the link's own, from its record. Nothing a program in FROM writes chooses where it goes: the
 listener's output may only say "ready", "error" or "connection PID", and any other line, a line over 32 bytes, or
 more than 200 lines a second closes the listener as hostile. TO's side is a client only, so nothing in TO can open

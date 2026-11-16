@@ -11,7 +11,8 @@ import { PaddockError, type CheckResult, type LinkSupport, type Manifest, type P
 // nothing listens on this machine, so every network check keeps its meaning. A link is bound to both sandboxes' ids,
 // and while open to both sandboxes' runs.
 
-// Open at once per link; each costs `to` one relay process and the daemon three engine sessions.
+// Open at once per link; each costs `from` five processes, `to` one relay process and the daemon three engine sessions
+// (docs/architecture.md says what that came to in tasks).
 export const LINK_CONNECTIONS = 64
 // Links from and to one sandbox, together.
 export const LINKS_PER_SANDBOX = 16
