@@ -317,11 +317,10 @@ export class GvisorProvider implements Provider {
     },
     attach: async (manifest, dir, pid) => {
       if (!LINK_DIR.test(dir) || !Number.isInteger(pid) || pid < 1) throw new PaddockError("usage", "A link connection needs its folder and process.")
-      const fromClient = await this.openExec(manifest, [RELAY, "cat", `${dir}/${pid}.o`], { user: "0", tty: false })
-      fromClient.pause()
+      // Held: a client that sent FIN at once ends its half before the daemon has dialled `to` and listens.
+      const fromClient = await this.openExec(manifest, [RELAY, "cat", `${dir}/${pid}.o`], { user: "0", tty: false, held: true })
       try {
-        const toClient = await this.openExec(manifest, [RELAY, "sh", "-c", 'exec "$0" cat > "$1"', RELAY, `${dir}/${pid}.i`], { user: "0", tty: false })
-        toClient.pause()
+        const toClient = await this.openExec(manifest, [RELAY, "sh", "-c", 'exec "$0" cat > "$1"', RELAY, `${dir}/${pid}.i`], { user: "0", tty: false, held: true })
         return { fromClient, toClient }
       } catch (error) { fromClient.close(); throw error }
     },
@@ -701,7 +700,7 @@ export class GvisorProvider implements Provider {
     return found
   }
 
-  async openExec(manifest: Manifest, argv: readonly string[], options: { user?: string; tty: boolean; cols?: number; rows?: number }): Promise<Session> {
+  async openExec(manifest: Manifest, argv: readonly string[], options: { user?: string; tty: boolean; cols?: number; rows?: number; held?: boolean }): Promise<Session> {
     const inspect = await this.inspect(manifest)
     if (!inspect?.State.Running || !inspect.Id) throw new PaddockError("conflict", `${manifest.name} is not running. Start it with \`paddock start ${manifest.name}\`.`)
     const socket = await this.endpoint(manifest.engine)
@@ -712,7 +711,7 @@ export class GvisorProvider implements Provider {
       ...(options.user ? { User: options.user } : {}), ...(options.tty && options.cols && options.rows ? { ConsoleSize: [options.rows, options.cols] } : {}),
     })
     if (created.status !== 201 || typeof created.body?.Id !== "string") throw new PaddockError("runtime", `The engine did not start the command: ${created.body?.message ?? `HTTP ${created.status}`}`)
-    const session = new EngineSession(socket, created.body.Id as string, options.tty, () => {
+    const session = new EngineSession(socket, created.body.Id as string, options.tty, options.held === true, () => {
       void this.docker(manifest.engine, ["exec", ...(options.user ? ["-u", options.user] : []), container(manifest.name), "sh", "-c", END_EXEC, "end", tag], { timeoutMs: 30_000 })
     })
     await session.started
@@ -771,9 +770,9 @@ export class GvisorProvider implements Provider {
     if (tried.exitCode !== 0) throw new PaddockError("runtime", `The relay at ${RELAY} does not run inside ${manifest.name}: something inside removed or replaced it while the sandbox ran, and a new copy is not visible until it restarts. Stop and start ${manifest.name}, then add the forward again. ${tried.stderr.trim().slice(0, 300)}`)
   }
 
-  dialLoopback(manifest: Manifest, port: number): Promise<Session> {
+  dialLoopback(manifest: Manifest, port: number, held = false): Promise<Session> {
     if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new PaddockError("usage", "A port is a whole number from 1 to 65535.")
-    return this.openExec(manifest, [RELAY, "nc", "127.0.0.1", String(port)], { tty: false })
+    return this.openExec(manifest, [RELAY, "nc", "127.0.0.1", String(port)], { tty: false, held })
   }
 
   async diskUsedBytes(manifest: Manifest): Promise<number | undefined> {
@@ -1059,8 +1058,11 @@ class EngineSession extends EventEmitter implements Session {
   private readonly connection: Socket
   private ended = false
   private header = Buffer.alloc(0); private remaining = 0; private stream: "stdout" | "stderr" = "stdout"
-  constructor(private readonly socket: string, private readonly id: string, readonly tty: boolean, private readonly endProcesses: () => void) {
+  // A held session's output and end, in order, until its first resume(); its connection is paused meanwhile.
+  private holding: Array<() => void> | undefined
+  constructor(private readonly socket: string, private readonly id: string, readonly tty: boolean, held: boolean, private readonly endProcesses: () => void) {
     super()
+    if (held) this.holding = []
     this.connection = connect(socket)
     const body = JSON.stringify({ Detach: false, Tty: tty })
     this.started = new Promise((resolve, reject) => {
@@ -1077,6 +1079,7 @@ class EngineSession extends EventEmitter implements Session {
         this.connection.on("end", () => void this.finish())
         this.connection.on("close", () => void this.finish())
         this.connection.on("error", () => {})
+        if (this.holding) this.connection.pause()
         resolve()
         const rest = head.subarray(end + 4)
         if (rest.length) this.take(rest)
@@ -1088,7 +1091,7 @@ class EngineSession extends EventEmitter implements Session {
   }
 
   private take(data: Buffer): void {
-    if (this.tty) { this.emit("output", "stdout", data); return }
+    if (this.tty) { this.deliver("output", "stdout", data); return }
     let at = 0
     while (at < data.length) {
       if (this.remaining === 0) {
@@ -1100,7 +1103,7 @@ class EngineSession extends EventEmitter implements Session {
       }
       const piece = data.subarray(at, at + this.remaining)
       at += piece.length; this.remaining -= piece.length
-      this.emit("output", this.stream, piece)
+      this.deliver("output", this.stream, piece)
     }
   }
 
@@ -1111,17 +1114,25 @@ class EngineSession extends EventEmitter implements Session {
     for (let attempt = 0; attempt < 60; attempt++) {
       const state = await engineApi(this.socket, "GET", `/exec/${this.id}/json`).catch(() => undefined)
       if (!state || state.status !== 200) break
-      if (state.body?.Running === false && typeof state.body.ExitCode === "number") { this.emit("end", { code: state.body.ExitCode }); return }
+      if (state.body?.Running === false && typeof state.body.ExitCode === "number") { this.deliver("end", { code: state.body.ExitCode }); return }
       await Bun.sleep(50)
     }
-    this.emit("end", { error: "The session ended without an exit status (the sandbox may have stopped)." })
+    this.deliver("end", { error: "The session ended without an exit status (the sandbox may have stopped)." })
+  }
+
+  private deliver(event: string, ...args: unknown[]): void {
+    if (this.holding) this.holding.push(() => this.emit(event, ...args)); else this.emit(event, ...args)
   }
 
   write(bytes: Uint8Array): boolean { return this.connection.write(bytes) }
   // A terminal's input is keystrokes; closing it would end the session.
   end(): void { if (!this.tty) this.connection.end() }
   pause(): void { this.connection.pause() }
-  resume(): void { this.connection.resume() }
+  resume(): void {
+    const held = this.holding; this.holding = undefined
+    for (const fire of held ?? []) fire()
+    this.connection.resume()
+  }
   async resize(cols: number, rows: number): Promise<void> {
     const reply = await engineApi(this.socket, "POST", `/exec/${this.id}/resize?h=${rows}&w=${cols}`)
     if (reply.status !== 200 && reply.status !== 201) throw new PaddockError("runtime", `The engine did not resize the terminal: HTTP ${reply.status}`)

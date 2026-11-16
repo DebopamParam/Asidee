@@ -4549,6 +4549,32 @@ ev("J11", "A link broken from inside TO does not get FROM stopped: verify of FRO
   }
 })
 
+ev("J12", "A link connection whose client sent FIN goes within seconds when TO stays silent, instead of holding a slot for minutes, and a reply that keeps coming after FIN arrives whole", async () => {
+  await ensure(JA); await ensure(JB)
+  const port = LINK_PORT + 1
+  // A service in TO that answers once and then holds every connection open without reading or writing.
+  await inside(JB, `(nc -lk -s 127.0.0.1 -p ${port} -e sh -c 'echo held; exec sleep 600' </dev/null >/dev/null 2>&1 &)`)
+  try {
+    await linkAdd(JA, JB, port)
+    const held = async () => (await linksOf(JA)).find((link) => link.port === port)?.connections ?? -1
+    await inside(JA, `for i in 1 2 3 4 5; do nc -w 1 ${JB} ${port} </dev/null; done`)
+    const after = await held()
+    expect(after > 0, `control: no connection was held after the clients ended (${after}), so the service does not hold them`)
+    const start = Date.now()
+    expect(await until(async () => await held() === 0, 40), `${await held()} connections were still held 40 s after their clients ended`)
+    const gone = Math.round((Date.now() - start) / 1000)
+    // A client that sends FIN at once and then reads a reply that comes over 24 s, a line every 2 s, gets all of it.
+    await inside(JB, `(nc -lk -s 127.0.0.1 -p ${port + 1} -e sh -c 'for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo s$i; sleep 2; done' </dev/null >/dev/null 2>&1 &)`)
+    await linkAdd(JA, JB, port + 1)
+    const streamed = (await inside(JA, `nc ${JB} ${port + 1} </dev/null`, 60_000)).out.trim().split("\n")
+    expect(streamed.length === 12 && streamed[11] === "s12", `a reply streamed after the client's FIN arrived as: ${streamed.join(" ")}`)
+    return `${after} held right after five clients sent FIN and ended; none ${gone} s later; a reply streamed over 24 s after a client's FIN arrived whole (12 lines)`
+  } finally {
+    for (const linked of [port, port + 1]) await pdk(["link", "remove", JA, JB, "--port", String(linked)])
+    await inside(JB, `pkill -f '[n]c -lk -s 127.0.0.1 -p ${port}'; pkill -f '[n]c -lk -s 127.0.0.1 -p ${port + 1}'; pkill -f '[s]leep 600'; true`)
+  }
+})
+
 ev("Z01", "Nothing is left on the engine or this machine when the run ends", async () => {
   // Control: the scan sees this run's daemon while it runs, so an empty scan after teardown means none is left.
   await pdk(["list"])

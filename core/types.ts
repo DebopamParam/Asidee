@@ -174,13 +174,15 @@ export interface Provider {
   remove(manifest: Manifest, createdOnly?: boolean): Promise<void>
   status(manifest: Manifest): Promise<"running" | "stopped" | "missing">
   exec(manifest: Manifest, argv: readonly string[], options?: { user?: string; stdin?: string | Uint8Array; signal?: AbortSignal }): Promise<RunResult>
-  // A command whose bytes are relayed as they come, for shells, binary exec and anything long-lived.
-  openExec(manifest: Manifest, argv: readonly string[], options: { user?: string; tty: boolean; cols?: number; rows?: number }): Promise<Session>
+  // A command whose bytes are relayed as they come, for shells, binary exec and anything long-lived. A held session
+  // delivers nothing it printed, nor its end, before its first resume(), for a caller that waits on something else
+  // before it listens.
+  openExec(manifest: Manifest, argv: readonly string[], options: { user?: string; tty: boolean; cols?: number; rows?: number; held?: boolean }): Promise<Session>
   // Which run of the sandbox is running now, or undefined when it is not. A restart or a recreated container differs.
   generation(manifest: Manifest): Promise<string | undefined>
   // Puts the loopback relay in place in this run of the sandbox, then connects one session to 127.0.0.1:port inside it.
   prepareLoopback(manifest: Manifest): Promise<void>
-  dialLoopback(manifest: Manifest, port: number): Promise<Session>
+  dialLoopback(manifest: Manifest, port: number, held?: boolean): Promise<Session>
   checks(manifest: Manifest, stage: Stage): Promise<CheckResult[]>
   diskUsedBytes(manifest: Manifest): Promise<number | undefined>
   // Why the engine stopped a sandbox that nobody asked to stop (it ran out of memory, for example), if it knows.

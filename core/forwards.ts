@@ -39,8 +39,10 @@ export const boundPort = (server: Server) => (server.address() as AddressInfo).p
 // Moves bytes between a connection and a session until both sides are done. Each direction waits for the other side to
 // take what it was given, and end of input is passed on as a half-close. The sandbox's stderr is not part of the
 // connection's bytes and is dropped.
-// How long a connection whose client has sent FIN may wait for the port's next byte.
-export const FIN_QUIET_MS = 10 * 60_000
+// How long a connection whose client has sent FIN may wait for the port's next byte. Seconds, not minutes: a half-closed
+// connection holds a slot of its forward's or link's cap, a relay process and engine sessions, and a client that sends
+// a request and then FIN (nc, for one) is common. A reply that keeps coming keeps it open.
+export const FIN_QUIET_MS = 10_000
 export function relay(socket: Socket, session: Session, quietAfterFinMs = FIN_QUIET_MS): void {
   let socketWaits = false; let sessionWaits = false
   let quiet: ReturnType<typeof setTimeout> | undefined

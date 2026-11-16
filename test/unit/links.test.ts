@@ -5,7 +5,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { CHECKLIST } from "../../core/checks"
 import { Core } from "../../core/core"
-import { LINK_CONNECTIONS, LINKS_PER_SANDBOX } from "../../core/links"
+import { FIN_QUIET_MS } from "../../core/forwards"
+import { LINK_CONNECTIONS, LINKS_PER_SANDBOX, pump } from "../../core/links"
 import { CATALOG, LINKS_LOCAL, Machines, type Hello } from "../../core/machines"
 import { type CheckResult, type Engine, type LinkSupport, type Provider, type Session, type Stage } from "../../core/types"
 
@@ -364,6 +365,30 @@ test("new connections past the rate are refused inside the sandbox, not relayed"
   expect((await core.links.list())[0]!.connections).toBe(20)
   expect(listener.written.match(/x \d+\n/g)?.length).toBe(5)
   core.closeSessions()
+})
+
+test("a link connection whose client has ended goes once TO is silent for seconds, and stays while TO's reply keeps coming", async () => {
+  expect(FIN_QUIET_MS).toBeLessThanOrEqual(30_000)
+  const connection = () => {
+    const halves = { fromClient: new FakeSession(), toClient: new FakeSession(), target: new FakeSession() }
+    let finished = 0
+    halves.toClient.end = () => { halves.toClient.inputEnded = true; halves.toClient.finish() }
+    pump(halves.fromClient, halves.toClient, halves.target, () => { finished++ }, 200)
+    return { ...halves, finished: () => finished }
+  }
+  // The client sent its request and FIN; TO says nothing more.
+  const idle = connection()
+  idle.fromClient.finish()
+  expect(idle.target.inputEnded).toBe(true)
+  await Bun.sleep(100); expect(idle.finished()).toBe(0)
+  await Bun.sleep(200); expect(idle.finished()).toBe(1)
+  // The same, while TO's reply streams for longer than the allowed silence, never silent that long; then TO ends.
+  const streaming = connection()
+  streaming.fromClient.finish()
+  for (let i = 0; i < 6; i++) { await Bun.sleep(100); streaming.target.print("part"); expect(streaming.finished()).toBe(0) }
+  expect(streaming.toClient.written).toBe("part".repeat(6))
+  streaming.target.finish()
+  expect(streaming.toClient.inputEnded).toBe(true); expect(streaming.finished()).toBe(1)
 })
 
 test("links are refused for another machine in one sentence, before any machine is contacted", async () => {

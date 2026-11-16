@@ -366,9 +366,9 @@ export class Links {
     void (async () => {
       // As a forward does, each connection first checks that `to` is still the run the link was opened for.
       if (await this.generation(to) !== route.toGen) return this.finish(route, conn)
-      // Each half is paused as it arrives, so what it prints while the other is still connecting waits for the pump.
+      // Each half is held as it arrives, so what it prints, or its end, while the other is still connecting waits for the pump.
       const [halves, target] = await Promise.allSettled([this.support(from).attach(from, `/.paddock/links/${route.record.id}.${route.port}`, pid),
-        this.providerOf(to).dialLoopback(to, route.port).then((session) => { session.pause(); return session })])
+        this.providerOf(to).dialLoopback(to, route.port, true)])
       if (halves.status === "fulfilled") conn.sessions.push(halves.value.fromClient, halves.value.toClient)
       if (target.status === "fulfilled") conn.sessions.push(target.value)
       if (halves.status !== "fulfilled" || target.status !== "fulfilled" || conn.done || route.ended) return this.finish(route, conn)
@@ -500,11 +500,11 @@ export class Links {
 }
 
 // Bytes between one accepted connection's two halves in `from` and its relay in `to`, each direction waiting for the
-// other side to take what it was given. The client's end of input reaches `to` as a half-close; when `to`'s side ends,
-// the client's connection closes.
-function pump(fromClient: Session, toClient: Session, target: Session, finish: () => void): void {
+// other side to take what it was given. The client's end of input reaches `to` as a half-close, and the connection then
+// ends once `to` has been silent for quietMs; when `to`'s side ends, the client's connection closes. Exported for tests.
+export function pump(fromClient: Session, toClient: Session, target: Session, finish: () => void, quietMs = FIN_QUIET_MS): void {
   let quiet: ReturnType<typeof setTimeout> | undefined
-  const waitQuietly = () => { clearTimeout(quiet); quiet = setTimeout(finish, FIN_QUIET_MS); quiet.unref?.() }
+  const waitQuietly = () => { clearTimeout(quiet); quiet = setTimeout(finish, quietMs); quiet.unref?.() }
   const clean = (exit: { code?: number; error?: string }) => exit.error === undefined && exit.code === 0
   fromClient.on("output", (stream, bytes) => { if (stream === "stdout" && !target.write(bytes)) fromClient.pause() })
   target.on("drain", () => fromClient.resume())
