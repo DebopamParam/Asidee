@@ -1403,7 +1403,7 @@ ev("U04", "In a real browser, the dashboard creates a sandbox, refuses a mistype
     expect(passed >= 8, `only ${passed} checks were measured as passing at creation`)
     const remove = `[...${panel(name)}.querySelectorAll("button")].find((button) => button.textContent === "Remove").click()`
     page.answerPromptsWith("something else"); await page.evaluate(remove)
-    expect(await page.waitFor(`${panel(name)}?.querySelector("pre")?.textContent.includes("Confirm")`, 10), "a mistyped name gave no error")
+    expect(await page.waitFor(`${panel(name)}?.querySelector("pre")?.textContent.includes("nothing was removed")`, 10), "a mistyped name gave no error")
     expect(await view(name), "a mistyped name removed the sandbox")
     page.answerPromptsWith(name); await page.evaluate(remove)
     expect(await page.waitFor(`!${panel(name)}`, 60), "the sandbox stayed on the page")
@@ -1441,7 +1441,9 @@ ev("U07", "Progress goes to stderr and results to stdout, so output can be piped
   try {
     expect(made.code === 0, `create failed: ${made.err}`)
     expect(made.err.includes("…") && !made.out.includes("…"), "progress lines are missing or on stdout")
-    expect(CHECKLIST.every((item) => made.out.includes(item.title)), "create does not print every check")
+    // Create prints one line for the checks that hold and names where each is listed; verify lists every check.
+    expect(/checks? holds?\. Each one is listed by/.test(made.out), "create does not say how many checks hold and where they are listed")
+    const listed = await pdk(["verify", name]); expect(CHECKLIST.every((item) => listed.out.includes(item.title)), "verify does not print every check")
     const json = await pdk(["--json", "verify", name]); expect(json.err === "", `--json wrote to stderr: ${json.err}`)
     const piped = await pdk(["exec", name, "--", "sh", "-c", "printf out; printf err >&2"]); expect(piped.out === "out" && piped.err === "err", "exec mixes the command's stdout and stderr")
     const binary = await pdk(["exec", name, "--stdin", "--", "wc", "-c"], { stdin: "x".repeat(200_000) }); expect(binary.out.trim() === "200000", "--stdin lost input")
@@ -2215,7 +2217,9 @@ ev("P02", "The Linux binary, run on Linux, creates a sandbox that passes every b
     const made = await inside(["--json", "create", name, "--image", "alpine:latest", "--cpus", "1", "--memory", "1", "--disk", "1"])
     const reply = JSON.parse(made.out || "{}")
     expect(reply.ok, `create on Linux failed: ${reply.error?.message ?? made.err}`)
-    const bad = reply.data.checks.filter((check: { id: string; status: string }) => CHECKLIST.find((item) => item.id === check.id)!.blocking && check.status !== "pass" && !(check.id === "docker" && check.status === "info" && !reply.data.sandbox.spec.docker))
+    const bad = reply.data.checks.filter((check: { id: string; status: string }) => CHECKLIST.find((item) => item.id === check.id)!.blocking && check.status !== "pass" && !(check.id === "docker" && check.status === "info" && !reply.data.sandbox.spec.docker)
+      // With no links there is nothing to measure, which the check says instead of passing.
+      && !(check.id === "link-scope" && check.status === "info"))
     expect(bad.length === 0, `not passing: ${bad.map((check: { id: string; status: string }) => `${check.id} ${check.status}`).join(", ")}`)
     expect(/gvisor/i.test((await inside(["exec", name, "--", "cat", "/proc/version"])).out), "exec on Linux did not reach the sandbox")
     expect((await inside(["verify", name])).code === 0 && (await inside(["stop", name])).code === 0 && (await inside(["start", name])).code === 0, "verify, stop or start failed on Linux")
@@ -2228,6 +2232,7 @@ ev("P02", "The Linux binary, run on Linux, creates a sandbox that passes every b
 // platform-neutral answer. Each must appear exactly as written, once; anything else still needs to name Windows.
 const CAPABILITY_GATES: Array<{ file: string; gate: string; why: string }> = [
   { file: "core/daemon.ts", gate: 'process.platform === "darwin" ? await workspaces.summary() : []', why: "workspaces are macOS-only; elsewhere the summary lists none" },
+  { file: "core/daemon.ts", gate: 'if (watching || process.platform !== "darwin") return', why: "workspaces are macOS-only; elsewhere there is no workspace disk use to watch" },
 ]
 
 ev("P03", "The core has no code that only works on one operating system, except named capability gates", async () => {
