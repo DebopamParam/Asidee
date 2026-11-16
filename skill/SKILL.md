@@ -30,7 +30,7 @@ paddock link add FROM TO --port P            # programs in FROM connect to TO:P,
 paddock link list [NAME] | paddock link remove FROM TO --port P
 paddock ssh setup NAME [--write-config]     # then `ssh NAME.paddock`; ask the user before --write-config
 paddock ssh access NAME                     # alias, user, home, and whether ssh would log in now
-paddock verify NAME                         # exit 6 if a blocking check failed
+paddock verify NAME                         # exit 6 if a blocking check failed; stopped sandboxes check configuration only
 paddock resize NAME [--cpus N] [--memory GB] [--pids N] [--disk GB]  # says what applies now, what at the next start
 paddock snapshot NAME --as TEMPLATE         # saves its files as a template; read what it says is inside
 paddock template list | paddock template remove TEMPLATE
@@ -39,6 +39,10 @@ paddock remove NAME --confirm NAME          # deletes everything in it; ask the 
 
 Text output of `create` and `resize` counts the checks that held and prints every other check in full; read
 `--json` or run `verify` for each check. Every command takes `--help`.
+Piped input is sent only with `--stdin` or `--stream`, for both sandbox and workspace exec.
+`doctor` exits 5 if no engine is ready. A stopped sandbox can pass configuration checks with exit 0;
+start it with `paddock start NAME`, then run `paddock verify NAME` to check the rest.
+`list` shows the disk limit and how many minutes ago verification ran. Its results are history.
 
 Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed or required probes could not run, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown.
 

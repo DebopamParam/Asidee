@@ -77,11 +77,13 @@ test("text from a daemon reaches the terminal without control characters", async
 }, 20_000)
 
 test("list describes saved verification as dated history with current checks unknown", async () => {
-  const paddock = await daemon({ list: { ok: true, data: [{ name: "demo", status: "running", engine: "fake", spec: { cpus: 1, memoryGb: 1 },
+  const paddock = await daemon({ list: { ok: true, data: [{ name: "demo", status: "running", engine: "fake", spec: { cpus: 1, memoryGb: 1, diskGb: 20 },
     lastVerify: { at: "2026-11-10T10:00:00Z", results: [{ id: "kernel", status: "pass" }] } }] } })
   const { out, code } = await paddock("list")
   expect(code).toBe(0)
-  expect(out).toContain("last measured 2026-11-10T10:00:00Z; historical only, current checks unknown")
+  expect(out).toMatch(/verified \d+ min ago/)
+  expect(out.split("historical only")).toHaveLength(2)
+  expect(out).toContain("disk limit 20 GB")
   expect(out).not.toContain("0 failed")
 })
 
@@ -461,4 +463,37 @@ test("start says what it checked and did not, and doctor and workspace create en
   expect(created.out.trimEnd().endsWith("Next: paddock workspace shell render")).toBe(true)
   const none = await (await daemon({ engines: { ok: true, data: [engine(false)] } }))("doctor")
   expect(none.out).not.toContain("Next:")
+})
+
+test("audit B: doctor fails without a ready engine and stopped verify explains its scope", async () => {
+  const paddock = await daemon({ engines: { ok: true, data: [] }, verify: { ok: true, data: { sandbox: { name: "demo", status: "stopped", engine: "fake" }, checks: [], ok: true } } })
+  expect((await paddock("doctor")).code).toBe(5)
+})
+
+test("audit B12: stopped verify explains its scope", async () => {
+  const paddock = await daemon({ verify: { ok: true, data: { sandbox: { name: "demo", status: "stopped", engine: "fake" }, checks: [], ok: true } } })
+  const verified = await paddock("verify", "demo")
+  expect(verified.code).toBe(0)
+  expect(verified.out.split("\n")[0]).toContain("stopped; only its configuration was checked")
+  expect(verified.out).toContain("paddock start demo")
+})
+
+test("audit B: usage errors point to the command and stdin help names the opt-in", async () => {
+  const paddock = await daemon({})
+  for (const args of [["create"], ["snapshot", "demo"], ["workspace", "get"]]) {
+    const result = await paddock(...args)
+    expect(result.code).toBe(2)
+    expect(result.err).toContain(`See \`paddock ${args[0] === "workspace" ? "workspace get" : args[0]} --help\``)
+  }
+})
+
+test("audit B4: stdin help names the opt-in", async () => {
+  const paddock = await daemon({})
+  for (const args of [["exec"], ["workspace", "exec"]]) expect((await paddock(...args, "--help")).out).toContain("Piped input is sent only with --stdin or --stream")
+})
+
+test("audit B2: workspace get and list include the saved stop reason", async () => {
+  const view = { name: "demo", status: "idle", spec: { diskGb: 1 }, stopReason: "Stopped by the daemon: disk limit exceeded. Free space or raise the limit." }
+  const paddock = await daemon({ workspaceGet: { ok: true, data: view }, workspaceList: { ok: true, data: [view] } })
+  for (const args of [["workspace", "get", "demo"], ["workspace", "list"]]) expect((await paddock(...args)).out).toContain(view.stopReason)
 })

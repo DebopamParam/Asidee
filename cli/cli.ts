@@ -34,7 +34,7 @@ const GROUPS: Array<[string, string[]]> = [
   ]],
   ["Use a sandbox", [
     "paddock exec NAME [--user USER] [--stdin] -- COMMAND…   --stdin sends this command's input, bytes exact, up to 16 MiB;",
-    "                                                        output comes back as text (invalid UTF-8 replaced)",
+    "                                                        output comes back as text (invalid UTF-8 replaced). Piped input is sent only with --stdin or --stream.",
     "paddock exec NAME --stream [--user USER] -- COMMAND…    bytes in and out as they come, any size",
     "paddock verify NAME                    run every check against the sandbox and list each result",
     "paddock start NAME",
@@ -67,6 +67,7 @@ const GROUPS: Array<[string, string[]]> = [
     "                                       --disk is watched, not capped (default 20): past it the daemon stops its processes",
     "paddock workspace shell NAME [-- COMMAND…]",
     "paddock workspace exec NAME [--stdin | --stream] -- COMMAND…",
+    "                                       Piped input is sent only with --stdin or --stream.",
     "paddock workspace list | get NAME | stop NAME | verify NAME",
     "paddock workspace set NAME host-temp on|off   stop first; applies to later processes; shared host temp weakens confinement",
     "paddock workspace set NAME disk GB            the watched disk limit; applies now, also while running",
@@ -364,7 +365,8 @@ async function main(argv: string[]): Promise<void> {
   }
   // The sandbox a create was making, for the next steps of a refusal.
   let creating: string | undefined
-  const need = (value: string | boolean | undefined, what: string) => { if (typeof value !== "string" || !value) throw new PaddockError("usage", `Missing ${what}. See \`paddock help\`.`); return value }
+  const helpWords = [command, ...(["workspace", "host", "forward", "link", "template", "config", "ssh", "ext", "daemon"].includes(command ?? "") ? [rest[0]] : [])].filter(Boolean).join(" ")
+  const need = (value: string | boolean | undefined, what: string) => { if (typeof value !== "string" || !value) throw new PaddockError("usage", `Missing ${what}. See \`paddock ${helpWords} --help\`.`); return value }
 
   try {
     const asked = command === "help" || command === "--help" || command === "-h" ? rest : rest.includes("--help") || rest.includes("-h") ? [command!, ...rest.filter((arg) => arg !== "--help" && arg !== "-h")] : []
@@ -454,7 +456,7 @@ async function main(argv: string[]): Promise<void> {
       case "version": case "--version": return out({ version: VERSION }, () => console.log(VERSION))
       case "doctor": case "init": {
         const engines = await call<Engine[]>("engines")
-        return out(engines, () => {
+        out(engines, () => {
           if (!engines.length) console.log("No engine found. Paddock needs Docker (OrbStack, a Linux host, Colima, …) with a gVisor runtime.")
           for (const engine of engines) {
             console.log(`${engine.ready ? "✓" : "✗"} ${shown(engine.label)}  [${shown(engine.id)}]`)
@@ -464,6 +466,8 @@ async function main(argv: string[]): Promise<void> {
           }
           if (engines.some((engine) => engine.ready)) console.log(`Next: ${next("create", "NAME")}`)
         })
+        if (!engines.some((engine) => engine.ready)) process.exit(EXIT.dependency)
+        return
       }
       case "create": {
         const { values, positionals } = parse({ docker: { type: "boolean" }, image: { type: "string" }, template: { type: "string" }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" }, pids: { type: "string" }, engine: { type: "string" } })
@@ -492,11 +496,12 @@ async function main(argv: string[]): Promise<void> {
         return out(list, () => {
           if (!list.length) console.log("No sandboxes. Create one with `paddock create NAME`.")
           for (const view of list) {
-            const verified = view.lastVerify ? `last measured ${shown(view.lastVerify.at)}; historical only, current checks unknown` : "never verified"
+            const verified = view.lastVerify ? `verified ${Math.max(0, Math.floor((Date.now() - Date.parse(view.lastVerify.at)) / 60000))} min ago` : "never verified"
             if (view.status === "damaged") { console.log(`${displayName(view.name).padEnd(24)} damaged\n    ${shown(view.stopReason)}`); continue }
-            console.log(`${displayName(view.name).padEnd(24)} ${shown(view.status).padEnd(8)} ${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  ${shown(view.engine)}${view.template ? `  template ${shown(view.template.name)}` : ""}  (${verified})${view.stopReason ? `\n    ${shown(view.stopReason)}` : ""}`)
+            console.log(`${displayName(view.name).padEnd(24)} ${shown(view.status).padEnd(8)} ${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  disk limit ${view.spec.diskGb} GB  ${shown(view.engine)}${view.template ? `  template ${shown(view.template.name)}` : ""}  (${verified})${view.stopReason ? `\n    ${shown(view.stopReason)}` : ""}`)
             if (view.enforcementProblem) console.log(`    Enforcement problem at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}`)
           }
+          if (list.some((view) => view.lastVerify)) console.log("Verification is historical only; current checks are unknown.")
         })
       }
       case "start": case "stop": {
@@ -508,7 +513,7 @@ async function main(argv: string[]): Promise<void> {
       }
       case "verify": {
         const report = await call<{ sandbox: SandboxView; checks: CheckResult[]; ok: boolean }>("verify", { name: need(rest[0], "a name") }, watching(rest[0]!))
-        out(report, () => { printSandbox(report.sandbox); printChecks(report.checks) })
+        out(report, () => { if (report.sandbox.status === "stopped") console.log(`${shown(report.sandbox.name)} is stopped; only its configuration was checked. Run \`${next("start", report.sandbox.name)}\`, then \`${next("verify", report.sandbox.name)}\` to check the rest.`); printSandbox(report.sandbox); printChecks(report.checks) })
         if (!report.ok) process.exit(EXIT["check-failed"])
         return
       }
@@ -746,7 +751,8 @@ async function main(argv: string[]): Promise<void> {
     }
   } catch (error) {
     const code: ErrorCode = error instanceof PaddockError ? error.code : "runtime"
-    const message = (error as Error).message
+    const raw = (error as Error).message
+    const message = code === "usage" && !raw.includes("See `paddock") ? `${raw} See \`paddock ${helpWords} --help\`.` : raw
     if (asJson) console.log(JSON.stringify({ ok: false, error: { code, message, details: error instanceof PaddockError ? error.details : undefined } }))
     else if (command === "host" && rest[0] === "add") {
       console.error(`paddock: ${refusal(message)}`)

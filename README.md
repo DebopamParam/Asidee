@@ -218,3 +218,8 @@ lives inside the sandbox and code there can read and send it out.** Logout leave
 Imports of file-backed Claude and Codex profiles and of this machine's `gh` login were checked live in one sandbox; the
 Claude Keychain guest-import path and agents accepting that sandbox import were not. The shared Keychain reader and
 Claude's login recognition are now measured separately for workspaces. Its README lists the sandbox measurements.
+
+Piped input reaches sandbox and workspace exec only with `--stdin` or `--stream`.
+`doctor` exits 5 when no engine is ready. On a stopped sandbox, `verify` checks configuration only
+and can exit 0. Run `paddock start NAME`, then `paddock verify NAME` to check the rest.
+`list` shows disk limits and minutes since verification; those checks are historical only.
