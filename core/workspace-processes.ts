@@ -30,9 +30,14 @@ let loaded: Library | undefined
 const lib = () => loaded ??= library()
 const cstr = (value: string) => Buffer.from(`${value}\0`)
 
+const liveInputs = new Set<{ operation: Buffer | null; argument: Buffer }>()
+
 export function decision(pid: number, operation: string | null, filter = 0, argument = ""): number {
-  const op = operation === null ? null : cstr(operation); const arg = cstr(argument)
-  return lib().check.symbols.paddock_sandbox_check(pid, op ? ptr(op) : null, filter | (operation === null ? 0 : 0x40000000), ptr(arg))
+  const input = { operation: operation === null ? null : cstr(operation), argument: cstr(argument) }
+  // The FFI sees raw pointers; keep their buffers reachable while native code runs.
+  liveInputs.add(input)
+  try { return lib().check.symbols.paddock_sandbox_check(pid, input.operation ? ptr(input.operation) : null, filter | (operation === null ? 0 : 0x40000000), ptr(input.argument)) }
+  finally { liveInputs.delete(input) }
 }
 
 export function controlledDecision(pid: number, control: number, operation: string, filter = 0, argument = ""): "allowed" | "denied" | "unknown" {
