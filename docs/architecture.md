@@ -21,7 +21,12 @@ verifies their removal and the absent container, then removes the record. Its er
 name. Cached helper images and the shared guard remain engine setup. An image download failure names the image in
 plain words before the engine's error. If cleanup cannot be verified, the record stays and the error lists the
 remaining or uncertain objects with `paddock remove NAME --confirm NAME`. Objects labeled for another attempt are
-left alone. A container that was created and then failed a required check stays stopped for inspection.
+left alone. A container that was created and then failed a required check stays stopped for inspection. So does one whose first
+checks could not finish (a probe that threw, for example): create reports it stopped and kept for diagnosis, whatever
+`requireProbes` says, since turning that off accepts an unknown probe, not a run with no checks at all. Every start is
+recorded in the sandbox's state file before the engine starts it, and cleared once its checks finish (for a create,
+its first verify). A daemon that finds a running sandbox still marked, because the daemon that started it ended in
+between, stops it on its next pass instead of checking it then, since a check can fail to finish too (H16).
 
 ## The checklist
 

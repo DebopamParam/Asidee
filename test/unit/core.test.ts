@@ -394,6 +394,41 @@ test("a start that fails halfway does not leave the sandbox running", async () =
   expect(state.running).toBe(false)
 })
 
+for (const requireProbes of [true, false]) test(`a create whose first verify throws stops the sandbox and says so, require-probes ${requireProbes ? "on" : "off"}`, async () => {
+  const { provider, state } = fakeProvider(); const paddock = await core(provider)
+  await paddock.configSet({ requireProbes })
+  provider.checks = async (_manifest, stage) => { if (stage === "probe") throw new PaddockError("runtime", "A previous Paddock probe has not finished tearing down its routes."); return allPass(stage) }
+  await expect(paddock.create({ name: "demo" })).rejects.toThrow("demo was created but stopped, and is kept for diagnosis: its first checks could not finish. A previous Paddock probe")
+  expect(state.running).toBe(false)
+  const saved = await readManifest(paddock.dirs, "demo")
+  expect(saved.stopReason).toContain("its first checks could not finish")
+  expect(saved.checksPending).toBeUndefined()
+})
+
+test("a sandbox a crashed daemon started but never finished checking is stopped by the next daemon", async () => {
+  const { provider, state } = fakeProvider(); const paddock = await core(provider)
+  // The first daemon dies inside the probe: the sandbox runs, and only the mark written before its start says so.
+  let reached: () => void = () => {}
+  const inProbe = new Promise<void>((resolve) => { reached = resolve })
+  provider.checks = async (_manifest, stage) => { if (stage === "probe") { reached(); return new Promise<never>(() => {}) } return allPass(stage) }
+  void paddock.create({ name: "demo" })
+  await inProbe
+  expect(state.running).toBe(true)
+  expect((await readManifest(paddock.dirs, "demo")).checksPending).toBeString()
+  provider.checks = async (_manifest, stage) => state.overrides[stage] ?? allPass(stage)
+  const next = new Core([provider], paddock.dirs, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere")
+  await next.enforce()
+  expect(state.running).toBe(false)
+  const saved = await readManifest(paddock.dirs, "demo")
+  expect(saved.stopReason).toContain("its checks never finished: the daemon that started it ended first")
+  expect(saved.checksPending).toBeUndefined()
+  // Control: a start whose checks finished leaves no mark, and enforcement keeps it running.
+  await next.start("demo")
+  expect((await readManifest(paddock.dirs, "demo")).checksPending).toBeUndefined()
+  await next.enforce()
+  expect(state.running).toBe(true)
+})
+
 test("verifying a stopped sandbox judges its configuration and does not call the rest a failure", async () => {
   const { provider, state } = fakeProvider(); const paddock = await core(provider)
   await paddock.create({ name: "demo" }); await paddock.stop("demo")

@@ -364,6 +364,27 @@ ev("H15", "The disk limit counts the engine's /etc/hosts: a sandbox that grows i
   }
 })
 
+ev("H16", "A sandbox whose daemon is killed between its start and its first verify is stopped by the next daemon, not left running unverified", async () => {
+  const name = `${PREFIX}-crash`
+  const made = socket("create", { name, image: "alpine:latest", cpus: 1, memoryGb: 1, diskGb: 1 }).catch(() => undefined)
+  try {
+    let up = false
+    for (const end = Date.now() + 180_000; Date.now() < end && !up; await Bun.sleep(150)) up = await running(name)
+    expect(up, "control: the sandbox's container never ran")
+    // Killed without a chance to finish anything: the sandbox runs, and no verify of this run has finished.
+    process.kill((await daemonFile()).pid, "SIGKILL")
+    await made
+    expect(await running(name), "control: the sandbox was not running after the daemon was killed")
+    const killedAt = Date.now()
+    await pdk(["list"])
+    expect((await view(name))?.lastVerify === undefined, "control: a verify had already finished when the daemon was killed")
+    expect(await until(async () => !await running(name), 75), "the sandbox still ran unverified 75 s after a new daemon started")
+    const reason = (await view(name))?.stopReason ?? ""
+    expect(/checks never finished/.test(reason), `it stopped without saying why: ${reason}`)
+    return `stopped ${Math.round((Date.now() - killedAt) / 1000)} s after the kill: ${reason}`
+  } finally { await socket("remove", { name, confirm: name }) }
+})
+
 ev("H12", "The disclosures are true: internet access and the logins found inside", async () => {
   await ensure(A)
   await pdk(["exec", A, "--stdin", "--", "sh", "-c", "cat > /root/.netrc"], { stdin: "machine example.com login x password y\n" })

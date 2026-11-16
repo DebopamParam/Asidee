@@ -128,11 +128,12 @@ export class Core {
     this.endSessions(manifest.name, `The session ended: ${manifest.name} was stopped. ${reason}`)
     await this.provider(manifest).stop(manifest)
     // A stop resolves what enforcement found; stopReason now carries it, so it is not left as a standing problem.
-    manifest.stopReason = reason; delete manifest.enforcementProblem; this.enforcementProblems.delete(manifest.name)
+    manifest.stopReason = reason; delete manifest.enforcementProblem; delete manifest.checksPending; this.enforcementProblems.delete(manifest.name)
     await writeManifest(this.dirs, manifest)
   }
 
-  private async startChecked(manifest: Manifest): Promise<void> {
+  // verifyFollows: the caller verifies next (create), and the start's checks are finished only once that verify is.
+  private async startChecked(manifest: Manifest, verifyFollows = false): Promise<void> {
     const provider = this.provider(manifest); const name = manifest.name
     this.activity.set(name, "Loading the network guard")
     await provider.prepare(manifest)
@@ -140,6 +141,7 @@ export class Core {
     const before = blockers(await this.stage(manifest, ["config"], false))
     if (before.length) this.refuse(name, before, "was not started")
     this.activity.set(name, "Starting")
+    manifest.checksPending = new Date().toISOString(); await writeManifest(this.dirs, manifest)
     // Whatever goes wrong from here, the sandbox is not left running unchecked.
     try {
       await provider.start(manifest)
@@ -149,15 +151,16 @@ export class Core {
       await provider.stop(manifest).catch(() => {})
       throw error
     }
-    const stale = manifest.stopReason !== undefined; delete manifest.stopReason
-    await this.clearEnforcement(manifest, stale)
+    delete manifest.stopReason
+    if (!verifyFollows) delete manifest.checksPending
+    await this.clearEnforcement(manifest, true)
   }
 
   private async verifyNow(manifest: Manifest, requireProbes = false): Promise<{ checks: CheckResult[]; failed: CheckResult[] }> {
     const running = (await this.provider(manifest).status(manifest)) === "running"
     this.activity.set(manifest.name, running ? "Running the checks (the live network tests take about 15 to 40 seconds)" : "Checking the configuration")
     const checks = await this.stage(manifest, ["config", "runtime", "probe"], running)
-    manifest.lastVerify = { at: new Date().toISOString(), results: checks }
+    manifest.lastVerify = { at: new Date().toISOString(), results: checks }; delete manifest.checksPending
     // A stopped sandbox is judged on its configuration alone: the rest was not checked, which is not a failure.
     const failed = running ? blockers(checks, CHECKLIST, requireProbes) : blockers(checks).filter((entry) => entry.status === "fail")
     if (failed.length && running) await this.stopBecause(manifest, `Stopped by verify: ${failed.map((entry) => titleOf(entry.id)).join("; ")}`)
@@ -210,8 +213,17 @@ export class Core {
         this.activity.set(spec.name, `Creating (downloading ${spec.image} if it is not here yet)`)
         await createContainer()
       }
-      await this.startChecked(manifest)
-      const { checks, failed } = await this.verifyNow(manifest, config.requireProbes)
+      await this.startChecked(manifest, true)
+      let verified: Awaited<ReturnType<Core["verifyNow"]>>
+      try { verified = await this.verifyNow(manifest, config.requireProbes) }
+      catch (error) {
+        // Whatever require-probes says: turning it off accepts an unknown probe, not a run with no verification at all.
+        const reason = error instanceof Error ? error.message : String(error)
+        try { await this.stopBecause(manifest, `Stopped after creation: its first checks could not finish. ${reason}`) }
+        catch (stop) { throw new PaddockError("runtime", `${spec.name} was created, but its first checks could not finish (${reason}), and stopping it failed too (${stop instanceof Error ? stop.message : String(stop)}). The daemon stops it on its next pass, within 30 seconds.`) }
+        throw new PaddockError("runtime", `${spec.name} was created but stopped, and is kept for diagnosis: its first checks could not finish. ${reason} To try again: \`paddock remove ${spec.name} --confirm ${spec.name}\`, then create it again.`)
+      }
+      const { checks, failed } = verified
       if (failed.length) {
         // Only when turning the requirement off would let this create through: a failure beside an unknown probe is a failed check.
         const unknown = failed.every((check) => check.status === "unknown" && CHECKLIST.find((item) => item.id === check.id)?.stage === "probe")
@@ -580,7 +592,18 @@ export class Core {
         let stoppingFor: string | undefined
         try {
           const provider = this.provider(manifest)
-          if ((await provider.status(manifest)) !== "running") { this.unchecked.delete(manifest.name); return await this.clearEnforcement(manifest) }
+          if ((await provider.status(manifest)) !== "running") {
+            this.unchecked.delete(manifest.name)
+            const pending = manifest.checksPending !== undefined; delete manifest.checksPending
+            return await this.clearEnforcement(manifest, pending)
+          }
+          // Started by a daemon that ended before its checks finished (this daemon's own starts hold the sandbox's lock
+          // until theirs do). It is stopped rather than checked now: a check can fail to finish too.
+          if (manifest.checksPending) {
+            stoppingFor = `it was started at ${manifest.checksPending}, but its checks never finished: the daemon that started it ended first.`
+            await this.stopBecause(manifest, `Stopped by the daemon at ${new Date().toISOString()}: ${stoppingFor} It is kept for diagnosis. Start it and run \`paddock verify ${manifest.name}\`, or remove it and create it again.`)
+            this.unchecked.delete(manifest.name); return
+          }
           const results = await this.stage(manifest, ["config", "runtime"], true)
           const describe = (entries: CheckResult[]) => entries.map((entry) => `${titleOf(entry.id)} (${entry.detail})`).join("; ")
           const failed = failures(results)

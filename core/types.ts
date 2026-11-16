@@ -97,6 +97,9 @@ export type Manifest = {
   spec: SandboxSpec
   createdAt: string
   lastVerify?: { at: string; results: CheckResult[] }
+  // When a start began whose checks have not finished yet (for a create, its first verify). Written before the engine
+  // starts the sandbox, so a daemon that ends in between leaves it for the next one, which stops the sandbox.
+  checksPending?: string
   stopReason?: string
   enforcementProblem?: { at: string; message: string }
   // Set by `paddock ssh setup` for this sandbox; a sandbox recreated under the name starts without it.
