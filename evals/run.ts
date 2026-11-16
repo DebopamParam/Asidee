@@ -4446,24 +4446,46 @@ ev("J07", "A link holds 64 connections at once and refuses the 65th while the 64
   } finally { await inside(JA, "pkill sleep; rm -f /tmp/c*") }
 })
 
-ev("J08", "A link broken on purpose fails its blocking check: verify cuts it and stops only the sandbox being verified", async () => {
+// Replaces Paddock's relay inside a sandbox with a script that runs the real one except where `rule` (shell, given the
+// relay's arguments) decides otherwise; root inside can do this. A start copies the relay in again.
+const RELAY_WRAPPED = "/.paddock/busybox.real"
+const wrapRelay = async (name: string, rule: string) => {
+  const script = `#!${RELAY_WRAPPED} sh\n${rule}\nexec ${RELAY_WRAPPED} "$@"\n`
+  const done = await pdk(["exec", name, "--stdin", "--", "sh", "-c", `[ -e ${RELAY_WRAPPED} ] || mv /.paddock/busybox ${RELAY_WRAPPED}; cat > /.paddock/busybox && chmod 755 /.paddock/busybox`], { stdin: script })
+  expect(done.code === 0, `could not replace the relay in ${name}: ${done.err}`)
+}
+const unwrapRelay = (name: string) => inside(name, `[ -e ${RELAY_WRAPPED} ] && mv ${RELAY_WRAPPED} /.paddock/busybox; rm -f /tmp/pdk-relay-*; true`)
+
+ev("J08", "A link broken on purpose: one that reaches what it does not name fails its blocking check and stops only the sandbox being verified; one that does not carry what it names is cut and stops neither", async () => {
   await linkedPair()
   expect((await through(JA, JB)).startsWith(`${JB}-hi`), "control: the link does not work before it is broken")
-  // Something in FROM names TO first in /etc/hosts, so the link's name leads nowhere.
+  // Not carried: something in FROM names TO first in /etc/hosts, so the link's name leads nowhere.
   await inside(JA, `{ echo '127.0.0.9 ${JB}'; cat /etc/hosts; } > /tmp/hosts && cat /tmp/hosts > /etc/hosts`)
-  const verified = await pdkJson(["verify", JA], { timeoutMs: 240_000 })
-  const scope = checkOf(verified.reply.data?.checks, "link-scope")
-  expect(scope?.status === "fail" && scope.detail.includes(`names ${JB} first`) && scope.detail.includes("The link was cut."), `link-scope: ${JSON.stringify(scope)}`)
-  expect(await until(async () => !await running(JA), 20), `${JA} kept running after its blocking check failed`)
-  expect(await running(JB), `${JB} was stopped too`)
-  const listed = (await linksOf(JA))[0]
-  expect(listed?.state === "cut", `the link is ${JSON.stringify(listed)}`)
-  expect((await pdk(["start", JA])).code === 0, `${JA} did not start`)
-  expect((await linksOf(JA))[0]?.state === "cut", "a start reopened a cut link")
-  expect(!(await through(JA, LINK_ADDRESS)).includes("-hi"), "a cut link still answered")
-  await inside(JA, `grep -v '^127.0.0.9' /etc/hosts > /tmp/hosts && cat /tmp/hosts > /etc/hosts`)
+  let carried: string
+  try {
+    const verified = await pdkJson(["verify", JA], { timeoutMs: 240_000 })
+    const scope = checkOf(verified.reply.data?.checks, "link-scope")
+    expect(scope?.status === "info" && scope.detail.includes(`names ${JB} first`) && scope.detail.includes("The link was cut.") && scope.detail.includes("stops neither sandbox"), `link-scope when the link did not carry: ${JSON.stringify(scope)}`)
+    expect(verified.reply.data?.ok && await running(JA) && await running(JB), "a sandbox was stopped for a link that did not carry what it names")
+    expect((await linksOf(JA))[0]?.state === "cut", `the link is ${JSON.stringify(await linksOf(JA))}`)
+    carried = scope!.detail
+  } finally { await inside(JA, `grep -v '^127.0.0.9' /etc/hosts > /tmp/hosts && cat /tmp/hosts > /etc/hosts`) }
   expect((await linkAdd(JA, JB)).state === "open" && (await through(JA, JB)).startsWith(`${JB}-hi`), "adding the link again did not measure and open it")
-  return `verify ${JA}: ${scope!.detail}`
+  // Reaching: FROM's relay replays what its first dial of a port received, so the closed test route seems to answer.
+  await wrapRelay(JA, `if [ "$1" = nc ] && [ "$2" = -w ] && [ "$#" = 5 ]; then f=/tmp/pdk-relay-$5; [ -e "$f" ] && exec ${RELAY_WRAPPED} cat "$f"; ${RELAY_WRAPPED} "$@" > "$f"; c=$?; ${RELAY_WRAPPED} cat "$f"; exit $c; fi`)
+  try {
+    const verified = await pdkJson(["verify", JA], { timeoutMs: 240_000 })
+    const scope = checkOf(verified.reply.data?.checks, "link-scope")
+    expect(scope?.status === "fail" && scope.detail.includes("after its test route closed") && scope.detail.includes("The link was cut."), `link-scope when the link reached past its route: ${JSON.stringify(scope)}`)
+    expect(await until(async () => !await running(JA), 20), `${JA} kept running after its blocking check failed`)
+    expect(await running(JB), `${JB} was stopped too`)
+    expect((await linksOf(JA))[0]?.state === "cut", `the link is ${JSON.stringify(await linksOf(JA))}`)
+    expect((await pdk(["start", JA])).code === 0, `${JA} did not start`)
+    expect((await linksOf(JA))[0]?.state === "cut", "a start reopened a cut link")
+    expect(!(await through(JA, LINK_ADDRESS)).includes("-hi"), "a cut link still answered")
+    expect((await linkAdd(JA, JB)).state === "open" && (await through(JA, JB)).startsWith(`${JB}-hi`), "adding the link again did not measure and open it")
+    return `verify ${JA}, not carried: ${carried}; reaching: ${scope!.detail}`
+  } finally { await unwrapRelay(JA) }
 })
 
 ev("J09", "With two sandboxes linked both ways, the existing network evals still hold, and the link's port is not reachable at the other's network address", async () => {
@@ -4498,13 +4520,31 @@ ev("J10", "A link broken from inside FROM does not get TO stopped: verify of TO 
   try {
     const verified = await pdkJson(["verify", JB], { timeoutMs: 240_000 })
     const scope = checkOf(verified.reply.data?.checks, "link-scope")
-    expect(scope?.status === "info" && scope.detail.includes("The link was cut.") && scope.detail.includes(`so ${JB} is not stopped for it`), `link-scope: ${JSON.stringify(scope)}`)
+    expect(scope?.status === "info" && scope.detail.includes("The link was cut.") && scope.detail.includes("stops neither sandbox"), `link-scope: ${JSON.stringify(scope)}`)
     expect(verified.reply.ok && verified.reply.data?.ok, `verify ${JB} did not pass: ${JSON.stringify(verified.reply.data?.checks?.filter((check: { status: string }) => check.status === "fail"))}`)
     expect(await running(JB) && await running(JA), "a sandbox was stopped")
     expect((await linksOf(JA))[0]?.state === "cut" && !(await through(JA, LINK_ADDRESS)).includes("-hi"), `the link is ${JSON.stringify(await linksOf(JA))}`)
     return `verify ${JB}: ${scope!.detail}`
   } finally {
     await inside(JA, `grep -v '^127.0.0.9' /etc/hosts > /tmp/hosts && cat /tmp/hosts > /etc/hosts`)
+    await pdk(["link", "remove", JA, JB, "--port", String(LINK_PORT)])
+  }
+})
+
+ev("J11", "A link broken from inside TO does not get FROM stopped: verify of FROM cuts the link and both keep running", async () => {
+  await linkedPair()
+  // TO's relay answers the test's control on each port once, then holds every later connection to that port silent.
+  await wrapRelay(JB, `if [ "$1" = nc ] && [ "$2" = 127.0.0.1 ] && [ "$#" = 3 ] && [ "$3" != ${LINK_PORT} ]; then f=/tmp/pdk-relay-$3; [ -e "$f" ] && exec ${RELAY_WRAPPED} sleep 4; : > "$f"; fi`)
+  try {
+    const verified = await pdkJson(["verify", JA], { timeoutMs: 240_000 })
+    const scope = checkOf(verified.reply.data?.checks, "link-scope")
+    expect(scope?.status === "info" && scope.detail.includes("did not come through the link") && scope.detail.includes("The link was cut.") && scope.detail.includes("stops neither sandbox"), `link-scope: ${JSON.stringify(scope)}`)
+    expect(verified.reply.ok && verified.reply.data?.ok, `verify ${JA} did not pass: ${JSON.stringify(verified.reply.data?.checks?.filter((check: { status: string }) => check.status === "fail"))}`)
+    expect(await running(JA) && await running(JB), "a sandbox was stopped")
+    expect((await linksOf(JA))[0]?.state === "cut" && !(await through(JA, LINK_ADDRESS)).includes("-hi"), `the link is ${JSON.stringify(await linksOf(JA))}`)
+    return `verify ${JA}: ${scope!.detail}`
+  } finally {
+    await unwrapRelay(JB)
     await pdk(["link", "remove", JA, JB, "--port", String(LINK_PORT)])
   }
 })

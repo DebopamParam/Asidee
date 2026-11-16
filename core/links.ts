@@ -31,7 +31,8 @@ const MARK = "# paddock-link"
 type End = { name: string; sandboxId: string }
 export type LinkRecord = { id: string; from: End; to: End; port: number; address: string; createdAt: string; cut?: { at: string; reason: string } }
 // fromOnly: the failure was seen only by what ran inside `from`, with nothing `from` could not have made up itself.
-export type Measure = { at: string; status: "pass" | "fail" | "unknown"; detail: string; fromOnly?: boolean }
+// unavailable: the link does not carry what it names (as opposed to reaching what it does not name).
+export type Measure = { at: string; status: "pass" | "fail" | "unknown"; detail: string; fromOnly?: boolean; unavailable?: boolean }
 export type LinkView = {
   from: string; to: string; port: number; address: string; createdAt: string
   state: "open" | "opening" | "waiting" | "closed" | "cut"; reason?: string; measured?: Measure; connections: number
@@ -297,7 +298,7 @@ export class Links {
       // Its controls answered, so a value that does not come through is the link failing, not the test.
       if (!carried) {
         const shadowed = this.shadowed.get(from.id)?.includes(to.name) ? ` (another line of /etc/hosts in ${from.name} names ${to.name} first)` : ""
-        return { at, status: "fail", fromOnly: true, detail: `a test value on ${to.name}'s port ${near} did not come through the link from ${from.name} by the name ${to.name}${shadowed}, though it answered ${to.name}'s own loopback.` }
+        return { at, status: "fail", unavailable: true, detail: `a test value on ${to.name}'s port ${near} did not come through the link from ${from.name} by the name ${to.name}${shadowed}, though it answered ${to.name}'s own loopback.` }
       }
       // The first value already came through to `from`, so `from` could repeat it; the second it has never been given.
       const reached: string[] = []
@@ -454,10 +455,13 @@ export class Links {
     return { id: "links", status: "info", evidence: "inspected", detail: `${lines.join(" ")} ${LINK_LIMITS}` }
   }
 
-  // The blocking check: each open link touching this sandbox is tested live. A link that fails (it reaches what it does
-  // not name, or does not carry what it names) is cut, and the sandbox being verified is stopped by the checklist's rule.
-  // One exception: a failure seen only inside `from` cuts the link but does not fail `to`'s check, so nothing running
-  // in `from` can have `to` stopped.
+  // The blocking check: each open link touching this sandbox is tested live, and a link that fails is cut. Only a link
+  // that reaches what it does not name fails the check, which stops the sandbox being verified. One that does not carry
+  // what it names is reported and stops neither sandbox, whichever is verified: either end can break it (`from` by its
+  // /etc/hosts or its relay, `to` by its relay or its service), so counting it would let one sandbox have the other
+  // stopped. Of the reaching failures, one seen only inside `from` (the closed test route, whose value `from` was
+  // given) does not fail `to`'s check either. The others need the second test value, which only `to`'s test listener
+  // holds.
   scope(manifest: Manifest): Promise<CheckResult> {
     return this.queued(async () => {
       let records: LinkRecord[]; let manifests: Map<string, Manifest>
@@ -478,10 +482,11 @@ export class Links {
         if (measured.status === "fail") await this.cut(link, measured.detail, from)
         results.push({ link, measured })
       }
-      const excused = ({ link, measured }: { link: LinkRecord; measured: Measure }) => measured.status === "fail" && measured.fromOnly === true && link.to.sandboxId === manifest.id
-      const status = results.some((entry) => entry.measured.status === "fail" && !excused(entry)) ? "fail" : results.some((entry) => entry.measured.status === "unknown") ? "unknown"
+      const excused = ({ link, measured }: { link: LinkRecord; measured: Measure }) => measured.status === "fail" && !measured.unavailable && measured.fromOnly === true && link.to.sandboxId === manifest.id
+      const blocking = (entry: { link: LinkRecord; measured: Measure }) => entry.measured.status === "fail" && !entry.measured.unavailable && !excused(entry)
+      const status = results.some(blocking) ? "fail" : results.some((entry) => entry.measured.status === "unknown") ? "unknown"
         : results.some((entry) => entry.measured.status === "pass") ? "pass" : "info"
-      const detail = results.map((entry) => `${entry.link.from.name} to ${entry.link.to.name}:${entry.link.port}: ${entry.measured.detail}${entry.measured.status === "fail" ? " The link was cut." : ""}${excused(entry) ? ` This was seen only inside ${entry.link.from.name}, so ${manifest.name} is not stopped for it.` : ""}`).join(" ")
+      const detail = results.map((entry) => `${entry.link.from.name} to ${entry.link.to.name}:${entry.link.port}: ${entry.measured.detail}${entry.measured.status === "fail" ? " The link was cut." : ""}${entry.measured.unavailable ? " A link that does not carry what it names stops neither sandbox." : ""}${excused(entry) ? ` This was seen only inside ${entry.link.from.name}, so ${manifest.name} is not stopped for it.` : ""}`).join(" ")
       return { id: "link-scope", status, evidence: status === "unknown" ? "none" : "probed", detail } as CheckResult
     })
   }

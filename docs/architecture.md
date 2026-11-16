@@ -84,7 +84,7 @@ is waived for it. A future microVM provider needs reviewed evidence or an explic
 | The template it was made from | no | before start | The template recorded at creation and the image the container runs, which must be the template's; a disclosure. |
 | Cannot reach the host | yes | verify | Live probe with controls. |
 | Cannot reach other sandboxes | yes | verify | Live probe with controls. |
-| Links reach only the sandboxes and ports they name | yes | verify | Checked by the core: each open link from or to this sandbox is measured live (see Links); a fail cuts that link. |
+| Links reach only the sandboxes and ports they name | yes | verify | Checked by the core: each open link from or to this sandbox is measured live (see Links); a fail cuts that link. Only a link that reaches what it does not name fails the check; one that does not carry what it names is reported and stops neither sandbox. |
 | Cannot reach LAN, tailnet, metadata, IPv6 | yes | verify | Live probe with controls of a stand-in address in each private range and the tailnet range; one attempt at the metadata address; IPv6 by the loaded rules. |
 | Internet access | no | verify | Live attempt; a disclosure. |
 | Logins inside | no | verify | Looks for the usual credential files; a disclosure. |
@@ -381,11 +381,23 @@ the link on the first test port must carry its value to FROM, by the name TO; wi
 that does not come through is the link failing (another `/etc/hosts` line naming TO first is one cause, and is
 named). With that route closed, the link's address on that port, the name TO on the second port, and TO's network address on the second port
 must not answer from FROM. A pass opens the link. A fail cuts it: it stays recorded as cut, carries nothing, and opens
-again only on a new `link add`. At add the link is then refused and not kept. On verify the "Links reach only…" check
-fails, which stops the sandbox being verified, not the other one. A failure seen only by what ran inside FROM (the
-value did not come through, or the closed test route still answered) cuts the link but does not fail TO's check, so
-nothing running in FROM can have TO stopped. A measurement whose controls failed is unknown; with
-`require-probes` on, the link stays closed. Both sandboxes' checklists disclose each link and the trust it gives:
+again only on a new `link add`. At add the link is then refused and not kept.
+
+On verify, the two kinds of failure count differently, in both directions:
+
+- **The link does not carry what it names** (the value did not come through). The link is cut and the check reports
+  it, and neither sandbox is stopped, whichever one is verified. Either end can cause this: FROM through its
+  `/etc/hosts` or its relay, TO through its relay (`/.paddock/busybox`, which root in TO can replace) or its service.
+  Counting it would let one sandbox have the other stopped (J10, J11).
+- **The link reaches what it does not name** (the closed test route, the second port or TO's network address answered).
+  The "Links reach only…" check fails, which stops the sandbox being verified, not the other one (J08). One exception:
+  a closed test route that still answers is seen only inside FROM, which was given that test value, so it does not
+  fail TO's check. The second port and the network address must return the second test value, which only TO's test
+  listener holds, so FROM cannot report them falsely unless something in TO gives FROM that value (a service in TO
+  reachable through the link that lets FROM read TO's process list would). TO cannot make FROM's dials receive it:
+  they go to FROM's own loopback and to TO's network address, which the guard drops.
+
+A measurement whose controls failed is unknown; with `require-probes` on, the link stays closed. Both sandboxes' checklists disclose each link and the trust it gives:
 TO sees FROM's connections as local.
 
 ### SSH for editors

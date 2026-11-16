@@ -178,33 +178,69 @@ test("a link whose test reaches what it does not name is refused at add, and cut
   expect(await core.links.add("app", "db", 5432)).toMatchObject({ state: "open" })
 })
 
-test("a link that does not carry its test value to the port it names fails and is cut, naming a shadowing hosts line", async () => {
+test("a link that does not carry what it names is cut and reported, and stops neither sandbox, whichever is verified", async () => {
   const fake = world(); const core = await paddock(fake)
   await core.create({ name: "app" }); await core.create({ name: "db" })
   await core.links.add("app", "db", 5432)
-  // Something in app names db first in /etc/hosts: by name, the test reaches nothing.
+  // From app's side: something in app names db first in /etc/hosts, so by name the test reaches nothing.
   const hosts = fake.provider.links!.hosts
   fake.provider.links!.hosts = async (manifest, lines) => { await hosts(manifest, lines); fake.boxes.get(manifest.name)!.hosts.unshift("127.0.0.9\tdb"); return `127.0.0.9\tdb\n${lines.join("\n")}\n` }
+  for (const name of ["app", "db"]) {
+    const verified = await core.verify(name)
+    expect(verified.checks.find((check) => check.id === "link-scope")).toMatchObject({ status: "info",
+      detail: expect.stringContaining("did not come through the link from app by the name db (another line of /etc/hosts in app names db first), though it answered db's own loopback. The link was cut. A link that does not carry what it names stops neither sandbox.") })
+    expect(verified.ok).toBe(true)
+    expect((await core.get("app")).status).toBe("running"); expect((await core.get("db")).status).toBe("running")
+    expect((await core.links.list())[0]).toMatchObject({ state: "cut" })
+    expect(fake.listeners.size).toBe(0)
+    fake.provider.links!.hosts = hosts
+    await core.links.add("app", "db", 5432)
+    fake.provider.links!.hosts = async (manifest, lines) => { await hosts(manifest, lines); fake.boxes.get(manifest.name)!.hosts.unshift("127.0.0.9\tdb"); return `127.0.0.9\tdb\n${lines.join("\n")}\n` }
+  }
+  fake.provider.links!.hosts = hosts
+  // From db's side: its relay answers the test's own control and nothing after it, as a replaced /.paddock/busybox could.
+  const dialLoopback = fake.provider.dialLoopback
+  const seen = new Set<number>()
+  fake.provider.dialLoopback = async (manifest, port) => {
+    if (manifest.name !== "db" || port === 5432 || !seen.has(port)) { seen.add(port); return dialLoopback(manifest, port) }
+    const session = new FakeSession(); setTimeout(() => session.finish({ code: 1 }), 1); return session
+  }
   const verified = await core.verify("app")
-  expect(verified.checks.find((check) => check.id === "link-scope")).toMatchObject({ status: "fail",
-    detail: expect.stringContaining("did not come through the link from app by the name db (another line of /etc/hosts in app names db first)") })
-  expect((await core.get("app")).status).toBe("stopped")
-  expect((await core.get("db")).status).toBe("running")
+  expect(verified.checks.find((check) => check.id === "link-scope")).toMatchObject({ status: "info", detail: expect.stringContaining("A link that does not carry what it names stops neither sandbox.") })
+  expect(verified.ok).toBe(true)
+  expect((await core.get("app")).status).toBe("running"); expect((await core.get("db")).status).toBe("running")
   expect((await core.links.list())[0]).toMatchObject({ state: "cut" })
-})
+}, 30_000)
 
-test("a failure seen only inside the linking sandbox cuts the link but does not stop the sandbox it links to", async () => {
+test("a link that reaches what it does not name fails the check; one seen only inside the linking sandbox does not stop the sandbox it links to", async () => {
   const fake = world(); const core = await paddock(fake)
   await core.create({ name: "app" }); await core.create({ name: "db" })
   await core.links.add("app", "db", 5432)
-  const hosts = fake.provider.links!.hosts
-  fake.provider.links!.hosts = async (manifest, lines) => { await hosts(manifest, lines); fake.boxes.get(manifest.name)!.hosts.unshift("127.0.0.9\tdb"); return `127.0.0.9\tdb\n${lines.join("\n")}\n` }
-  const verified = await core.verify("db")
-  expect(verified.checks.find((check) => check.id === "link-scope")).toMatchObject({ status: "info", detail: expect.stringContaining("The link was cut. This was seen only inside app, so db is not stopped for it.") })
-  expect(verified.ok).toBe(true)
-  expect((await core.get("db")).status).toBe("running")
+  // app's relay replays what its first dial of a port received, so the closed test route seems to answer still.
+  const dial = fake.provider.links!.dial
+  const received = new Map<number, string>()
+  fake.provider.links!.dial = async (manifest, host, port) => {
+    if (received.has(port)) return { connected: true, received: received.get(port)! }
+    const result = await dial(manifest, host, port); received.set(port, result.received); return result
+  }
+  const excused = await core.verify("db")
+  expect(excused.checks.find((check) => check.id === "link-scope")).toMatchObject({ status: "info",
+    detail: expect.stringMatching(/after its test route closed, app still reached db's port \d+\. The link was cut\. This was seen only inside app, so db is not stopped for it\./) })
+  expect(excused.ok).toBe(true)
+  expect((await core.get("db")).status).toBe("running"); expect((await core.get("app")).status).toBe("running")
   expect((await core.links.list())[0]).toMatchObject({ state: "cut" })
-  expect(fake.listeners.size).toBe(0)
+  // The same failure on app's own verify stops app, and only app.
+  fake.provider.links!.dial = dial
+  await core.links.add("app", "db", 5432)
+  received.clear()
+  fake.provider.links!.dial = async (manifest, host, port) => {
+    if (received.has(port)) return { connected: true, received: received.get(port)! }
+    const result = await dial(manifest, host, port); received.set(port, result.received); return result
+  }
+  const failed = await core.verify("app")
+  expect(failed.checks.find((check) => check.id === "link-scope")).toMatchObject({ status: "fail" })
+  expect(failed.ok).toBe(false)
+  expect((await core.get("app")).status).toBe("stopped"); expect((await core.get("db")).status).toBe("running")
 })
 
 test("the test never uses a port another link of the pair names, so that link's answer is not taken for a leak", async () => {
