@@ -59,3 +59,19 @@ test("a held session keeps what it printed and its end for a caller that listens
   expect(await late(await provider.openExec(manifest, ["cat"], { tty: false, held: true }))).toEqual({ output: "hi\n", exit: { code: 0 } })
   expect(await late(await provider.dialLoopback(manifest, 5432, true))).toEqual({ output: "hi\n", exit: { code: 0 } })
 })
+
+test("link test replies travel on stdin and never in the sandbox command line", async () => {
+  const { EventEmitter } = await import("node:events")
+  let command: readonly string[] = []; let input = ""
+  class Listener extends EventEmitter implements Session {
+    readonly tty = false
+    write(bytes: Uint8Array) { input += Buffer.from(bytes).toString(); return true }
+    end() {} async resize() {} pause() {} resume() {} close() {}
+  }
+  const provider = new GvisorProvider()
+  provider.openExec = async (_manifest, argv) => { command = argv; return new Listener() }
+  const secret = "abcd1234ef567890"
+  await provider.links.canary(manifest, 5432, secret, true)
+  expect(command.join(" ")).not.toContain(secret)
+  expect(input).toBe(`${secret}\n`)
+})

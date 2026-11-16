@@ -337,3 +337,6 @@ the session ends. Signal exits use 128 plus the signal number (137 for SIGKILL).
 
 An image the engine cannot pull is a missing dependency (exit 5). The error names the image
 and the engine's reason. Doctor's manual gVisor recipe includes `--net-raw` for Docker inside.
+
+Link tests send their test replies to the target listener through stdin. The listener keeps
+the reply in its environment so it does not appear in the sandbox process arguments.

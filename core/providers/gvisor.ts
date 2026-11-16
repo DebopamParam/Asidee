@@ -335,9 +335,12 @@ export class GvisorProvider implements Provider {
       if (written.exitCode !== 0) throw new PaddockError("runtime", `Could not write the link names into /etc/hosts in ${manifest.name}: ${written.stderr.trim() || `exit ${written.exitCode}`}`)
       return written.stdout
     },
-    canary: (manifest, port, reply, everywhere) => {
+    canary: async (manifest, port, reply, everywhere) => {
       if (!/^[0-9a-f]{1,32}$/.test(reply)) throw new PaddockError("usage", "A test reply is hexadecimal.")
-      return this.openExec(manifest, [RELAY, "nc", "-lk", ...(everywhere ? [] : ["-s", "127.0.0.1"]), "-p", String(port), "-e", RELAY, "echo", reply], { tty: false })
+      const script = 'read -r PADDOCK_LINK_REPLY || exit 1; export PADDOCK_LINK_REPLY; exec "$0" nc -lk "$@" -e "$0" sh -c \'printf "%s\\n" "$PADDOCK_LINK_REPLY"\''
+      const listener = await this.openExec(manifest, [RELAY, "sh", "-c", script, RELAY, ...(everywhere ? [] : ["-s", "127.0.0.1"]), "-p", String(port)], { tty: false })
+      listener.write(Buffer.from(`${reply}\n`))
+      return listener
     },
     dial: async (manifest, host, port) => {
       if (!/^[a-z0-9][a-z0-9.-]{0,62}$/.test(host)) throw new PaddockError("usage", "A test connection needs a host name or address.")
