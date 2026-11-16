@@ -166,7 +166,13 @@ print(json.dumps(dict(
 export const HOST_APPLY = String.raw`
 import os, sys, json, subprocess, hashlib, urllib.request, shutil, base64, tarfile, io, tempfile
 
-p = json.load(open(sys.argv[1])) if len(sys.argv) > 1 else json.load(sys.stdin)
+if len(sys.argv) > 1:
+    request = open(sys.argv[1], 'rb').read()
+    if len(sys.argv) != 3 or hashlib.sha256(request).hexdigest() != sys.argv[2]:
+        raise RuntimeError('Enrollment request checksum mismatch; nothing installed')
+    p = json.loads(request)
+else:
+    p = json.load(sys.stdin)
 completed = []
 started = None
 stage = None

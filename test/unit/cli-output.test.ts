@@ -316,7 +316,7 @@ test("workspace disk: create and set send the limit, status shows it and a stop 
   expect(text.code).toBe(0); expect(text.out).toBe("out\n"); expect(text.err).toContain(`${warning.message}\n`)
   const json = await paddock("--json", "workspace", "exec", "render", "--", "true")
   expect(JSON.parse(json.out).data.diskWarning).toEqual(warning); expect(json.err).toBe("")
-  expect((await paddock("help")).out).toContain("paddock workspace set NAME disk GB")
+  expect((await paddock("help")).out).toContain("paddock workspace set NAME disk GiB")
 })
 
 test("a workspace stream session prints the disk warning that comes with ready", async () => {

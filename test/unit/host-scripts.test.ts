@@ -77,3 +77,14 @@ test("B9: repository text removes URL userinfo and binds original bytes by hash"
     expect(value.apt[source]).toBe(new Bun.CryptoHasher("sha256").update(content).digest("hex"))
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test("B7: a replaced interactive request is refused before its plan can run", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pdk-request-swap-"))
+  try {
+    const path = join(root, "request")
+    await writeFile(path, JSON.stringify({ uploads: [], changes: [], steps: [], stateDir: root, stageDir: root }))
+    const result = await python(`import sys,json\nx=json.load(sys.stdin)\nsys.argv=['apply',x['path'],'0'*64]\nexec(x['script'])`, { path, script: HOST_APPLY })
+    expect(result.code).not.toBe(0)
+    expect(result.err).toContain("Enrollment request checksum mismatch")
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

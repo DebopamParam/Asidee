@@ -569,3 +569,6 @@ Each privileged step that reads staged files copies them into a root-owned priva
 checks SHA-256 there, uses only those copies, then removes them. The script and digests are in the plan hash.
 Interactive installs refresh `sudo -v` before each privileged step. Repository source text in the
 plan removes URL usernames and passwords; the plan binds the original file bytes by their hash.
+
+For an interactive host install, the client also sends the private request file's SHA-256
+through the SSH command. Apply checks the read bytes against it before reading the plan.

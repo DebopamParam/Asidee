@@ -354,3 +354,6 @@ eight distinct port/process pairs. Use `--json` for the full listener evidence.
 `forward add` keeps the forward when its target port is closed, and says nothing listens
 inside yet. It probes once; a service started later can use the forward. Remote daemon and
 SSH lifetime caveats appear only when selecting a remote host.
+
+For an interactive host install, the client also sends the private request file's SHA-256
+through the SSH command. Apply checks the read bytes against it before reading the plan.

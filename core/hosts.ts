@@ -751,7 +751,7 @@ export class Hosts {
     const requestPath = staged.stdout.trim()
     if (!/^\/tmp\/paddock-request-[a-zA-Z0-9_-]+$/.test(requestPath)) throw new PaddockError("runtime", "The host did not report a private request path.")
     if (terminal.closed) throw new PaddockError("outcome-unknown", `Terminal closed after staging ${requestPath}. No installation was started; remove that staging file before retrying.`)
-    const argv = sshArgv(plan.options.ssh, ["python3", "-c", HOST_APPLY, requestPath], pin); argv[1] = "-tt"
+    const argv = sshArgv(plan.options.ssh, ["python3", "-c", HOST_APPLY, requestPath, sha256(input)], pin); argv[1] = "-tt"
     const child = spawn(argv[0]!, argv.slice(1), { stdio: ["pipe", "pipe", "pipe"] }); terminal.child = child
     child.stdin.on("error", () => {}); child.stdin.on("drain", terminal.drain)
     let output = ""; let size = 0
