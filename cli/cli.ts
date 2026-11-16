@@ -486,7 +486,7 @@ async function main(argv: string[]): Promise<void> {
         const view = await call<SandboxView>(command, { name: need(rest[0], "a name") }, watching(rest[0]!))
         return out(view, () => {
           printSandbox(view)
-          if (command === "start") console.log(`  Its configuration and runtime were checked before it started; its network was not tested. To test it: ${next("verify", view.name)}`)
+          if (command === "start") console.log(`  Its configuration was checked before it started and its runtime after; its network was not tested. To test it: ${next("verify", view.name)}`)
         })
       }
       case "verify": {

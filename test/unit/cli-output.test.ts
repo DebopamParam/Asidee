@@ -390,7 +390,7 @@ test("start says what it checked and did not, and doctor and workspace create en
   const engine = (ready: boolean) => ({ id: "fake:1", provider: "fake", label: "Fake", ready, problems: [], data: {} })
   const paddock = await daemon({ start: { ok: true, data: sandbox }, engines: { ok: true, data: [engine(true)] },
     workspaceCreate: { ok: true, data: { workspace, ok: true, checks: [{ id: "seatbelt", status: "pass", evidence: "inspected", detail: "ok" }] } } })
-  expect((await paddock("start", "demo")).out).toContain("Its configuration and runtime were checked before it started; its network was not tested. To test it: paddock verify demo")
+  expect((await paddock("start", "demo")).out).toContain("Its configuration was checked before it started and its runtime after; its network was not tested. To test it: paddock verify demo")
   expect((await paddock("doctor")).out.trimEnd().endsWith("Next: paddock create NAME")).toBe(true)
   const created = await paddock("workspace", "create", "render", "--no-logins")
   expect(created.out).toContain("✓ 1 check holds. Each one is listed by `paddock workspace verify render`.")
