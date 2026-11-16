@@ -350,3 +350,7 @@ plan removes URL usernames and passwords; the plan binds the original file bytes
 
 Workspace size, disk and free-space values use GiB (1024³ bytes). Listener text is capped at
 eight distinct port/process pairs. Use `--json` for the full listener evidence.
+
+`forward add` keeps the forward when its target port is closed, and says nothing listens
+inside yet. It probes once; a service started later can use the forward. Remote daemon and
+SSH lifetime caveats appear only when selecting a remote host.

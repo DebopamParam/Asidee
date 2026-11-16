@@ -12,6 +12,7 @@ import type { ResizeChange, SandboxView } from "../core/core"
 import { BUILD, readDaemonFile, runDaemon, VERSION } from "../core/daemon"
 import type { Extension } from "../core/extensions"
 import { FORWARD_REACH, type ForwardView } from "../core/forwards"
+import { RELAY } from "../core/providers/gvisor"
 import { LINK_LIMITS, type LinkView } from "../core/links"
 import type { HostPlan } from "../core/hosts"
 import { hostOption, type FleetView, type HostView } from "../core/machines"
@@ -592,8 +593,11 @@ async function main(argv: string[]): Promise<void> {
         const { values, positionals } = parse({ port: { type: "string" }, "local-port": { type: "string" } }, rest.slice(1))
         if (rest[0] === "add") {
           const made = await call<ForwardView>("forwardAdd", { name: need(positionals[0], "a name"), port: need(values.port, "--port"), localPort: values["local-port"] })
+          const probe = await call<RunResult>("exec", { name: made.name, argv: [RELAY, "nc", "-z", "-w", "1", "127.0.0.1", String(made.port)] }).catch(() => undefined)
           return out(made, () => {
-            console.log(`Forwarding 127.0.0.1:${made.localPort} to port ${made.port} in ${displayName(made.name)} (forward ${shown(made.id)}). It ends when the sandbox stops or the daemon stops; for a sandbox on another machine, also when either daemon stops or its SSH link is silent for 15 seconds. Then add it again.`)
+            console.log(`Forwarding 127.0.0.1:${made.localPort} to port ${made.port} in ${displayName(made.name)} (forward ${shown(made.id)}). It ends when the sandbox stops or the daemon stops${selectedHost && selectedHost !== "local" ? "; also when the remote daemon stops or its SSH link is silent for 15 seconds" : ""}. Then add it again.`)
+            if (probe?.exitCode !== 0 && /[Cc]onnection refused/.test(probe?.stderr ?? "")) console.log(`  nothing listens on ${made.port} inside yet.`)
+            else if (probe?.exitCode !== 0) console.log(`  Could not check whether port ${made.port} listens inside.`)
             console.log(`  ${FORWARD_REACH.replace("these", "it")}`)
             console.log(`Remove it: ${next("forward", "remove", made.id)}`)
           })

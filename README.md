@@ -240,3 +240,7 @@ plan removes URL usernames and passwords; the plan binds the original file bytes
 Workspace sizes, disk limits and free-space floors are shown in GiB (1 GiB is 1024³ bytes).
 Workspace create/verify text lists at most eight distinct `port (process)` listeners; `--json`
 keeps the full listener evidence.
+
+`forward add` keeps the forward when its target port is closed, and says nothing listens
+inside yet. It probes once; a service started later can use the forward. Remote daemon and
+SSH lifetime caveats appear only when selecting a remote host.

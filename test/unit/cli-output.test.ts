@@ -534,3 +534,14 @@ test("B14/B19: workspace text summarizes listeners and uses GiB; JSON keeps list
   expect(got).toContain("1.00 GiB")
   expect(got).toContain("disk limit 2 GiB")
 })
+
+test("B22: an empty port still gets a forward, and remote lifetime text is only for a host", async () => {
+  const paddock = await daemon({ forwardAdd: { ok: true, data: { id: "abcd", name: "demo", port: 9999, localPort: 4567 } }, exec: { ok: true, data: { exitCode: 1, stdout: "", stderr: "nc: can't connect to remote host (127.0.0.1): Connection refused" } } })
+  const local = await paddock("forward", "add", "demo", "--port", "9999")
+  expect(local.code).toBe(0)
+  expect(local.out).toContain("nothing listens on 9999 inside yet")
+  expect(local.out).not.toContain("SSH")
+  const remote = await paddock("--host", "build", "forward", "add", "demo", "--port", "9999")
+  expect(remote.out).toContain("SSH")
+  expect(remote.out).toContain("nothing listens on 9999 inside yet")
+})
