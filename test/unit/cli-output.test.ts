@@ -536,7 +536,7 @@ test("B14/B19: workspace text summarizes listeners and uses GiB; JSON keeps list
 })
 
 test("B22: an empty port still gets a forward, and remote lifetime text is only for a host", async () => {
-  const paddock = await daemon({ forwardAdd: { ok: true, data: { id: "abcd", name: "demo", port: 9999, localPort: 4567 } }, exec: { ok: true, data: { exitCode: 1, stdout: "", stderr: "nc: can't connect to remote host (127.0.0.1): Connection refused" } } })
+  const paddock = await daemon({ forwardAdd: { ok: true, data: { id: "abcd", name: "demo", port: 9999, localPort: 4567 } }, exec: { ok: true, data: { exitCode: 1, stdout: "", stderr: "" } } })
   const local = await paddock("forward", "add", "demo", "--port", "9999")
   expect(local.code).toBe(0)
   expect(local.out).toContain("nothing listens on 9999 inside yet")

@@ -185,7 +185,7 @@ export class Core {
       const createContainer = async () => {
         try { await provider.create(manifest) }
         catch (error) {
-          const reason = error instanceof Error ? error.message : String(error)
+          const reason = (error instanceof Error ? error.message : String(error)).replace(/[.\s]+$/, "")
           try {
             if (await provider.status(manifest) !== "missing") throw new Error("the container exists and is kept for inspection")
             await provider.remove(manifest, true)
@@ -194,7 +194,7 @@ export class Core {
           } catch (cleanup) {
             throw new PaddockError("runtime", `${reason}. Cleanup incomplete: the record for ${spec.name} is kept; ${cleanup instanceof Error ? cleanup.message : String(cleanup)}. Run \`paddock remove ${spec.name} --confirm ${spec.name}\` to remove what remains.`)
           }
-          throw new PaddockError("runtime", `${reason}. Nothing was kept for ${spec.name}.`)
+          throw new PaddockError(error instanceof PaddockError ? error.code : "runtime", `${reason}. Nothing was kept for ${spec.name}.`)
         }
       }
       if (spec.template) {

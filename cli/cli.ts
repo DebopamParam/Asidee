@@ -596,7 +596,7 @@ async function main(argv: string[]): Promise<void> {
           const probe = await call<RunResult>("exec", { name: made.name, argv: [RELAY, "nc", "-z", "-w", "1", "127.0.0.1", String(made.port)] }).catch(() => undefined)
           return out(made, () => {
             console.log(`Forwarding 127.0.0.1:${made.localPort} to port ${made.port} in ${displayName(made.name)} (forward ${shown(made.id)}). It ends when the sandbox stops or the daemon stops${selectedHost && selectedHost !== "local" ? "; also when the remote daemon stops or its SSH link is silent for 15 seconds" : ""}. Then add it again.`)
-            if (probe?.exitCode !== 0 && /[Cc]onnection refused/.test(probe?.stderr ?? "")) console.log(`  nothing listens on ${made.port} inside yet.`)
+            if (probe?.exitCode === 1) console.log(`  nothing listens on ${made.port} inside yet.`)
             else if (probe?.exitCode !== 0) console.log(`  Could not check whether port ${made.port} listens inside.`)
             console.log(`  ${FORWARD_REACH.replace("these", "it")}`)
             console.log(`Remove it: ${next("forward", "remove", made.id)}`)

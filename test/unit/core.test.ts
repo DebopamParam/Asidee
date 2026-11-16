@@ -914,3 +914,9 @@ test("stopped verification reports configuration scope and succeeds if that conf
   await paddock.create({ name: "demo" }); await paddock.stop("demo")
   expect(await paddock.verify("demo")).toMatchObject({ ok: true, configurationOnly: true })
 })
+
+test("B13: failed-create cleanup preserves the image dependency code without doubled punctuation", async () => {
+  const { provider } = fakeProvider(); const paddock = await core(provider)
+  provider.create = async () => { throw new PaddockError("dependency", "Cannot download image bad/image:0: pull access denied.") }
+  await expect(paddock.create({ name: "demo" })).rejects.toMatchObject({ code: "dependency", message: "Cannot download image bad/image:0: pull access denied. Nothing was kept for demo." })
+})
