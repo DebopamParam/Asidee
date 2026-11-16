@@ -221,7 +221,7 @@ export class Core {
         const reason = error instanceof Error ? error.message : String(error)
         try { await this.stopBecause(manifest, `Stopped after creation: its first checks could not finish. ${reason}`) }
         catch (stop) { throw new PaddockError("runtime", `${spec.name} was created, but its first checks could not finish (${reason}), and stopping it failed too (${stop instanceof Error ? stop.message : String(stop)}). The daemon stops it on its next pass, within 30 seconds.`) }
-        throw new PaddockError("runtime", `${spec.name} was created but stopped, and is kept for diagnosis: its first checks could not finish. ${reason} To try again: \`paddock remove ${spec.name} --confirm ${spec.name}\`, then create it again.`)
+        throw new PaddockError("runtime", `${spec.name} was created but stopped, and is kept for diagnosis: its first checks could not finish. ${reason} To try again: \`paddock start ${spec.name}\`, then \`paddock verify ${spec.name}\`; or \`paddock remove ${spec.name} --confirm ${spec.name}\` and create it again.`)
       }
       const { checks, failed } = verified
       if (failed.length) {

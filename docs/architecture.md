@@ -149,7 +149,11 @@ any range skipped, or none set up, it is `weak` and says which ranges were probe
 alone. `weak` does not stop the sandbox. Routes through a previous Paddock probe are awaited
 with a bounded deadline instead of being counted as occupied addresses. A probe returns only after its own veth,
 bridge and routes disappear. A teardown timeout fails the request instead of returning weaker evidence. A listener that was created but whose
-host control failed is reported separately from an occupied address. One probe runs per engine at a time.
+host control failed is reported separately from an occupied address. One probe runs per engine at a time. A probe
+that meets another one's routes waits up to 45 seconds for them to go, then fails without probing and says to run
+verify again in a few seconds. Two Paddock daemons on one engine are not supported: each runs only its own probes one
+at a time, so one's probe can meet the other's teardown, and each takes the engine's guard rules for its own, so two
+versions whose rules differ would each find the other's changed.
 
 The helper runs from an image built from `core/providers/helper.Dockerfile` (Alpine pinned by digest), never from the
 sandbox's image, so a tampered image cannot fake a result or run as root on the engine's host.

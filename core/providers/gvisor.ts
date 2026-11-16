@@ -98,13 +98,17 @@ const FAR_RANGES = [["10.255.255.25", "10.0.0.0/8"], ["172.31.255.25", "172.16.0
 // Runs on the engine's host: a listener on the sandbox's gateway address, then the far listeners. A range whose address
 // the host already routes somewhere specific is left alone and reported as not probed. Everything here lives in the
 // helper's container and goes with it.
+// Seconds a probe waits for another one's routes to go, per stand-in address; the other's teardown removes them all
+// at once, so in practice the wait happens once. Only another daemon's probe can be met here: one daemon runs one
+// probe per engine at a time and tears it down before the next.
+export const PROBE_TEARDOWN_WAIT = 45
 const hostProbeScript = (tag: string, gateway: string, port: string) => `${WAIT_FOR_PROBE_ROUTES}
 nc -lk -p ${port} -s ${gateway} -e echo ${PROBE_REPLY} &
 ( set -e
   ip netns add far; ip link add pv${tag}a type veth peer name pv${tag}b; ip link set pv${tag}b netns far; ip link set pv${tag}a up
   ip netns exec far ip link set lo up; ip netns exec far ip link set pv${tag}b up
   for a in ${FAR_RANGES.map(([address]) => address).join(" ")}; do
-    wait_probe_routes \${a}4 || { echo "teardown-timeout \${a}4"; exit 1; }
+    wait_probe_routes \${a}4 ${PROBE_TEARDOWN_WAIT * 10} || { echo "teardown-timeout \${a}4"; exit 1; }
     [ -n "$(ip route show match \${a}4 | grep -v '^default')" ] && continue
     ip addr add \${a}3/30 dev pv${tag}a; ip netns exec far ip addr add \${a}4/30 dev pv${tag}b
     ip netns exec far ip route add default via \${a}3 2>/dev/null || true
@@ -943,10 +947,11 @@ export class GvisorProvider implements Provider {
       must(await runHelper(probeC, engine.data.runtime!, network(name), listen(PROBE_PORT)), "Starting the probe")
       const [peerIp, probeIp] = [await address(peerC), await address(probeC)]
       const hostLog = async () => (await this.docker(engine, ["logs", hostC])).stdout
-      if (!await retry(async () => (await hostLog()).includes("ready"), 40)) throw new Error("The host listener did not get ready.")
+      // Past the wait for another probe's teardown, which the host listener does first.
+      if (!await retry(async () => /^(ready|teardown-timeout)/m.test(await hostLog()), Math.ceil((PROBE_TEARDOWN_WAIT + 15) / 0.4))) throw new Error("The host listener did not get ready.")
       const log = await hostLog()
       if (log.includes("teardown-timeout")) {
-        teardownFailure = "A previous Paddock probe has not finished tearing down its routes; no weaker evidence was substituted."
+        teardownFailure = `Another Paddock probe was still tearing down its routes after ${PROBE_TEARDOWN_WAIT} seconds, so nothing was probed and no weaker evidence was substituted. Run verify again in a few seconds.`
         throw new Error(teardownFailure)
       }
       const far = log.split("\n").filter((line) => line.startsWith("far ")).map((line) => line.slice(4).trim())

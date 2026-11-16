@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { probeCleanupScript, WAIT_FOR_PROBE_ROUTES } from "../../core/providers/probe"
-import { GvisorProvider, LABEL_ID, netPrivate } from "../../core/providers/gvisor"
+import { GvisorProvider, LABEL_ID, netPrivate, PROBE_TEARDOWN_WAIT } from "../../core/providers/gvisor"
 import { validSpec } from "../../core/state"
 import type { Manifest, Runner } from "../../core/types"
 
@@ -44,10 +44,14 @@ exit 0`, probeCleanupScript("1234abcd"))
 for (const leftover of ["previous", "current"] as const) test(`a ${leftover} probe that misses teardown's deadline fails instead of returning weaker evidence`, async () => {
   const manifest: Manifest = { version: 1, name: "demo", id: "owned", createdAt: "", spec: validSpec({ name: "demo" }),
     engine: { id: "fake", provider: "gvisor", label: "fake", ready: true, problems: [], data: { context: "fake", runtime: "runsc" } } }
+  let reads = 0; let hostScript = ""
   const runner: Runner = async (argv) => {
     let stdout = "", exitCode = 0, stderr = ""
+    if (argv.includes("--network") && argv[argv.indexOf("--network") + 1] === "host" && argv.at(-2) === "-c" && argv.at(-1)!.includes("echo ready")) hostScript = argv.at(-1)!
     if (argv[3] === "inspect" && argv[4] === "paddock-demo") stdout = JSON.stringify([{ State: { Running: true }, Config: { Labels: { [LABEL_ID]: "owned" } } }])
-    else if (argv[3] === "logs") stdout = `ready\n${leftover === "previous" ? "teardown-timeout 10.255.255.254\n" : ""}`
+    // Another daemon's probe is tearing down: the host listener waits, and gives up after more reads than the 16 s
+    // the daemon used to allow.
+    else if (argv[3] === "logs") stdout = leftover === "current" ? "ready\n" : ++reads > 50 ? "teardown-timeout 10.255.255.254\n" : ""
     else if (argv[3] === "inspect" || argv[3] === "network") stdout = "172.20.0.1"
     else if (argv.some((part) => part.includes("Paddock probe teardown timed out:"))) {
       if (leftover === "current") { exitCode = 1; stderr = "Paddock probe teardown timed out" }
@@ -56,8 +60,12 @@ for (const leftover of ["previous", "current"] as const) test(`a ${leftover} pro
     } else if (argv.includes("--entrypoint")) stdout = "intact"
     return { stdout, stderr, exitCode }
   }
-  await expect(new GvisorProvider(runner).checks(manifest, "probe")).rejects.toThrow(/teardown|tearing down/)
-})
+  const checked = new GvisorProvider(runner).checks(manifest, "probe")
+  if (leftover === "current") return void await expect(checked).rejects.toThrow(/teardown|tearing down/)
+  await expect(checked).rejects.toThrow(`Another Paddock probe was still tearing down its routes after ${PROBE_TEARDOWN_WAIT} seconds, so nothing was probed and no weaker evidence was substituted. Run verify again in a few seconds.`)
+  expect(reads).toBeGreaterThan(50)
+  expect(hostScript).toContain(`wait_probe_routes \${a}4 ${PROBE_TEARDOWN_WAIT * 10} ||`)
+}, 60_000)
 
 test("net-private passes only when every stand-in range was probed, and is weak, naming the rest, when one was not", () => {
   const all = ["10.255.255.25", "172.31.255.25", "192.168.255.25", "100.127.255.25"]
