@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util"
 import { randomBytes } from "node:crypto"
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
@@ -87,8 +88,8 @@ export function parseHello(value: unknown): Hello {
 
 // Exactly one build talks to another: the same version, protocol and source. There is no negotiation down to an older
 // protocol and no upgrade; a mismatch is refused before anything is sent.
-export function compatible(hello: Hello, local: Pick<Hello, "version" | "sourceDigest">, expected?: string, binary?: string): void {
-  const update = `Build Paddock for that machine from this machine's source (bun build --compile --target=bun-linux-x64 or bun-linux-arm64 --outfile paddock cli/cli.ts), put it in place of ${binary ?? "the binary its host record names"}, and restart its daemon. Nothing was sent; nothing was replaced.`
+export function compatible(hello: Hello, local: Pick<Hello, "version" | "sourceDigest">, expected?: string, binary?: string, enrollment?: { name: string; ssh: string }): void {
+  const update = enrollment ? `Build the Linux artifact from this source, then review and accept an update with \`paddock host add ${enrollment.name} --ssh ${enrollment.ssh} --artifact PATH --sha256 HASH\`. Include --docker if the host offers inner Docker. Nothing was sent or replaced.` : `Build Paddock for that machine from this machine's source (bun build --compile --target=bun-linux-x64 or bun-linux-arm64 --outfile paddock cli/cli.ts), put it in place of ${binary ?? "the binary its host record names"}, and restart its daemon. Nothing was sent; nothing was replaced.`
   if (hello.version !== local.version || !hello.protocols.includes(PROTOCOL)) throw new PaddockError("incompatible", `Remote Paddock ${hello.version} (protocols ${hello.protocols.join(", ")}) is incompatible with ${local.version}, protocol ${PROTOCOL}. ${update}`)
   if (hello.sourceDigest !== local.sourceDigest) throw new PaddockError("incompatible", `Remote Paddock ${hello.version} was built from other source (${hello.sourceDigest.slice(0, 12)}) than this one (${local.sourceDigest.slice(0, 12)}); two builds of one version are not mixed. ${update}`)
   if (expected && expected !== hello.machineId) throw new PaddockError("identity-changed", `The machine identity changed from ${expected} to ${hello.machineId}. Nothing was sent to its sandboxes. Remove and enroll it explicitly.`)
@@ -285,7 +286,7 @@ export class Machines {
     signal?.addEventListener("abort", cancel, { once: true })
     try {
       const hello = parseHello(await peer.call("hello", {}, { timeoutMs: 10_000 }))
-      compatible(hello, this.hello, host.machineId, host.binary)
+      compatible(hello, this.hello, host.machineId, host.binary, "name" in host && typeof host.name === "string" ? { name: host.name, ssh: host.ssh } : undefined)
       return await run(peer, hello)
     } finally { signal?.removeEventListener("abort", cancel); this.peers.delete(peer); await peer.close() }
   }
@@ -437,21 +438,27 @@ export class Machines {
   private edit<T>(task: () => Promise<T>): Promise<T> {
     const next = this.registryWrite.then(task, task); this.registryWrite = next.catch(() => {}); return next
   }
-  attach(body: Record<string, unknown>, beforeWrite?: () => void): Promise<HostRecord> {
+  attach(body: Record<string, unknown>, beforeWrite?: () => void, previous?: HostRecord): Promise<HostRecord> {
     return this.edit(async () => {
       await this.experimental()
       const name = hostName(body.name); const registry = await readHosts(this.dirs)
-      if ([...registry.hosts, ...registry.unknown].some((host) => host.name === name)) throw new PaddockError("conflict", `${name} is already registered. Remove it explicitly before enrolling another machine.`)
+      const existing = registry.hosts.find((host) => host.name === name)
+      if (previous && !isDeepStrictEqual(existing, previous)) throw new PaddockError("conflict", `${name}'s registration changed during the update. Existing registration retained; request a new plan.`)
+      if (!previous && [...registry.hosts, ...registry.unknown].some((host) => host.name === name)) throw new PaddockError("conflict", `${name} is already registered. Remove it explicitly before enrolling another machine.`)
       const endpoint = { ssh: sshDestination(body.ssh), binary: absolutePath(body.binary), stateDir: absolutePath(body.stateDir) }
       const ssh = await this.io.sshIdentity(endpoint)
       // Enrollment passes the key its plan named: the machine attached must still be that one.
       if (body.hostPublicKey !== undefined && body.hostPublicKey !== ssh.hostPublicKey) throw new PaddockError("identity-changed", `The SSH host key for ${endpoint.ssh} changed from ${typeof body.hostKey === "string" ? body.hostKey : "the planned one"} to ${ssh.hostKey} during enrollment. Nothing was registered. ${enrolledKeyHelp}`)
-      const pinned = { ...endpoint, hostKey: ssh.hostKey, hostPublicKey: ssh.hostPublicKey }
+      if (previous && (previous.hostPublicKey !== ssh.hostPublicKey || !previous.hostPublicKey))
+        throw new PaddockError("identity-changed", "The registered SSH host key changed. Existing registration retained.")
+      const pinned = { ...endpoint, ...(previous ? { machineId: previous.machineId } : {}), hostKey: ssh.hostKey, hostPublicKey: ssh.hostPublicKey }
       const hello = await this.peer(pinned, async (_peer, hello) => hello)
-      if (hello.machineId === this.hello.machineId || [...registry.hosts, ...registry.unknown].some((host) => host.machineId === hello.machineId)) throw new PaddockError("conflict", "This machine identity is already registered.")
-      const host: HostRecord = { name, ...endpoint, machineId: hello.machineId, addedAt: new Date().toISOString(), diskPolicy: "watched", service: body.service === "systemd" ? "systemd" : "prepared", sshUser: ssh.user, hostKey: ssh.hostKey, hostPublicKey: ssh.hostPublicKey }
+      if (hello.machineId === this.hello.machineId || [...registry.hosts, ...registry.unknown].some((host) => host.name !== previous?.name && host.machineId === hello.machineId)) throw new PaddockError("conflict", "This machine identity is already registered.")
+      const host: HostRecord = { name, ...endpoint, machineId: hello.machineId, addedAt: previous?.addedAt ?? new Date().toISOString(), diskPolicy: "watched", service: body.service === "systemd" ? "systemd" : "prepared", sshUser: ssh.user, hostKey: ssh.hostKey, hostPublicKey: ssh.hostPublicKey }
       beforeWrite?.()
-      await writeHosts(this.dirs, [...registry.entries, host]); return host
+      await writeHosts(this.dirs, previous ? registry.entries.map((entry, index) => recordName(entry, index) === name ? host : entry) : [...registry.entries, host])
+      if (previous) { this.endHost(name, "The host was updated."); this.cache.delete(name) }
+      return host
     })
   }
   remove(body: Record<string, unknown>): Promise<{ removed: string; remoteRetained: true }> {

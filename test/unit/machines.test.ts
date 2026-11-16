@@ -378,3 +378,43 @@ test("the target side answers another machine's primary whatever its own experim
   await machines.openSession({ kind: "exec", name: "demo", argv: ["true"], tty: false, machineId: REMOTE.machineId, bootId: REMOTE.bootId, protocol: 1, version: REMOTE.version, build: REMOTE.sourceDigest } as never, async () => { local++; return {} as never })
   expect(local).toBe(1)
 })
+
+test("an enrollment update rechecks the old record, host key and daemon identity before replacing it", async () => {
+  const dirs = await setup(); let remote = REMOTE; let key = PUBLIC_KEY
+  const io: Partial<MachineIo> = {
+    sshIdentity: async () => ({ user: "builder", hostKey: "SHA256:0X7US8OfQfzxyXkA9yUZy3JjznnQA/iqkCBdPkPPSEQ", hostPublicKey: key }),
+    connectPeer: () => ({ async close() {}, async call() { return remote } }),
+  }
+  const machines = new Machines(dirs, LOCAL, async () => summary(LOCAL), io)
+  const old = await machines.attach(HOST)
+  const path = join(dirs.config, "hosts.json"); const before = await readFile(path, "utf8")
+  const input = { ...old, binary: "/opt/paddock/releases/new/paddock", service: "systemd" }
+  remote = { ...REMOTE, machineId: "1".repeat(32) }
+  await expect(machines.attach(input, undefined, old)).rejects.toMatchObject({ code: "identity-changed" })
+  expect(await readFile(path, "utf8")).toBe(before)
+  remote = REMOTE; key = "different-key"
+  await expect(machines.attach(input, undefined, old)).rejects.toMatchObject({ code: "identity-changed" })
+  expect(await readFile(path, "utf8")).toBe(before)
+  key = PUBLIC_KEY
+  const changed = { ...old, addedAt: "2026-11-12T00:00:00Z" }
+  await expect(machines.attach(input, undefined, changed)).rejects.toThrow("registration changed")
+  expect(await readFile(path, "utf8")).toBe(before)
+  const updated = await machines.attach(input, undefined, old)
+  expect(updated).toMatchObject({ name: old.name, machineId: old.machineId, addedAt: old.addedAt, binary: input.binary, service: "systemd" })
+  expect(JSON.parse(await readFile(path, "utf8")).hosts).toEqual([updated])
+  await machines.close()
+})
+
+test("host list source mismatches name host add with the registered alias and SSH destination", async () => {
+  const dirs = await setup(); let remote = REMOTE
+  const machines = new Machines(dirs, LOCAL, async () => summary(LOCAL), { ...identity,
+    connectPeer: () => ({ async close() {}, async call() { return remote } }),
+  })
+  await machines.attach(HOST)
+  remote = { ...REMOTE, sourceDigest: "1".repeat(64) }
+  const [view] = await machines.list()
+  expect(view).toMatchObject({ state: "incompatible" })
+  expect(view?.error).toContain("paddock host add build --ssh home-linux --artifact PATH --sha256 HASH")
+  expect(view?.error).not.toContain("put it in place")
+  await machines.close()
+})

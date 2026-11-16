@@ -75,7 +75,7 @@ const GROUPS: Array<[string, string[]]> = [
   ["Other machines (experimental, off unless turned on: paddock config set experimental on)", [
     "paddock host list                       registered SSH daemons and their connection state",
     "paddock host add NAME --ssh DEST --artifact PATH --sha256 HASH [--docker] [--sudo ask|never] [--disk-policy watched] [--accept-plan HASH]",
-    "                                        plans, shows the plan, and installs only once it is accepted; --docker lets its sandboxes run Docker inside",
+    "                                        installs or updates the same registered machine only after plan acceptance; --docker lets its sandboxes run Docker inside",
     "paddock host attach NAME --ssh DEST --binary PATH --state-dir PATH   attach an already prepared daemon",
     "paddock host remove NAME --confirm NAME  forget a prepared host; remote files and service stay",
   ]],
@@ -140,7 +140,7 @@ function planLines(plan: HostPlan): string[] {
   const lines = [
     `Enrollment plan for ${shown(plan.options.name)} (${shown(plan.options.ssh)})`,
     `  Machine: ${shown(destination.os.PRETTY_NAME ?? destination.os.ID)} on ${shown(destination.arch)}, account ${shown(destination.user)} (uid ${shown(destination.uid)}), machine id ${shown(destination.machine)}, host key ${shown(destination.hostKey)}`,
-    `  Mode: ${plan.mode === "install" ? "install" : "reuse. Nothing is installed; what is already there is verified and registered"}`,
+    `  Mode: ${plan.mode !== "reuse" ? plan.mode : "reuse. Nothing is installed; what is already there is verified and registered"}`,
     `  Paddock: ${shown(plan.options.artifact.path)} (sha256 ${shown(plan.options.artifact.sha256)}) as ${shown(plan.binary)}; service ${shown(plan.service)}; state in ${shown(plan.stateDir)}`,
     `  Runtime: gVisor ${shown(runtime.release)} registered with Docker as ${shown(runtime.name)}: ${shown([runtime.path, ...runtime.runtimeArgs].map(word).join(" "))}`,
     `  Docker inside sandboxes: ${runtime.innerDocker ? "offered (--docker)" : "not offered (enroll with --docker to offer it)"}`,

@@ -8,7 +8,7 @@ import { compatible, hostName, parseHello, readHosts, type Hello, type HostRecor
 import { HELPER_IMAGE, MANAGED_RUNTIME } from "./providers/gvisor"
 import HELPER_DOCKERFILE from "./providers/helper.Dockerfile" with { type: "text" }
 import { systemRunner, must } from "./run"
-import { hostKeyCapture, HttpPeer, keyFingerprint, object, pinnedKnownHosts, sshArgv, sshDestination, type Endpoint } from "./transport"
+import { hostKeyCapture, HttpPeer, keyFingerprint, object, pinnedKnownHosts, shellQuote, sshArgv, sshDestination, type Endpoint } from "./transport"
 import { PaddockError, type ErrorCode, type Session, type RunResult } from "./types"
 
 // The one gVisor release enrollment installs. Its archive is checked against the SHA-512 the release publishes, and
@@ -257,7 +257,8 @@ export type HostPlan = {
   options: EnrollmentOptions
   destination: HostProbe
   stageDir: string; requestPath: string; stateDir: string; binary: string; service: string
-  mode: "install" | "reuse"
+  mode: "install" | "update" | "reuse"
+  previousHost: HostRecord | null
   runtime: { name: string; release: string; path: string; runtimeArgs: string[]; innerDocker: boolean }
   changes: Change[]; uploads: Upload[]; steps: Step[]
   authentication: string[]
@@ -273,8 +274,12 @@ export type HostPlan = {
   warnings: string[]; blockers: string[]
 }
 
-export function installationPlan(options: EnrollmentOptions, destination: HostProbe, client: Pick<Hello, "version" | "sourceDigest">): HostPlan {
+export function installationPlan(options: EnrollmentOptions, destination: HostProbe, client: Pick<Hello, "version" | "sourceDigest">, previousHost: HostRecord | null = null): HostPlan {
   const stateDir = `/var/lib/paddock/${destination.uid}`
+  if (previousHost && (previousHost.hostPublicKey !== destination.hostPublicKey
+    || !previousHost.hostPublicKey || previousHost.stateDir !== stateDir
+    || !identityRegistered(destination.files[`${stateDir}/machine-id`], [previousHost.machineId])))
+    throw new PaddockError("identity-changed", `${options.name} is registered to another machine, SSH host key or state directory. Nothing was installed. Inspect the destination; remove and enroll explicitly only if you intend to replace it.`)
   const releaseDir = `/opt/paddock/releases/${options.artifact.sha256}`; const binary = `${releaseDir}/paddock`
   const service = `paddock@${destination.uid}.service`
   const stageDir = `/tmp/paddock-enroll-${sha256(`${destination.machine}:${destination.uid}:${options.artifact.sha256}`).slice(0, 24)}`
@@ -455,7 +460,7 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
   }
   const plan = {
     client, options, destination, stageDir, requestPath: `${stageDir}.json`, stateDir, binary, service,
-    mode: reuse ? "reuse" as const : "install" as const,
+    mode: previousHost ? "update" as const : reuse ? "reuse" as const : "install" as const, previousHost,
     runtime: { name: MANAGED_RUNTIME, release: GVISOR_RELEASE, ...entry, innerDocker: options.docker },
     changes, uploads, steps,
     authentication: reuse ? [] : ["sudo", "-v"],
@@ -515,6 +520,9 @@ export function installOutcome(result: RunResult): (Progress & { stale: boolean;
 // progress is undefined when this run installed nothing (a reused service).
 export function enrollmentFailure(plan: HostPlan, progress: Progress | undefined, verifying: boolean, error: unknown): PaddockError {
   const code = error instanceof PaddockError ? error.code : "runtime"; const journal = `${plan.stateDir}/enrollment.json`
+  const registration = plan.previousHost
+    ? `Existing registration retained. To review and retry the update: ${updateCommand(plan.options)}.`
+    : "Host is unregistered."
   const left = verifying ? ` Verification may have left the shared helper image ${HELPER_IMAGE}, the paddock_guard firewall tables or the diagnostic sandbox ${plan.verification.name}; inspect before removal.` : ""
   const leaves = (labels: string[]) => plan.steps.filter((step) => labels.includes(step.label)).flatMap((step) => step.leaves)
   const details = {
@@ -524,10 +532,10 @@ export function enrollmentFailure(plan: HostPlan, progress: Progress | undefined
   }
   // The cause can carry a command's whole output; its start and end are kept, so that what follows is not pushed out.
   const cause = (error as Error).message; const message = cause.length > 1500 ? `${cause.slice(0, 400)} … ${cause.slice(-1000)}` : cause
-  if (!progress) return new PaddockError(code, `${message} Host is unregistered. This run installed nothing; the service it found was left as it is.${left}`, details)
-  if (!progress.completed.length && !progress.started) return new PaddockError(code, `${message} No installation step ran. Host is unregistered.`, details)
+  if (!progress) return new PaddockError(code, `${message} ${registration} This run installed nothing; the service it found was left as it is.${left}`, details)
+  if (!progress.completed.length && !progress.started) return new PaddockError(code, `${message} No installation step ran. ${registration}`, details)
   const interrupted = progress.started ? `${progress.started}, which may also have left: ${leaves([progress.started]).join(", ") || "nothing"}` : "none"
-  return new PaddockError(code, `${message} Host is unregistered. Completed steps: ${JSON.stringify(progress.completed)}. They left, and it is retained: ${leaves(progress.completed).join(", ") || "nothing"}. Interrupted step: ${interrupted}. Journal: ${journal}.${left} No automatic rollback.`, details)
+  return new PaddockError(code, `${message} ${registration} Completed steps: ${JSON.stringify(progress.completed)}. They left, and it is retained: ${leaves(progress.completed).join(", ") || "nothing"}. Interrupted step: ${interrupted}. Journal: ${journal}.${left} No automatic rollback.`, details)
 }
 
 // A daemon whose identity this primary already knows is not enrolled a second time under another name. The identity
@@ -580,7 +588,7 @@ export class Hosts {
   private readonly plans = new Map<string, HostPlan>()
   private applying = false
   private readonly terminals = new Set<Session>()
-  constructor(private readonly machines: Machines) {}
+  constructor(private readonly machines: Machines, private readonly io: Partial<EnrollmentIo> = {}) {}
 
   async plan(body: Record<string, unknown>): Promise<HostPlan> {
     await this.machines.experimental()
@@ -588,9 +596,13 @@ export class Hosts {
     // Hash-check before SSH, and architecture-check again using the actual probe.
     const bytes = new Uint8Array(await Bun.file(options.artifact.path).arrayBuffer())
     if (sha256(bytes) !== options.artifact.sha256) throw new PaddockError("usage", "The local artifact checksum does not match --sha256. Nothing was uploaded or installed.")
-    const destination = await probe(options)
-    await verifyArtifact(options.artifact, destination.arch)
-    const plan = installationPlan(options, destination, { version: this.machines.hello.version, sourceDigest: this.machines.hello.sourceDigest })
+    const destination = await (this.io.probe ?? probe)(options)
+    await (this.io.artifact ?? verifyArtifact)(options.artifact, destination.arch)
+    const registry = await readHosts(this.machines.dirs)
+    if (registry.unknown.some((host) => host.name === options.name))
+      throw new PaddockError("conflict", `${options.name} has an unreadable registration. Restore it or remove it explicitly; nothing was installed.`)
+    const previous = registry.hosts.find((host) => host.name === options.name) ?? null
+    const plan = installationPlan(options, destination, { version: this.machines.hello.version, sourceDigest: this.machines.hello.sourceDigest }, previous)
     if (this.plans.size >= 32) this.plans.delete(this.plans.keys().next().value!)
     this.plans.set(plan.hash, plan)
     return plan
@@ -614,17 +626,17 @@ export class Hosts {
       if (current.blockers.length) throw new PaddockError("dependency", `Enrollment refused before installation: ${current.blockers.join(" ")}`, { plan: current, completed: [] })
       // Check the alias before touching the remote. attach checks it again when committing the registration.
       const registry = await readHosts(this.machines.dirs)
-      if ([...registry.hosts, ...registry.unknown].some((host) => host.name === current.options.name)) throw new PaddockError("conflict", "The host alias is already registered. Nothing was installed.")
-      if (identityRegistered(current.destination.files[`${current.stateDir}/machine-id`], [this.machines.hello, ...registry.hosts].map((host) => host.machineId)))
+      if (!current.previousHost && [...registry.hosts, ...registry.unknown].some((host) => host.name === current.options.name)) throw new PaddockError("conflict", "The host alias is already registered. Nothing was installed.")
+      if (identityRegistered(current.destination.files[`${current.stateDir}/machine-id`], [this.machines.hello, ...registry.hosts.filter((host) => host.name !== current.previousHost?.name)].map((host) => host.machineId)))
         throw new PaddockError("conflict", "This daemon identity is already registered. Nothing was installed.")
 
-      if (current.mode === "install") {
-        const bytes = await verifyArtifact(current.options.artifact, current.destination.arch)
-        const outcome = installOutcome(await this.install(current, bytes, terminal))
+      if (current.steps.length) {
+        const bytes = await (this.io.artifact ?? verifyArtifact)(current.options.artifact, current.destination.arch)
+        const outcome = installOutcome(await (this.io.install ?? this.install.bind(this))(current, bytes, terminal))
         if (!outcome)
           throw new PaddockError(
             "outcome-unknown",
-            "Installation SSH ended without a journal response. Some reviewed changes may have happened; inspect the destination enrollment.json and planned files before retrying. Host is unregistered.",
+            "Installation SSH ended without a journal response. Some reviewed changes may have happened; inspect the destination enrollment.json and planned files before retrying.",
             { journal: `${current.stateDir}/enrollment.json`, plan: current },
           )
         if (outcome.stale) {
@@ -639,13 +651,19 @@ export class Hosts {
       const endpoint: Endpoint = { ssh: current.options.ssh, binary: current.binary, stateDir: current.stateDir, hostKey: current.destination.hostKey, hostPublicKey: current.destination.hostPublicKey }
       terminal?.output(Buffer.from("\r\nVerifying the installed service and smoke sandbox.\r\n"))
       verifying = true
-      await this.verify(endpoint, current, () => terminal?.closed ?? false)
+      await (this.io.verify ?? this.verify.bind(this))(endpoint, current, () => terminal?.closed ?? false)
       if (terminal?.closed) throw new PaddockError("outcome-unknown", "Enrollment terminal disconnected during verification. Nothing was registered.")
-      return await this.machines.attach({ name: current.options.name, ...endpoint, service: "systemd" }, () => {
-        if (terminal?.closed) throw new PaddockError("outcome-unknown", "The terminal disconnected before registration. Nothing was registered.")
-      })
+      try {
+        return await this.machines.attach({ name: current.options.name, ...endpoint, service: "systemd" }, () => {
+          if (terminal?.closed) throw new PaddockError("outcome-unknown", "The terminal disconnected before registration. Nothing was registered.")
+        }, current.previousHost ?? undefined)
+      } catch (error) {
+        throw new PaddockError(error instanceof PaddockError ? error.code : "runtime", `Enrollment registration (SSH identity / hello / registry write) failed: ${(error as Error).message}`)
+      }
     } catch (error) {
-      throw progress || verifying ? enrollmentFailure(old, progress, verifying, error) : error
+      if (progress || verifying) throw enrollmentFailure(old, progress, verifying, error)
+      if (old.previousHost) throw new PaddockError(error instanceof PaddockError ? error.code : "runtime", `${(error as Error).message} Existing registration retained. To review and retry the update: ${updateCommand(old.options)}.`, error instanceof PaddockError ? error.details : undefined)
+      throw error
     } finally { this.applying = false }
   }
 
@@ -687,7 +705,7 @@ export class Hosts {
       }, (error) => {
         if (cancelled) {
           if (error instanceof PaddockError && error.details !== undefined) terminal.output(Buffer.from(terminalDetails(error.details)))
-          terminal.output(Buffer.from("Enrollment cancelled; no host was registered.\r\n"))
+          terminal.output(Buffer.from(this.plans.get(hash)?.previousHost ? "Update cancelled; existing registration retained.\r\n" : "Enrollment cancelled; no host was registered.\r\n"))
           events.emit("end", { code: 130 })
         } else if (!terminal.closed) {
           if (error instanceof PaddockError && error.details !== undefined) terminal.output(Buffer.from(terminalDetails(error.details)))
@@ -737,30 +755,19 @@ export class Hosts {
 
   // The installed service has to answer as the approved build and run a sandbox that passes, before anything is registered.
   private async verify(endpoint: Endpoint, plan: HostPlan, cancelled: () => boolean = () => false): Promise<void> {
-    const peer = new HttpPeer(endpoint)
+    const { peer, hello } = await readyEnrollmentPeer(endpoint, cancelled, this.io.connect, this.io.pause)
     const spec = plan.verification; let created = false
-    const call = (method: string, body: object = {}) => {
+    const call = async (method: string, body: object = {}) => {
       if (cancelled() && method !== "remove") throw new PaddockError("conflict", "Enrollment verification was cancelled.")
-      return peer.call(method, body, { mutation: ["create", "remove", "exec", "verify"].includes(method), timeoutMs: 300_000 })
+      return verificationCall(peer, method, body)
     }
     try {
-      // systemctl start can return before the service has opened its socket.
-      let hello: Hello | undefined
-      for (let at = 0; at < 30; at++) {
-        if (cancelled()) throw new PaddockError("conflict", "Enrollment verification was cancelled.")
-        const check = new HttpPeer(endpoint)
-        try {
-          hello = parseHello(await check.call("hello", {}, { timeoutMs: 5000 }))
-          break
-        } catch { await new Promise((resolve) => setTimeout(resolve, 500)) } finally { await check.close() }
-      }
-      if (!hello) throw new PaddockError("dependency", "The installed daemon did not answer within the startup budget.")
       const identity = plan.destination.files[`${plan.stateDir}/machine-id`]
       compatible(hello, this.machines.hello, identity?.kind === "file" ? identity.text?.trim() : undefined)
       if (hello.buildDigest !== plan.options.artifact.sha256 || hello.service !== "systemd" || hello.listener !== "socket-only")
         throw new PaddockError("incompatible", "Service artifact digest, supervisor or socket-only listener does not match the approved installation.")
 
-      const unit = must(await pinned(plan, (pin) => systemRunner(sshArgv(endpoint.ssh, ["systemctl", "show", plan.service, "--property=ActiveState,UnitFileState,User,SupplementaryGroups,ExecStart"], pin))), "Inspecting the boot service")
+      const unit = this.io.inspectService ? await this.io.inspectService(plan) : must(await pinned(plan, (pin) => systemRunner(sshArgv(endpoint.ssh, ["systemctl", "show", plan.service, "--property=ActiveState,UnitFileState,User,SupplementaryGroups,ExecStart"], pin))), "Inspecting the boot service")
       if (!serviceMatches(unit.stdout, plan.destination.user, plan.binary))
         throw new PaddockError("dependency", `Boot-service inspection did not show ${plan.service} active, permanently enabled, and running ${plan.binary} daemon run as ${plan.destination.user} with SupplementaryGroups=docker.`)
       requireSmokeEngine(await call("engines"), spec.docker)
@@ -780,4 +787,43 @@ export class Hosts {
       try { if (created) await call("remove", { name: spec.name, confirm: spec.name }) } finally { await peer.close() }
     }
   }
+}
+
+export const updateCommand = (options: EnrollmentOptions) => `paddock host add ${options.name} --ssh ${options.ssh} --artifact ${shellQuote(options.artifact.path)} --sha256 ${options.artifact.sha256}${options.docker ? " --docker" : ""} --disk-policy watched${options.sudo === "never" ? " --sudo never" : ""}`
+
+type EnrollmentPeer = Pick<HttpPeer, "call" | "close">
+type EnrollmentIo = {
+  connect: (endpoint: Endpoint) => EnrollmentPeer
+  pause: () => Promise<void>
+  inspectService: (plan: HostPlan) => Promise<RunResult>
+  probe: typeof probe
+  artifact: typeof verifyArtifact
+  install: (plan: HostPlan, bytes: Uint8Array, terminal?: Terminal) => Promise<RunResult>
+  verify: (endpoint: Endpoint, plan: HostPlan, cancelled: () => boolean) => Promise<void>
+}
+
+export async function verificationCall(peer: EnrollmentPeer, method: string, body: object = {}): Promise<unknown> {
+  try { return await peer.call(method, body, { mutation: ["create", "remove", "exec", "verify"].includes(method), timeoutMs: 300_000 }) }
+  catch (error) {
+    throw new PaddockError(error instanceof PaddockError ? error.code : "runtime", `Enrollment verification call ${method} failed: ${(error as Error).message}`, { method, cause: error instanceof PaddockError ? error.details : undefined })
+  }
+}
+
+export async function readyEnrollmentPeer(endpoint: Endpoint, cancelled: () => boolean = () => false,
+  connect: (endpoint: Endpoint) => EnrollmentPeer = (endpoint) => new HttpPeer(endpoint),
+  pause: () => Promise<void> = () => new Promise((resolve) => setTimeout(resolve, 500)),
+): Promise<{ peer: EnrollmentPeer; hello: Hello }> {
+  let last: unknown
+  for (let at = 0; at < 30; at++) {
+    if (cancelled()) throw new PaddockError("conflict", "Enrollment verification was cancelled before hello.")
+    const peer = connect(endpoint)
+    try { return { peer, hello: parseHello(await peer.call("hello", {}, { timeoutMs: 5000 })) } }
+    catch (error) {
+      last = error
+      await peer.close()
+      if (!(error instanceof PaddockError) || error.code !== "offline") break
+      if (at < 29) await pause()
+    }
+  }
+  throw new PaddockError(last instanceof PaddockError ? last.code : "runtime", `Enrollment verification startup call hello failed: ${(last as Error).message}`, { method: "hello" })
 }

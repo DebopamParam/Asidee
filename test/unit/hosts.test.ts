@@ -435,3 +435,179 @@ test("smoke verification requires the managed runtime, a watched disk, the plann
     { ...verified, checks: verified.checks.map((check) => check.id === "net-host" ? { ...check, status: "unknown" } : check) },
   ]) expect(() => requireSmokeVerified(changed, false)).toThrow()
 })
+
+test("startup retries discard failed connections and keep the successful hello connection for smoke calls", async () => {
+  const { readyEnrollmentPeer, verificationCall } = await import("../../core/hosts")
+  const calls: string[] = []; const closed: number[] = []; let connections = 0
+  const hello = { machineId: "a".repeat(32), bootId: "b".repeat(32), sourceDigest: client.sourceDigest, buildDigest: options.artifact.sha256, version: client.version, protocols: [1], methods: [], features: [] }
+  const ready = await readyEnrollmentPeer({ ssh: "build", binary: "/bin/paddock", stateDir: "/state" }, () => false, () => {
+    const id = ++connections
+    return { async close() { closed.push(id) }, async call(method) {
+      calls.push(`${id}:${method}`)
+      if (id === 1) throw new PaddockError("offline", "connect ENOENT /state/daemon.sock")
+      return method === "hello" ? hello : []
+    } }
+  }, async () => {})
+  await verificationCall(ready.peer, "engines")
+  expect(connections).toBe(2)
+  expect(calls).toEqual(["1:hello", "2:hello", "2:engines"])
+  expect(closed).toEqual([1])
+  await ready.peer.close()
+  expect(closed).toEqual([1, 2])
+})
+
+test("startup and smoke failures name their calls and preserve their error code and cause", async () => {
+  const { readyEnrollmentPeer, verificationCall } = await import("../../core/hosts")
+  let attempts = 0; let closed = 0
+  try {
+    await readyEnrollmentPeer({ ssh: "build", binary: "/bin/paddock", stateDir: "/state" }, () => false,
+      () => ({ async close() { closed++ }, async call() { attempts++; throw new PaddockError("offline", "connect ENOENT /state/daemon.sock") } }), async () => {})
+    throw new Error("accepted")
+  } catch (error) {
+    expect(error).toMatchObject({ code: "offline" })
+    expect((error as Error).message).toContain("startup call hello failed: connect ENOENT")
+  }
+  expect(attempts).toBe(30); expect(closed).toBe(30)
+  for (const method of ["engines", "list", "create", "exec", "verify", "remove"]) {
+    await expect(verificationCall({ async close() {}, async call() { throw new PaddockError("outcome-unknown", "lost reply") } }, method)).rejects.toMatchObject({ code: "outcome-unknown", message: `Enrollment verification call ${method} failed: lost reply`, details: { method } })
+  }
+})
+
+async function updateFixture() {
+  const { mkdtemp, mkdir, writeFile, readFile, rm } = await import("node:fs/promises")
+  const { tmpdir } = await import("node:os")
+  const { join } = await import("node:path")
+  const { Machines, CATALOG } = await import("../../core/machines")
+  const { Hosts } = await import("../../core/hosts")
+  const root = await mkdtemp(join(tmpdir(), "pdk-update-"))
+  const dirs = { state: join(root, "s"), config: join(root, "c") }
+  await mkdir(dirs.config)
+  await writeFile(join(dirs.config, "config.json"), JSON.stringify({ experimental: true }))
+  const artifact = join(root, "paddock"); await writeFile(artifact, "fake artifact")
+  const sha256 = new Bun.CryptoHasher("sha256").update("fake artifact").digest("hex")
+  const chosen = { ...options, artifact: { path: artifact, sha256 } }
+  const probe = updated(); probe.files[`/opt/paddock/releases/${sha256}/paddock`] = { kind: "absent" }
+  const machineId = "d".repeat(32)
+  probe.files["/var/lib/paddock/1000/machine-id"] = file(`${machineId}\n`)
+  const remote = { ...client, machineId, bootId: "e".repeat(32), buildDigest: sha256, protocols: [1], methods: Object.keys(CATALOG), features: [], service: "systemd" as const, listener: "socket-only" as const }
+  const previous = { name: options.name, ssh: options.ssh, binary: `/opt/paddock/releases/${options.artifact.sha256}/paddock`, stateDir: "/var/lib/paddock/1000", machineId, addedAt: "2026-11-11T00:00:00Z", diskPolicy: "watched" as const, service: "systemd" as const, hostKey: probe.hostKey, hostPublicKey: probe.hostPublicKey, sshUser: "alice" }
+  const registry = join(dirs.config, "hosts.json")
+  await writeFile(registry, JSON.stringify({ version: 1, hosts: [previous] }))
+  let peerFailure: PaddockError | undefined
+  const machines = new Machines(dirs, { ...remote, machineId: "f".repeat(32) }, async () => ({ hello: remote, sandboxes: [], checkedAt: new Date().toISOString() }), {
+    sshIdentity: async () => ({ user: "alice", hostKey: probe.hostKey, hostPublicKey: probe.hostPublicKey }),
+    connectPeer: () => ({ async close() {}, async call(method) { if (peerFailure) throw peerFailure; return method === "hello" ? remote : { ...remote, sandboxes: [] } } }),
+  })
+  let installs = 0; let verifies = 0; let installFailure = false; let verifyFailure = false
+  const hosts = new Hosts(machines, {
+    probe: async () => probe, artifact: async () => new Uint8Array(),
+    install: async (plan) => { installs++; return { exitCode: installFailure ? 1 : 0, stderr: "", stdout: JSON.stringify(installFailure ? { ok: false, completed: [plan.steps[0]!.label], started: plan.steps[1]!.label, error: "deliberate failure" } : { ok: true, completed: plan.steps.map((step) => step.label) }) } },
+    verify: async () => { verifies++; if (verifyFailure) throw new PaddockError("check-failed", "Enrollment verification call verify failed: deliberate failure") },
+  })
+  return { hosts, machines, chosen, probe, previous, remote, registry, dirs,
+    counts: () => ({ installs, verifies }),
+    failInstall: () => { installFailure = true }, failVerify: () => { verifyFailure = true },
+    failAttach: () => { peerFailure = new PaddockError("offline", "registration hello unavailable") },
+    read: async () => JSON.parse(await readFile(registry, "utf8")).hosts,
+    cleanup: async () => { await machines.close(); await rm(root, { recursive: true, force: true }) },
+  }
+}
+
+test("host add reviews an update, requires acceptance, preserves restart victims and replaces the registration only after verification", async () => {
+  const f = await updateFixture()
+  try {
+    f.probe.containers.out = JSON.stringify({ Names: "paddock-soak", ID: "soak-id", Labels: "dev.paddock.id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,dev.paddock.name=soak" })
+    const plan = await f.hosts.plan(f.chosen)
+    expect(plan).toMatchObject({ mode: "update", previousHost: f.previous, blockers: [], restart: { required: false, service: true } })
+    expect(plan.restart.sandboxes.join(" ")).toContain("soak")
+    expect(plan.changes.some((change) => change.path === "/etc/docker/daemon.json")).toBe(false)
+    expect(f.counts()).toEqual({ installs: 0, verifies: 0 })
+    await expect(f.hosts.apply({ hash: plan.hash })).rejects.toThrow("accepted:true")
+    expect(await f.read()).toEqual([f.previous])
+    const host = await f.hosts.apply({ hash: plan.hash, accepted: true })
+    expect(host).toMatchObject({ binary: plan.binary, machineId: f.previous.machineId, addedAt: f.previous.addedAt })
+    expect(await f.read()).toEqual([host])
+    expect(f.counts()).toEqual({ installs: 1, verifies: 1 })
+  } finally { await f.cleanup() }
+})
+
+test("update planning refuses another machine, another host key and another state directory before installation", async () => {
+  for (const change of ["identity", "key", "state"] as const) {
+    const f = await updateFixture()
+    try {
+      if (change === "identity") f.probe.files["/var/lib/paddock/1000/machine-id"] = file("1".repeat(32))
+      if (change === "key") f.probe.hostPublicKey = "different key"
+      if (change === "state") f.probe.uid = 1001
+      await expect(f.hosts.plan(f.chosen)).rejects.toMatchObject({ code: "identity-changed" })
+      expect(f.counts()).toEqual({ installs: 0, verifies: 0 })
+      expect(await f.read()).toEqual([f.previous])
+    } finally { await f.cleanup() }
+  }
+})
+
+test("changed registry or inventory invalidates update consent and performs no installation", async () => {
+  for (const change of ["registry", "inventory"] as const) {
+    const f = await updateFixture()
+    try {
+      const plan = await f.hosts.plan(f.chosen)
+      if (change === "inventory") f.probe.containers.out = JSON.stringify({ Names: "new", ID: "new" })
+      else await Bun.write(f.registry, JSON.stringify({ version: 1, hosts: [{ ...f.previous, addedAt: "2026-11-12T00:00:00Z" }] }))
+      await expect(f.hosts.apply({ hash: plan.hash, accepted: true })).rejects.toThrow("Consent is stale")
+      expect(f.counts()).toEqual({ installs: 0, verifies: 0 })
+    } finally { await f.cleanup() }
+  }
+})
+
+test("failed installation, smoke verification and registration preserve the old record and name the update command", async () => {
+  for (const fail of ["install", "verify", "attach"] as const) {
+    const f = await updateFixture()
+    try {
+      const plan = await f.hosts.plan(f.chosen)
+      if (fail === "install") f.failInstall()
+      if (fail === "verify") f.failVerify()
+      if (fail === "attach") f.failAttach()
+      try { await f.hosts.apply({ hash: plan.hash, accepted: true }); throw new Error("accepted") }
+      catch (error) {
+        expect((error as Error).message).toContain("Existing registration retained")
+        expect((error as Error).message).toContain(`paddock host add build --ssh alice@build --artifact '${f.chosen.artifact.path}' --sha256 ${f.chosen.artifact.sha256}`)
+        expect((error as Error).message).not.toContain("Host is unregistered")
+      }
+      expect(await f.read()).toEqual([f.previous])
+    } finally { await f.cleanup() }
+  }
+})
+
+test("real enrollment verification waits for hello and uses that connection through smoke cleanup", async () => {
+  const { Hosts } = await import("../../core/hosts")
+  const f = await updateFixture(); const calls: string[] = []; let connections = 0; const closed: number[] = []
+  try {
+    const hosts = new Hosts(f.machines, {
+      probe: async () => f.probe, artifact: async () => new Uint8Array(), pause: async () => {},
+      install: async (plan) => ({ exitCode: 0, stderr: "", stdout: JSON.stringify({ ok: true, completed: plan.steps.map((step) => step.label) }) }),
+      inspectService: async (plan) => ({ exitCode: 0, stderr: "", stdout: `User=alice\nSupplementaryGroups=docker\nActiveState=active\nUnitFileState=enabled\nExecStart={ path=${plan.binary} ; argv[]=${plan.binary} daemon run ; }` }),
+      connect: () => {
+        const id = ++connections
+        const checks = CHECKLIST.filter((item) => item.blocking).map((item) => ({ id: item.id, status: item.id === "docker" ? "info" : "pass" }))
+        return { async close() { closed.push(id) }, async call(method) {
+          calls.push(`${id}:${method}`)
+          if (id === 1) throw new PaddockError("offline", "connect ENOENT daemon.sock")
+          switch (method) {
+            case "hello": return f.remote
+            case "engines": return [{ id: "gvisor:default", ready: true, data: { runtime: "paddock-runsc" }, capabilities: { diskLimit: "watched", docker: false } }]
+            case "list": return []
+            case "create": return { checks }
+            case "exec": return { exitCode: 0 }
+            case "verify": return { ok: true, checks: [...checks, { id: "disk", status: "weak" }], diskUsedBytes: 1048576 }
+            case "remove": return {}
+            default: throw new Error(`unexpected ${method}`)
+          }
+        } }
+      },
+    })
+    const plan = await hosts.plan(f.chosen)
+    await hosts.apply({ hash: plan.hash, accepted: true })
+    expect(calls).toEqual(["1:hello", "2:hello", "2:engines", "2:list", "2:create", "2:exec", "2:verify", "2:remove"])
+    expect(closed).toEqual([1, 2])
+    expect(connections).toBe(2)
+  } finally { await f.cleanup() }
+})
