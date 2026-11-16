@@ -96,7 +96,10 @@ export async function scanManifests(dirs: Dirs): Promise<{ manifests: Manifest[]
 }
 export const listManifests = async (dirs: Dirs) => (await scanManifests(dirs)).manifests
 
-export type Config = { defaults: Partial<typeof DEFAULT_SPEC>; engine?: string; requireProbes: boolean }
+// experimental: unproven features (today, other machines), off by default.
+export type Config = { defaults: Partial<typeof DEFAULT_SPEC>; engine?: string; requireProbes: boolean; experimental: boolean }
+// What `configSet` may change, each a boolean.
+const SETTINGS = ["requireProbes", "experimental"] as const
 // A config file with a mistake stops the request and says where, instead of being quietly ignored.
 async function configFile(dirs: Dirs): Promise<Record<string, unknown>> {
   const file = join(dirs.config, "config.json")
@@ -115,24 +118,24 @@ function parseConfig(dirs: Dirs, data: Record<string, unknown>): Config {
   const file = join(dirs.config, "config.json")
   const wrong = (problem: string): never => { throw new PaddockError("usage", `${file} has a mistake: ${problem}. Fix it or delete it.`) }
   const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
-  if (data.requireProbes !== undefined && typeof data.requireProbes !== "boolean") wrong("requireProbes must be a boolean (true or false)")
+  for (const key of SETTINGS) if (data[key] !== undefined && typeof data[key] !== "boolean") wrong(`${key} must be a boolean (true or false)`)
   if (data.defaults !== undefined && !isObject(data.defaults)) wrong("defaults must be an object")
   if (data.engine !== undefined && typeof data.engine !== "string") wrong("engine must be an engine id, as `paddock doctor` prints it")
   const defaults = (data.defaults ?? {}) as Record<string, unknown>
   // The defaults pass the same validation as a request, so config cannot set what a request cannot.
   try { validSpec({ ...defaults, name: "x" }) } catch (error) { wrong(`in defaults, ${(error as Error).message.replace(/^./, (first) => first.toLowerCase()).replace(/\.$/, "")}`) }
   const known = Object.fromEntries(Object.entries(defaults).filter(([key]) => key in DEFAULT_SPEC))
-  return { defaults: known as Partial<typeof DEFAULT_SPEC>, engine: data.engine as string | undefined, requireProbes: data.requireProbes !== false }
+  return { defaults: known as Partial<typeof DEFAULT_SPEC>, engine: data.engine as string | undefined, requireProbes: data.requireProbes !== false, experimental: data.experimental === true }
 }
 
 export async function readConfig(dirs: Dirs): Promise<Config> { return parseConfig(dirs, await configFile(dirs)) }
 
 // The daemon serializes settings writes. Preserve defaults, engine and fields owned by other config consumers.
 export async function writeConfig(dirs: Dirs, input: Record<string, unknown>): Promise<Config> {
-  if (Object.keys(input).some((key) => key !== "requireProbes") || typeof input.requireProbes !== "boolean")
-    throw new PaddockError("usage", "Set requireProbes to a boolean (true or false).")
-  const data = await configFile(dirs)
-  data.requireProbes = input.requireProbes
+  const keys = Object.keys(input)
+  if (!keys.length || keys.some((key) => !(SETTINGS as readonly string[]).includes(key) || typeof input[key] !== "boolean"))
+    throw new PaddockError("usage", "Set requireProbes or experimental to a boolean (true or false).")
+  const data = { ...await configFile(dirs), ...input }
   const config = parseConfig(dirs, data)
   await mkdir(dirs.config, { recursive: true, mode: 0o700 })
   const file = join(dirs.config, "config.json"); const temp = `${file}.tmp-${process.pid}`

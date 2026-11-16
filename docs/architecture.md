@@ -34,14 +34,16 @@ The sandbox is stopped and retained for diagnosis, exactly as for a failed block
 unmeasured probe and its reason, with code `probes-required` (HTTP 422, CLI exit 6). Its `details` remains an array of
 check results. Nonblocking unknown or unsupported checks remain disclosures.
 
-`config.json` has a boolean `requireProbes`, default `true`. `paddock config get` reads the effective configuration;
-`paddock config set require-probes on|off` changes this one setting. Both support `--json` and `--host NAME`.
+`config.json` has a boolean `requireProbes`, default `true`, and a boolean `experimental`, default `false` (see
+[Machines](#machines)). `paddock config get` reads the effective configuration; `paddock config set require-probes on|off`
+and `paddock config set experimental on|off` change one setting each. Both support `--json` and `--host NAME`.
 With `requireProbes: false`, create accepts unknown blocking probes and reports them as unknown, never as passes.
 Failed and unsupported blocking probes still refuse create. The dashboard's **Settings** section has the same toggle.
 A create refused for unknown probes offers **Open settings**, which navigates and focuses the toggle without changing it.
 The sandbox list labels current isolation as **Not verified**; saved checks remain dated history.
 
-The daemon API exposes `configGet` and `configSet`; the latter accepts only `{ "requireProbes": boolean }`.
+The daemon API exposes `configGet` and `configSet`; the latter accepts only `requireProbes` and `experimental`, each a
+boolean, and at least one of them.
 A settings write atomically replaces `config.json` with mode 0600, preserving defaults, engine selection and other fields.
 Writes are serialized within the daemon, and each create reads the current file without a daemon restart.
 Both methods are available over the user socket and on loopback with the dashboard token and accepted Host header.
@@ -492,6 +494,16 @@ Malformed request URLs, including invalid percent encoding in paths or query par
 before routing or reading dashboard files. No parser diagnostic is returned.
 
 ## Machines
+
+Other machines are experimental: `experimental` in `config.json` is off by default, because they are not yet proven on
+enough machines. While it is off, the daemon (in `core/machines.ts` and `core/hosts.ts`, not only the CLI) refuses
+`hostList`, `fleet` (`list --all`), `hostAttach`, `hostRemove`, `hostPlan`, `hostApply`, every request and stream with a
+`host` other than `local`, with code `dependency` (exit 5) and one sentence naming `paddock config set experimental on`.
+Nothing is contacted and `hosts.json` is not changed. Turning the setting off ends the primary's hosted forwards and
+streams. The target side is not gated: requests without a `host`, which another machine's primary sends through
+`paddock transport stdio`, are answered whatever this daemon's setting. Help marks the group experimental and off unless
+turned on, since help may run without a daemon. The dashboard shows no machines. Unit tests and the M and N evals turn
+the setting on themselves; F10 measures the refusal with it off. The rest of this section describes the feature on.
 
 The first Machines unit registers an already prepared daemon with `host attach NAME --ssh DEST --binary PATH
 --state-dir PATH`. It installs nothing. The primary alone writes `CONFIG/hosts.json` atomically, mode 0600. Each

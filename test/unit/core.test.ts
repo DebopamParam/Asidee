@@ -549,13 +549,13 @@ test("a running sandbox that cannot be checked for several passes in a row is st
 
 test("a config file with a mistake is refused by name, and its defaults obey the same limits as a request", async () => {
   const root = await mkdtemp(join(tmpdir(), "paddock-config-")); const dirs = { state: join(root, "state"), config: root }
-  expect(await readConfig(dirs)).toEqual({ defaults: {}, requireProbes: true })
-  for (const bad of ["{ nope", "[]", "null", '{"defaults":"x"}', '{"engine":5}', '{"requireProbes":"off"}', '{"requireProbes":null}', '{"requireProbes":0}', '{"defaults":{"cpus":"lots"}}', '{"defaults":{"image":"--privileged"}}', '{"defaults":{"memoryGb":100000}}']) {
+  expect(await readConfig(dirs)).toEqual({ defaults: {}, requireProbes: true, experimental: false })
+  for (const bad of ['{"experimental":"on"}', '{"experimental":1}', "{ nope", "[]", "null", '{"defaults":"x"}', '{"engine":5}', '{"requireProbes":"off"}', '{"requireProbes":null}', '{"requireProbes":0}', '{"defaults":{"cpus":"lots"}}', '{"defaults":{"image":"--privileged"}}', '{"defaults":{"memoryGb":100000}}']) {
     await writeFile(join(root, "config.json"), bad)
     await expect(readConfig(dirs)).rejects.toThrow("config.json")
   }
   await writeFile(join(root, "config.json"), '{"defaults":{"image":"alpine:3","cpus":1,"privileged":true,"name":"x"},"engine":"gvisor:orbstack"}')
-  expect(await readConfig(dirs)).toEqual({ defaults: { image: "alpine:3", cpus: 1 }, engine: "gvisor:orbstack", requireProbes: true })
+  expect(await readConfig(dirs)).toEqual({ defaults: { image: "alpine:3", cpus: 1 }, engine: "gvisor:orbstack", requireProbes: true, experimental: false })
 })
 
 test("a damaged state file is listed as damaged and the other sandboxes still work", async () => {
@@ -753,6 +753,8 @@ test("settings persist across core and daemon instances, preserve other config a
   expect((await restarted.create({ name: "demo" })).sandbox.status).toBe("running")
   await table.configSet!.run({ requireProbes: true })
   await expect(restarted.create({ name: "other" })).rejects.toMatchObject({ code: "probes-required" })
+  expect(await table.configSet!.run({ experimental: true })).toMatchObject({ requireProbes: true, experimental: true })
+  expect(JSON.parse(await readFile(file, "utf8"))).toEqual({ ...existing, requireProbes: true, experimental: true })
   expect(state.running).toBe(false)
 })
 
@@ -764,6 +766,8 @@ test("settings require a boolean and loopback writes require both token and trus
     expect((await answer(post({ requireProbes: value }), false, 7717)).status).toBe(400)
   }
   expect((await answer(post({ requireProbes: false, engine: "other" }), false, 7717)).status).toBe(400)
+  for (const value of ["on", 1, null]) expect((await answer(post({ experimental: value }), false, 7717)).status).toBe(400)
+  expect((await answer(post({}), false, 7717)).status).toBe(400)
   expect((await answer(post({ requireProbes: false }, { authorization: "" }), false, 7717)).status).toBe(401)
   expect((await answer(post({ requireProbes: false }, { authorization: "Bearer wrong" }), false, 7717)).status).toBe(401)
   expect((await answer(post({ requireProbes: false }, { host: "evil.example:7717" }), false, 7717)).status).toBe(403)
@@ -778,7 +782,7 @@ test("routed create preserves the remote refusal text and code and uses only the
   const fake = fakeProvider({ probe: [] }); const target = await core(fake.provider)
   const remote = new Core([fake.provider], target.dirs, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere", "d".repeat(32))
   const local = await core(fakeProvider().provider)
-  await local.configSet({ requireProbes: false })
+  await local.configSet({ requireProbes: false, experimental: true })
   const hello: Hello = { machineId: "a".repeat(32), bootId: "b".repeat(32), buildDigest: "c".repeat(64), sourceDigest: "e".repeat(64), version: "0.4.0", protocols: [1], features: [], methods: Object.keys(CATALOG) }
   const remoteHello = { ...hello, machineId: remote.machineId }
   const remoteHandle = createHandler({ ...methods(remote, () => {}), hello: { run: async () => remoteHello } }, "remote-token", remote.dirs.config)

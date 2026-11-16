@@ -191,15 +191,16 @@ test("transport stdio hands SSH every byte the daemon sent before it exits, even
 
 test("config get/set route boolean settings and support JSON; invalid commands are refused", async () => {
   const calls: unknown[] = []
-  const paddock = await daemon({ configGet: (body: unknown) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: true } } },
-    configSet: (body: { requireProbes: boolean }) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: body.requireProbes } } } })
-  expect(await paddock("config", "get")).toMatchObject({ code: 0, out: "require-probes on\n" })
+  const paddock = await daemon({ configGet: (body: unknown) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: true, experimental: false } } },
+    configSet: (body: { requireProbes?: boolean; experimental?: boolean }) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: body.requireProbes ?? true, experimental: body.experimental ?? false } } } })
+  expect(await paddock("config", "get")).toMatchObject({ code: 0, out: "require-probes on\nexperimental off\n" })
   expect(await paddock("config", "set", "require-probes", "off")).toMatchObject({ code: 0, out: "require-probes off\n" })
+  expect(await paddock("config", "set", "experimental", "on")).toMatchObject({ code: 0, out: "experimental on\n" })
   const json = await paddock("--host", "build", "config", "set", "require-probes", "on", "--json")
-  expect(JSON.parse(json.out)).toEqual({ ok: true, data: { defaults: {}, requireProbes: true } })
-  expect(calls).toEqual([{}, { requireProbes: false }, { host: "build", requireProbes: true }])
+  expect(JSON.parse(json.out)).toEqual({ ok: true, data: { defaults: {}, requireProbes: true, experimental: false } })
+  expect(calls).toEqual([{}, { requireProbes: false }, { experimental: true }, { host: "build", requireProbes: true }])
   expect(JSON.parse((await paddock("config", "get", "--json")).out).data.requireProbes).toBe(true)
-  for (const args of [["get", "extra"], ["set", "require-probes", "false"], ["set", "require-probes"], ["set", "bogus", "on"]]) {
+  for (const args of [["get", "extra"], ["set", "require-probes", "false"], ["set", "require-probes"], ["set", "bogus", "on"], ["set", "experimental", "yes"]]) {
     expect((await paddock("config", ...args)).code).toBe(2)
   }
 })
@@ -288,6 +289,10 @@ test("help is grouped by task, and each command answers --help with its own usag
   const paddock = await daemon({})
   const top = await paddock("help")
   for (const group of ["Start here", "Use a sandbox", "Reach in", "Change a sandbox", "Settings", "Other machines"]) expect(top.out).toContain(`\n${group}`)
+  // Help may run without a daemon, so it says what is true either way: experimental, off unless turned on.
+  expect(top.out).toContain("\nOther machines (experimental, off unless turned on: paddock config set experimental on)\n")
+  expect(top.out).toContain("paddock config set experimental on|off")
+  expect(top.out).toContain("--host NAME   select a registered machine (experimental)")
   const usage = async (...args: string[]) => { const result = await paddock(...args); expect(result.code).toBe(0); return result.out }
   for (const [args, has, lacks] of [
     [["create", "--help"], "paddock create NAME", "paddock remove"],

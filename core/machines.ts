@@ -4,7 +4,7 @@ import { join } from "node:path"
 import type { Server } from "node:net"
 import type { SandboxView } from "./core"
 import { boundPort, LEASE_RENEW_MS, LEASE_TTL_MS, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
-import { validName, validSpec, type Dirs } from "./state"
+import { readConfig, validName, validSpec, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
 import { addInclude, alias, editorKey, included, includeLine, parseSshSetup, remoteAliases, updateRemoteAlias, userConfig } from "./ssh"
 import { absolutePath, bounded, enrolledKeyHelp, hostPublicKey, HttpPeer, keyFingerprint, KILL_GRACE_MS, MUTATION_DEADLINE_MS, object, PROTOCOL, RemoteSession, sshDestination, sshIdentity, type Endpoint } from "./transport"
@@ -24,6 +24,7 @@ export const CATALOG = {
   sshPrepare: ["socket", "write"],
 } as const
 export type MethodName = keyof typeof CATALOG
+export const EXPERIMENTAL_OFF = "Other machines are experimental and off on this machine: they are not yet proven on enough machines. To turn them on: paddock config set experimental on"
 export const isMethod = (method: string): method is MethodName => Object.hasOwn(CATALOG, method)
 export const mutates = (method: MethodName) => CATALOG[method][1] === "write"
 
@@ -204,7 +205,7 @@ export function parseSummary(value: unknown, hello: Hello): MachineSummary {
 const withRow = (shape: Shape) => (value: unknown, hello: Hello) => { shaped(shape)(value); return { ...(value as object), sandbox: parseRow((value as { sandbox: unknown }).sandbox, hello) } }
 const REPLIES: Partial<Record<MethodName, (value: unknown, hello: Hello) => unknown>> = {
   version: shaped({ version: "string" }), hello: (value) => parseHello(value), checklist: shaped([{ id: "string", title: "string" }]), summary: (value, hello) => parseSummary(value, hello),
-  configGet: shaped({ defaults: "object", requireProbes: "boolean" }), configSet: shaped({ defaults: "object", requireProbes: "boolean" }),
+  configGet: shaped({ defaults: "object", requireProbes: "boolean", "experimental?": "boolean" }), configSet: shaped({ defaults: "object", requireProbes: "boolean", "experimental?": "boolean" }),
   engines: shaped([ENGINE]), list: (value, hello) => { if (!Array.isArray(value)) throw new Error("its shape"); return value.map((entry, index) => parseRow(entry, hello, index)) },
   get: (value, hello) => parseRow(value, hello), start: (value, hello) => parseRow(value, hello), stop: (value, hello) => parseRow(value, hello),
   create: withRow({ sandbox: "object", checks: [CHECK], hooks: [{ extension: "string", exitCode: "number", output: "string" }] }), remove: shaped({ removed: "string" }),
@@ -254,6 +255,14 @@ export class Machines {
     this.io = { connectPeer: (endpoint) => new HttpPeer(endpoint), openStream: (endpoint, request) => RemoteSession.open(endpoint, request), sshIdentity, ...io }
   }
 
+  // Other machines are experimental: with the setting off, this daemon refuses to act as a primary and contacts no host.
+  // Answering another machine's primary (a request without a host) is not gated.
+  async experimental(): Promise<void> {
+    if (!(await readConfig(this.dirs)).experimental) throw new PaddockError("dependency", EXPERIMENTAL_OFF)
+  }
+  // Turning the setting off ends what still talks to other machines.
+  suspend(): void { for (const name of new Set([...this.forwards.values()].map((forward) => forward.host).concat([...this.sessions.values()]))) this.endHost(name, "Other machines were turned off on this machine.") }
+
   async resolve(host: unknown): Promise<HostRecord> {
     const name = hostName(host)
     const registry = await readHosts(this.dirs)
@@ -285,6 +294,7 @@ export class Machines {
   async route(method: MethodName, body: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
     const { host: selected, ...payload } = body
     if (selected === undefined || selected === "local") return undefined
+    await this.experimental()
     const host = await this.resolve(selected)
     if (body.machineId !== undefined && body.machineId !== host.machineId) throw new PaddockError("identity-changed", `${host.name} is machine ${host.machineId}, not the ${String(body.machineId)} the request names. Nothing was sent.`)
     if (method === "forwardAdd") return this.forwardAdd(host, body, signal)
@@ -344,6 +354,7 @@ export class Machines {
       if (request.protocol !== undefined && (request.protocol !== PROTOCOL || request.version !== this.hello.version || request.build !== this.hello.sourceDigest)) throw new PaddockError("incompatible", "The stream protocol, daemon version or build differs.")
       return local(request)
     }
+    await this.experimental()
     const host = await this.resolve(request.host); const epoch = this.epoch(host.name)
     if (request.machineId !== undefined && request.machineId !== host.machineId) throw new PaddockError("identity-changed", `${host.name} is machine ${host.machineId}, not the ${request.machineId} the session names. Nothing was opened.`)
     return this.peer(host, async (peer, hello) => {
@@ -425,6 +436,7 @@ export class Machines {
   }
   attach(body: Record<string, unknown>, beforeWrite?: () => void): Promise<HostRecord> {
     return this.edit(async () => {
+      await this.experimental()
       const name = hostName(body.name); const registry = await readHosts(this.dirs)
       if ([...registry.hosts, ...registry.unknown].some((host) => host.name === name)) throw new PaddockError("conflict", `${name} is already registered. Remove it explicitly before enrolling another machine.`)
       const endpoint = { ssh: sshDestination(body.ssh), binary: absolutePath(body.binary), stateDir: absolutePath(body.stateDir) }
@@ -441,6 +453,7 @@ export class Machines {
   }
   remove(body: Record<string, unknown>): Promise<{ removed: string; remoteRetained: true }> {
     return this.edit(async () => {
+      await this.experimental()
       const name = hostName(body.name); const registry = await readHosts(this.dirs)
       if (![...registry.hosts, ...registry.unknown].some((host) => host.name === name)) throw new PaddockError("not-found", `There is no host ${name}. See \`paddock host list\`.`)
       if (body.confirm !== name) throw new PaddockError("usage", "Confirm removal with --confirm NAME. A prepared daemon and all remote data are retained.")
@@ -467,12 +480,14 @@ export class Machines {
 
   // A host removed while these wait is left out, not reported as a failure of the whole call.
   async list(): Promise<HostView[]> {
+    await this.experimental()
     const registry = await readHosts(this.dirs)
     await Promise.all(registry.hosts.map((host) => this.refresh(host)))
     return [...registry.hosts.flatMap((host) => { const view = this.cache.get(host.name)?.view; return view ? [view] : [] }),
       ...registry.unknown.map((host): HostView => ({ host, state: "unknown-record", error: host.error }))]
   }
   async fleet(refresh?: unknown): Promise<FleetView> {
+    await this.experimental()
     const registry = await readHosts(this.dirs); const hosts = registry.hosts
     if (refresh !== undefined && (typeof refresh !== "string" || !hosts.some((host) => host.name === refresh))) throw new PaddockError("not-found", "No such host to refresh.")
     for (const host of hosts) if (host.name === refresh || Date.now() >= (this.cache.get(host.name)?.retryAt ?? 0)) void this.refresh(host)

@@ -4,6 +4,7 @@ import { connect, createServer, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createHandler } from "../../core/daemon"
+import { Hosts } from "../../core/hosts"
 import { CATALOG, compatible, type MachineIo, hostName, hostOption, machineIdentity, Machines, parseHello, parseHosts, parseSummary, staleSummary, type Hello, type HostRecord, type MachineSummary } from "../../core/machines"
 import { frame, FrameReader, type Frame } from "../../core/stream"
 import { MAX_REPLY, parseReply, RemoteSession, sshArgv, sshDestination, transportCommand } from "../../core/transport"
@@ -14,10 +15,12 @@ const REMOTE: Hello = { ...LOCAL, machineId: "d".repeat(32), bootId: "e".repeat(
 const HOST: HostRecord = { name: "build", ssh: "home-linux", binary: "/opt/paddock/bin", stateDir: "/home/me/state", machineId: REMOTE.machineId, addedAt: "2026-11-11T00:00:00Z", diskPolicy: "watched", service: "prepared" }
 const folders: string[] = []
 afterEach(async () => { for (const folder of folders.splice(0)) await rm(folder, { recursive: true, force: true }) })
-async function setup() {
+// Other machines are experimental, so each test that uses them turns the setting on, as a person would.
+async function setup(experimental = true) {
   const root = await mkdtemp(join(tmpdir(), "pdk-machines-")); folders.push(root)
   const dirs = { state: join(root, "s"), config: join(root, "c") }
   await mkdir(dirs.config)
+  if (experimental) await writeFile(join(dirs.config, "config.json"), JSON.stringify({ experimental: true }))
   return dirs
 }
 const PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEU61N7KJmkiTPSmrOfaemXZu/1hocrAC0WXPcRUyjQ8"
@@ -325,3 +328,53 @@ console.log(Date.now())
   expect(child.exitCode).toBe(0)
   expect(Date.now() - done).toBeLessThan(1000)
 }, 15_000)
+
+test("with experimental off, the daemon refuses host commands and --host and contacts no machine, keeping the registry as it was", async () => {
+  const dirs = await setup(false); const peers = fakePeers(answers()); let streams = 0
+  const registry = JSON.stringify({ version: 1, hosts: [HOST] })
+  await writeFile(join(dirs.config, "hosts.json"), registry)
+  const machines = new Machines(dirs, LOCAL, async () => summary(LOCAL), { ...identity, connectPeer: peers.connectPeer, openStream: async () => { streams++; throw new Error("should not open") } })
+  const ran: string[] = []
+  const table = Object.fromEntries(["hostList", "fleet", "hostAttach", "hostRemove", "hostPlan", "hostApply", "list", "forwardAdd", "sshSetup"].map((method) => [method, { run: async (body: Record<string, unknown>) => {
+    ran.push(method)
+    if (method === "hostList") return machines.list()
+    if (method === "fleet") return machines.fleet()
+    if (method === "hostAttach") return machines.attach(body)
+    if (method === "hostRemove") return machines.remove(body)
+    return "local"
+  } }]))
+  const handle = createHandler(table, "token", dirs.config, machines)
+  const call = async (method: string, body: object) => await (await handle(new Request(`http://paddock/api/${method}`, { method: "POST", body: JSON.stringify(body) }), true, 0)).json() as { ok: boolean; data?: unknown; error?: { code: string; message: string } }
+  const off = { ok: false, error: { code: "dependency" as const, message: "Other machines are experimental and off on this machine: they are not yet proven on enough machines. To turn them on: paddock config set experimental on" } }
+  for (const [method, body] of [["hostList", {}], ["fleet", {}], ["hostAttach", { name: "other", ssh: HOST.ssh, binary: HOST.binary, stateDir: HOST.stateDir }], ["hostRemove", { name: "build", confirm: "build" }], ["list", { host: "build" }], ["forwardAdd", { host: "build", name: "demo", port: 80 }], ["sshSetup", { host: "build", name: "demo" }]] as const)
+    expect(await call(method, body)).toEqual(off)
+  expect(await outcome(machines.openSession({ kind: "exec", name: "demo", argv: ["true"], tty: false, host: "build" }, async () => { throw new Error("local") }))).toEqual(off.error)
+  expect(await outcome(machines.route("get", { host: "build", name: "demo" }))).toEqual(off.error)
+  expect(await call("list", { host: "local" })).toEqual({ ok: true, data: "local" })
+  expect(ran).toEqual(["hostList", "fleet", "hostAttach", "hostRemove", "list"])
+  expect(peers.log.connected).toBe(0); expect(streams).toBe(0)
+  expect(await readFile(join(dirs.config, "hosts.json"), "utf8")).toBe(registry)
+  // On, the same registry is used as before.
+  await writeFile(join(dirs.config, "config.json"), JSON.stringify({ experimental: true }))
+  expect(await call("list", { host: "build" })).toMatchObject({ ok: true, data: [{ name: "demo" }] })
+  expect((await machines.list())[0]).toMatchObject({ state: "online" })
+})
+
+test("hosts refuse enrollment while experimental is off, before reading the artifact", async () => {
+  const dirs = await setup(false)
+  const hosts = new Hosts(new Machines(dirs, LOCAL, async () => summary(LOCAL)))
+  for (const attempt of [hosts.plan({ name: "build", ssh: "home-linux", artifact: { path: "/nonexistent", sha256: "0".repeat(64) } }), hosts.apply({ hash: "0".repeat(64), accepted: true })])
+    expect(await outcome(attempt)).toMatchObject({ code: "dependency", message: expect.stringContaining("paddock config set experimental on") })
+})
+
+test("the target side answers another machine's primary whatever its own experimental setting", async () => {
+  const dirs = await setup(false)
+  const machines = new Machines(dirs, REMOTE, async () => summary())
+  const handle = createHandler({ hello: { run: async () => REMOTE, socketOnly: true }, get: { run: async () => ROW }, summary: { run: async () => summary() } }, "token", dirs.config, machines)
+  const headers = { "x-paddock-machine": REMOTE.machineId, "x-paddock-protocol": "1", "x-paddock-version": REMOTE.version, "x-paddock-build": REMOTE.sourceDigest }
+  for (const method of ["hello", "get", "summary"])
+    expect(await (await handle(new Request(`http://paddock/api/${method}`, { method: "POST", headers, body: JSON.stringify({ name: "demo" }) }), true, 0)).json()).toMatchObject({ ok: true })
+  let local = 0
+  await machines.openSession({ kind: "exec", name: "demo", argv: ["true"], tty: false, machineId: REMOTE.machineId, bootId: REMOTE.bootId, protocol: 1, version: REMOTE.version, build: REMOTE.sourceDigest } as never, async () => { local++; return {} as never })
+  expect(local).toBe(1)
+})

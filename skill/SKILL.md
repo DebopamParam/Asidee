@@ -19,6 +19,7 @@ paddock create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] 
 paddock list
 paddock config get                         # effective settings on the selected machine
 paddock config set require-probes on|off    # require blocking isolation probes at create, default on
+paddock config set experimental on|off      # other machines (host, --host, list --all), default off
 paddock exec NAME [--stdin] -- COMMAND ARG… # exit code, stdout and stderr are the command's; output as text
 paddock exec NAME --stream -- COMMAND ARG…  # raw bytes in and out, no size limit
 paddock start NAME | paddock stop NAME
@@ -38,7 +39,9 @@ Text output of `create` and `resize` counts the checks that held and prints ever
 
 Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed or required probes could not run, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown.
 
-Prepared remote daemons can be attached with `paddock host attach NAME --ssh DEST --binary PATH --state-dir PATH`.
+Other machines are experimental and off by default; while off, `host` commands, `--host NAME` and `list --all` exit 5
+with a sentence naming `paddock config set experimental on`. Ask the user before turning it on. With it on, prepared
+remote daemons can be attached with `paddock host attach NAME --ssh DEST --binary PATH --state-dir PATH`.
 This installs nothing. `paddock host list` refreshes their availability. Add `--host NAME` to buffered sandbox commands
 to select that daemon; names without it always mean local. `paddock list --all` shows each machine, keeping stale
 sandboxes and checks unknown. An unreachable host is not an empty successful list. A version, protocol, source or
@@ -248,8 +251,9 @@ Other files in that folder are served next to it. The page calls `POST /api/METH
 `checklist`, `engines`, `list`, `get`, `create`, `start`, `stop`, `remove`, `verify`, `resize`, `snapshot`, `templateList`,
 `templateRemove`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `sshAccess`, `extensions`, `action`, `summary`,
 `hostList`, `fleet`, `configGet`, `configSet`. `configGet` returns this machine's effective configuration. `configSet`
-accepts only `{ "requireProbes": boolean }`, saves it to `config.json` and returns the new effective configuration; it
-affects later creates, not running sandboxes.
+accepts only `requireProbes` and `experimental`, each a boolean, saves them to `config.json` and returns the new
+effective configuration. `requireProbes` affects later creates, not running sandboxes. With `experimental` off,
+`hostList`, `fleet` and any request with a `host` other than `local` are refused.
 
 Requests can include `host` to select a registered machine. A sandbox's API address is `{host, name}` and its returned
 identity is `{machineId, sandboxId}`. Supply `machineId` too when acting on a previously selected machine: any routed

@@ -29,7 +29,7 @@ const GROUPS: Array<[string, string[]]> = [
     "paddock create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]",
     "paddock shell NAME [-- COMMAND…]       a shell, or one command on a terminal, inside the sandbox",
     "paddock list                           your sandboxes",
-    "paddock list --all                     machines, including unavailable ones and unknown cached sandboxes",
+    "paddock list --all                     machines, including unavailable ones and unknown cached sandboxes (experimental)",
   ]],
   ["Use a sandbox", [
     "paddock exec NAME [--user USER] [--stdin] -- COMMAND…   --stdin sends this command's input, bytes exact, up to 16 MiB;",
@@ -54,6 +54,7 @@ const GROUPS: Array<[string, string[]]> = [
   ["Settings", [
     "paddock config get                     settings on the selected machine",
     "paddock config set require-probes on|off   require blocking isolation probes at create (default on)",
+    "paddock config set experimental on|off     features not yet proven on enough machines: other machines (default off)",
   ]],
   ["Workspaces: on this Mac's own kernel, not a sandbox (macOS only)", [
     "paddock workspace create NAME [--host-temp] [--copy PATH] [--read PATH]… [--path DIR]… [--no-logins | --claude-profile NAME --codex-profile NAME]",
@@ -64,7 +65,7 @@ const GROUPS: Array<[string, string[]]> = [
     "paddock workspace set NAME host-temp on|off   stop first; applies to later processes; shared host temp weakens confinement",
     "paddock workspace remove NAME --confirm NAME",
   ]],
-  ["Other machines", [
+  ["Other machines (experimental, off unless turned on: paddock config set experimental on)", [
     "paddock host list                       registered SSH daemons and their connection state",
     "paddock host add NAME --ssh DEST --artifact PATH --sha256 HASH [--docker] [--sudo ask|never] [--disk-policy watched] [--accept-plan HASH]",
     "                                        plans, shows the plan, and installs only once it is accepted; --docker lets its sandboxes run Docker inside",
@@ -79,7 +80,7 @@ const GROUPS: Array<[string, string[]]> = [
     "paddock transport stdio --protocol 1 [--stream]   internal SSH socket relay; starts nothing",
   ]],
 ]
-const OPTIONS = `  --host NAME   select a registered machine (unqualified names always mean local)
+const OPTIONS = `  --host NAME   select a registered machine (experimental); unqualified names always mean local
   --json   print {"ok":true,"data":…} or {"ok":false,"error":{code,message}}
   --help   after any command, that command's usage`
 const EXITS = "Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed or required probes could not run, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown."
@@ -366,10 +367,12 @@ async function main(argv: string[]): Promise<void> {
       case "config": {
         const { positionals } = parse({})
         const [action, key, value] = positionals
-        if (!((action === "get" && positionals.length === 1) || (action === "set" && positionals.length === 3 && key === "require-probes" && (value === "on" || value === "off"))))
-          throw new PaddockError("usage", "Use paddock config get or paddock config set require-probes on|off.")
-        const config = await call<Config>(action === "get" ? "configGet" : "configSet", action === "get" ? {} : { requireProbes: value === "on" })
-        return out(config, () => console.log(`require-probes ${config.requireProbes ? "on" : "off"}`))
+        const settings: Record<string, keyof Config> = { "require-probes": "requireProbes", experimental: "experimental" }
+        if (!((action === "get" && positionals.length === 1) || (action === "set" && positionals.length === 3 && Object.hasOwn(settings, key!) && (value === "on" || value === "off"))))
+          throw new PaddockError("usage", "Use paddock config get, or paddock config set require-probes|experimental on|off.")
+        const config = await call<Config>(action === "get" ? "configGet" : "configSet", action === "get" ? {} : { [settings[key!]!]: value === "on" })
+        const lines = { "require-probes": config.requireProbes, experimental: config.experimental }
+        return out(config, () => { for (const [name, on] of Object.entries(lines)) if (action === "get" || name === key) console.log(`${name} ${on ? "on" : "off"}`) })
       }
       case "workspace": {
         if (selectedHost && selectedHost !== "local") throw new PaddockError("usage", "Workspaces run on this Mac; --host is not available.")

@@ -583,6 +583,7 @@ export class Hosts {
   constructor(private readonly machines: Machines) {}
 
   async plan(body: Record<string, unknown>): Promise<HostPlan> {
+    await this.machines.experimental()
     const options = enrollmentOptions(body)
     // Hash-check before SSH, and architecture-check again using the actual probe.
     const bytes = new Uint8Array(await Bun.file(options.artifact.path).arrayBuffer())
@@ -596,6 +597,7 @@ export class Hosts {
   }
 
   async apply(body: Record<string, unknown>, terminal?: Terminal): Promise<HostRecord> {
+    await this.machines.experimental()
     if (body.accepted !== true || !digest(body.hash)) throw new PaddockError("usage", "Apply needs accepted:true and the exact reviewed plan hash.")
     const old = this.plans.get(body.hash)
     if (!old) throw new PaddockError("conflict", "Unknown or expired plan. Request and review a new host plan; nothing was changed.")

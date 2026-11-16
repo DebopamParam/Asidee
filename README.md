@@ -62,7 +62,11 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   removed before saving; volumes (inner Docker's images and containers), memory and `/dev/shm` are not saved. Removing
   a template leaves the sandboxes made from it working. See [Templates](docs/architecture.md#templates).
 - The daemon, the CLI with `--json`, a web dashboard, and extensions.
-- Prepared Linux daemons can be registered with `paddock host attach NAME --ssh DEST --binary /absolute/paddock
+- Other machines are **experimental and off by default**: they are not yet proven on enough machines. While off, the
+  daemon refuses every `host` command, `--host NAME` and `list --all`, contacts no registered machine and leaves the
+  registry as it is; `paddock config set experimental on` turns them on. A daemon that another machine reaches over
+  SSH answers it whatever its own setting. With the setting on:
+  Prepared Linux daemons can be registered with `paddock host attach NAME --ssh DEST --binary /absolute/paddock
   --state-dir /absolute/state`. Buffered sandbox operations select one daemon with `--host NAME`, over system SSH to
   its Unix socket. The remote daemon runs its own provider and checks. A different version, protocol, source build or
   machine identity is refused, with how to update the other machine. `paddock host list` reports unreachable machines,

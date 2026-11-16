@@ -1260,6 +1260,23 @@ ev("F06", "Every command prints one line of JSON with --json, for results and fo
   return `${commands.length} commands`
 })
 
+ev("F10", "Other machines are off by default: the daemon refuses host commands and --host with the command that turns them on, before looking up any host", async () => {
+  const refused = (result: { code: number; err: string }) => result.code === 5 && result.err.includes("not yet proven on enough machines") && result.err.includes("paddock config set experimental on")
+  expect((await pdk(["config", "get"])).out.includes("experimental off"), "experimental is not off in a fresh config")
+  for (const argv of [["host", "list"], ["list", "--all"], ["--host", `${PREFIX}-nowhere`, "list"]]) {
+    const result = await pdk(argv)
+    expect(refused(result), `paddock ${argv.join(" ")} answered exit ${result.code}: ${result.err}`)
+  }
+  // The same call through the socket, so the refusal is the daemon's and not only the CLI's.
+  const routed = await socket("list", { host: `${PREFIX}-nowhere` })
+  expect(routed.status === 424 && routed.reply.error!.message.includes("paddock config set experimental on"), `the daemon answered ${routed.status}: ${JSON.stringify(routed.reply)}`)
+  try {
+    expect((await pdk(["config", "set", "experimental", "on"])).out === "experimental on\n", "experimental could not be turned on")
+    const unknown = await pdk(["--host", `${PREFIX}-nowhere`, "list"])
+    expect(unknown.code === 3 && unknown.err.includes("There is no host"), `with experimental on, an unknown host answered exit ${unknown.code}: ${unknown.err}`)
+  } finally { await pdk(["config", "set", "experimental", "off"]) }
+})
+
 ev("F07", "The skill's Paddock commands and flags exist, and it lists exactly the API's methods", async () => {
   const skill = await readFile(join(ROOT, "skill/SKILL.md"), "utf8")
   const commands = new Set([...skill.matchAll(/`?paddock ([a-z]+)(?: (list|run|status|stop))?/g)].map((match) => match[1]!))
@@ -2761,8 +2778,11 @@ const remoteWrite = async (file: string, contents: string) => {
   const result = await remote(["sh", "-c", 'cat > "$1"; chmod 700 "$1"', "write", file], { stdin: contents })
   expect(result.code === 0, `could not write ${file} on the fixture: ${result.err}`)
 }
+// Other machines are experimental; the evals that use them turn them on, as a person would.
+const experimentalOn = async () => expect((await pdk(["config", "set", "experimental", "on"])).code === 0, "experimental could not be turned on")
 async function machineFixture() {
   if (!TEST_HOST) skip("no PADDOCK_EVAL_HOST supplied; a disposable Linux SSH fixture is opt-in")
+  await experimentalOn()
   if (remoteReady) return
   const arch = await remote(["uname", "-m"])
   expect(arch.code === 0, `SSH fixture unreachable: ${arch.err}`)
@@ -3321,6 +3341,7 @@ async function linuxBuild(arch: string, name: string, minify = true) {
   return { artifact, digest: new Bun.CryptoHasher("sha256").update(await readFile(artifact)).digest("hex") }
 }
 async function enrollmentFixture() {
+  await experimentalOn()
   if (enrollmentArtifact) return
   const arch = await enrollRemote(["uname", "-m"])
   expect(arch.code === 0, `enrollment fixture unreachable: ${arch.err}`)
@@ -3361,6 +3382,7 @@ const realSsh = async () => { await pdk(["daemon", "stop"]); await pdk(["list"])
 
 ev("N01", "A read-only host plan against the routing fixture preserves system files, services, installation paths and the running engine, and reports actual Docker restart victims", async () => {
   if (!TEST_HOST) skip("no PADDOCK_EVAL_HOST supplied for read-only planning")
+  await experimentalOn()
   const arch = await remote(["uname", "-m"])
   expect(arch.code === 0, `SSH fixture unreachable: ${arch.err}`)
   const { artifact, digest } = await linuxBuild(arch.out.trim(), "read-only-enrollment-paddock")
@@ -3618,6 +3640,7 @@ ev("N08", "A fresh Ubuntu machine receives exactly the checksum-verified distro 
   expect((await run(["which", "docker"])).code !== 0, "the package fixture must start without Docker")
   const groups = await run(["id", "-Gn"])
   expect(groups.code === 0, groups.err)
+  await experimentalOn()
   const { artifact, digest } = await linuxBuild((await run(["uname", "-m"])).out.trim(), "package-enrollment-paddock")
   const name = `${PREFIX}-packages`; const argv = ["host", "add", name, "--ssh", destination!, "--artifact", artifact, "--sha256", digest]
   const made = await pdkJson(argv)

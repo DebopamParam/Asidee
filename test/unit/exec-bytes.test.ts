@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test"
 import { statSync } from "node:fs"
-import { mkdir, mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -128,6 +128,7 @@ test("buffered sandbox exec delivers stdinBase64 to the engine's exec byte for b
 test("a routed exec carries stdinBase64 to the remote daemon unchanged", async () => {
   const root = await mkdtemp(join(tmpdir(), "pdk-route-")); cleanups.push(() => rm(root, { recursive: true, force: true }))
   const dirs = { state: join(root, "s"), config: join(root, "c") }; await mkdir(dirs.config)
+  await writeFile(join(dirs.config, "config.json"), JSON.stringify({ experimental: true }))
   const local: Hello = { machineId: "a".repeat(32), bootId: "b".repeat(32), buildDigest: "c".repeat(64), sourceDigest: "9".repeat(64), version: "0.4.0", methods: Object.keys(CATALOG), protocols: [1], features: ["machines", "remote-streams", "remote-forwards", "lease-renewal"] }
   const remote: Hello = { ...local, machineId: "d".repeat(32), bootId: "e".repeat(32) }
   const host: HostRecord = { name: "build", ssh: "home-linux", binary: "/opt/paddock/bin", stateDir: "/home/me/state", machineId: remote.machineId, addedAt: "2026-11-11T00:00:00Z", diskPolicy: "watched", service: "prepared" }
