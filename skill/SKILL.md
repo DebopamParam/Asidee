@@ -56,7 +56,9 @@ Remote aliases are `SANDBOX.HOST.paddock`; their private editor key stays on the
 on the primary's 127.0.0.1 and closes when its sandbox run, either daemon or the SSH control stream ends. Each side
 ends it after fifteen seconds without the other's heartbeat; it never reconnects or recreates itself. Its evidence is
 `paddock --host NAME forward list` on the primary, not a check. Add a new forward explicitly after link loss.
-`paddock host add NAME --ssh DEST --artifact PATH --sha256 HASH --json` produces a read-only installation plan. Build the
+`paddock host add NAME --ssh DEST --artifact PATH --sha256 HASH --json` produces a read-only install or update plan. For an enrolled machine, use the same command with the new artifact;
+keep `--docker` to retain inner Docker. Do not remove its registration first. An update refuses changed daemon identity,
+SSH public key or state directory, covers the existing record in consent, and preserves that record on failure. Build the
 Linux artifact explicitly from the same source as the primary. Review every sudo vector and what it leaves, file diff,
 artifact and package checksum, service, watched disk choice, Docker restart victim and sandbox a Paddock service restart
 stops. `--json` never applies. Interactive enrollment needs
@@ -64,13 +66,14 @@ the word `yes`; automation needs `--accept-plan HASH`. A revised plan requires n
 primary's private terminal stream; never put a password in an API body, plan or log. Automation needs noninteractive
 sudo. Registration follows verified artifacts, enabled system service inspection, isolation/disk smoke checks and cleanup.
 Ctrl-C during verification requests cancellation; wait for cleanup and exit 130. Completed installation changes remain,
-and no host is registered (N13). The installed runtime has watched disks. Its sandboxes can run Docker inside only when
+and no new registration is written (N13). An update keeps its existing registration. The installed runtime has watched disks. Its sandboxes can run Docker inside only when
 the host is enrolled with `host add --docker`, which registers gVisor's raw sockets and shows that in the plan. Hard
 disk helpers and disk tools are not installed.
 `--sudo never` can reuse a verified enabled system service in the enrolled layout, and otherwise refuses unattended
 installation. Do not install a user unit or infer reboot behavior from lingering. See [Enroll a Linux host](../docs/host-enrollment.md)
-for build commands, preparation, failure journals and manual uninstall. A refusal or failure must leave this enrollment
-unregistered and report any completed changes. Do not roll back shared packages or overwrite newer unrelated config.
+for build commands, preparation, failure journals and manual uninstall. A failed first enrollment stays unregistered; a failed update retains its existing record and names the command for
+reviewing a retry. A healthy daemon built from the primary's source remains reachable through the retained record.
+A source mismatch in `host list` names `host add` to update it. Verification failures name the failed call. Report completed changes. Do not roll back shared packages or overwrite newer unrelated config.
 `paddock host remove NAME --confirm NAME` forgets primary resources and leaves remote files and services intact. Group M
 needs `PADDOCK_EVAL_HOST`; installation evals additionally require explicit disposable `pdk-enroll-*@orb` fixtures. Never
 run installer, restart or privileged evals on an owner's engine. Read the scorecards for measured results. Reboot

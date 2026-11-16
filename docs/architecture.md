@@ -569,7 +569,8 @@ cannot be rebound implicitly. Attach records the account SSH uses, from `ssh -G`
 its fingerprint (`SHA256:…`), captured as described below; `host list` shows them, with whether the remote daemon has its dashboard
 listener and whether it runs under systemd. Removing a prepared host forgets its entry and cache and ends its open
 sessions and forwards; its remote installation and data are retained. `host add` installs a reviewed Linux system
-service as described below; remote uninstall remains an explicit manual operation.
+service as described below. On the same registered machine, it reviews an update without a separate command or flag.
+Remote uninstall remains an explicit manual operation.
 
 ### The host-key pin
 
@@ -689,7 +690,8 @@ with a dashboard token. The CLI prints the complete plan before consent. `--json
 when an acceptance hash is present. Interactive consent is exactly `yes`; automation supplies `--accept-plan HASH`.
 The hash covers the primary's source/version, destination SSH host key, account, OS/machine/boot identities, relevant
 file bytes and ownership, container inventory, artifacts, package transaction, paths, service, sudo vectors and watched
-disk choice. Docker's current-time field is excluded; installation-relevant engine fields are retained.
+disk choice. For an update, the hash also covers the existing host record. Docker's current-time field is excluded;
+installation-relevant engine fields are retained.
 
 The Python bootstrap probe performs no sudo or destination writes. It needs existing Python 3, glibc and systemd,
 readable system files, established SSH trust and readable Docker inventory when changing an existing engine. Apt
@@ -706,8 +708,9 @@ bytes is refused. Exactly one named Docker runtime is merged, with full before/a
 runtime plans validation, backup, configuration installation and Docker restart. Every running container is listed,
 even with live restore. An unchanged runtime that Docker has loaded plans no Docker restart. Only what is missing is
 planned: a binary, runtime or unit already in place is not installed again. Another artifact plans a restart of the
-Paddock service alone, and the plan names the running sandboxes that restart stops (N17). Each step records what it
-leaves on the host, and the CLI prints the plan as text with the destination's control characters removed.
+Paddock service alone. `host add` on an existing alias shows `Mode: update`, refuses a changed daemon machine ID,
+SSH public key or state directory, and keeps the registration until verification succeeds. The plan names the running sandboxes that restart stops (N17).
+Each step records what it leaves on the host, and the CLI prints the plan as text with the destination's control characters removed.
 
 The daemon re-probes before delivery. The destination probes again after delivery and optional sudo authentication,
 before installation. Changed inputs return a revised plan and invalidate consent. Interactive enrollment opens a
@@ -724,6 +727,17 @@ may have left, without shared-package rollback; a failure before the first step 
 session that reports success and exits nonzero is an unknown outcome and registers nothing (N17).
 `--sudo never` reuses a verified enabled system service in this layout; user-unit installation is conservatively refused
 because its boot behavior is unmeasured. Another prepared layout can still use `host attach`.
+
+Startup verification opens one peer per `hello` attempt and retains the successful peer for smoke calls. Opening a
+separate smoke peer before that wait caused a measured restart race on home-linux: its relay exited with socket ENOENT,
+while a later `hello` succeeded. Startup failures now name `hello` and its last error; smoke failures name the failed call.
+Registration failures name the SSH identity, handshake and registry-write stage.
+
+A successful update atomically replaces the same host record after rechecking its reviewed contents, SSH key and daemon
+identity. Its original `addedAt` is preserved. Failed updates retain the record, report completed changes and print the
+`host add` command for reviewing a retry. The retained endpoint relays to the same socket, so a healthy daemon of the
+primary's source stays usable even after a smoke failure. A daemon from another source is refused; `host list` names
+`host add` to review its update with an explicitly built matching artifact. No automatic rollback is attempted.
 
 Registration follows the artifact/source/protocol handshake, active/enabled service inspection, a ready local engine on
 the runtime `paddock-runsc`, all applicable blocking smoke checks at creation and again after a real disk write with

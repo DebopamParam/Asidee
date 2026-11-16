@@ -1,4 +1,4 @@
-# Enroll a Linux host
+# Enroll or update a Linux host
 
 Build both artifacts explicitly from the same source tree. Choose the Linux target from the destination's architecture.
 `host add` never builds an artifact. These examples use arm64; use `bun-linux-x64` for x86_64.
@@ -43,6 +43,11 @@ The plan is everything an installation would do, in the order it would do it:
   that verification builds on the host, the notes, and the blockers. Nothing is installed while a blocker remains.
 - The plan hash, which covers all of the above.
 
+For an existing registration, run the same `host add NAME` command with the new artifact and checksum. Keep `--docker`
+if you want Docker inside sandboxes. The plan says `Mode: update` and needs the same acceptance as an install. Do not
+remove the registration first. A changed daemon machine ID, SSH public key or state directory is refused before installation.
+The existing registration is covered by the plan hash, so changing it also invalidates consent.
+
 Only what is missing is planned. A host that already has the binary, the runtime or the service unit is not sent them
 again, and Docker restarts only when it has to load a runtime entry it does not have. Enrolling a host again with
 another artifact installs that binary and restarts the Paddock service without restarting Docker. That service restart
@@ -67,8 +72,7 @@ the plan says that sandboxes created with `--docker` then fail their kernel chec
 For interactive enrollment, run the command in a terminal and enter the literal word `yes`. If installation needs
 sudo, its password prompt travels over the private daemon stream to the same SSH terminal used by the installer. The
 password is not part of the JSON API body, plan or journal. Ctrl-C during verification cancels enrollment, waits for
-smoke cleanup and returns 130 with the terminal restored. Completed installation changes stay for inspection; no host
-is registered. Automation uses the reviewed hash:
+smoke cleanup and returns 130 with the terminal restored. Completed installation changes stay for inspection; no new registration is written. An update keeps its existing record. Automation uses the reviewed hash:
 
 ```sh
 dist/paddock host add build --ssh alice@linux --artifact "$PWD/dist/paddock-linux" --sha256 HASH --accept-plan PLAN_HASH
@@ -116,7 +120,13 @@ enablement is inspected; reboot persistence and automatic sandbox recovery are n
 
 ## When it fails
 
-A refusal or failure leaves the host unregistered and says what this run changed:
+A failed first enrollment leaves the host unregistered. A failed update keeps the existing registration and prints the
+`host add` command for reviewing a retry. Installation changes remain for inspection, with no automatic rollback.
+The retained record still uses the same daemon socket. A healthy daemon from the primary's source stays usable through
+that record, including when smoke verification fails. If the remote still runs another source, `host list` reports the
+mismatch and names `host add` to update it. Build the Linux artifact from the primary's source before retrying.
+
+Failure reports say what this run changed:
 
 - Before any step: stale consent says `Nothing was installed` and returns the revised plan, and a delivery that does
   not match its checksum ends with `No installation step ran.`
@@ -124,7 +134,11 @@ A refusal or failure leaves the host unregistered and says what this run changed
   have left, and the journal's path. Nothing is rolled back automatically.
 - During verification of a reused service: `This run installed nothing; the service it found was left as it is.`
 - An installer session that reports every step complete and then ends with a nonzero exit is an unknown outcome, not
-  an enrollment. An SSH loss can leave one too. Inspect the destination journal before retrying.
+  a successful enrollment or update. An SSH loss can leave one too. Inspect the destination journal before retrying.
+
+Startup retries keep the connection whose `hello` succeeds for the remaining smoke calls. A failed startup names
+`hello` and its last error; a failed smoke call names `engines`, `list`, `create`, `exec`, `verify` or `remove`.
+Registration failures identify the SSH identity, handshake and registry-write stage.
 
 If a sandbox with the smoke name is already on the host, kept by an earlier attempt whose reply was lost, enrollment
 does not touch it. The refusal prints the `ssh` command that removes it; run that, then enroll again.
