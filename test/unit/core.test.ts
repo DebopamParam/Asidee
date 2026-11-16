@@ -383,6 +383,7 @@ test("gVisor flags that open the host are recognized in every spelling", () => {
     ["--nvproxy"], ["-nvproxy"], ["--nvproxy=true"], ["--nvproxy-docker"], ["--nvproxy-docker=true"], ["--tpuproxy"], ["-tpuproxy=true"]])
     expect(unsafeRuntimeArgs(args).length).toBe(1)
   expect(gvisorSetup("OrbStack", "aarch64")).toContain("~/.orbstack/config/docker.json")
+  expect(gvisorSetup("OrbStack", "aarch64")).toContain("--net-raw")
   expect(gvisorSetup("Ubuntu 24.04", "x86_64")).toContain("/etc/docker/daemon.json")
 })
 

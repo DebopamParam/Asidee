@@ -455,8 +455,11 @@ export class GvisorProvider implements Provider {
       ...(spec.docker ? [...DOCKER_CAPABILITIES.flatMap((cap) => ["--cap-add", cap]), "--mount", `type=volume,src=${dockerVolume(manifest)},dst=/var/lib/docker,volume-nocopy`, "--user", "0", "--entrypoint", RELAY, spec.image, "sh", "-c", DOCKER_REAPER]
         : ["--entrypoint", RELAY, spec.image, "sh", "-c", REAPER]),
     ], { timeoutMs: 1_800_000 })
-    must(made, /Unable to find image|No such image|pull access denied|manifest unknown|image.*not found|failed to resolve|failed to pull|pulling.*failed/i.test(made.stderr)
-      ? `The engine cannot download the image ${spec.image}` : `Creating ${name}`)
+    if (made.exitCode !== 0 && /Unable to find image|No such image|pull access denied|manifest unknown|image.*not found|failed to resolve|failed to pull|pulling.*failed/i.test(made.stderr)) {
+      const reason = made.stderr.trim().split("\n").find((line) => /Error response from daemon:/.test(line)) ?? made.stderr.trim().split("\n").at(-1) ?? "image unavailable"
+      throw new PaddockError("dependency", `Cannot download image ${spec.image}: ${reason.replace(/^Error response from daemon:\s*/, "").replace(/[.\s]+$/, "")}.`)
+    }
+    must(made, `Creating ${name}`)
   }
 
   private async inspect(manifest: Manifest): Promise<Inspect | undefined> {
@@ -1168,7 +1171,7 @@ export function netPrivate(seen: { guard: GuardState; reached: string[]; metadat
 // What to do on an engine without a usable gVisor runtime. The OrbStack steps are the ones this was developed on.
 export function gvisorSetup(os = "", architecture = ""): string {
   const arch = /arm64|aarch64/.test(architecture) ? "aarch64" : "x86_64"
-  const runtime = (path: string) => `"runtimes": { "runsc": { "path": "${path}", "runtimeArgs": ["--allow-suid", "--overlay2=none"] } }`
+  const runtime = (path: string) => `"runtimes": { "runsc": { "path": "${path}", "runtimeArgs": ["--allow-suid", "--overlay2=none", "--net-raw"] } }`
   const download = `https://storage.googleapis.com/gvisor/releases/release/latest/${arch}/runsc (check it against runsc.sha512 beside it)`
   if (os === "OrbStack") return `1. Download ${download} into a folder under your home, such as ~/.local/share/paddock/gvisor, and make it executable. 2. Add to ~/.orbstack/config/docker.json: ${runtime("/Users/YOU/.local/share/paddock/gvisor/runsc")}. 3. Run \`orb restart docker\` (it stops running containers).`
   return `1. Install gVisor: download ${download} to /usr/local/bin/runsc and make it executable, or follow https://gvisor.dev/docs/user_guide/install/. 2. Add to /etc/docker/daemon.json: ${runtime("/usr/local/bin/runsc")}. 3. Restart the engine, for example \`sudo systemctl restart docker\` (it stops running containers).`

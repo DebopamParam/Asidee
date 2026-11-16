@@ -52,3 +52,10 @@ test("the recovery remove command reports a network that the engine leaves behin
   }
   await expect(new GvisorProvider(run).remove(manifest)).rejects.toThrow("paddock-net-demo")
 })
+
+test("a missing image names the image and engine reason as a dependency problem", async () => {
+  const provider = new GvisorProvider(async (argv) => argv.slice(3)[0] === "create"
+    ? { exitCode: 1, stdout: "", stderr: "Unable to find image 'bad/image:0' locally\nError response from daemon: pull access denied for bad/image, repository does not exist" }
+    : { exitCode: 0, stdout: "", stderr: "" })
+  await expect(provider.create({ ...manifest, spec: { ...manifest.spec, image: "bad/image:0", docker: false } })).rejects.toMatchObject({ code: "dependency", message: "Cannot download image bad/image:0: pull access denied for bad/image, repository does not exist." })
+})

@@ -334,3 +334,6 @@ finishing the work. The CLI prints the list and exact remove commands.
 
 When workspace stop, remove or the disk watch ends a command, its stderr says why before
 the session ends. Signal exits use 128 plus the signal number (137 for SIGKILL).
+
+An image the engine cannot pull is a missing dependency (exit 5). The error names the image
+and the engine's reason. Doctor's manual gVisor recipe includes `--net-raw` for Docker inside.
