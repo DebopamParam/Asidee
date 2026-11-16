@@ -152,7 +152,7 @@ function actionForm(sandbox, extension, action) {
 }
 
 let sandboxes = [], engines = [], workspaces = [], workspaceProblem = "", drawn = ""
-// Rebuilds the page only when what it shows changed, so the 5-second refresh does not wipe a form someone is typing in.
+// Rebuilds the page only when what it shows changed, so the 3-second refresh does not wipe a form someone is typing in.
 function render() {
   const state = JSON.stringify([sandboxes, engines, workspaces, workspaceProblem, extensions, [...open], [...busy], output])
   if (state === drawn) return

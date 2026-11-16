@@ -231,7 +231,7 @@ Restore prior config or service links only if their hashes still match this inst
 |---|---|
 | `paddock host list [--json]` | Aliases, destination, ID, version, service mode, disk policy, last contact, and connection state. |
 | `paddock host remove build --confirm build` | Forget the primary registry entry, cached rows, generated aliases, and primary forwards for this host. Works offline. |
-| `paddock host upgrade build [--artifact PATH --sha256 HASH]` | Produce a new reviewed installation plan. Apply only after consent to that plan. |
+| `paddock host upgrade build [--artifact PATH --sha256 HASH]` | Not built. Use `paddock host add build --ssh DEST --artifact PATH --sha256 HASH` for a reviewed update plan. |
 
 Remove leaves remote Paddock, its service, checks, sandboxes, images, disks, runtime registration, packages, and logs intact.
 It also leaves ordinary SSH config and known-host trust intact. Explain these leftovers before confirmation.
@@ -404,7 +404,8 @@ Loopback is reachable by other processes on the primary, and a browser may conta
 Generate `demo.paddock` for local and `demo.build.paddock` for remote sandboxes.
 `paddock --host build ssh setup demo` prepares guest sshd, generates fresh guest host keys, and installs only the client's public key.
 It also writes a managed primary SSH include and a dedicated known-hosts file, preserving unrelated user config.
-`paddock ssh config` prints the include path and effective alias; `ssh proxy --alias ALIAS` is the internal ProxyCommand.
+`paddock ssh config` is not built. Use `paddock ssh access NAME` for the effective alias and
+`paddock ssh setup NAME --write-config` to write the include; `ssh proxy --alias ALIAS` is the internal ProxyCommand.
 Use an absolute Paddock executable path so GUI apps do not depend on an interactive shell PATH.
 
 1. Editor runs ordinary `ssh demo.build.paddock`, with the primary's dedicated editor private key.
