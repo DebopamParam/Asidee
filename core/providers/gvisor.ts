@@ -73,8 +73,10 @@ ip netns exec reference nft -f /tmp/rules
 ip netns exec reference sh -c 'nft list table inet paddock_guard && nft list table bridge paddock_guard' > /tmp/want
 show > /tmp/have 2>/dev/null || { echo missing; exit 0; }
 cmp -s /tmp/want /tmp/have && echo intact || echo changed`
-// gVisor flags that open a path to the host or switch a limit off. A runtime registered with one is not used.
-const UNSAFE_RUNTIME_ARGS = [/^--network(=|$)(?!sandbox$)/, /^--host-uds(=(?!none$)|$)/, /^--host-fifo(=(?!none$)|$)/, /^--fsgofer-host-uds(=(?!false$)|$)/, /^--TESTONLY/, /^--ignore-cgroups(=(?!false$)|$)/, /^--allow-flag-override(=(?!false$)|$)/]
+// gVisor flags that open a path to the host or switch a limit off. A runtime registered with one is not used. GPU and
+// TPU passthrough (nvproxy, tpuproxy) hand the sandbox a host driver's interface.
+const UNSAFE_RUNTIME_ARGS = [/^--network(=|$)(?!sandbox$)/, /^--host-uds(=(?!none$)|$)/, /^--host-fifo(=(?!none$)|$)/, /^--fsgofer-host-uds(=(?!false$)|$)/, /^--TESTONLY/, /^--ignore-cgroups(=(?!false$)|$)/, /^--allow-flag-override(=(?!false$)|$)/,
+  /^--nvproxy(-docker)?(=(?!false$)|$)/, /^--tpuproxy(=(?!false$)|$)/]
 type RuntimeEntry = { path?: string; runtimeArgs?: string[] }
 export function unsafeRuntimeArgs(args: readonly string[] = []): string[] {
   // "--network host" (two words) is the same flag as "--network=host".

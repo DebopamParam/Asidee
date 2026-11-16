@@ -378,8 +378,9 @@ test("guard rules that could not be read block a start but do not stop a running
 })
 
 test("gVisor flags that open the host are recognized in every spelling", () => {
-  expect(unsafeRuntimeArgs(["--allow-suid", "--overlay2=none", "--net-raw", "--network=sandbox", "--host-uds=none", "--network-processors-per-channel=2", "--ignore-cgroups=false"])).toEqual([])
-  for (const args of [["--network=host"], ["-network=host"], ["--network", "host"], ["--network=none"], ["--host-uds=all"], ["--host-fifo=open"], ["--fsgofer-host-uds"], ["--TESTONLY-unsafe-nonroot"], ["--ignore-cgroups"], ["--allow-flag-override=true"]])
+  expect(unsafeRuntimeArgs(["--allow-suid", "--overlay2=none", "--net-raw", "--network=sandbox", "--host-uds=none", "--network-processors-per-channel=2", "--ignore-cgroups=false", "--nvproxy=false", "-tpuproxy=false"])).toEqual([])
+  for (const args of [["--network=host"], ["-network=host"], ["--network", "host"], ["--network=none"], ["--host-uds=all"], ["--host-fifo=open"], ["--fsgofer-host-uds"], ["--TESTONLY-unsafe-nonroot"], ["--ignore-cgroups"], ["--allow-flag-override=true"],
+    ["--nvproxy"], ["-nvproxy"], ["--nvproxy=true"], ["--nvproxy-docker"], ["--nvproxy-docker=true"], ["--tpuproxy"], ["-tpuproxy=true"]])
     expect(unsafeRuntimeArgs(args).length).toBe(1)
   expect(gvisorSetup("OrbStack", "aarch64")).toContain("~/.orbstack/config/docker.json")
   expect(gvisorSetup("Ubuntu 24.04", "x86_64")).toContain("/etc/docker/daemon.json")
