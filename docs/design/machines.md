@@ -172,7 +172,7 @@ Architecture, libc, package, and systemd compatibility are **unverified U4**.
 | Plan entry shown before consent | Recommended operation and privilege |
 |---|---|
 | Destination and identity | Show resolved SSH user, host-key fingerprint, OS, architecture, machine ID if present, engine, and current containers. |
-| Paddock | Copy checksum-verified release binary to a user staging file, then `sudo install` into `/opt/paddock/releases/<digest>/paddock`. |
+| Paddock | Copy the staged release into a root-owned private directory, check its SHA-256, then install that copy into `/opt/paddock/releases/<digest>/paddock`. |
 | Command path | Root-owned `/usr/local/bin/paddock` selects that release. Preserve an existing unrelated executable by refusing replacement. |
 | Docker if missing | Show exact version, apt repositories, keys, package list, downloads, and `sudo apt-get ...` recipe before executing it. |
 | Docker authority | System unit uses `SupplementaryGroups=docker`. Show that Docker access is effectively host-root authority. No hidden group edits. |

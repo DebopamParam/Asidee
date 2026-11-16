@@ -41,7 +41,7 @@ test("B8/B10: leftover staging cannot block retry and each privileged step refre
       const report = JSON.parse(line!.replace(/^PADDOCK-RESULT /, ""))
       expect(report.ok).toBe(true)
       paths.push(report.stageDir)
-      expect(JSON.parse(calls!)).toEqual([["sudo", "-v"], ["sudo", "-n", "slow"], ["sudo", "-v"], ["sudo", "-n", "next"]])
+      expect(JSON.parse(calls!)).toEqual([["sudo", "-v"], ["sudo", "-v"], ["sudo", "-n", "slow"], ["sudo", "-v"], ["sudo", "-n", "next"]])
     }
     expect(paths[0]).not.toBe(paths[1])
   } finally { await rm(root, { recursive: true, force: true }) }

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { EventEmitter } from "node:events"
 import { createHash } from "node:crypto"
-import { resolve } from "node:path"
+import { basename, resolve } from "node:path"
 import { CHECKLIST } from "./checks"
 import { HOST_APPLY, HOST_PROBE, HOST_REQUEST, HOST_ROOT_STEP } from "./host-scripts"
 import { compatible, hostName, parseHello, readHosts, type Hello, type HostRecord, type Machines } from "./machines"
@@ -749,7 +749,7 @@ export class Hosts {
     const staged = await systemRunner(sshArgv(plan.options.ssh, ["python3", "-c", HOST_REQUEST], pin), { stdin: input, timeoutMs: 120_000 })
     must(staged, "Staging the private enrollment request")
     const requestPath = staged.stdout.trim()
-    if (!/^\/tmp\/paddock-request-[a-zA-Z0-9_-]+$/.test(requestPath)) throw new PaddockError("runtime", "The host did not report a private request path.")
+    if (!requestPath.startsWith("/") || /[\x00-\x1f]/.test(requestPath) || !/^paddock-request-[a-zA-Z0-9_-]+$/.test(basename(requestPath))) throw new PaddockError("runtime", "The host did not report a private request path.")
     if (terminal.closed) throw new PaddockError("outcome-unknown", `Terminal closed after staging ${requestPath}. No installation was started; remove that staging file before retrying.`)
     const argv = sshArgv(plan.options.ssh, ["python3", "-c", HOST_APPLY, requestPath, sha256(input)], pin); argv[1] = "-tt"
     const child = spawn(argv[0]!, argv.slice(1), { stdio: ["pipe", "pipe", "pipe"] }); terminal.child = child

@@ -25,7 +25,8 @@ in the scorecard have installation measurements.
 
 If Docker already exists, its socket and configuration must be readable by the SSH account to plan a runtime change. If
 Docker is absent, usable signed apt metadata must already exist; refreshing it is an owner preparation step. The plan
-then lists the apt sources and the exact packages, versions and checksums, and enrollment adds no repository or key.
+then lists apt source URLs with usernames and passwords removed, hashes of the original source files, and the exact
+packages, versions and checksums. Enrollment adds no repository or key.
 The destination downloads gVisor itself, from `storage.googleapis.com`, so it needs outbound HTTPS.
 
 ## The plan
@@ -41,7 +42,7 @@ The plan is everything an installation would do, in the order it would do it:
   with live restore. Whether the Paddock service restarts, and the running sandboxes that stops.
 - The smoke sandbox that verifies the installation before the host is registered, the Dockerfile of the helper image
   that verification builds on the host, the notes, and the blockers. Nothing is installed while a blocker remains.
-- The plan hash, which covers all of the above.
+- The plan hash, which covers all of the above, including the root copy/check scripts and their expected digests.
 
 For an existing registration, run the same `host add NAME` command with the new artifact and checksum. Keep `--docker`
 if you want Docker inside sandboxes. The plan says `Mode: update` and needs the same acceptance as an install. Do not
@@ -52,6 +53,12 @@ Only what is missing is planned. A host that already has the binary, the runtime
 again, and Docker restarts only when it has to load a runtime entry it does not have. Enrolling a host again with
 another artifact installs that binary and restarts the Paddock service without restarting Docker. That service restart
 stops the running sandboxes the plan names; start each again with `paddock start`.
+
+Staging directories and interactive request files are created with destination `mkdtemp` and `mkstemp`.
+The plan shows placeholders; apply reports the staging path. Leftovers do not block a retry. Before a privileged
+command uses a staged file, it copies it into a root-owned private directory, checks SHA-256 there and uses
+only that copy. Filenames are preserved for directory installs. The copy is removed after the command.
+An interactive request file is checked against a digest sent separately through the SSH command.
 
 Duration is unknown. Disk limits are watched. No hard disk helper, disk tools or sudoers rule is installed.
 
@@ -71,7 +78,8 @@ the plan says that sandboxes created with `--docker` then fail their kernel chec
 
 For interactive enrollment, run the command in a terminal and enter the literal word `yes`. If installation needs
 sudo, its password prompt travels over the private daemon stream to the same SSH terminal used by the installer. The
-password is not part of the JSON API body, plan or journal. Ctrl-C during verification cancels enrollment, waits for
+password is not part of the JSON API body, plan or journal. Sudo is refreshed before every privileged step,
+so a slow prior step can prompt again instead of failing when the timestamp expires. Ctrl-C during verification cancels enrollment, waits for
 smoke cleanup and returns 130 with the terminal restored. Completed installation changes stay for inspection; no new registration is written. An update keeps its existing record. Automation uses the reviewed hash:
 
 ```sh

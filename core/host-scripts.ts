@@ -241,6 +241,9 @@ try:
         if change['after'] is not None:
             with open(stage + '/' + change['staged'], 'w') as f:
                 f.write(change['after'])
+    if p.get('interactive'):
+        subprocess.run(['sudo', '-v'], check=True, timeout=120)
+
     # Probe again, here and now: the steps below run only on the destination the plan was made for.
     check = subprocess.run(['python3', '-c', p['probeScript']], input=json.dumps(p['probeRequest']).encode(), capture_output=True, timeout=90)
     if check.returncode:
