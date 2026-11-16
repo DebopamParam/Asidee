@@ -4445,6 +4445,23 @@ ev("J09", "With two sandboxes linked both ways, the existing network evals still
   }
 })
 
+ev("J10", "A link broken from inside FROM does not get TO stopped: verify of TO cuts the link and both keep running", async () => {
+  await linkedPair()
+  await inside(JA, `{ echo '127.0.0.9 ${JB}'; cat /etc/hosts; } > /tmp/hosts && cat /tmp/hosts > /etc/hosts`)
+  try {
+    const verified = await pdkJson(["verify", JB], { timeoutMs: 240_000 })
+    const scope = checkOf(verified.reply.data?.checks, "link-scope")
+    expect(scope?.status === "info" && scope.detail.includes("The link was cut.") && scope.detail.includes(`so ${JB} is not stopped for it`), `link-scope: ${JSON.stringify(scope)}`)
+    expect(verified.reply.ok && verified.reply.data?.ok, `verify ${JB} did not pass: ${JSON.stringify(verified.reply.data?.checks?.filter((check: { status: string }) => check.status === "fail"))}`)
+    expect(await running(JB) && await running(JA), "a sandbox was stopped")
+    expect((await linksOf(JA))[0]?.state === "cut" && !(await through(JA, LINK_ADDRESS)).includes("-hi"), `the link is ${JSON.stringify(await linksOf(JA))}`)
+    return `verify ${JB}: ${scope!.detail}`
+  } finally {
+    await inside(JA, `grep -v '^127.0.0.9' /etc/hosts > /tmp/hosts && cat /tmp/hosts > /etc/hosts`)
+    await pdk(["link", "remove", JA, JB, "--port", String(LINK_PORT)])
+  }
+})
+
 ev("Z01", "Nothing is left on the engine or this machine when the run ends", async () => {
   // Control: the scan sees this run's daemon while it runs, so an empty scan after teardown means none is left.
   await pdk(["list"])
