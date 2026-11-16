@@ -7,7 +7,9 @@ root = tempfile.mkdtemp(prefix='paddock-root-')
 try:
     copies = {}
     for source, checksum in checks.items():
-        target = os.path.join(root, str(len(copies)))
+        directory = os.path.join(root, str(len(copies)))
+        os.mkdir(directory, 0o700)
+        target = os.path.join(directory, os.path.basename(source))
         with open(source, 'rb') as incoming, open(target, 'xb') as outgoing:
             shutil.copyfileobj(incoming, outgoing)
         if hashlib.sha256(open(target, 'rb').read()).hexdigest() != checksum:
@@ -278,7 +280,7 @@ finally:
         os.unlink(sys.argv[1])
 `
 
-// Writes stdin to a new private file. It refuses a path that already exists or is a link.
+// Writes stdin to a fresh private request file on the destination and reports its path.
 export const HOST_REQUEST = String.raw`
 import os, sys, shutil, tempfile
 

@@ -31,10 +31,11 @@ test("B8/B10: leftover staging cannot block retry and each privileged step refre
   const root = await mkdtemp(join(tmpdir(), "pdk-apply-"))
   const script = `import sys,json,subprocess,tempfile,types\nx=json.load(sys.stdin)\ntempfile.tempdir=x['root']\np=x['plan']\nsys.stdin=__import__('io').StringIO(json.dumps(p))\ncalls=[]\ndef run(argv,**kw):\n if argv==['sudo','-v']:\n  calls.append(argv); return types.SimpleNamespace(returncode=0,stdout=b'',stderr=b'')\n if argv[0]=='python3': return types.SimpleNamespace(returncode=0,stdout=b'{}',stderr=b'')\n if not calls or calls[-1]!=['sudo','-v']: raise RuntimeError('sudo timestamp expired')\n calls.append(argv)\n return types.SimpleNamespace(returncode=0,stdout=b'',stderr=b'')\nsubprocess.run=run\nexec(x['script'])\nprint(json.dumps(calls))`
   try {
-    const plan = { hash: "x", stageDir: root, stateDir: join(root, "state"), uploads: [], changes: [], interactive: true, probeScript: "", probeRequest: {}, destination: {}, steps: [{ label: "one", argv: ["sudo", "-n", "slow"] }, { label: "two", argv: ["sudo", "-n", "next"] }] }
+    const plan = { hash: "x", stageDir: join(root, "stage"), stateDir: join(root, "state"), uploads: [], changes: [], interactive: true, probeScript: "", probeRequest: {}, destination: {}, steps: [{ label: "one", argv: ["sudo", "-n", "slow"] }, { label: "two", argv: ["sudo", "-n", "next"] }] }
     const paths: string[] = []
     for (let i = 0; i < 2; i++) {
       const result = await python(script, { root, plan, script: HOST_APPLY })
+      expect(result.out).not.toContain("sudo timestamp expired")
       expect(result.code).toBe(0)
       const [line, calls] = result.out.trim().split("\n")
       const report = JSON.parse(line!.replace(/^PADDOCK-RESULT /, ""))
@@ -86,5 +87,17 @@ test("B7: a replaced interactive request is refused before its plan can run", as
     const result = await python(`import sys,json\nx=json.load(sys.stdin)\nsys.argv=['apply',x['path'],'0'*64]\nexec(x['script'])`, { path, script: HOST_APPLY })
     expect(result.code).not.toBe(0)
     expect(result.err).toContain("Enrollment request checksum mismatch")
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test("B7: private copies preserve basenames for install -t", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pdk-install-names-"))
+  try {
+    const source = join(root, "runsc"); const target = join(root, "bin")
+    await writeFile(source, "runtime")
+    const checksum = new Bun.CryptoHasher("sha256").update("runtime").digest("hex")
+    const result = await python(`import sys,json,os\nx=json.load(sys.stdin)\nos.mkdir(x['target'])\nsys.argv=['step',json.dumps({x['source']:x['checksum']}),'python3','-c',"import shutil,sys,os; shutil.copyfile(sys.argv[1],os.path.join(sys.argv[2],os.path.basename(sys.argv[1])))",x['source'],x['target']]\nexec(x['script'])`, { script: HOST_ROOT_STEP, source, target, checksum })
+    expect(result.code).toBe(0)
+    expect(await Bun.file(join(target, "runsc")).exists()).toBe(true)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
