@@ -34,16 +34,18 @@ The sandbox is stopped and retained for diagnosis, exactly as for a failed block
 unmeasured probe and its reason, with code `probes-required` (HTTP 422, CLI exit 6). Its `details` remains an array of
 check results. Nonblocking unknown or unsupported checks remain disclosures.
 
-`config.json` has a boolean `requireProbes`, default `true`, and a boolean `experimental`, default `false` (see
-[Machines](#machines)). `paddock config get` reads the effective configuration; `paddock config set require-probes on|off`
-and `paddock config set experimental on|off` change one setting each. Both support `--json` and `--host NAME`.
+`config.json` has a boolean `requireProbes`, default `true`, a boolean `experimental`, default `false` (see
+[Machines](#machines)), and a number `workspaceFreeSpaceGb`, default 5, from 0 to 100000 (see
+[macOS workspaces](workspaces.md#disk-use-and-free-space)). `paddock config get` reads the effective configuration;
+`paddock config set require-probes on|off`, `paddock config set experimental on|off` and
+`paddock config set workspace-free-space GB` change one setting each. Both support `--json` and `--host NAME`.
 With `requireProbes: false`, create accepts unknown blocking probes and reports them as unknown, never as passes.
 Failed and unsupported blocking probes still refuse create. The dashboard's **Settings** section has the same toggle.
 A create refused for unknown probes offers **Open settings**, which navigates and focuses the toggle without changing it.
 The sandbox list labels current isolation as **Not verified**; saved checks remain dated history.
 
 The daemon API exposes `configGet` and `configSet`; the latter accepts only `requireProbes` and `experimental`, each a
-boolean, and at least one of them.
+boolean, and `workspaceFreeSpaceGb`, a number, and at least one of them.
 A settings write atomically replaces `config.json` with mode 0600, preserving defaults, engine selection and other fields.
 Writes are serialized within the daemon, and each create reads the current file without a daemon restart.
 Both methods are available over the user socket and on loopback with the dashboard token and accepted Host header.
@@ -722,9 +724,13 @@ The `workspaceList`, `workspaceGet`, `workspaceCreate`, `workspaceExec`, `worksp
 existing stream socket with `kind: "workspace"`; remote routes and a requested user are refused. The dashboard's
 read-only summary carries a separate workspace inventory. Dashboard workspace actions remain unavailable to honor
 socket-only authority. Summary reads manifests and tagged-process counts without identity repair, chmod or tree
-walks. CLI list/get alone request live size measurements. The 30-second enforcement pass does no workspace work.
+walks. Of the status views, CLI list/get alone request live size measurements. The 30-second sandbox enforcement pass
+does no workspace work. A separate 30-second pass (`Workspaces.watch`) measures each workspace with running processes
+and stops it, recording `stopReason`, past its watched `diskGb` limit or below the `workspaceFreeSpaceGb` floor; a
+launch measures too, and warns with `diskWarning` (in the buffered exec result, or in the stream's `ready` frame).
+Measurements of one workspace are shared, never run at once. See [macOS workspaces](workspaces.md#disk-use-and-free-space).
 
-Launch runs only blocking checks. Create and verify additionally inspect listeners, logins, hard links, Time Machine
+Launch runs only blocking checks, then `du` for the disk warning. Create and verify additionally inspect listeners, logins, hard links, Time Machine
 and an available ffmpeg hardware-only encode. Verify does not repair directory permissions for its hard-link walk;
 remove does. Policy controls use confined processes with same-operation allowed decisions, and the daemon/socket
 check includes real listeners, in a private fixture and in shared `T`, each with a working outside control. A `--` separator prevents command arguments from

@@ -191,6 +191,8 @@ function render() {
   for (const workspace of workspaces) workspaceList.append(el("div", { class: "panel" },
     el("div", {}, el("span", { class: "name" }, workspace.name), `: workspace, not a sandbox; ${workspace.status}, host-temp ${workspace.spec ? workspace.spec.hostTemp ? "on (shared, weaker)" : "off" : "unknown"}, ${workspace.processes ?? "unknown"} processes`),
     el("div", { class: "muted" }, workspace.folder), workspace.problem ? el("div", { class: "error" }, workspace.problem) : null,
+    workspace.stopReason ? el("div", { class: "error" }, workspace.stopReason) : null,
+    workspace.enforcementProblem ? el("div", { class: "error" }, `Disk watch unknown at ${workspace.enforcementProblem.at}: ${workspace.enforcementProblem.message}`) : null,
     el("div", { class: "muted" }, workspace.disclosure), el("div", { class: "muted" }, "Use paddock workspace in the CLI to stop, verify or remove. Workspace methods are socket-only.")))
   if (workspaceProblem) workspaceList.append(el("div", { class: "panel error" }, `Workspaces unknown: ${workspaceProblem}`))
   else if (!workspaces.length) workspaceList.append(el("div", { class: "panel muted" }, "No workspaces. A workspace is not a sandbox."))

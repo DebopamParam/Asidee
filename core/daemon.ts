@@ -18,7 +18,7 @@ import { serveStream } from "./stream"
 import { PaddockError, type ErrorCode } from "./types"
 import builtInUi from "../ui/index.html" with { type: "text" }
 import pkg from "../package.json"
-import { Workspaces } from "./workspaces"
+import { WORKSPACE_WATCH_MS, Workspaces } from "./workspaces"
 
 // Bun's types describe an .html import as a page bundle; with type "text" it is the file's text.
 const BUILT_IN_UI = builtInUi as unknown as string
@@ -63,7 +63,7 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     summary: { run: async () => ({ hello: machines?.hello, sandboxes: await core.list(), workspaces: process.platform === "darwin" ? await workspaces.summary() : [], checkedAt: new Date().toISOString() }) },
     workspaceList: { run: () => workspaces.list(), socketOnly: true },
     workspaceGet: { run: (body) => workspaces.get(String(body.name), body.withSize !== false), socketOnly: true },
-    workspaceSet: { run: (body) => workspaces.setHostTemp(String(body.name), body.hostTemp), socketOnly: true },
+    workspaceSet: { run: (body) => workspaces.set(String(body.name), body), socketOnly: true },
     workspaceCreate: { run: (body) => workspaces.create(body), socketOnly: true },
     workspaceExec: { run: (body, signal) => workspaces.exec(String(body.name), body.argv, execStdin(body), signal), socketOnly: true },
     workspaceShell: { run: async (body) => ({ workspace: await workspaces.get(String(body.name), false), stream: "workspace", argv: ["/bin/zsh", "-l"] }), socketOnly: true },
@@ -225,12 +225,18 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   const enforce = async () => { if (enforcing) return; enforcing = true; try { await core.enforce() } catch (error) { process.stderr.write(`${JSON.stringify({ event: "enforcement-error", message: (error as Error).message })}\n`) } finally { enforcing = false } }
   void core.sweep().then(enforce)
   const timer = setInterval(() => { void enforce() }, ENFORCE_MS)
+  // Workspaces have a pass of their own, so a slow du never holds up a sandbox's. It does not stop workspaces when the
+  // daemon stops: nothing watches them then, and the docs say so.
+  let watching = false
+  const watch = async () => { if (watching || process.platform !== "darwin") return; watching = true; try { await workspaces.watch() } catch (error) { process.stderr.write(`${JSON.stringify({ event: "workspace-watch-error", message: (error as Error).message })}\n`) } finally { watching = false } }
+  void watch()
+  const watchTimer = setInterval(() => { void watch() }, WORKSPACE_WATCH_MS)
   const keepSandboxes = await new Promise<boolean>((resolve) => {
     stop = resolve
     process.on("SIGTERM", () => resolve(false)); process.on("SIGINT", () => resolve(false))
   })
   stopping = true
-  clearInterval(timer)
+  clearInterval(timer); clearInterval(watchTimer)
   hosts.close()
   core.closeSessions()
   workspaces.closeSessions()

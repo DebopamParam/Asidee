@@ -1,11 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { EventEmitter } from "node:events"
 import { OUTPUT_LIMIT } from "./run"
-import { PaddockError, type RunResult, type Session } from "./types"
+import { PaddockError, type DiskWarning, type RunResult, type Session } from "./types"
 import { signalWorkspacePid } from "./workspace-processes"
 
 export class WorkspaceSession extends EventEmitter implements Session {
   readonly tty: boolean
+  diskWarning?: DiskWarning
   readonly pid: number
   readonly finished: Promise<void>
   private child?: ChildProcessWithoutNullStreams

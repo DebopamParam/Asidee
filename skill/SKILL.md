@@ -20,6 +20,7 @@ paddock list
 paddock config get                         # effective settings on the selected machine
 paddock config set require-probes on|off    # require blocking isolation probes at create, default on
 paddock config set experimental on|off      # other machines (host, --host, list --all), default off
+paddock config set workspace-free-space GB  # below this, workspace launches are refused and running ones stopped, default 5
 paddock exec NAME [--stdin] -- COMMAND ARG… # exit code, stdout and stderr are the command's; output as text
 paddock exec NAME --stream -- COMMAND ARG…  # raw bytes in and out, no size limit
 paddock start NAME | paddock stop NAME
@@ -148,7 +149,9 @@ coverage and limits.
 paddock workspace create NAME --copy /absolute/project [--read PATH] [--path DIR] [--no-logins]
 paddock workspace create NAME --claude-profile work --codex-profile work
 paddock workspace create NAME --host-temp --no-logins
+paddock workspace create NAME --disk GB --no-logins   # watched disk limit, default 20
 paddock workspace set NAME host-temp on|off   # stop first; later processes use the changed profile
+paddock workspace set NAME disk GB            # applies now, also while running
 paddock workspace shell NAME
 paddock workspace exec NAME [--stdin | --stream] -- COMMAND ARG…
 paddock workspace list
@@ -163,7 +166,7 @@ does not confine anything. Copy out wanted files before confirmed removal. A sto
 exec can run again. Use the CLI to stop and remove; never signal PIDs from an environment marker or delete the folder
 before its processes have been identified and ended.
 
-Always describe it as a workspace, not a sandbox. It has the same kernel and user, no resource limits, open internet,
+Always describe it as a workspace, not a sandbox. It has the same kernel and user, no CPU, memory or process limits, open internet,
 LAN, tailnet and loopback, and open reads outside home. Current listeners appear in create/verify; later listeners
 are reachable too. There is no declared-ports option. `--read ~/.ssh`, workspace/state/home ancestors and shared temp
 allowances are refused. By default, writes and installs outside the folder remain refused, including Docker and nix sockets.
@@ -194,8 +197,16 @@ private files inside. Product-path `claude auth status` reported logged in; auth
 unverified. Never log tokens or call a recognised file verified authentication. Paddock passes no flags to change an
 agent's inner sandbox. Describe failures and let the user choose the agent's configuration.
 
-Summary is read-only and does not walk workspace trees. Only explicit list/get requests measure size. Launch runs
-blocking checks only. Informational probes, including the available hardware-only VideoToolbox encode, run on create
+Disk use is watched, not capped. While the daemon runs it measures each workspace with running processes every 30
+seconds (private `tmp` included) and stops them past the `--disk` limit, or when free space where workspaces live
+falls below the `workspace-free-space` floor (statfs available space; purgeable space is not counted). `workspace
+get` and `list` then show the reason, with the two ways out: free space in the folder, or `workspace set NAME disk N`.
+A launch over the limit still runs, so space can be freed from inside, and warns on stderr (`diskWarning` in JSON).
+Below the floor launches are refused. Nothing watches while no daemon runs. Tell the user when a workspace was
+stopped for disk and which way out the reason gives; do not raise a limit or lower the floor without asking.
+
+Summary is read-only and does not walk workspace trees. Of the status views, only explicit list/get requests measure size. Launch runs
+blocking checks only, then `du` for the disk warning. Informational probes, including the available hardware-only VideoToolbox encode, run on create
 and verify. Verify leaves unreadable directories unchanged and reports an unknown hard-link result; remove repairs
 permissions. Do not treat the media encode check as a Metal-compute measurement.
 
@@ -251,7 +262,7 @@ Other files in that folder are served next to it. The page calls `POST /api/METH
 `checklist`, `engines`, `list`, `get`, `create`, `start`, `stop`, `remove`, `verify`, `resize`, `snapshot`, `templateList`,
 `templateRemove`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `sshAccess`, `extensions`, `action`, `summary`,
 `hostList`, `fleet`, `configGet`, `configSet`. `configGet` returns this machine's effective configuration. `configSet`
-accepts only `requireProbes` and `experimental`, each a boolean, saves them to `config.json` and returns the new
+accepts only `requireProbes` and `experimental`, each a boolean, and `workspaceFreeSpaceGb`, a number, saves them to `config.json` and returns the new
 effective configuration. `requireProbes` affects later creates, not running sandboxes. With `experimental` off,
 `hostList`, `fleet` and any request with a `host` other than `local` are refused.
 

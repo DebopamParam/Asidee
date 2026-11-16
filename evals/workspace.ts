@@ -489,6 +489,67 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
     } finally { await drop(ws) }
   })
 
+  // The daemon's workspace pass runs every 30 seconds; a stop is looked for over two and a half of them.
+  const stoppedWithin = async (name: string, seconds = 75) => {
+    for (const end = Date.now() + seconds * 1000; Date.now() < end; await Bun.sleep(1000)) { const view = await json(["get", name]); if (view.stopReason) return view as { status: string; stopReason: string } }
+    throw new Error(`${name} was not stopped within ${seconds} s`)
+  }
+  ev("K31", "Real files past a 1 GB limit get the workspace stopped with a reason, a relaunch is warned, space freed from inside clears it, and remove deletes its private tmp", async () => {
+    const ws = await make(["--disk", "1"]); const notes: string[] = []
+    try {
+      // 1100 MiB of real blocks, then a process that stays, as an agent would.
+      const writer = Bun.spawn([binary, "workspace", "exec", ws.name, "--", "/bin/sh", "-c", 'dd if=/dev/zero of="$PWD/big" bs=1048576 count=1100 2>/dev/null && sleep 300'], { env, stdout: "pipe", stderr: "pipe" })
+      started.push(writer)
+      const began = Date.now(); const view = await stoppedWithin(ws.name)
+      notes.push(`stopped ${((Date.now() - began) / 1000).toFixed(0)} s after the write began`)
+      expect(view.status === "idle" && /^Stopped by the daemon at \S+: k-\d+ uses 1\.0\d GB of its 1 GB disk limit\. Free space in .+, or raise the limit: paddock workspace set k-\d+ disk N$/.test(view.stopReason), `get: ${JSON.stringify(view)}`)
+      const exited = await Promise.race([writer.exited, Bun.sleep(10_000).then(() => "running")])
+      expect(exited !== "running", "the writer's exec was still running after the stop")
+      const listed = await pdk(["workspace", "list"])
+      expect(listed.out.includes(view.stopReason), `list did not show the reason: ${listed.out.slice(0, 500)}`)
+      notes.push(`reason: ${view.stopReason.replace(/^Stopped by the daemon at \S+: /, "")}`)
+      const relaunch = await pdk(["--json", "workspace", "exec", ws.name, "--", "/bin/ls", "big"])
+      const warned = JSON.parse(relaunch.out).data
+      expect(relaunch.code === 0 && warned.diskWarning?.limitBytes === 1024 ** 3 && warned.diskWarning.usedBytes > 1024 ** 3, `JSON relaunch: ${relaunch.out.slice(0, 500)}`)
+      const cleanup = await pdk(["workspace", "exec", ws.name, "--", "/bin/rm", "big"])
+      expect(cleanup.code === 0 && cleanup.err.includes(warned.diskWarning.message), `text relaunch: exit ${cleanup.code}, err ${cleanup.err.slice(0, 500)}`)
+      const after = await pdk(["--json", "workspace", "exec", ws.name, "--", "/usr/bin/true"])
+      const plain = await pdk(["workspace", "exec", ws.name, "--", "/usr/bin/true"])
+      expect(after.code === 0 && JSON.parse(after.out).data.diskWarning === undefined && plain.code === 0 && !plain.err.includes("disk limit"), `after cleanup: ${after.out.slice(0, 300)} ${plain.err.slice(0, 300)}`)
+      expect((await json(["get", ws.name])).stopReason === undefined, "the stop reason stayed after a launch under the limit")
+      // Private tmp is inside the folder, so it is measured and removed with it.
+      const tmp = await pdk(["workspace", "exec", ws.name, "--", "/bin/sh", "-c", 'printf kept > "$TMPDIR/left" && printf %s "$TMPDIR"'])
+      const left = join(ws.folder, "tmp", "left")
+      expect(tmp.out === `${join(ws.folder, "tmp")}/` && await readFile(left, "utf8") === "kept", `TMPDIR ${tmp.out}`)
+      await drop(ws)
+      expect(!await lstat(join(ws.folder, "tmp")).catch(() => undefined) && !await lstat(ws.folder).catch(() => undefined), "remove left the private tmp")
+      notes.push(`TMPDIR was ${tmp.out}; after remove neither it nor the folder exists`)
+      return notes.join("; ")
+    } finally { if (await lstat(ws.folder).catch(() => undefined)) await drop(ws) }
+  })
+
+  ev("K32", "Below the free-space floor a launch is refused with the setting's command and a running workspace is stopped; the floor is restored", async () => {
+    const ws = await make()
+    const before = (JSON.parse((await pdk(["--json", "config", "get"])).out).data as { workspaceFreeSpaceGb: number }).workspaceFreeSpaceGb
+    try {
+      const sleeper = Bun.spawn([binary, "workspace", "exec", ws.name, "--", "/bin/sleep", "300"], { env, stdout: "pipe", stderr: "pipe" }); started.push(sleeper)
+      for (let i = 0; i < 100 && (await json(["get", ws.name])).status !== "running"; i++) await Bun.sleep(100)
+      // Far above this Mac's free space, so the floor is not met.
+      const set = await pdk(["config", "set", "workspace-free-space", "100000"])
+      expect(set.code === 0 && set.out === "workspace-free-space 100000 GB\n", `set: ${set.out}${set.err}`)
+      const refused = await pdk(["workspace", "exec", ws.name, "--", "/usr/bin/true"])
+      const sentence = /This Mac has [\d.]+ GB free where workspaces live, below the 100000 GB floor\. Free space on this Mac, or change the floor: paddock config set workspace-free-space GB/
+      expect(refused.code === 6 && sentence.test(refused.err), `exit ${refused.code}: ${refused.err.slice(0, 600)}`)
+      const view = await stoppedWithin(ws.name)
+      expect(view.status === "idle" && sentence.test(view.stopReason), `get: ${JSON.stringify(view)}`)
+      return `refused with: ${sentence.exec(refused.err)![0]}`
+    } finally {
+      const restored = await pdk(["config", "set", "workspace-free-space", String(before)])
+      expect(restored.code === 0 && restored.out === `workspace-free-space ${before} GB\n`, `the floor was not restored: ${restored.out}${restored.err}`)
+      await drop(ws)
+    }
+  })
+
   return { evals, async close() {
     if (!root) return
     for (const finish of cleanup.reverse()) await finish()

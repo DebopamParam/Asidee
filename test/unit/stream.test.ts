@@ -96,6 +96,17 @@ test("a session relays input, output, stderr, resize and end of input, then the 
   expect(session.sizes).toEqual([[90, 30]]); expect(session.ended).toBe(true)
 })
 
+test("ready carries a session's disk warning, and nothing more when there is none", async () => {
+  const diskWarning = { usedBytes: 2, limitBytes: 1, message: "render uses 2.00 GB of its 1 GB disk limit." }
+  for (const warned of [true, false]) {
+    const session = Object.assign(new Echo(), warned ? { diskWarning } : {})
+    const { talk, close } = await served(async () => session)
+    const got = await talk([frame("open", { kind: "workspace", name: "render", argv: ["cat"] }), frame("eof")])
+    close()
+    expect(JSON.parse(got[0]!.payload.toString())).toEqual(warned ? { tty: false, diskWarning } : { tty: false })
+  }
+})
+
 test("a connection that does not open a session first, sends before ready, or asks for a bad one, gets an error frame", async () => {
   const { talk, close } = await served(async () => { throw new PaddockError("conflict", "demo is not running.") })
   const first = await talk([frame("stdin", "x")])

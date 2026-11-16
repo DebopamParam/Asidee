@@ -155,7 +155,7 @@ export function serveStream(socket: Socket, open: (request: OpenRequest) => Prom
           })
           opened.on("drain", () => { if (inputWaits) { inputWaits = false; socket.resume() } })
           opened.on("end", (exit) => finish(exit.error === undefined ? frame("exit", { code: exit.code ?? -1 }) : failure(exit.error, "runtime")))
-          socket.write(frame("ready", { tty: opened.tty }))
+          socket.write(frame("ready", { tty: opened.tty, ...(opened.diskWarning ? { diskWarning: opened.diskWarning } : {}) }))
           opened.resume()
           socket.resume()
         }, (error) => fail((error as Error).message, error instanceof PaddockError ? error.code : "runtime"))

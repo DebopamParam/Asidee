@@ -6,7 +6,8 @@ import { dirname, join } from "node:path"
 import { blockers, complete, failures, WORKSPACE_CHECKLIST } from "../../core/checks"
 import { belongs, controlledDecision, decision, requireMac, signalWorkspacePid, workspacePids } from "../../core/workspace-processes"
 import { systemRunner } from "../../core/run"
-import { PaddockError, type Runner } from "../../core/types"
+import { writeConfig } from "../../core/state"
+import { PaddockError, type RunResult, type Runner } from "../../core/types"
 import controlProfile from "../../core/workspace-control.sb" with { type: "text" }
 import { WORKSPACE_DISCLOSURE, HOST_TEMP_DISCLOSURE, workspaceDisclosure, workspaceEnvironment, workspaceProfile } from "../../core/workspace-profile"
 import { acquire, canonical, validateRead, validWorkspaceSpec, Workspaces } from "../../core/workspaces"
@@ -20,9 +21,14 @@ const fixture = async () => {
   const state = join(root, "state"); const config = join(root, "config")
   const env = { ...process.env, PADDOCK_WORKSPACES_ROOT: join(root, "workspaces"), CLAUDE_CONFIG_DIR: join(root, "no-claude"), CODEX_HOME: join(root, "no-codex") }
   const commands: string[][] = []
-  const runHost: Runner = (argv, options) => { commands.push([...argv]); return systemRunner(argv, options) }
-  return { root, env, commands, workspaces: new ExplainedWorkspaces({ state, config }, env, { home: root, platform: "linux", runner: async () => { throw new Error("No host command is needed for file fixtures.") } }, runHost), clean: () => rm(root, { recursive: true, force: true }) }
+  // du and free space as a test sets them; left unset, the real ones.
+  const fake: { du?: () => Promise<RunResult>; free?: number } = {}
+  const runHost: Runner = (argv, options) => { commands.push([...argv]); return argv[0] === "/usr/bin/du" && fake.du ? fake.du() : systemRunner(argv, options) }
+  class Faked extends ExplainedWorkspaces { protected override async freeBytes(folder: string) { return fake.free ?? super.freeBytes(folder) } }
+  const dirs = { state, config }
+  return { root, env, dirs, commands, fake, workspaces: new Faked(dirs, env, { home: root, platform: "linux", runner: async () => { throw new Error("No host command is needed for file fixtures.") } }, runHost), clean: () => rm(root, { recursive: true, force: true }) }
 }
+const du = (gb: number, exitCode = 0) => async (): Promise<RunResult> => ({ exitCode, stdout: `${Math.round(gb * 1024 ** 2)}\t/folder\n`, stderr: "" })
 
 mac("K15 finder control: empty workspace matches zero, known processes match exactly, and decoys do not match", async () => {
   const { root, clean } = await fixture(); const children: Bun.Subprocess[] = []
@@ -54,7 +60,9 @@ mac("K15 finder control: empty workspace matches zero, known processes match exa
 })
 
 test("workspace spec drops unknown fields, permits only open loopback, and refuses unsupported platforms", () => {
-  expect(validWorkspaceSpec({ name: "render", reads: ["/a"], privileged: true })).toEqual({ name: "render", hostTemp: false, reads: ["/a"], path: [], loopback: "open", logins: { kind: "profiles", claude: "default", codex: "default" } })
+  expect(validWorkspaceSpec({ name: "render", reads: ["/a"], privileged: true })).toEqual({ name: "render", hostTemp: false, diskGb: 20, reads: ["/a"], path: [], loopback: "open", logins: { kind: "profiles", claude: "default", codex: "default" } })
+  expect(validWorkspaceSpec({ name: "render", diskGb: "3" }).diskGb).toBe(3)
+  for (const diskGb of [0, 2001, "lots", -1]) expect(() => validWorkspaceSpec({ name: "render", diskGb })).toThrow("Disk (GB) must be a number from 1 to 2000.")
   expect(() => validWorkspaceSpec({ name: "../outside" })).toThrow()
   expect(() => validWorkspaceSpec({ name: "render", loopback: [80] })).toThrow("Declared ports")
   expect(() => requireMac("linux")).toThrow("only on macOS")
@@ -63,7 +71,9 @@ test("workspace spec drops unknown fields, permits only open loopback, and refus
 test("workspace checks reuse blocker logic without weakening sandbox checks", () => {
   const missing = complete([], ["config", "runtime", "probe"], "missing", WORKSPACE_CHECKLIST)
   expect(missing.every((check) => check.status === "unknown")).toBe(true)
-  expect(blockers(missing, WORKSPACE_CHECKLIST, false).map((check) => check.id)).toEqual(["seatbelt", "processes"])
+  expect(blockers(missing, WORKSPACE_CHECKLIST, false).map((check) => check.id)).toEqual(["seatbelt", "processes", "free-space"])
+  // The size limit is watched, never a reason to refuse a launch.
+  expect(blockers([{ id: "disk", status: "fail", evidence: "inspected", detail: "over" }], WORKSPACE_CHECKLIST, false)).toEqual([])
   expect(failures([{ id: "writes", status: "fail", evidence: "probed", detail: "outside write" }], WORKSPACE_CHECKLIST)).toHaveLength(1)
   expect(blockers([{ id: "kernel", status: "fail", evidence: "probed", detail: "host" }])).toHaveLength(1)
 })
@@ -221,8 +231,8 @@ mac("launch runs blocking checks only and verify reads hard-link directories wit
     commands.length = 0
     expect((await workspaces.exec("launch", ["/usr/bin/true"])).exitCode).toBe(0)
     expect(await Bun.file(join(home, "information-called")).exists()).toBe(false)
-    // Only the two unconfined listener controls: the private fixture and shared host temp T.
-    expect(commands.map((argv) => argv[0])).toEqual(["/usr/bin/nc", "/usr/bin/nc"])
+    // Only the two unconfined listener controls (the private fixture and shared host temp T), and du for the disk warning.
+    expect(commands.map((argv) => argv[0])).toEqual(["/usr/bin/nc", "/usr/bin/nc", "/usr/bin/du"])
     expect((await stat(closed)).mode & 0o777).toBe(0)
     expect((await workspaces.manifest("launch")).lastVerify?.at).toBe(m.lastVerify?.at)
     const verified = await workspaces.verify("launch")
@@ -488,3 +498,129 @@ mac("a --copy, --read or --path that does not exist is refused in plain words, w
     expect(await lstat(join(root, "workspaces", "absent")).catch(() => undefined)).toBeUndefined()
   } finally { await clean() }
 })
+
+// Waits for a launched command's processes to be found, so a watch pass sees the workspace running.
+const running = async (workspaces: Workspaces, name: string) => { for (let i = 0; i < 100 && (await workspaces.get(name, false)).status !== "running"; i++) await Bun.sleep(20) }
+
+mac("over its disk limit a workspace is stopped by the watch with a reason, warned at launch, and clear again once under", async () => {
+  const { workspaces, fake, clean } = await fixture()
+  try {
+    const made = await workspaces.create({ name: "disk", diskGb: 1, logins: { kind: "none" } })
+    expect(made.workspace.spec?.diskGb).toBe(1)
+    const watched = made.checks.find((check) => check.id === "disk")!
+    expect(watched.status).toBe("weak"); expect(watched.detail).toContain("every 30 seconds"); expect(watched.detail).toContain("Watched, not capped")
+    fake.du = du(2)
+    // A launch over the limit runs, and says so.
+    const warned = await workspaces.exec("disk", ["/bin/echo", "ran"])
+    expect(warned.stdout).toBe("ran\n")
+    expect(warned.diskWarning).toEqual({ usedBytes: 2 * 1024 ** 3, limitBytes: 1024 ** 3, message: `disk uses 2.00 GB of its 1 GB disk limit, so the daemon stops its processes again within about 30 seconds unless space is freed. Free space in ${made.workspace.folder}, or raise the limit: paddock workspace set disk disk N` })
+    const session = await workspaces.open("disk", ["/bin/sleep", "60"], { tty: false }); session.resume()
+    expect(session.diskWarning?.usedBytes).toBe(2 * 1024 ** 3)
+    await running(workspaces, "disk")
+    await workspaces.watch()
+    await session.finished
+    const stopped = await workspaces.get("disk", false)
+    expect(stopped.status).toBe("idle")
+    expect(stopped.stopReason).toMatch(new RegExp(`^Stopped by the daemon at \\S+: disk uses 2\\.00 GB of its 1 GB disk limit\\. Free space in ${made.workspace.folder}, or raise the limit: paddock workspace set disk disk N$`))
+    expect((await workspaces.list())[0]!.stopReason).toBe(stopped.stopReason)
+    expect((await workspaces.verify("disk")).checks.find((check) => check.id === "disk")).toMatchObject({ status: "fail", detail: expect.stringContaining("It uses 2.00 GB now.") })
+    // Under the limit again: no warning, and a launch clears the old reason.
+    fake.du = du(0.5)
+    const clear = await workspaces.exec("disk", ["/usr/bin/true"])
+    expect(clear.diskWarning).toBeUndefined()
+    expect((await workspaces.get("disk", false)).stopReason).toBeUndefined()
+  } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
+}, 30_000)
+
+mac("a workspace whose processes are idle is not measured by the watch, and the limit can change while it runs", async () => {
+  const { workspaces, fake, commands, clean } = await fixture()
+  try {
+    await workspaces.create({ name: "idle", logins: { kind: "none" } })
+    fake.du = du(30); commands.length = 0
+    await workspaces.watch()
+    expect(commands).toEqual([])
+    expect((await workspaces.get("idle", false)).stopReason).toBeUndefined()
+    fake.du = du(0.1)
+    const session = await workspaces.open("idle", ["/bin/sleep", "60"], { tty: false }); session.resume()
+    await running(workspaces, "idle")
+    const changed = await workspaces.set("idle", { diskGb: 3 })
+    expect(changed.spec?.diskGb).toBe(3); expect(changed.status).toBe("running")
+    expect((await workspaces.manifest("idle")).spec.diskGb).toBe(3)
+    await expect(workspaces.set("idle", { diskGb: 0 })).rejects.toThrow("from 1 to 2000")
+    await expect(workspaces.set("idle", { diskGb: 3, hostTemp: true })).rejects.toThrow("one at a time")
+    await expect(workspaces.set("idle", { diskGb: null })).rejects.toThrow("in GB")
+    // Host temp still refuses a live change.
+    await expect(workspaces.set("idle", { hostTemp: true })).rejects.toThrow("Stop the workspace")
+    session.close(); await session.finished
+  } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
+}, 30_000)
+
+mac("a manifest written before disk limits reads with the 20 GB default", async () => {
+  const { workspaces, dirs, clean } = await fixture()
+  try {
+    await workspaces.create({ name: "legacy", logins: { kind: "none" } })
+    const file = join(dirs.state, "workspaces", "legacy.json")
+    const saved = JSON.parse(await readFile(file, "utf8")); delete saved.spec.diskGb; await writeFile(file, JSON.stringify(saved))
+    expect((await workspaces.manifest("legacy")).spec.diskGb).toBe(20)
+  } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
+}, 15_000)
+
+mac("a measurement that fails is unknown, warns in the view, and stops the workspace after four passes in a row", async () => {
+  const { workspaces, fake, clean } = await fixture()
+  try {
+    await workspaces.create({ name: "blind", diskGb: 1, logins: { kind: "none" } })
+    const session = await workspaces.open("blind", ["/bin/sleep", "60"], { tty: false }); session.resume()
+    await running(workspaces, "blind")
+    // A partial total under the limit proves nothing; one over it would.
+    fake.du = du(0.5, 1)
+    for (let pass = 1; pass <= 3; pass++) {
+      await workspaces.watch()
+      const view = await workspaces.get("blind", false)
+      expect(view.status).toBe("running")
+      expect(view.enforcementProblem?.message).toBe(`Its size could not be measured. After 4 such passes in a row its processes are stopped (this is ${pass}).`)
+    }
+    expect((await workspaces.verify("blind")).checks.find((check) => check.id === "disk")?.status).toBe("unknown")
+    await workspaces.watch(); await session.finished
+    const view = await workspaces.get("blind", false)
+    expect(view.status).toBe("idle"); expect(view.enforcementProblem).toBeUndefined()
+    expect(view.stopReason).toMatch(/^Stopped by the daemon at \S+: for 4 passes in a row it could not check disk use\. Its size could not be measured\.$/)
+    // A partial total already over the limit is enough to stop.
+    const again = await workspaces.open("blind", ["/bin/sleep", "60"], { tty: false }); again.resume()
+    await running(workspaces, "blind")
+    fake.du = du(2, 1)
+    await workspaces.watch(); await again.finished
+    expect((await workspaces.get("blind", false)).stopReason).toContain("uses 2.00 GB of its 1 GB disk limit")
+  } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
+}, 30_000)
+
+mac("below the free-space floor launches are refused with the setting's command and running workspaces are stopped", async () => {
+  const { workspaces, fake, dirs, clean } = await fixture()
+  try {
+    await workspaces.create({ name: "floor", logins: { kind: "none" } })
+    const session = await workspaces.open("floor", ["/bin/sleep", "60"], { tty: false }); session.resume()
+    await running(workspaces, "floor")
+    fake.free = 3 * 1024 ** 3
+    const sentence = "This Mac has 3.00 GB free where workspaces live, below the 5 GB floor. Free space on this Mac, or change the floor: paddock config set workspace-free-space GB"
+    const refused = await workspaces.exec("floor", ["/usr/bin/true"]).then(() => undefined, (error: PaddockError) => error)
+    expect(refused?.code).toBe("check-failed"); expect(refused?.message).toContain(`(fail): ${sentence}`)
+    await workspaces.watch(); await session.finished
+    const view = await workspaces.get("floor", false)
+    expect(view.status).toBe("idle"); expect(view.stopReason).toMatch(new RegExp(`^Stopped by the daemon at \\S+: ${sentence.replace(/\./g, "\\.")}$`))
+    // The floor is the machine-wide setting; at 2 GB the same free space is enough.
+    await writeConfig(dirs, { workspaceFreeSpaceGb: 2 })
+    expect((await workspaces.exec("floor", ["/usr/bin/true"])).exitCode).toBe(0)
+  } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
+}, 30_000)
+
+mac("two measurements of one workspace never run at once", async () => {
+  const { workspaces, fake, commands, clean } = await fixture()
+  try {
+    await workspaces.create({ name: "once", logins: { kind: "none" } })
+    let active = 0; let most = 0
+    fake.du = async () => { active++; most = Math.max(most, active); await Bun.sleep(100); active--; return du(0.1)() }
+    commands.length = 0
+    const views = await Promise.all([workspaces.get("once"), workspaces.get("once"), workspaces.list()])
+    expect(most).toBe(1); expect(commands.filter((argv) => argv[0] === "/usr/bin/du")).toHaveLength(1)
+    expect(views[0].sizeBytes).toBe(Math.round(0.1 * 1024 ** 2) * 1024)
+  } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
+}, 15_000)

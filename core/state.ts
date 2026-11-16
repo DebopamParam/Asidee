@@ -42,6 +42,8 @@ function number(value: unknown, label: string, min: number, max: number, fallbac
 // The range of each size, the same for create and resize.
 export type Sizes = Pick<SandboxSpec, "cpus" | "memoryGb" | "pids" | "diskGb">
 const RANGES: Record<keyof Sizes, [string, number, number]> = { cpus: ["CPUs", 0.25, 64], memoryGb: ["Memory (GB)", 0.25, 256], pids: ["The process limit", 64, 65_536], diskGb: ["Disk (GB)", 1, 2000] }
+// A workspace's watched disk limit has the same range and default as a sandbox's.
+export const validDiskGb = (value: unknown) => number(value, ...RANGES.diskGb, DEFAULT_SPEC.diskGb)
 export function validSizes(input: Record<string, unknown>, base: Sizes): Sizes {
   const size = (key: keyof Sizes) => number(input[key], ...RANGES[key], base[key])
   return { cpus: size("cpus"), memoryGb: size("memoryGb"), pids: Math.round(size("pids")), diskGb: size("diskGb") }
@@ -96,10 +98,15 @@ export async function scanManifests(dirs: Dirs): Promise<{ manifests: Manifest[]
 }
 export const listManifests = async (dirs: Dirs) => (await scanManifests(dirs)).manifests
 
-// experimental: unproven features (today, other machines), off by default.
-export type Config = { defaults: Partial<typeof DEFAULT_SPEC>; engine?: string; requireProbes: boolean; experimental: boolean }
-// What `configSet` may change, each a boolean.
-const SETTINGS = ["requireProbes", "experimental"] as const
+// experimental: unproven features (today, other machines), off by default. workspaceFreeSpaceGb: below this much free
+// space where workspaces live, workspace launches are refused and the daemon stops running workspaces.
+export type Config = { defaults: Partial<typeof DEFAULT_SPEC>; engine?: string; requireProbes: boolean; experimental: boolean; workspaceFreeSpaceGb: number }
+// What `configSet` may change.
+const SETTINGS = { requireProbes: "boolean", experimental: "boolean", workspaceFreeSpaceGb: "number" } as const
+const FREE_SPACE: [string, number, number] = ["workspaceFreeSpaceGb", 0, 100_000]
+const settingProblem = (key: keyof typeof SETTINGS, value: unknown): string | undefined => SETTINGS[key] === "boolean"
+  ? typeof value === "boolean" ? undefined : `${key} must be a boolean (true or false)`
+  : typeof value === "number" && Number.isFinite(value) && value >= FREE_SPACE[1] && value <= FREE_SPACE[2] ? undefined : `${key} must be a number of GB from ${FREE_SPACE[1]} to ${FREE_SPACE[2]}`
 // A config file with a mistake stops the request and says where, instead of being quietly ignored.
 async function configFile(dirs: Dirs): Promise<Record<string, unknown>> {
   const file = join(dirs.config, "config.json")
@@ -118,14 +125,15 @@ function parseConfig(dirs: Dirs, data: Record<string, unknown>): Config {
   const file = join(dirs.config, "config.json")
   const wrong = (problem: string): never => { throw new PaddockError("usage", `${file} has a mistake: ${problem}. Fix it or delete it.`) }
   const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
-  for (const key of SETTINGS) if (data[key] !== undefined && typeof data[key] !== "boolean") wrong(`${key} must be a boolean (true or false)`)
+  for (const key of Object.keys(SETTINGS) as Array<keyof typeof SETTINGS>) { const problem = data[key] === undefined ? undefined : settingProblem(key, data[key]); if (problem) wrong(problem) }
   if (data.defaults !== undefined && !isObject(data.defaults)) wrong("defaults must be an object")
   if (data.engine !== undefined && typeof data.engine !== "string") wrong("engine must be an engine id, as `paddock doctor` prints it")
   const defaults = (data.defaults ?? {}) as Record<string, unknown>
   // The defaults pass the same validation as a request, so config cannot set what a request cannot.
   try { validSpec({ ...defaults, name: "x" }) } catch (error) { wrong(`in defaults, ${(error as Error).message.replace(/^./, (first) => first.toLowerCase()).replace(/\.$/, "")}`) }
   const known = Object.fromEntries(Object.entries(defaults).filter(([key]) => key in DEFAULT_SPEC))
-  return { defaults: known as Partial<typeof DEFAULT_SPEC>, engine: data.engine as string | undefined, requireProbes: data.requireProbes !== false, experimental: data.experimental === true }
+  return { defaults: known as Partial<typeof DEFAULT_SPEC>, engine: data.engine as string | undefined, requireProbes: data.requireProbes !== false, experimental: data.experimental === true,
+    workspaceFreeSpaceGb: (data.workspaceFreeSpaceGb as number | undefined) ?? 5 }
 }
 
 export async function readConfig(dirs: Dirs): Promise<Config> { return parseConfig(dirs, await configFile(dirs)) }
@@ -133,8 +141,8 @@ export async function readConfig(dirs: Dirs): Promise<Config> { return parseConf
 // The daemon serializes settings writes. Preserve defaults, engine and fields owned by other config consumers.
 export async function writeConfig(dirs: Dirs, input: Record<string, unknown>): Promise<Config> {
   const keys = Object.keys(input)
-  if (!keys.length || keys.some((key) => !(SETTINGS as readonly string[]).includes(key) || typeof input[key] !== "boolean"))
-    throw new PaddockError("usage", "Set requireProbes or experimental to a boolean (true or false).")
+  if (!keys.length || keys.some((key) => !Object.hasOwn(SETTINGS, key))) throw new PaddockError("usage", "Set requireProbes, experimental or workspaceFreeSpaceGb.")
+  for (const key of keys as Array<keyof typeof SETTINGS>) { const problem = settingProblem(key, input[key]); if (problem) throw new PaddockError("usage", `${problem.replace(/^./, (first) => first.toUpperCase())}.`) }
   const data = { ...await configFile(dirs), ...input }
   const config = parseConfig(dirs, data)
   await mkdir(dirs.config, { recursive: true, mode: 0o700 })

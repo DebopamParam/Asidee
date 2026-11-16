@@ -8,7 +8,7 @@ import { OUTPUT_LIMIT } from "./run"
 import { addInclude, alias, editorKey, GUEST_SETUP, GUEST_SSH, includeLine, included, keyFingerprint, parseGuestSetup, userConfig, validPublicKey, writeClientFiles, type SshAccess } from "./ssh"
 import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSizes, validSpec, validTemplateName, writeManifest, writeConfig, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
-import { PaddockError, type CheckResult, type Engine, type Limits, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage, type Template, type SshSetup } from "./types"
+import { PaddockError, type CheckResult, type DiskWarning, type Engine, type Limits, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage, type Template, type SshSetup } from "./types"
 
 // A running sandbox is stopped when a blocking check could not be made this many timer passes in a row.
 export const UNCHECKED_PASSES = 4
@@ -28,7 +28,7 @@ export type SandboxView = {
   machineId?: string; sandboxId?: string
   capabilities?: Engine["capabilities"]; lastVerify?: Manifest["lastVerify"]; stopReason?: string
   enforcementProblem?: Manifest["enforcementProblem"]
-  diskWarning?: { usedBytes: number; limitBytes: number; message: string }
+  diskWarning?: DiskWarning
   // What a long operation on it is doing right now.
   activity?: string
   template?: Manifest["template"]

@@ -8,6 +8,7 @@ import { CHECKLIST, WORKSPACE_CHECKLIST } from "../../core/checks"
 import { VERSION } from "../../core/daemon"
 import { enrollmentOptions, GVISOR, GVISOR_FILES, GVISOR_RELEASE, installationPlan, type HostProbe } from "../../core/hosts"
 import { socketPath, streamSocketPath } from "../../core/state"
+import { frame } from "../../core/stream"
 import { WORKSPACE_DISCLOSURE, workspaceDisclosure, HOST_TEMP_DISCLOSURE } from "../../core/workspace-profile"
 
 const cleanups: Array<() => Promise<void>> = []
@@ -51,7 +52,7 @@ test("buffered exec and JSON preserve inherited file offsets on both output stre
       const child = Bun.spawn(["/bin/sh", "-c", script, "sh", out, err, ...(executable ? [executable] : [process.execPath, CLI]), ...args], { env: paddock.env, stdout: "pipe", stderr: "pipe" })
       expect(await child.exited).toBe(0)
       expect(await readFile(out)).toEqual(Buffer.from(`b1${json ? `${JSON.stringify({ ok: true, data: result })}\n` : result.stdout}b2`))
-      const disclosure = workspace && !json ? "Workspace, not a sandbox. Network and loopback open; no resource limits.\n" : ""
+      const disclosure = workspace && !json ? "Workspace, not a sandbox. Network and loopback open; disk watched, no other resource limits.\n" : ""
       expect(await readFile(err)).toEqual(Buffer.from(`e1${disclosure}${json ? "" : result.stderr}e2`))
     }
   }
@@ -189,18 +190,19 @@ test("transport stdio hands SSH every byte the daemon sent before it exits, even
   run.stdin.end()
 }, 30_000)
 
-test("config get/set route boolean settings and support JSON; invalid commands are refused", async () => {
+test("config get/set route settings and support JSON; invalid commands are refused", async () => {
   const calls: unknown[] = []
-  const paddock = await daemon({ configGet: (body: unknown) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: true, experimental: false } } },
-    configSet: (body: { requireProbes?: boolean; experimental?: boolean }) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: body.requireProbes ?? true, experimental: body.experimental ?? false } } } })
-  expect(await paddock("config", "get")).toMatchObject({ code: 0, out: "require-probes on\nexperimental off\n" })
+  const paddock = await daemon({ configGet: (body: unknown) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5 } } },
+    configSet: (body: { requireProbes?: boolean; experimental?: boolean; workspaceFreeSpaceGb?: number }) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: body.requireProbes ?? true, experimental: body.experimental ?? false, workspaceFreeSpaceGb: body.workspaceFreeSpaceGb ?? 5 } } } })
+  expect(await paddock("config", "get")).toMatchObject({ code: 0, out: "require-probes on\nexperimental off\nworkspace-free-space 5 GB\n" })
+  expect(await paddock("config", "set", "workspace-free-space", "12.5")).toMatchObject({ code: 0, out: "workspace-free-space 12.5 GB\n" })
   expect(await paddock("config", "set", "require-probes", "off")).toMatchObject({ code: 0, out: "require-probes off\n" })
   expect(await paddock("config", "set", "experimental", "on")).toMatchObject({ code: 0, out: "experimental on\n" })
   const json = await paddock("--host", "build", "config", "set", "require-probes", "on", "--json")
-  expect(JSON.parse(json.out)).toEqual({ ok: true, data: { defaults: {}, requireProbes: true, experimental: false } })
-  expect(calls).toEqual([{}, { requireProbes: false }, { experimental: true }, { host: "build", requireProbes: true }])
+  expect(JSON.parse(json.out)).toEqual({ ok: true, data: { defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5 } })
+  expect(calls).toEqual([{}, { workspaceFreeSpaceGb: 12.5 }, { requireProbes: false }, { experimental: true }, { host: "build", requireProbes: true }])
   expect(JSON.parse((await paddock("config", "get", "--json")).out).data.requireProbes).toBe(true)
-  for (const args of [["get", "extra"], ["set", "require-probes", "false"], ["set", "require-probes"], ["set", "bogus", "on"], ["set", "experimental", "yes"]]) {
+  for (const args of [["get", "extra"], ["set", "require-probes", "false"], ["set", "require-probes"], ["set", "bogus", "on"], ["set", "experimental", "yes"], ["set", "workspace-free-space", "lots"], ["set", "workspace-free-space", "on"], ["set", "require-probes", "5"]]) {
     expect((await paddock("config", ...args)).code).toBe(2)
   }
 })
@@ -283,6 +285,47 @@ test("workspace status lines leave size out where it was not measured and say un
   }
   expect((await paddock("workspace", "get", "render")).out).toContain("0 processes, size unknown")
   expect((await paddock("workspace", "list")).out).toContain("0 processes, 3.0 MiB")
+})
+
+test("workspace disk: create and set send the limit, status shows it and a stop reason, and a launch over it warns in text and JSON", async () => {
+  const calls: unknown[] = []
+  const warning = { usedBytes: 2 * 1024 ** 3, limitBytes: 1024 ** 3, message: "render uses 2.00 GB of its 1 GB disk limit, so the daemon stops its processes again within about 30 seconds unless space is freed. Free space in /w/render, or raise the limit: paddock workspace set render disk N" }
+  const view = { kind: "workspace", name: "render", folder: "/w/render", status: "idle", processes: 0, spec: { hostTemp: false, diskGb: 1 }, disclosure: WORKSPACE_DISCLOSURE,
+    stopReason: "Stopped by the daemon at 2026-11-16T10:00:00Z: render uses 2.00 GB of its 1 GB disk limit. Free space in /w/render, or raise the limit: paddock workspace set render disk N",
+    enforcementProblem: { at: "2026-11-16T10:00:30Z", message: "Its size could not be measured." } }
+  const result = { exitCode: 0, stdout: "out\n", stderr: "", diskWarning: warning }
+  const paddock = await daemon({
+    workspaceCreate: (body: unknown) => { calls.push(body); return { ok: true, data: { workspace: view, checks: [], ok: true } } },
+    workspaceSet: (body: unknown) => { calls.push(body); return { ok: true, data: view } },
+    workspaceGet: { ok: true, data: view }, workspaceExec: { ok: true, data: result },
+  })
+  await paddock("workspace", "create", "render", "--disk", "7", "--no-logins")
+  expect(calls[0]).toMatchObject({ name: "render", diskGb: "7" })
+  await paddock("workspace", "create", "other", "--no-logins")
+  expect(calls[1]).not.toHaveProperty("diskGb")
+  const set = await paddock("workspace", "set", "render", "disk", "2.5")
+  expect(set.code).toBe(0); expect(calls[2]).toEqual({ name: "render", diskGb: 2.5 })
+  for (const args of [["set", "render", "disk"], ["set", "render", "disk", "lots"], ["set", "render", "disk", "on"], ["get", "render", "--disk", "3"]]) expect((await paddock("workspace", ...args)).code).toBe(2)
+  const shown = (await paddock("workspace", "get", "render")).out
+  expect(shown).toContain("0 processes, size unknown, disk limit 1 GB (watched)\n")
+  expect(shown).toContain(`\n  ${view.stopReason}\n`)
+  expect(shown).toContain("\n  Disk watch unknown at 2026-11-16T10:00:30Z: Its size could not be measured.")
+  const text = await paddock("workspace", "exec", "render", "--", "true")
+  expect(text.code).toBe(0); expect(text.out).toBe("out\n"); expect(text.err).toContain(`${warning.message}\n`)
+  const json = await paddock("--json", "workspace", "exec", "render", "--", "true")
+  expect(JSON.parse(json.out).data.diskWarning).toEqual(warning); expect(json.err).toBe("")
+  expect((await paddock("help")).out).toContain("paddock workspace set NAME disk GB")
+})
+
+test("a workspace stream session prints the disk warning that comes with ready", async () => {
+  const paddock = await daemon({ workspaceGet: { ok: true, data: { kind: "workspace", name: "render", status: "idle", spec: { hostTemp: false, diskGb: 1 }, disclosure: WORKSPACE_DISCLOSURE } } })
+  const state = paddock.env.PADDOCK_STATE_DIR!
+  const message = "render uses 2.00 GB of its 1 GB disk limit. Free space in /w/render, or raise the limit: paddock workspace set render disk N"
+  const server = createServer((socket) => socket.once("data", () => socket.end(Buffer.concat([frame("ready", { tty: false, diskWarning: { usedBytes: 2, limitBytes: 1, message } }), frame("exit", { code: 0 })]))))
+  await new Promise<void>((resolve) => server.listen(streamSocketPath({ state, config: state }), resolve))
+  cleanups.push(() => new Promise((resolve) => server.close(() => resolve())))
+  const run = await paddock("workspace", "exec", "render", "--stream", "--", "true")
+  expect(run.code).toBe(0); expect(run.err).toContain(`${message}\n`)
 })
 
 test("help is grouped by task, and each command answers --help with its own usage", async () => {

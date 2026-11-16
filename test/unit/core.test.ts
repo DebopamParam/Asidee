@@ -549,13 +549,13 @@ test("a running sandbox that cannot be checked for several passes in a row is st
 
 test("a config file with a mistake is refused by name, and its defaults obey the same limits as a request", async () => {
   const root = await mkdtemp(join(tmpdir(), "paddock-config-")); const dirs = { state: join(root, "state"), config: root }
-  expect(await readConfig(dirs)).toEqual({ defaults: {}, requireProbes: true, experimental: false })
-  for (const bad of ['{"experimental":"on"}', '{"experimental":1}', "{ nope", "[]", "null", '{"defaults":"x"}', '{"engine":5}', '{"requireProbes":"off"}', '{"requireProbes":null}', '{"requireProbes":0}', '{"defaults":{"cpus":"lots"}}', '{"defaults":{"image":"--privileged"}}', '{"defaults":{"memoryGb":100000}}']) {
+  expect(await readConfig(dirs)).toEqual({ defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5 })
+  for (const bad of ['{"workspaceFreeSpaceGb":-1}', '{"workspaceFreeSpaceGb":"5"}', '{"workspaceFreeSpaceGb":100001}', '{"experimental":"on"}', '{"experimental":1}', "{ nope", "[]", "null", '{"defaults":"x"}', '{"engine":5}', '{"requireProbes":"off"}', '{"requireProbes":null}', '{"requireProbes":0}', '{"defaults":{"cpus":"lots"}}', '{"defaults":{"image":"--privileged"}}', '{"defaults":{"memoryGb":100000}}']) {
     await writeFile(join(root, "config.json"), bad)
     await expect(readConfig(dirs)).rejects.toThrow("config.json")
   }
   await writeFile(join(root, "config.json"), '{"defaults":{"image":"alpine:3","cpus":1,"privileged":true,"name":"x"},"engine":"gvisor:orbstack"}')
-  expect(await readConfig(dirs)).toEqual({ defaults: { image: "alpine:3", cpus: 1 }, engine: "gvisor:orbstack", requireProbes: true, experimental: false })
+  expect(await readConfig(dirs)).toEqual({ defaults: { image: "alpine:3", cpus: 1 }, engine: "gvisor:orbstack", requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5 })
 })
 
 test("a damaged state file is listed as damaged and the other sandboxes still work", async () => {
@@ -755,6 +755,8 @@ test("settings persist across core and daemon instances, preserve other config a
   await expect(restarted.create({ name: "other" })).rejects.toMatchObject({ code: "probes-required" })
   expect(await table.configSet!.run({ experimental: true })).toMatchObject({ requireProbes: true, experimental: true })
   expect(JSON.parse(await readFile(file, "utf8"))).toEqual({ ...existing, requireProbes: true, experimental: true })
+  expect(await table.configSet!.run({ workspaceFreeSpaceGb: 12.5 })).toMatchObject({ workspaceFreeSpaceGb: 12.5 })
+  expect(await methods(restarted, () => {}).configGet!.run({})).toMatchObject({ workspaceFreeSpaceGb: 12.5 })
   expect(state.running).toBe(false)
 })
 
@@ -767,6 +769,7 @@ test("settings require a boolean and loopback writes require both token and trus
   }
   expect((await answer(post({ requireProbes: false, engine: "other" }), false, 7717)).status).toBe(400)
   for (const value of ["on", 1, null]) expect((await answer(post({ experimental: value }), false, 7717)).status).toBe(400)
+  for (const value of ["5", -1, 100_001, null, true]) expect((await answer(post({ workspaceFreeSpaceGb: value }), false, 7717)).status).toBe(400)
   expect((await answer(post({}), false, 7717)).status).toBe(400)
   expect((await answer(post({ requireProbes: false }, { authorization: "" }), false, 7717)).status).toBe(401)
   expect((await answer(post({ requireProbes: false }, { authorization: "Bearer wrong" }), false, 7717)).status).toBe(401)

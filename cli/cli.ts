@@ -18,7 +18,7 @@ import { bounded, PROTOCOL, transportStdio } from "../core/transport"
 import { included, userConfig, type SshAccess } from "../core/ssh"
 import { checkSocketPath, defaultDirs, socketPath, streamSocketPath, type Config } from "../core/state"
 import { dataFrames, frame, FrameReader, type OpenRequest, type EnrollmentRequest } from "../core/stream"
-import { PaddockError, type CheckResult, type Engine, type ErrorCode, type RunResult, type Template } from "../core/types"
+import { PaddockError, type CheckResult, type DiskWarning, type Engine, type ErrorCode, type RunResult, type Template } from "../core/types"
 
 // A thin client: every command is one call to the daemon, which is started on first use.
 
@@ -55,14 +55,18 @@ const GROUPS: Array<[string, string[]]> = [
     "paddock config get                     settings on the selected machine",
     "paddock config set require-probes on|off   require blocking isolation probes at create (default on)",
     "paddock config set experimental on|off     features not yet proven on enough machines: other machines (default off)",
+    "paddock config set workspace-free-space GB below this much free space, workspace launches are refused and running",
+    "                                           workspaces are stopped (default 5; 0 turns it off; purgeable space not counted)",
   ]],
   ["Workspaces: on this Mac's own kernel, not a sandbox (macOS only)", [
-    "paddock workspace create NAME [--host-temp] [--copy PATH] [--read PATH]… [--path DIR]… [--no-logins | --claude-profile NAME --codex-profile NAME]",
+    "paddock workspace create NAME [--host-temp] [--disk GB] [--copy PATH] [--read PATH]… [--path DIR]… [--no-logins | --claude-profile NAME --codex-profile NAME]",
     "                                       --host-temp opens shared per-user temp (default off); TMPDIR stays private",
+    "                                       --disk is watched, not capped (default 20): past it the daemon stops its processes",
     "paddock workspace shell NAME [-- COMMAND…]",
     "paddock workspace exec NAME [--stdin | --stream] -- COMMAND…",
     "paddock workspace list | get NAME | stop NAME | verify NAME",
     "paddock workspace set NAME host-temp on|off   stop first; applies to later processes; shared host temp weakens confinement",
+    "paddock workspace set NAME disk GB            the watched disk limit; applies now, also while running",
     "paddock workspace remove NAME --confirm NAME",
   ]],
   ["Other machines (experimental, off unless turned on: paddock config set experimental on)", [
@@ -280,6 +284,8 @@ async function session(request: OpenRequest | EnrollmentRequest): Promise<never>
         void leave(EXIT[error.code] ?? 1, request.kind === "enroll" ? refusal(error.message) : shown(error.message))
       } else if (kind === "ready" && !ready) {
         ready = true
+        const warning = (JSON.parse(payload.toString()) as { diskWarning?: DiskWarning }).diskWarning
+        if (warning) process.stderr.write(`${shown(warning.message)}\n`)
         if (raw) {
           process.stdin.setRawMode(true); restored = false
           // A terminal that reports no size (0 by 0) keeps the sandbox's default.
@@ -327,8 +333,9 @@ const utc = (at: string) => { const date = new Date(at); return Number.isNaN(dat
 // Buffered input travels as base64 so every byte arrives as it was; a string would lose bytes that are not UTF-8.
 const stdinBytes = async () => ({ stdinBase64: Buffer.from(await Bun.stdin.arrayBuffer()).toString("base64") })
 // Waits for the output to be written before exiting: into a pipe, an exit right after a write loses what did not fit.
-async function printRun(output: RunResult, asJson = false): Promise<never> {
+async function printRun(output: RunResult & { diskWarning?: DiskWarning }, asJson = false): Promise<never> {
   const write = (stream: NodeJS.WriteStream, text: string) => new Promise<void>((resolve, reject) => stream.write(text, (error) => error ? reject(error) : resolve()))
+  if (!asJson && output.diskWarning) await write(process.stderr, `${shown(output.diskWarning.message)}\n`)
   await write(process.stdout, asJson ? `${JSON.stringify({ ok: true, data: output })}\n` : output.stdout)
   if (!asJson) await write(process.stderr, output.stderr)
   process.exit(output.exitCode)
@@ -368,11 +375,12 @@ async function main(argv: string[]): Promise<void> {
         const { positionals } = parse({})
         const [action, key, value] = positionals
         const settings: Record<string, keyof Config> = { "require-probes": "requireProbes", experimental: "experimental" }
-        if (!((action === "get" && positionals.length === 1) || (action === "set" && positionals.length === 3 && Object.hasOwn(settings, key!) && (value === "on" || value === "off"))))
-          throw new PaddockError("usage", "Use paddock config get, or paddock config set require-probes|experimental on|off.")
-        const config = await call<Config>(action === "get" ? "configGet" : "configSet", action === "get" ? {} : { [settings[key!]!]: value === "on" })
-        const lines = { "require-probes": config.requireProbes, experimental: config.experimental }
-        return out(config, () => { for (const [name, on] of Object.entries(lines)) if (action === "get" || name === key) console.log(`${name} ${on ? "on" : "off"}`) })
+        const gb = key === "workspace-free-space" && /^\d+(\.\d+)?$/.test(value ?? "")
+        if (!((action === "get" && positionals.length === 1) || (action === "set" && positionals.length === 3 && (gb || (Object.hasOwn(settings, key!) && (value === "on" || value === "off"))))))
+          throw new PaddockError("usage", "Use paddock config get, paddock config set require-probes|experimental on|off, or paddock config set workspace-free-space GB.")
+        const config = await call<Config>(action === "get" ? "configGet" : "configSet", action === "get" ? {} : gb ? { workspaceFreeSpaceGb: Number(value) } : { [settings[key!]!]: value === "on" })
+        const lines = { "require-probes": config.requireProbes ? "on" : "off", experimental: config.experimental ? "on" : "off", "workspace-free-space": `${config.workspaceFreeSpaceGb} GB` }
+        return out(config, () => { for (const [name, text] of Object.entries(lines)) if (action === "get" || name === key) console.log(`${name} ${text}`) })
       }
       case "workspace": {
         if (selectedHost && selectedHost !== "local") throw new PaddockError("usage", "Workspaces run on this Mac; --host is not available.")
@@ -381,14 +389,15 @@ async function main(argv: string[]): Promise<void> {
         const { values, positionals } = (() => {
           try { return parseArgs({ args: rest.slice(1), allowPositionals: true, options: {
             read: { type: "string", multiple: true }, path: { type: "string", multiple: true }, copy: { type: "string" }, loopback: { type: "string" }, confirm: { type: "string" }, stdin: { type: "boolean" }, stream: { type: "boolean" },
-            "host-temp": { type: "boolean" }, "no-logins": { type: "boolean" }, "claude-profile": { type: "string" }, "codex-profile": { type: "string" },
+            "host-temp": { type: "boolean" }, disk: { type: "string" }, "no-logins": { type: "boolean" }, "claude-profile": { type: "string" }, "codex-profile": { type: "string" },
           } }) } catch (error) { throw argumentError(error, `workspace ${action}`) }
         })()
         if (values["host-temp"] !== undefined && action !== "create") throw new PaddockError("usage", "--host-temp is a create option. Use workspace set NAME host-temp on|off to change it.")
+        if (values.disk !== undefined && action !== "create") throw new PaddockError("usage", "--disk is a create option. Use workspace set NAME disk GB to change it.")
         const localPath = (path: string) => path === "~" || path.startsWith("~/") ? path : resolve(path)
         if (values["no-logins"] && (values["claude-profile"] !== undefined || values["codex-profile"] !== undefined)) throw new PaddockError("usage", "Choose --no-logins or named login profiles, not both.")
         // Only list and get measure size; elsewhere the field is left out rather than shown as unknown.
-        const show = (view: WorkspaceView, measured = false) => console.log(`${shown(view.name)}: workspace, not a sandbox; ${shown(view.status)}, host-temp ${view.spec ? view.spec.hostTemp ? "on (shared, weaker)" : "off" : "unknown"}, ${view.processes ?? "unknown"} processes${view.sizeBytes !== undefined ? `, ${(view.sizeBytes / 1024 ** 2).toFixed(1)} MiB` : measured ? ", size unknown" : ""}${view.folder ? `\n  ${shown(view.folder)}` : ""}${view.problem ? `\n  ${shown(view.problem)}` : ""}`)
+        const show = (view: WorkspaceView, measured = false) => console.log(`${shown(view.name)}: workspace, not a sandbox; ${shown(view.status)}, host-temp ${view.spec ? view.spec.hostTemp ? "on (shared, weaker)" : "off" : "unknown"}, ${view.processes ?? "unknown"} processes${view.sizeBytes !== undefined ? `, ${(view.sizeBytes / 1024 ** 2).toFixed(1)} MiB` : measured ? ", size unknown" : ""}${view.spec?.diskGb !== undefined ? `, disk limit ${view.spec.diskGb} GB (watched)` : ""}${view.folder ? `\n  ${shown(view.folder)}` : ""}${view.problem ? `\n  ${shown(view.problem)}` : ""}${view.stopReason ? `\n  ${shown(view.stopReason)}` : ""}${view.enforcementProblem ? `\n  Disk watch unknown at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}` : ""}`)
         const disclose = (disclosure = WORKSPACE_DISCLOSURE) => console.log(`\n${shown(disclosure)}`)
         if (action === "list") {
           const workspaces = await call<WorkspaceView[]>("workspaceList")
@@ -397,7 +406,7 @@ async function main(argv: string[]): Promise<void> {
         const name = need(positionals[0], "a workspace name")
         if (action === "create" || action === "verify") {
           const report = await call<WorkspaceReport>(action === "create" ? "workspaceCreate" : "workspaceVerify", { name,
-            ...(action === "create" ? { hostTemp: values["host-temp"] ?? false, reads: values.read?.map(localPath), path: values.path?.map(localPath), copy: values.copy ? localPath(values.copy) : undefined, loopback: values.loopback,
+            ...(action === "create" ? { hostTemp: values["host-temp"] ?? false, ...(values.disk !== undefined ? { diskGb: values.disk } : {}), reads: values.read?.map(localPath), path: values.path?.map(localPath), copy: values.copy ? localPath(values.copy) : undefined, loopback: values.loopback,
               logins: values["no-logins"] ? { kind: "none" } : { kind: "profiles", claude: values["claude-profile"] ?? "default", codex: values["codex-profile"] ?? "default" } } : {}) })
           out(report, () => { show(report.workspace); printChecks(report.checks, WORKSPACE_CHECKLIST, action === "create" ? `paddock workspace verify ${shown(name)}` : true); for (const path of report.pathSuggestions ?? []) console.log(`Tool folder under home, closed unless declared with --read: ${shown(path)}`)
             // The not-covered check already carries the disclosure when verification reached it.
@@ -407,8 +416,10 @@ async function main(argv: string[]): Promise<void> {
           return
         }
         if (action === "set") {
-          if (positionals.length !== 3 || positionals[1] !== "host-temp" || !["on", "off"].includes(positionals[2]!)) throw new PaddockError("usage", "Use paddock workspace set NAME host-temp on|off. Stop the workspace first.")
-          const view = await call<WorkspaceView>("workspaceSet", { name, hostTemp: positionals[2] === "on" })
+          const [, key, value] = positionals
+          const disk = key === "disk" && /^\d+(\.\d+)?$/.test(value ?? "")
+          if (positionals.length !== 3 || !(disk || (key === "host-temp" && ["on", "off"].includes(value!)))) throw new PaddockError("usage", "Use paddock workspace set NAME host-temp on|off (stop the workspace first), or paddock workspace set NAME disk GB.")
+          const view = await call<WorkspaceView>("workspaceSet", disk ? { name, diskGb: Number(value) } : { name, hostTemp: value === "on" })
           return out(view, () => { show(view); disclose(view.disclosure) })
         }
         if (action === "get" || action === "stop") { const view = await call<WorkspaceView>(action === "get" ? "workspaceGet" : "workspaceStop", { name }); return out(view, () => { show(view, action === "get"); disclose(view.disclosure) }) }
@@ -421,7 +432,7 @@ async function main(argv: string[]): Promise<void> {
           if (values.stream && (asJson || values.stdin)) throw new PaddockError("usage", "--stream takes neither --json nor --stdin.")
           if (!asJson) {
             const view = await call<WorkspaceView>("workspaceGet", { name, withSize: false })
-            console.error(`Workspace, not a sandbox. Network and loopback open; no resource limits.${view.spec?.hostTemp ? ` ${HOST_TEMP_DISCLOSURE}` : ""}`)
+            console.error(`Workspace, not a sandbox. Network and loopback open; disk watched, no other resource limits.${view.spec?.hostTemp ? ` ${HOST_TEMP_DISCLOSURE}` : ""}`)
           }
           if (values.stream) return await session({ kind: "workspace", name, argv: tail, tty: false })
           return printRun(await call<RunResult>("workspaceExec", { name, argv: tail, ...(values.stdin ? await stdinBytes() : {}) }), asJson)

@@ -58,6 +58,8 @@ export const WORKSPACE_CHECKLIST: readonly ChecklistItem[] = [
   { id: "daemons", title: "Named daemon sockets and launch channels are refused; Apple events not covered", stage: "probe", blocking: true },
   { id: "user-data", title: "Preferences, clipboard, outside signals and open files are closed", stage: "probe", blocking: true },
   { id: "processes", title: "Processes are identified by this workspace's kernel profile", stage: "runtime", blocking: true },
+  { id: "free-space", title: "Free space where workspaces live is above the floor", stage: "runtime", blocking: true },
+  { id: "disk", title: "Disk use is watched against its limit, not capped", stage: "runtime", blocking: false },
   { id: "gpu", title: "Hardware-only VideoToolbox encode; Metal compute not covered by this check", stage: "probe", blocking: false },
   { id: "network", title: "Network is open to internet, LAN and tailnet", stage: "probe", blocking: false },
   { id: "loopback", title: "Loopback is open to this Mac's services", stage: "probe", blocking: false },

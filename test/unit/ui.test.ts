@@ -182,6 +182,16 @@ test("an unavailable setting cannot be changed and a sandbox with unknown probes
 })
 
 
+test("a workspace row shows why the daemon stopped it and a disk watch it could not make, with no control added", async () => {
+  const stopReason = "Stopped by the daemon at 2026-11-16T10:00:00Z: render uses 2.00 GB of its 1 GB disk limit. Free space in /w/render, or raise the limit: paddock workspace set render disk N"
+  const ui = await page({ ...base, list: () => [], summary: () => ({ workspaces: [{ name: "render", status: "idle", processes: 0, folder: "/w/render", spec: { hostTemp: false, diskGb: 1 }, disclosure: workspaceDisclosure(false), stopReason,
+    enforcementProblem: { at: "2026-11-16T10:00:30Z", message: "Its size could not be measured." } }] }) })
+  const row = ui.window.document.querySelector("#workspaces .panel")!
+  expect(row.textContent).toContain(stopReason)
+  expect(row.textContent).toContain("Disk watch unknown at 2026-11-16T10:00:30Z: Its size could not be measured.")
+  expect(row.querySelectorAll("button, input, select")).toHaveLength(0)
+})
+
 test("each workspace row shows host-temp state and the shared-temp disclosure", async () => {
   const ui = await page({ ...base, list: () => [], summary: () => ({ workspaces: [false, true].map((hostTemp) => ({ name: hostTemp ? "shared" : "closed", status: "idle", spec: { hostTemp }, disclosure: workspaceDisclosure(hostTemp) })) }) })
   const rows = [...ui.window.document.querySelectorAll("#workspaces .panel")].map((row) => row.textContent)

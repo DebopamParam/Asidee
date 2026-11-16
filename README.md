@@ -103,8 +103,10 @@ They run directly on the Mac; K06 measured Metal compute and hardware-only HEVC 
 `workspace stop` ends processes identified by their kernel profile. `workspace remove render --confirm render` stops
 them and deletes the folder, leaving the original project alone. Paddock never copies with hard links.
 
-A workspace is **not a sandbox**. It shares this Mac's kernel and user, has no resource limits, and keeps the network
-and loopback open. Reads outside home are open. Remote effects, unified logs, existing backups and changes through
+A workspace is **not a sandbox**. It shares this Mac's kernel and user, has no CPU, memory or process limits, and keeps
+the network and loopback open. Its disk use is watched, not capped: while the daemon runs it stops a workspace's
+processes within about 30 seconds of passing its `--disk` limit (default 20 GB), or when free space falls below
+`paddock config set workspace-free-space GB` (default 5). Reads outside home are open. Remote effects, unified logs, existing backups and changes through
 externally supplied hard links can survive removal. Apple events and permission-gated capabilities are not covered.
 Paddock passes no flags to change agents' own sandboxes. Entering the folder from an ordinary shell applies no profile.
 

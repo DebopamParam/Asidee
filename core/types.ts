@@ -62,10 +62,10 @@ export type Engine = {
 export type CheckId =
   | "kernel" | "hardening" | "mounts" | "network-guard" | "inbound" | "forwards" | "ssh" | "limits" | "disk" | "docker" | "dns"
   | "template" | "net-host" | "net-peers" | "net-private" | "egress" | "credentials"
-  | "seatbelt" | "writes" | "home-closed" | "daemons" | "user-data" | "processes" | "gpu" | "network" | "loopback" | "not-covered" | "hard-links"
+  | "seatbelt" | "writes" | "home-closed" | "daemons" | "user-data" | "processes" | "gpu" | "network" | "loopback" | "not-covered" | "hard-links" | "free-space"
 
 export type WorkspaceLogins = { kind: "none" } | { kind: "profiles"; claude: string; codex: string }
-export type WorkspaceSpec = { name: string; hostTemp: boolean; reads: string[]; loopback: "open"; path: string[]; copy?: string; logins: WorkspaceLogins }
+export type WorkspaceSpec = { name: string; hostTemp: boolean; diskGb: number; reads: string[]; loopback: "open"; path: string[]; copy?: string; logins: WorkspaceLogins }
 export type WorkspaceManifest = {
   version: 1; kind: "workspace"; name: string; id: string; spec: WorkspaceSpec
   folder: string; tag: string; home: string; userVar: string
@@ -74,6 +74,8 @@ export type WorkspaceManifest = {
   logins: Array<{ agent: "claude" | "codex"; copied: boolean; detail: string }>
   backup: string
   lastVerify?: { at: string; results: CheckResult[] }
+  // Why the daemon last stopped its processes; a launch clears it.
+  stopReason?: string
 }
 
 // pass: holds. weak: holds in a weaker form than the title says (the detail says how). fail: does not hold.
@@ -109,6 +111,7 @@ export type SshSetup = { user: string; home: string; unlocked: boolean; sshd: st
 
 // overflow: the command printed more than its output limit on that stream, was killed, and its output was discarded.
 // raw: stdout's bytes, when asked for with `binary`.
+export type DiskWarning = { usedBytes: number; limitBytes: number; message: string }
 export type RunResult = { exitCode: number; stdout: string; stderr: string; overflow?: "stdout" | "stderr"; raw?: Uint8Array }
 export type RunOptions = { stdin?: string | Uint8Array; timeoutMs?: number; env?: Record<string, string>; cwd?: string; maxOutputBytes?: number; binary?: boolean; signal?: AbortSignal }
 // Every external command goes through a Runner, so tests run without an engine.
@@ -119,6 +122,8 @@ export type Runner = (argv: readonly string[], options?: RunOptions) => Promise<
 // after the last output: with the command's exit code, or with an error when it was cut off (the sandbox stopped).
 export interface Session {
   readonly tty: boolean
+  // A workspace launched over its disk limit says so; the stream passes it on with "ready".
+  readonly diskWarning?: DiskWarning
   // false: wait for "drain" before writing more.
   write(bytes: Uint8Array): boolean
   // Closes the command's input; its output goes on. Ignored on a terminal, where input is keystrokes.

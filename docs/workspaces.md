@@ -1,8 +1,9 @@
 # macOS workspaces
 
 A workspace is **not a sandbox**. It runs programs as your user on this Mac's kernel, under an inherited Seatbelt
-profile. There is no VM, container, or CPU, memory, disk, GPU or process limit. Network and loopback are open. Use a
-sandbox when you need an isolated kernel, guarded networking or resource limits.
+profile. There is no VM, container, or CPU, memory, GPU or process limit; disk use is watched, not capped (see
+[Disk use and free space](#disk-use-and-free-space)). Network and loopback are open. Use a sandbox when you need an
+isolated kernel, guarded networking or resource limits.
 
 ## Copy a project in and run it
 
@@ -48,9 +49,45 @@ terminal and carries terminal input and resize. PTY output waiting for a slow cl
 that ends the session with an error. A closed session ends its identified starter. Detached descendants remain
 tracked until `workspace stop` or `remove`. A daemon restart does not remove a workspace or its detached processes. A disconnected buffered exec client also
 closes its session and ends its command's starter. Detached descendants still require `workspace stop` or `remove`.
-Exec and shell run only blocking checks before launch. They do not run GPU/login probes, `lsof`, `tmutil`, `du`, or
-the hard-link walk. Full informational checks run at creation and explicit verify. Verify only reads directories
+Exec and shell run only blocking checks before launch, then `du` for the disk warning. They do not run GPU/login
+probes, `lsof`, `tmutil`, or the hard-link walk. Full informational checks run at creation and explicit verify. Verify only reads directories
 while looking for hard links; an unreadable subtree is unknown. Permission repair belongs to remove.
+
+## Disk use and free space
+
+`workspace create NAME --disk GB` sets a workspace's disk limit: from 1 to 2000, default 20, as for a sandbox.
+`workspace set NAME disk GB` changes it at any time, also while its processes run. GB here is 1024³ bytes.
+
+The limit is **watched, not capped**. While the daemon runs, every 30 seconds it measures each workspace that has
+running processes with `/usr/bin/du -sk` on its folder, so `home`, private `tmp` and `work` all count; shared host
+temp `T` does not. Over its limit, the daemon stops the workspace's processes as `workspace stop` does and records a
+reason that `workspace get` and `workspace list` show. The reason gives the space used and the limit, and two ways
+out: free space in the folder, or `paddock workspace set NAME disk N`. A workspace can overshoot by whatever it
+writes in those 30 seconds. Nothing watches it while no daemon runs, and stopping the daemon does not stop
+workspaces. A workspace with no processes is not measured.
+
+A launch over the limit still runs, so space can be freed from inside, with a warning: buffered `exec` returns
+`diskWarning` (`usedBytes`, `limitBytes`, `message`) in JSON and prints the message on stderr in text; `shell` and
+`exec --stream` print it on stderr when the session starts. The daemon stops the processes again on its next pass
+unless space was freed. A launch clears the recorded reason. A `du` that fails part way gives a lower bound: over
+the limit is enough to stop; otherwise the pass could not check. That shows as a warning in get and list, and after
+four such passes in a row the processes are stopped with that reason, as for a sandbox. One measurement of a
+workspace runs at a time; list, get, a launch, verify and the pass share it.
+
+Cost: on this Mac (Apple M5, macOS 26.7.1), `/usr/bin/du -sk` took 0.06 to 0.12 seconds on a folder of 100,000 small
+files with a warm cache. A cold cache was not measured.
+
+Below a machine-wide free-space floor, workspace launches are refused (exit 6) with a sentence giving the free space,
+the floor and the command to change it, and the pass stops running workspaces with the same sentence as their
+reason. `paddock config set workspace-free-space GB` sets the floor: default 5, from 0 (off) to 100000. Free space is
+`statfs`'s available space on the volume that holds the workspace folder. macOS purgeable space is not counted, so
+Finder can show more free space than Paddock does.
+
+The checklist has both: `free-space` blocks a launch, create and verify when it fails or cannot be read; `disk`
+does not block and reads `weak` while under the limit, `fail` over it, or `unknown`, and states the 30-second
+interval. K31 writes 1100 MiB past a 1 GB limit and sees the stop, its reason, the warning on relaunch, cleanup from
+inside, and no warning afterwards. K32 sets the floor above this Mac's free space, sees the refusal and the stop,
+and restores the setting.
 
 ## Allow the shared per-user temp folder
 
@@ -192,9 +229,10 @@ Workspaces have a separate spec, manifest directory and fixed checklist; they ar
 `workspace*` API methods are socket-only and local. The dashboard displays a separate **Workspaces: not sandboxes**
 section through the read-only summary. Its actions stay in the CLI. Non-macOS commands refuse before starting a daemon.
 Summary reads manifests and counts tagged processes, without repairing identity, changing modes or walking the tree.
-An unavailable folder/tag stays unknown. Only explicit CLI list/get measure size with `du`; the lines create, verify,
-set and stop print leave size out, and `size unknown` means a measurement was tried and failed. The 30-second sandbox
-enforcement pass does no workspace inventory work. Full check results retain their verification timestamp.
+An unavailable folder/tag stays unknown. Of the status lines, only list and get measure size with `du`; the lines
+create, verify, set and stop print leave size out, and `size unknown` means a measurement was tried and failed. The
+30-second sandbox enforcement pass does no workspace work; workspaces have a pass of their own (see
+[Disk use and free space](#disk-use-and-free-space)). Full check results retain their verification timestamp.
 
 Policy decision controls run inside confined processes. Read and write decisions have same-operation allowed
 controls on the workspace folder. Global denials use a second confined profile with the needed allows, running
