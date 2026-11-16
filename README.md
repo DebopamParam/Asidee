@@ -113,8 +113,8 @@ them and deletes the folder, leaving the original project alone. Paddock never c
 
 A workspace is **not a sandbox**. It shares this Mac's kernel and user, has no CPU, memory or process limits, and keeps
 the network and loopback open. Its disk use is watched, not capped: while the daemon runs it stops a workspace's
-processes within about 30 seconds of passing its `--disk` limit (default 20 GB), or when free space falls below
-`paddock config set workspace-free-space GB` (default 5). Reads outside home are open. Remote effects, unified logs, existing backups and changes through
+processes within about 30 seconds of passing its `--disk` limit (default 20 GiB), or when free space falls below
+`paddock config set workspace-free-space GiB` (default 5). Reads outside home are open. Remote effects, unified logs, existing backups and changes through
 externally supplied hard links can survive removal. Apple events and permission-gated capabilities are not covered.
 Paddock passes no flags to change agents' own sandboxes. Entering the folder from an ordinary shell applies no profile.
 
@@ -236,3 +236,7 @@ Each privileged step that reads staged files copies them into a root-owned priva
 checks SHA-256 there, uses only those copies, then removes them. The script and digests are in the plan hash.
 Interactive installs refresh `sudo -v` before each privileged step. Repository source text in the
 plan removes URL usernames and passwords; the plan binds the original file bytes by their hash.
+
+Workspace sizes, disk limits and free-space floors are shown in GiB (1 GiB is 1024³ bytes).
+Workspace create/verify text lists at most eight distinct `port (process)` listeners; `--json`
+keeps the full listener evidence.

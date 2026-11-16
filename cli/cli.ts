@@ -58,11 +58,11 @@ const GROUPS: Array<[string, string[]]> = [
     "paddock config get                     settings on the selected machine",
     "paddock config set require-probes on|off   require blocking isolation probes at create (default on)",
     "paddock config set experimental on|off     features not yet proven on enough machines: other machines (default off)",
-    "paddock config set workspace-free-space GB below this much free space, workspace launches are refused and running",
+    "paddock config set workspace-free-space GiB below this much free space, workspace launches are refused and running",
     "                                           workspaces are stopped (default 5; 0 turns it off; purgeable space not counted)",
   ]],
   ["Workspaces: on this Mac's own kernel, not a sandbox (macOS only)", [
-    "paddock workspace create NAME [--host-temp] [--disk GB] [--copy PATH] [--read PATH]… [--path DIR]… [--no-logins | --claude-profile NAME --codex-profile NAME]",
+    "paddock workspace create NAME [--host-temp] [--disk GiB] [--copy PATH] [--read PATH]… [--path DIR]… [--no-logins | --claude-profile NAME --codex-profile NAME]",
     "                                       --host-temp opens shared per-user temp (default off); TMPDIR stays private",
     "                                       --disk is watched, not capped (default 20): past it the daemon stops its processes",
     "paddock workspace shell NAME [-- COMMAND…]",
@@ -70,7 +70,7 @@ const GROUPS: Array<[string, string[]]> = [
     "                                       Piped input is sent only with --stdin or --stream.",
     "paddock workspace list | get NAME | stop NAME | verify NAME",
     "paddock workspace set NAME host-temp on|off   stop first; applies to later processes; shared host temp weakens confinement",
-    "paddock workspace set NAME disk GB            the watched disk limit; applies now, also while running",
+    "paddock workspace set NAME disk GiB            the watched disk limit; applies now, also while running",
     "paddock workspace remove NAME --confirm NAME",
   ]],
   ["Other machines (experimental, off unless turned on: paddock config set experimental on)", [
@@ -320,12 +320,22 @@ const MARK: Record<CheckResult["status"], string> = { pass: "✓", weak: "~", fa
 const MEANING: Record<CheckResult["status"], string> = { pass: "holds", weak: "holds in a weaker form", fail: "does not hold", unsupported: "not available on this engine", unknown: "could not be checked", info: "for your information" }
 // full lists every check; otherwise the passes are counted on one line, with the command that lists them, and every
 // other result is printed in full. The legend names only the marks shown.
+function workspaceListeners(detail: string): string {
+  const match = /Current listeners, including wildcard binds reachable on loopback: (.*)\. Services started later are also reachable\./.exec(detail)
+  if (!match) return detail
+  const pairs = [...new Set(match[1]!.split("; ").flatMap((line) => {
+    const port = /\bTCP \S+:(\d+) \(LISTEN\)/.exec(line)?.[1]
+    return port ? [`${port} (${line.trim().split(/\s+/)[0]})`] : []
+  }))]
+  return `Open. Current listeners: ${pairs.slice(0, 8).join(", ") || "none found"}${pairs.length > 8 ? `; ${pairs.length - 8} more (full detail in --json)` : ""}. Services started later are also reachable.`
+}
+
 function printChecks(checks: CheckResult[], checklist = CHECKLIST, full: string | true = true): void {
   const passed = checks.filter((check) => check.status === "pass")
   if (full !== true && passed.length) console.log(`  ✓ ${passed.length} ${passed.length === 1 ? "check holds" : "checks hold"}. Each one is listed by \`${full}\`.`)
   for (const check of full === true ? checks : checks.filter((check) => check.status !== "pass")) {
     const item = checklist.find((entry) => entry.id === check.id)
-    console.log(`  ${MARK[check.status] ?? "?"} ${item?.title ?? shown(check.id)}${check.status === "pass" || check.status === "info" ? "" : ` [${shown(check.status)}]`}\n      ${shown(check.detail)}${check.evidence === "none" ? "" : ` (${shown(check.evidence)})`}`)
+    console.log(`  ${MARK[check.status] ?? "?"} ${item?.title ?? shown(check.id)}${check.status === "pass" || check.status === "info" ? "" : ` [${shown(check.status)}]`}\n      ${shown(checklist === WORKSPACE_CHECKLIST && check.id === "loopback" ? workspaceListeners(check.detail) : check.detail)}${check.evidence === "none" ? "" : ` (${shown(check.evidence)})`}`)
   }
   const shownMarks = (Object.keys(MARK) as Array<CheckResult["status"]>).filter((status) => checks.some((check) => check.status === status))
   if (shownMarks.length) console.log(`\n  ${shownMarks.map((status) => `${MARK[status]} ${MEANING[status]}`).join("   ")}`)
@@ -390,9 +400,9 @@ async function main(argv: string[]): Promise<void> {
         const settings: Record<string, keyof Config> = { "require-probes": "requireProbes", experimental: "experimental" }
         const gb = key === "workspace-free-space" && /^\d+(\.\d+)?$/.test(value ?? "")
         if (!((action === "get" && positionals.length === 1) || (action === "set" && positionals.length === 3 && (gb || (Object.hasOwn(settings, key!) && (value === "on" || value === "off"))))))
-          throw new PaddockError("usage", "Use paddock config get, paddock config set require-probes|experimental on|off, or paddock config set workspace-free-space GB.")
+          throw new PaddockError("usage", "Use paddock config get, paddock config set require-probes|experimental on|off, or paddock config set workspace-free-space GiB.")
         const config = await call<Config>(action === "get" ? "configGet" : "configSet", action === "get" ? {} : gb ? { workspaceFreeSpaceGb: Number(value) } : { [settings[key!]!]: value === "on" })
-        const lines = { "require-probes": config.requireProbes ? "on" : "off", experimental: config.experimental ? "on" : "off", "workspace-free-space": `${config.workspaceFreeSpaceGb} GB` }
+        const lines = { "require-probes": config.requireProbes ? "on" : "off", experimental: config.experimental ? "on" : "off", "workspace-free-space": `${config.workspaceFreeSpaceGb} GiB` }
         return out(config, () => { for (const [name, text] of Object.entries(lines)) if (action === "get" || name === key) console.log(`${name} ${text}`) })
       }
       case "workspace": {
@@ -406,11 +416,11 @@ async function main(argv: string[]): Promise<void> {
           } }) } catch (error) { throw argumentError(error, `workspace ${action}`) }
         })()
         if (values["host-temp"] !== undefined && action !== "create") throw new PaddockError("usage", "--host-temp is a create option. Use workspace set NAME host-temp on|off to change it.")
-        if (values.disk !== undefined && action !== "create") throw new PaddockError("usage", "--disk is a create option. Use workspace set NAME disk GB to change it.")
+        if (values.disk !== undefined && action !== "create") throw new PaddockError("usage", "--disk is a create option. Use workspace set NAME disk GiB to change it.")
         const localPath = (path: string) => path === "~" || path.startsWith("~/") ? path : resolve(path)
         if (values["no-logins"] && (values["claude-profile"] !== undefined || values["codex-profile"] !== undefined)) throw new PaddockError("usage", "Choose --no-logins or named login profiles, not both.")
         // Only list and get measure size; elsewhere the field is left out rather than shown as unknown.
-        const show = (view: WorkspaceView, measured = false) => console.log(`${shown(view.name)}: workspace, not a sandbox; ${shown(view.status)}, host-temp ${view.spec ? view.spec.hostTemp ? "on (shared, weaker)" : "off" : "unknown"}, ${view.processes ?? "unknown"} processes${view.sizeBytes !== undefined ? `, ${(view.sizeBytes / 1024 ** 2).toFixed(1)} MiB` : measured ? ", size unknown" : ""}${view.spec?.diskGb !== undefined ? `, disk limit ${view.spec.diskGb} GB (watched)` : ""}${view.folder ? `\n  ${shown(view.folder)}` : ""}${view.problem ? `\n  ${shown(view.problem)}` : ""}${view.stopReason ? `\n  ${shown(view.stopReason)}` : ""}${view.enforcementProblem ? `\n  Disk watch unknown at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}` : ""}`)
+        const show = (view: WorkspaceView, measured = false) => console.log(`${shown(view.name)}: workspace, not a sandbox; ${shown(view.status)}, host-temp ${view.spec ? view.spec.hostTemp ? "on (shared, weaker)" : "off" : "unknown"}, ${view.processes ?? "unknown"} processes${view.sizeBytes !== undefined ? `, ${(view.sizeBytes / 1024 ** 3).toFixed(2)} GiB` : measured ? ", size unknown" : ""}${view.spec?.diskGb !== undefined ? `, disk limit ${view.spec.diskGb} GiB (watched)` : ""}${view.folder ? `\n  ${shown(view.folder)}` : ""}${view.problem ? `\n  ${shown(view.problem)}` : ""}${view.stopReason ? `\n  ${shown(view.stopReason)}` : ""}${view.enforcementProblem ? `\n  Disk watch unknown at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}` : ""}`)
         const disclose = (disclosure = WORKSPACE_DISCLOSURE) => console.log(`\n${shown(disclosure)}`)
         if (action === "list") {
           const workspaces = await call<WorkspaceView[]>("workspaceList")
@@ -431,7 +441,7 @@ async function main(argv: string[]): Promise<void> {
         if (action === "set") {
           const [, key, value] = positionals
           const disk = key === "disk" && /^\d+(\.\d+)?$/.test(value ?? "")
-          if (positionals.length !== 3 || !(disk || (key === "host-temp" && ["on", "off"].includes(value!)))) throw new PaddockError("usage", "Use paddock workspace set NAME host-temp on|off (stop the workspace first), or paddock workspace set NAME disk GB.")
+          if (positionals.length !== 3 || !(disk || (key === "host-temp" && ["on", "off"].includes(value!)))) throw new PaddockError("usage", "Use paddock workspace set NAME host-temp on|off (stop the workspace first), or paddock workspace set NAME disk GiB.")
           const view = await call<WorkspaceView>("workspaceSet", disk ? { name, diskGb: Number(value) } : { name, hostTemp: value === "on" })
           return out(view, () => { show(view); disclose(view.disclosure) })
         }

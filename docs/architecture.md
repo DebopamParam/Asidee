@@ -43,7 +43,7 @@ check results. Nonblocking unknown or unsupported checks remain disclosures.
 [Machines](#machines)), and a number `workspaceFreeSpaceGb`, default 5, from 0 to 100000 (see
 [macOS workspaces](workspaces.md#disk-use-and-free-space)). `paddock config get` reads the effective configuration;
 `paddock config set require-probes on|off`, `paddock config set experimental on|off` and
-`paddock config set workspace-free-space GB` change one setting each. Both support `--json` and `--host NAME`.
+`paddock config set workspace-free-space GiB` change one setting each. Both support `--json` and `--host NAME`.
 With `requireProbes: false`, create accepts unknown blocking probes and reports them as unknown, never as passes.
 Failed and unsupported blocking probes still refuse create. The dashboard's **Settings** section has the same toggle.
 A create refused for unknown probes offers **Open settings**, which navigates and focuses the toggle without changing it.

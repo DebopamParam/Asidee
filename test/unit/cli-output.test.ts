@@ -196,8 +196,8 @@ test("config get/set route settings and support JSON; invalid commands are refus
   const calls: unknown[] = []
   const paddock = await daemon({ configGet: (body: unknown) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5 } } },
     configSet: (body: { requireProbes?: boolean; experimental?: boolean; workspaceFreeSpaceGb?: number }) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: body.requireProbes ?? true, experimental: body.experimental ?? false, workspaceFreeSpaceGb: body.workspaceFreeSpaceGb ?? 5 } } } })
-  expect(await paddock("config", "get")).toMatchObject({ code: 0, out: "require-probes on\nexperimental off\nworkspace-free-space 5 GB\n" })
-  expect(await paddock("config", "set", "workspace-free-space", "12.5")).toMatchObject({ code: 0, out: "workspace-free-space 12.5 GB\n" })
+  expect(await paddock("config", "get")).toMatchObject({ code: 0, out: "require-probes on\nexperimental off\nworkspace-free-space 5 GiB\n" })
+  expect(await paddock("config", "set", "workspace-free-space", "12.5")).toMatchObject({ code: 0, out: "workspace-free-space 12.5 GiB\n" })
   expect(await paddock("config", "set", "require-probes", "off")).toMatchObject({ code: 0, out: "require-probes off\n" })
   expect(await paddock("config", "set", "experimental", "on")).toMatchObject({ code: 0, out: "experimental on\n" })
   const json = await paddock("--host", "build", "config", "set", "require-probes", "on", "--json")
@@ -286,7 +286,7 @@ test("workspace status lines leave size out where it was not measured and say un
     expect(out).not.toContain("size")
   }
   expect((await paddock("workspace", "get", "render")).out).toContain("0 processes, size unknown")
-  expect((await paddock("workspace", "list")).out).toContain("0 processes, 3.0 MiB")
+  expect((await paddock("workspace", "list")).out).toContain("0 processes, 0.00 GiB")
 })
 
 test("workspace disk: create and set send the limit, status shows it and a stop reason, and a launch over it warns in text and JSON", async () => {
@@ -309,7 +309,7 @@ test("workspace disk: create and set send the limit, status shows it and a stop 
   expect(set.code).toBe(0); expect(calls[2]).toEqual({ name: "render", diskGb: 2.5 })
   for (const args of [["set", "render", "disk"], ["set", "render", "disk", "lots"], ["set", "render", "disk", "on"], ["get", "render", "--disk", "3"]]) expect((await paddock("workspace", ...args)).code).toBe(2)
   const shown = (await paddock("workspace", "get", "render")).out
-  expect(shown).toContain("0 processes, size unknown, disk limit 1 GB (watched)\n")
+  expect(shown).toContain("0 processes, size unknown, disk limit 1 GiB (watched)\n")
   expect(shown).toContain(`\n  ${view.stopReason}\n`)
   expect(shown).toContain("\n  Disk watch unknown at 2026-11-16T10:00:30Z: Its size could not be measured.")
   const text = await paddock("workspace", "exec", "render", "--", "true")
@@ -517,3 +517,20 @@ test("audit B1: interrupted buffered mutations explain continued daemon work", a
     expect(err).toContain(`paddock ${workspace ? "workspace " : ""}remove demo --confirm demo`)
   }
 }, 10_000)
+
+test("B14/B19: workspace text summarizes listeners and uses GiB; JSON keeps listener detail", async () => {
+  const lines = Array.from({ length: 12 }, (_, i) => `process${i} ${700 + i} owner 10u IPv4 0x1234 0t0 TCP *:${8000 + i} (LISTEN)`)
+  const detail = `Open. Current listeners, including wildcard binds reachable on loopback: ${[...lines, lines[0]].join("; ")}. Services started later are also reachable.`
+  const workspace = { name: "demo", status: "idle", processes: 0, sizeBytes: 1024 ** 3, spec: { diskGb: 2 } }
+  const report = { workspace, checks: [{ id: "loopback", status: "weak", evidence: "inspected", detail }], ok: true }
+  const paddock = await daemon({ workspaceVerify: { ok: true, data: report }, workspaceGet: { ok: true, data: workspace } })
+  const out = (await paddock("workspace", "verify", "demo")).out
+  expect(out).toContain("8000 (process0)")
+  expect(out).not.toContain("0x1234")
+  expect(out).not.toContain("8008 (process8)")
+  expect(out.split("8000 (process0)")).toHaveLength(2)
+  expect(JSON.parse((await paddock("workspace", "verify", "demo", "--json")).out).data.checks[0].detail).toBe(detail)
+  const got = (await paddock("workspace", "get", "demo")).out
+  expect(got).toContain("1.00 GiB")
+  expect(got).toContain("disk limit 2 GiB")
+})

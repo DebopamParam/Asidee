@@ -62,7 +62,7 @@ mac("K15 finder control: empty workspace matches zero, known processes match exa
 test("workspace spec drops unknown fields, permits only open loopback, and refuses unsupported platforms", () => {
   expect(validWorkspaceSpec({ name: "render", reads: ["/a"], privileged: true })).toEqual({ name: "render", hostTemp: false, diskGb: 20, reads: ["/a"], path: [], loopback: "open", logins: { kind: "profiles", claude: "default", codex: "default" } })
   expect(validWorkspaceSpec({ name: "render", diskGb: "3" }).diskGb).toBe(3)
-  for (const diskGb of [0, 2001, "lots", -1]) expect(() => validWorkspaceSpec({ name: "render", diskGb })).toThrow("Disk (GB) must be a number from 1 to 2000.")
+  for (const diskGb of [0, 2001, "lots", -1]) expect(() => validWorkspaceSpec({ name: "render", diskGb })).toThrow("Disk (GiB) must be a number from 1 to 2000.")
   expect(() => validWorkspaceSpec({ name: "../outside" })).toThrow()
   expect(() => validWorkspaceSpec({ name: "render", loopback: [80] })).toThrow("Declared ports")
   expect(() => requireMac("linux")).toThrow("only on macOS")
@@ -513,7 +513,7 @@ mac("over its disk limit a workspace is stopped by the watch with a reason, warn
     // A launch over the limit runs, and says so.
     const warned = await workspaces.exec("disk", ["/bin/echo", "ran"])
     expect(warned.stdout).toBe("ran\n")
-    expect(warned.diskWarning).toEqual({ usedBytes: 2 * 1024 ** 3, limitBytes: 1024 ** 3, message: `disk uses 2.00 GB of its 1 GB disk limit, so the daemon stops its processes again within about 30 seconds unless space is freed. Free space in ${made.workspace.folder}, or raise the limit: paddock workspace set disk disk N` })
+    expect(warned.diskWarning).toEqual({ usedBytes: 2 * 1024 ** 3, limitBytes: 1024 ** 3, message: `disk uses 2.00 GiB of its 1 GiB disk limit, so the daemon stops its processes again within about 30 seconds unless space is freed. Free space in ${made.workspace.folder}, or raise the limit: paddock workspace set disk disk N` })
     const session = await workspaces.open("disk", ["/bin/sleep", "60"], { tty: false }); session.resume()
     expect(session.diskWarning?.usedBytes).toBe(2 * 1024 ** 3)
     await running(workspaces, "disk")
@@ -521,9 +521,9 @@ mac("over its disk limit a workspace is stopped by the watch with a reason, warn
     await session.finished
     const stopped = await workspaces.get("disk", false)
     expect(stopped.status).toBe("idle")
-    expect(stopped.stopReason).toMatch(new RegExp(`^Stopped by the daemon at \\S+: disk uses 2\\.00 GB of its 1 GB disk limit\\. Free space in ${made.workspace.folder}, or raise the limit: paddock workspace set disk disk N$`))
+    expect(stopped.stopReason).toMatch(new RegExp(`^Stopped by the daemon at \\S+: disk uses 2\\.00 GiB of its 1 GiB disk limit\\. Free space in ${made.workspace.folder}, or raise the limit: paddock workspace set disk disk N$`))
     expect((await workspaces.list())[0]!.stopReason).toBe(stopped.stopReason)
-    expect((await workspaces.verify("disk")).checks.find((check) => check.id === "disk")).toMatchObject({ status: "fail", detail: expect.stringContaining("It uses 2.00 GB now.") })
+    expect((await workspaces.verify("disk")).checks.find((check) => check.id === "disk")).toMatchObject({ status: "fail", detail: expect.stringContaining("It uses 2.00 GiB now.") })
     // Under the limit again: no warning, and a launch clears the old reason.
     fake.du = du(0.5)
     const clear = await workspaces.exec("disk", ["/usr/bin/true"])
@@ -548,14 +548,14 @@ mac("a workspace whose processes are idle is not measured by the watch, and the 
     expect((await workspaces.manifest("idle")).spec.diskGb).toBe(3)
     await expect(workspaces.set("idle", { diskGb: 0 })).rejects.toThrow("from 1 to 2000")
     await expect(workspaces.set("idle", { diskGb: 3, hostTemp: true })).rejects.toThrow("one at a time")
-    await expect(workspaces.set("idle", { diskGb: null })).rejects.toThrow("in GB")
+    await expect(workspaces.set("idle", { diskGb: null })).rejects.toThrow("in GiB")
     // Host temp still refuses a live change.
     await expect(workspaces.set("idle", { hostTemp: true })).rejects.toThrow("Stop the workspace")
     session.close(); await session.finished
   } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
 }, 30_000)
 
-mac("a manifest written before disk limits reads with the 20 GB default", async () => {
+mac("a manifest written before disk limits reads with the 20 GiB default", async () => {
   const { workspaces, dirs, clean } = await fixture()
   try {
     await workspaces.create({ name: "legacy", logins: { kind: "none" } })
@@ -589,7 +589,7 @@ mac("a measurement that fails is unknown, warns in the view, and stops the works
     await running(workspaces, "blind")
     fake.du = du(2, 1)
     await workspaces.watch(); await again.finished
-    expect((await workspaces.get("blind", false)).stopReason).toContain("uses 2.00 GB of its 1 GB disk limit")
+    expect((await workspaces.get("blind", false)).stopReason).toContain("uses 2.00 GiB of its 1 GiB disk limit")
   } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
 }, 30_000)
 
@@ -600,13 +600,13 @@ mac("below the free-space floor launches are refused with the setting's command 
     const session = await workspaces.open("floor", ["/bin/sleep", "60"], { tty: false }); session.resume()
     await running(workspaces, "floor")
     fake.free = 3 * 1024 ** 3
-    const sentence = "This Mac has 3.00 GB free where workspaces live, below the 5 GB floor. Free space on this Mac, or change the floor: paddock config set workspace-free-space GB"
+    const sentence = "This Mac has 3.00 GiB free where workspaces live, below the 5 GiB floor. Free space on this Mac, or change the floor: paddock config set workspace-free-space GiB"
     const refused = await workspaces.exec("floor", ["/usr/bin/true"]).then(() => undefined, (error: PaddockError) => error)
     expect(refused?.code).toBe("check-failed"); expect(refused?.message).toContain(`(fail): ${sentence}`)
     await workspaces.watch(); await session.finished
     const view = await workspaces.get("floor", false)
     expect(view.status).toBe("idle"); expect(view.stopReason).toMatch(new RegExp(`^Stopped by the daemon at \\S+: ${sentence.replace(/\./g, "\\.")}$`))
-    // The floor is the machine-wide setting; at 2 GB the same free space is enough.
+    // The floor is the machine-wide setting; at 2 GiB the same free space is enough.
     await writeConfig(dirs, { workspaceFreeSpaceGb: 2 })
     expect((await workspaces.exec("floor", ["/usr/bin/true"])).exitCode).toBe(0)
   } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }

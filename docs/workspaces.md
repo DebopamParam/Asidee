@@ -55,8 +55,8 @@ while looking for hard links; an unreadable subtree is unknown. Permission repai
 
 ## Disk use and free space
 
-`workspace create NAME --disk GB` sets a workspace's disk limit: from 1 to 2000, default 20, as for a sandbox.
-`workspace set NAME disk GB` changes it at any time, also while its processes run. GB here is 1024³ bytes.
+`workspace create NAME --disk GiB` sets a workspace's disk limit: from 1 to 2000, default 20, as for a sandbox.
+`workspace set NAME disk GiB` changes it at any time, also while its processes run. GiB here is 1024³ bytes.
 
 The limit is **watched, not capped**. While the daemon runs, every 30 seconds it measures each workspace that has
 running processes with `/usr/bin/du -sk` on its folder, so `home`, private `tmp` and `work` all count; shared host
@@ -79,13 +79,13 @@ files with a warm cache. A cold cache was not measured.
 
 Below a machine-wide free-space floor, workspace launches are refused (exit 6) with a sentence giving the free space,
 the floor and the command to change it, and the pass stops running workspaces with the same sentence as their
-reason. `paddock config set workspace-free-space GB` sets the floor: default 5, from 0 (off) to 100000. Free space is
+reason. `paddock config set workspace-free-space GiB` sets the floor: default 5, from 0 (off) to 100000. Free space is
 `statfs`'s available space on the volume that holds the workspace folder. macOS purgeable space is not counted, so
 Finder can show more free space than Paddock does.
 
 The checklist has both: `free-space` blocks a launch, create and verify when it fails or cannot be read; `disk`
 does not block and reads `weak` while under the limit, `fail` over it, or `unknown`, and states the 30-second
-interval. K31 writes 1100 MiB past a 1 GB limit and sees the stop, its reason, the warning on relaunch, cleanup from
+interval. K31 writes 1100 MiB past a 1 GiB limit and sees the stop, its reason, the warning on relaunch, cleanup from
 inside, and no warning afterwards. K32 sets the floor above this Mac's free space, sees the refusal and the stop,
 and restores the setting.
 
@@ -266,3 +266,7 @@ K15 runs first even when selecting individual K IDs. Partial K scorecards go onl
 [`evals/SCORECARD.workspace.md`](../evals/SCORECARD.workspace.md); neither full sandbox scorecard is rewritten.
 The K runner removes its workspaces, app registrations, job, private daemon and temporary folders. The unit tests
 also verify PTY input/resize, mode-000 and missing-folder recovery, credential redaction, and unchanged copy sources.
+
+Text listener output shows at most eight distinct `port (process)` pairs. `--json` keeps
+the full listener evidence. Stop, remove and disk-watch session endings print the reason
+on stderr before exit; signal exits use 128 plus the signal number.

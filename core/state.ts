@@ -43,7 +43,7 @@ function number(value: unknown, label: string, min: number, max: number, fallbac
 export type Sizes = Pick<SandboxSpec, "cpus" | "memoryGb" | "pids" | "diskGb">
 const RANGES: Record<keyof Sizes, [string, number, number]> = { cpus: ["CPUs", 0.25, 64], memoryGb: ["Memory (GB)", 0.25, 256], pids: ["The process limit", 64, 65_536], diskGb: ["Disk (GB)", 1, 2000] }
 // A workspace's watched disk limit has the same range and default as a sandbox's.
-export const validDiskGb = (value: unknown) => number(value, ...RANGES.diskGb, DEFAULT_SPEC.diskGb)
+export const validDiskGb = (value: unknown, label = RANGES.diskGb[0]) => number(value, label, RANGES.diskGb[1], RANGES.diskGb[2], DEFAULT_SPEC.diskGb)
 export function validSizes(input: Record<string, unknown>, base: Sizes): Sizes {
   const size = (key: keyof Sizes) => number(input[key], ...RANGES[key], base[key])
   return { cpus: size("cpus"), memoryGb: size("memoryGb"), pids: Math.round(size("pids")), diskGb: size("diskGb") }

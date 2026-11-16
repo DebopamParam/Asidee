@@ -26,8 +26,8 @@ export type WorkspaceRemoval = { removed: string; kind: "workspace"; hardLinks: 
 // How often the daemon measures each workspace with running processes. /usr/bin/du took 0.06 to 0.12 s on 100,000
 // small files on an Apple M5 with a warm cache, so a pass costs little; a cold cache was not measured.
 export const WORKSPACE_WATCH_MS = 30_000
-const GB = 1024 ** 3
-const gb = (bytes: number) => (bytes / GB).toFixed(2)
+const GiB = 1024 ** 3
+const gb = (bytes: number) => (bytes / GiB).toFixed(2)
 
 export function workspaceName(value: unknown): string {
   if (typeof value !== "string" || !/^[a-z0-9][a-z0-9-]{0,30}$/.test(value)) throw new PaddockError("usage", "A workspace name is 1 to 31 lowercase letters, digits or hyphens, and does not start with a hyphen.")
@@ -46,7 +46,7 @@ export function validWorkspaceSpec(input: Record<string, unknown>): WorkspaceSpe
   if (!object(selected) || (selected.kind !== "none" && selected.kind !== "profiles")) throw new PaddockError("usage", "logins must select named profiles or none.")
   const profile = (value: unknown) => { if (typeof value !== "string") throw new PaddockError("usage", "Choose a named login profile."); try { return profileName(value) } catch { throw new PaddockError("usage", "A login profile is 1 to 48 letters, digits, underscores or hyphens.") } }
   const logins: WorkspaceSpec["logins"] = selected.kind === "none" ? { kind: "none" } : { kind: "profiles", claude: profile(selected.claude), codex: profile(selected.codex) }
-  return { name: workspaceName(input.name), hostTemp: input.hostTemp ?? false, diskGb: validDiskGb(input.diskGb), reads: strings(input.reads, "reads"), path: strings(input.path, "path"), loopback: "open", ...(copy ? { copy } : {}), logins }
+  return { name: workspaceName(input.name), hostTemp: input.hostTemp ?? false, diskGb: validDiskGb(input.diskGb, "Disk (GiB)"), reads: strings(input.reads, "reads"), path: strings(input.path, "path"), loopback: "open", ...(copy ? { copy } : {}), logins }
 }
 export const validArgv = (value: unknown): string[] => {
   if (!Array.isArray(value) || !value.length || !value.every((arg) => typeof arg === "string" && !arg.includes("\0"))) throw new PaddockError("usage", "workspace exec needs a command after --.")
@@ -185,14 +185,14 @@ export class Workspaces {
   protected async freeBytes(folder: string): Promise<number> { const volume = await statfs(folder); return volume.bavail * volume.bsize }
   private async freeSpace(folder: string): Promise<{ free: number; floorGb: number; low: boolean; sentence: string }> {
     const floorGb = (await readConfig(this.dirs)).workspaceFreeSpaceGb; const free = await this.freeBytes(folder)
-    const low = free < floorGb * GB
+    const low = free < floorGb * GiB
     return { free, floorGb, low, sentence: low
-      ? `This Mac has ${gb(free)} GB free where workspaces live, below the ${floorGb} GB floor. Free space on this Mac, or change the floor: paddock config set workspace-free-space GB`
-      : `${gb(free)} GB free where workspaces live; the floor is ${floorGb} GB. Purgeable space is not counted.` }
+      ? `This Mac has ${gb(free)} GiB free where workspaces live, below the ${floorGb} GiB floor. Free space on this Mac, or change the floor: paddock config set workspace-free-space GiB`
+      : `${gb(free)} GiB free where workspaces live; the floor is ${floorGb} GiB. Purgeable space is not counted.` }
   }
   // Ends with the command, so nothing follows it on the line.
   private overLimit(manifest: WorkspaceManifest, usedBytes: number, then = ""): string {
-    return `${manifest.name} uses ${gb(usedBytes)} GB of its ${manifest.spec.diskGb} GB disk limit${then}. Free space in ${manifest.folder}, or raise the limit: paddock workspace set ${manifest.name} disk N`
+    return `${manifest.name} uses ${gb(usedBytes)} GiB of its ${manifest.spec.diskGb} GiB disk limit${then}. Free space in ${manifest.folder}, or raise the limit: paddock workspace set ${manifest.name} disk N`
   }
   private async view(manifest: WorkspaceManifest, withSize = false): Promise<WorkspaceView> {
     let processes: number | undefined; let problem: string | undefined
@@ -432,10 +432,10 @@ export class Workspaces {
       } catch { add("gpu", "unknown", "none", "The hardware encode probe could not run. Metal compute is not covered by this check.") }
       finally { await rm(movie, { force: true }) }
     }
-    const watched = `Watched, not capped: while the daemon runs it measures this folder, private tmp included, every ${WORKSPACE_WATCH_MS / 1000} seconds and stops the workspace's processes once it passes ${manifest.spec.diskGb} GB, so it can overshoot. Nothing watches it while no daemon runs.`
+    const watched = `Watched, not capped: while the daemon runs it measures this folder, private tmp included, every ${WORKSPACE_WATCH_MS / 1000} seconds and stops the workspace's processes once it passes ${manifest.spec.diskGb} GiB, so it can overshoot. Nothing watches it while no daemon runs.`
     const used = await this.measure(manifest)
-    if (!used || (!used.complete && used.bytes <= manifest.spec.diskGb * GB)) add("disk", "unknown", "none", `${watched} Its size could not be measured now.`)
-    else add("disk", used.bytes > manifest.spec.diskGb * GB ? "fail" : "weak", "inspected", `${watched} It uses ${gb(used.bytes)} GB now.`)
+    if (!used || (!used.complete && used.bytes <= manifest.spec.diskGb * GiB)) add("disk", "unknown", "none", `${watched} Its size could not be measured now.`)
+    else add("disk", used.bytes > manifest.spec.diskGb * GiB ? "fail" : "weak", "inspected", `${watched} It uses ${gb(used.bytes)} GiB now.`)
     add("network", "info", "inspected", "No IP network restrictions. Internet, LAN, tailnet and remote effects are open; HTTPS is measured by K18.")
     const listeners = await this.runHost(["/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], { timeoutMs: 5000, maxOutputBytes: 256 * 1024 })
     add("loopback", listeners.exitCode === 0 ? "weak" : "unknown", listeners.exitCode === 0 ? "inspected" : "none", listeners.exitCode === 0
@@ -470,7 +470,7 @@ export class Workspaces {
       // The checks go in the message too: a stream session (shell, exec --stream) carries only the message.
       if (blocked.length) throw new PaddockError("check-failed", `Workspace execution refused by its checklist: ${blocked.map((check) => `${WORKSPACE_CHECKLIST.find((item) => item.id === check.id)?.title ?? check.id} (${check.status}): ${check.detail}`).join(" ")}`, blocked)
       // Over its limit, a launch still runs, so space can be freed from inside; the daemon stops it again if not.
-      const used = await this.measure(manifest); const limitBytes = manifest.spec.diskGb * GB
+      const used = await this.measure(manifest); const limitBytes = manifest.spec.diskGb * GiB
       const diskWarning: DiskWarning | undefined = used && used.bytes > limitBytes ? { usedBytes: used.bytes, limitBytes,
         message: this.overLimit(manifest, used.bytes, `, so the daemon stops its processes again within about ${WORKSPACE_WATCH_MS / 1000} seconds unless space is freed`) } : undefined
       if (manifest.stopReason) { delete manifest.stopReason; await this.save(manifest) }
@@ -493,8 +493,8 @@ export class Workspaces {
   }
   // The limit is only watched, so it changes now, also while processes run.
   async setDisk(name: string, diskGb: unknown): Promise<WorkspaceView> {
-    if (diskGb === null || diskGb === "") throw new PaddockError("usage", "Give the disk limit in GB.")
-    const limit = validDiskGb(diskGb)
+    if (diskGb === null || diskGb === "") throw new PaddockError("usage", "Give the disk limit in GiB.")
+    const limit = validDiskGb(diskGb, "Disk (GiB)")
     return this.exclusive(workspaceName(name), async () => {
       const manifest = await this.manifest(name)
       manifest.spec.diskGb = limit
@@ -533,7 +533,7 @@ export class Workspaces {
         const space = await this.freeSpace(manifest.folder).catch(() => undefined)
         if (space?.low) { await this.stopBecause(manifest.name, `Stopped by the daemon at ${at}: ${space.sentence}`); continue }
         const used = await this.measure(manifest)
-        if (used && used.bytes > manifest.spec.diskGb * GB) { await this.stopBecause(manifest.name, `Stopped by the daemon at ${at}: ${this.overLimit(manifest, used.bytes)}`); continue }
+        if (used && used.bytes > manifest.spec.diskGb * GiB) { await this.stopBecause(manifest.name, `Stopped by the daemon at ${at}: ${this.overLimit(manifest, used.bytes)}`); continue }
         if (space && used?.complete) { this.unmeasured.delete(name); this.watchProblems.delete(name); continue }
         const count = (this.unmeasured.get(name) ?? 0) + 1; this.unmeasured.set(name, count)
         const message = space ? "Its size could not be measured." : "Free space where workspaces live could not be read."

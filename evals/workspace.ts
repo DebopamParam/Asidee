@@ -494,7 +494,7 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
     for (const end = Date.now() + seconds * 1000; Date.now() < end; await Bun.sleep(1000)) { const view = await json(["get", name]); if (view.stopReason) return view as { status: string; stopReason: string } }
     throw new Error(`${name} was not stopped within ${seconds} s`)
   }
-  ev("K31", "Real files past a 1 GB limit get the workspace stopped with a reason, a relaunch is warned, space freed from inside clears it, and remove deletes its private tmp", async () => {
+  ev("K31", "Real files past a 1 GiB limit get the workspace stopped with a reason, a relaunch is warned, space freed from inside clears it, and remove deletes its private tmp", async () => {
     const ws = await make(["--disk", "1"]); const notes: string[] = []
     try {
       // 1100 MiB of real blocks, then a process that stays, as an agent would.
@@ -502,7 +502,7 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
       started.push(writer)
       const began = Date.now(); const view = await stoppedWithin(ws.name)
       notes.push(`stopped ${((Date.now() - began) / 1000).toFixed(0)} s after the write began`)
-      expect(view.status === "idle" && /^Stopped by the daemon at \S+: k-\d+ uses 1\.0\d GB of its 1 GB disk limit\. Free space in .+, or raise the limit: paddock workspace set k-\d+ disk N$/.test(view.stopReason), `get: ${JSON.stringify(view)}`)
+      expect(view.status === "idle" && /^Stopped by the daemon at \S+: k-\d+ uses 1\.0\d GiB of its 1 GiB disk limit\. Free space in .+, or raise the limit: paddock workspace set k-\d+ disk N$/.test(view.stopReason), `get: ${JSON.stringify(view)}`)
       const exited = await Promise.race([writer.exited, Bun.sleep(10_000).then(() => "running")])
       expect(exited !== "running", "the writer's exec was still running after the stop")
       const listed = await pdk(["workspace", "list"])
@@ -536,16 +536,16 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
       for (let i = 0; i < 100 && (await json(["get", ws.name])).status !== "running"; i++) await Bun.sleep(100)
       // Far above this Mac's free space, so the floor is not met.
       const set = await pdk(["config", "set", "workspace-free-space", "100000"])
-      expect(set.code === 0 && set.out === "workspace-free-space 100000 GB\n", `set: ${set.out}${set.err}`)
+      expect(set.code === 0 && set.out === "workspace-free-space 100000 GiB\n", `set: ${set.out}${set.err}`)
       const refused = await pdk(["workspace", "exec", ws.name, "--", "/usr/bin/true"])
-      const sentence = /This Mac has [\d.]+ GB free where workspaces live, below the 100000 GB floor\. Free space on this Mac, or change the floor: paddock config set workspace-free-space GB/
+      const sentence = /This Mac has [\d.]+ GiB free where workspaces live, below the 100000 GiB floor\. Free space on this Mac, or change the floor: paddock config set workspace-free-space GiB/
       expect(refused.code === 6 && sentence.test(refused.err), `exit ${refused.code}: ${refused.err.slice(0, 600)}`)
       const view = await stoppedWithin(ws.name)
       expect(view.status === "idle" && sentence.test(view.stopReason), `get: ${JSON.stringify(view)}`)
       return `refused with: ${sentence.exec(refused.err)![0]}`
     } finally {
       const restored = await pdk(["config", "set", "workspace-free-space", String(before)])
-      expect(restored.code === 0 && restored.out === `workspace-free-space ${before} GB\n`, `the floor was not restored: ${restored.out}${restored.err}`)
+      expect(restored.code === 0 && restored.out === `workspace-free-space ${before} GiB\n`, `the floor was not restored: ${restored.out}${restored.err}`)
       await drop(ws)
     }
   })

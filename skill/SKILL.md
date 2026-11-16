@@ -20,7 +20,7 @@ paddock list
 paddock config get                         # effective settings on the selected machine
 paddock config set require-probes on|off    # require blocking isolation probes at create, default on
 paddock config set experimental on|off      # other machines (host, --host, list --all), default off
-paddock config set workspace-free-space GB  # below this, workspace launches are refused and running ones stopped, default 5
+paddock config set workspace-free-space GiB  # below this, workspace launches are refused and running ones stopped, default 5
 paddock exec NAME [--stdin] -- COMMAND ARG… # exit code, stdout and stderr are the command's; output as text
 paddock exec NAME --stream -- COMMAND ARG…  # raw bytes in and out, no size limit
 paddock start NAME | paddock stop NAME
@@ -167,9 +167,9 @@ coverage and limits.
 paddock workspace create NAME --copy /absolute/project [--read PATH] [--path DIR] [--no-logins]
 paddock workspace create NAME --claude-profile work --codex-profile work
 paddock workspace create NAME --host-temp --no-logins
-paddock workspace create NAME --disk GB --no-logins   # watched disk limit, default 20
+paddock workspace create NAME --disk GiB --no-logins   # watched disk limit, default 20
 paddock workspace set NAME host-temp on|off   # stop first; later processes use the changed profile
-paddock workspace set NAME disk GB            # applies now, also while running
+paddock workspace set NAME disk GiB            # applies now, also while running
 paddock workspace shell NAME
 paddock workspace exec NAME [--stdin | --stream] -- COMMAND ARG…
 paddock workspace list
@@ -347,3 +347,6 @@ Each privileged step that reads staged files copies them into a root-owned priva
 checks SHA-256 there, uses only those copies, then removes them. The script and digests are in the plan hash.
 Interactive installs refresh `sudo -v` before each privileged step. Repository source text in the
 plan removes URL usernames and passwords; the plan binds the original file bytes by their hash.
+
+Workspace size, disk and free-space values use GiB (1024³ bytes). Listener text is capped at
+eight distinct port/process pairs. Use `--json` for the full listener evidence.
