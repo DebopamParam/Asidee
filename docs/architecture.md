@@ -322,7 +322,9 @@ the engine adds behind a running guest once the guest has looked in that folder,
 with one `ls /.paddock` before the first forward, and also for a new top-level folder after a listing of `/`. A copy
 made before the start exists before any guest process can look, and replacing a file the guest can see works. A guest
 that removes the relay while running hides any new copy, so `forward add` runs the relay once and refuses with the
-restart to make, instead of listening and relaying the engine's error. The relay gets the port as a number and nothing else. The engine publishes nothing and gets no
+restart to make, instead of listening and relaying the engine's error. The relay gets the port as a number and nothing else. A forward holds 64
+connections at once, counting ones still being dialled; past that a connection is closed before anything is opened for
+it. The engine publishes nothing and gets no
 listener on its host. Each direction waits for the other side. End of input passes on as a half-close: the relay
 stays while the port answers and is ended after ten seconds of silence, since a client that has gone after its FIN
 looks the same as one still waiting. Links do the same. A reply that keeps coming keeps the connection; a reply that
@@ -376,7 +378,9 @@ heartbeat, or when its input closes.
 A link is bound to both sandboxes' ids, and while open to both runs (the engine id and start time, as a forward is).
 Within two seconds of either side restarting behind Paddock's back, and at once when either stops through Paddock,
 its connections end; it opens again, with a new measurement, when both run: after `paddock start` and at each
-30-second enforcement pass. Links are recorded in `links.json` in the state folder, so they come back after a daemon
+30-second enforcement pass. A link that fails to open, or whose listener stops within ten minutes of opening, is tried
+again after 30 seconds, then after twice as long each time in a row, up to 30 minutes, because every try runs its test
+on the engine; `paddock start` of either sandbox, or `link add` again, tries it at once. Links are recorded in `links.json` in the state folder, so they come back after a daemon
 restart. While the daemon is down they are down. Removing either sandbox removes its links, and a sandbox made again
 under the name inherits none. `link remove` closes the listener and then measures that its address and port refuse a
 connection inside FROM.

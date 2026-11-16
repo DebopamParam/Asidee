@@ -6,7 +6,7 @@ import { join } from "node:path"
 import { CHECKLIST } from "../../core/checks"
 import { Core } from "../../core/core"
 import { FIN_QUIET_MS } from "../../core/forwards"
-import { LINK_CONNECTIONS, LINKS_PER_SANDBOX, pump } from "../../core/links"
+import { LINK_CONNECTIONS, LINKS_PER_SANDBOX, pump, RETRY_MAX_MS, RETRY_MS } from "../../core/links"
 import { CATALOG, LINKS_LOCAL, Machines, type Hello } from "../../core/machines"
 import { type CheckResult, type Engine, type LinkSupport, type Provider, type Session, type Stage } from "../../core/types"
 
@@ -323,6 +323,37 @@ test("a link closes when either sandbox restarts behind Paddock's back, and its 
   expect((await core.links.list())[0]).toMatchObject({ state: "open" })
   core.closeSessions()
 }, 10_000)
+
+test("a link whose listener keeps stopping is tried again less and less often, and a start or a steady run starts over", async () => {
+  const fake = world(); const core = await paddock(fake)
+  let clock = 1_000_000; core.links.now = () => clock
+  await core.create({ name: "app" }); await core.create({ name: "db" })
+  fake.boxes.get("db")!.services.add(5432)
+  await core.links.add("app", "db", 5432)
+  const opens = () => fake.dialed.filter((dial) => dial.name === "db" && dial.port !== 5432).length
+  // `app` ends its listener as soon as it opens; each sync that opens the link runs its test again.
+  const kill = async () => { fake.listen("app", "127.77.0.2", 5432)?.finish(); await Bun.sleep(10) }
+  const waits: number[] = []
+  await kill()
+  for (let round = 0; round < 8; round++) {
+    let waited = 0; const before = opens()
+    while (opens() === before) { clock += RETRY_MS / 2; waited += RETRY_MS / 2; await core.links.sync() }
+    waits.push(waited); await kill()
+  }
+  expect(waits).toEqual([RETRY_MS, 2 * RETRY_MS, 4 * RETRY_MS, 8 * RETRY_MS, 16 * RETRY_MS, 32 * RETRY_MS, RETRY_MAX_MS, RETRY_MAX_MS])
+  expect((await core.links.list())[0]).toMatchObject({ state: "closed", reason: "its listener stopped soon after it opened; it is tried again in 30 minutes (9 failures in a row)" })
+  // A start through Paddock tries it now.
+  const before = opens()
+  await core.start("app")
+  expect(opens()).toBeGreaterThan(before)
+  expect((await core.links.list())[0]).toMatchObject({ state: "open" })
+  // A listener that stops after ten minutes open counts as working: the next sync opens it again.
+  clock += 10 * 60_000; await kill()
+  expect((await core.links.list())[0]).toMatchObject({ reason: "its listener stopped; it opens again within 30 seconds" })
+  await core.links.sync()
+  expect((await core.links.list())[0]).toMatchObject({ state: "open" })
+  core.closeSessions()
+}, 20_000)
 
 test(`connections, links and the listener's output are bounded: ${LINK_CONNECTIONS} connections per link, ${LINKS_PER_SANDBOX} links per sandbox`, async () => {
   const fake = world(); const core = await paddock(fake)

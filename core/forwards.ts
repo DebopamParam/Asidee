@@ -23,10 +23,15 @@ export function validPort(value: unknown, what: string): number {
   return port as number
 }
 
+// Connections open at once per forward, counting ones still being dialled; past it a connection is closed before
+// anything is opened for it. Each costs a relay process in the sandbox and engine sessions, as a link's does.
+export const FORWARD_CONNECTIONS = 64
+
 // Binds once. Without a local port the system picks a free one, so nothing is probed and then assumed still free.
 export function listenLoopback(localPort?: number): Promise<Server> {
   return new Promise((resolve, reject) => {
     const server = createServer({ allowHalfOpen: true, pauseOnConnect: true })
+    server.maxConnections = FORWARD_CONNECTIONS
     server.once("error", (error: NodeJS.ErrnoException) => reject(error.code === "EADDRINUSE"
       ? new PaddockError("conflict", `127.0.0.1:${localPort} is already in use on this machine. Choose another --local-port, or leave it out to get a free one.`)
       : new PaddockError("runtime", `Could not listen on 127.0.0.1:${localPort ?? 0}: ${error.message}`)))

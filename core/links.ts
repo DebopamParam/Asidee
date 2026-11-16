@@ -23,6 +23,12 @@ export const OPENS_PER_SECOND = 20
 // Lines per second from a listener past which it is treated as hostile and closed.
 const LINES_PER_SECOND = 200
 const HEARTBEAT_MS = 5000
+// A link that failed to open, or whose listener stopped within STEADY_MS of opening, is tried again after RETRY_MS,
+// doubling each time in a row up to RETRY_MAX_MS: each try runs the test, so `from` could otherwise keep the daemon
+// working on the engine by ending its listener.
+export const RETRY_MS = 30_000
+export const RETRY_MAX_MS = 30 * 60_000
+const STEADY_MS = 10 * 60_000
 const READY_MS = 10_000
 const WATCH_MS = 2000
 // The loopback range links listen on inside `from`; gVisor answers on all of 127.0.0.0/8 without configuring it.
@@ -56,11 +62,13 @@ export class Links {
   private readonly why = new Map<string, string>()
   private readonly measured = new Map<string, Measure>()
   private readonly opening = new Set<string>()
+  private readonly retries = new Map<string, { failures: number; at: number }>()
   // Other /etc/hosts lines that name a linked sandbox, per `from`.
   private readonly shadowed = new Map<string, string[]>()
   private total = 0
   private watch?: ReturnType<typeof setInterval>
   opensPerSecond = OPENS_PER_SECOND
+  now = () => Date.now()
   constructor(private readonly dirs: Dirs, private readonly providerOf: (manifest: Manifest) => Provider) {}
 
   private get file() { return join(this.dirs.state, "links.json") }
@@ -139,7 +147,7 @@ export class Links {
         ?? Array.from({ length: 250 }, (_, at) => `${ADDRESSES}${at + 2}`).find((candidate) => !used.has(candidate))!
       const record: LinkRecord = { id: existing?.id ?? randomBytes(4).toString("hex"), from: { name: from, sandboxId: fromManifest.id }, to: { name: to, sandboxId: toManifest.id }, port, address, createdAt: existing?.createdAt ?? new Date().toISOString() }
       await this.save([...others, record])
-      this.why.delete(record.id)
+      this.why.delete(record.id); this.retries.delete(record.id)
       const outcome = await this.open(record, manifests)
       if (outcome === "open" || outcome === "waiting") return this.view(record, manifests)
       // A link that was refused is not kept: nothing of it stays.
@@ -207,11 +215,13 @@ export class Links {
   close(): void { for (const route of [...this.live.values()]) { this.live.delete(route.record.id); void this.closeRoute(route, "The link ended: the Paddock daemon stopped.") } }
 
   // Makes the running links match the records: drops links of removed sandboxes, restores each running `from`'s
-  // /etc/hosts lines, and opens (and measures) each link whose two sandboxes run.
+  // /etc/hosts lines, and opens (and measures) each link whose two sandboxes run and that is not waiting to be tried
+  // again. A start through Paddock (`only`) tries that sandbox's links now.
   sync(only?: string): Promise<void> {
     return this.queued(async () => {
       const { records, manifests } = await this.current()
       const touched = records.filter((link) => !only || link.from.name === only || link.to.name === only)
+      if (only) for (const link of touched) this.retries.delete(link.id)
       for (const name of new Set(touched.map((link) => link.from.name))) {
         const from = manifests.get(name)!
         if (await this.generation(from)) await this.writeHosts(from).catch(() => {})
@@ -226,6 +236,7 @@ export class Links {
     const from = manifests.get(record.from.name)!; const to = manifests.get(record.to.name)!
     const [fromGen, toGen] = await Promise.all([this.generation(from), this.generation(to)])
     if (!fromGen || !toGen) { this.why.set(record.id, `${!fromGen ? from.name : to.name} is stopped`); return "waiting" }
+    if (this.now() < (this.retries.get(record.id)?.at ?? 0)) return "failed"
     this.opening.add(record.id)
     try {
       const fromProvider = this.providerOf(from); const toProvider = this.providerOf(to)
@@ -234,19 +245,29 @@ export class Links {
       const measured = await this.measure(record, from, to, fromGen, toGen)
       this.measured.set(record.id, measured)
       if (measured.status === "fail") { await this.cut(record, measured.detail, from); return "cut" }
-      if (measured.status === "unknown" && (await readConfig(this.dirs)).requireProbes) { this.why.set(record.id, `it could not be measured: ${measured.detail}`); return "unmeasured" }
+      if (measured.status === "unknown" && (await readConfig(this.dirs)).requireProbes) { this.failed(record.id, `it could not be measured: ${measured.detail}`); return "unmeasured" }
       const route = await this.route(record, from, to, fromGen, toGen, record.port)
+      const opened = this.now()
       route.finished.then(() => {
         if (this.live.get(record.id) !== route) return
-        this.live.delete(record.id); this.why.set(record.id, "its listener stopped; it opens again within 30 seconds")
+        this.live.delete(record.id)
+        if (this.now() - opened >= STEADY_MS) { this.retries.delete(record.id); this.why.set(record.id, "its listener stopped; it opens again within 30 seconds") }
+        else this.failed(record.id, "its listener stopped soon after it opened")
       })
       this.live.set(record.id, route); this.why.delete(record.id)
       this.watching()
       return "open"
     } catch (error) {
-      this.why.set(record.id, (error as Error).message)
+      this.failed(record.id, (error as Error).message)
       return "failed"
     } finally { this.opening.delete(record.id) }
+  }
+
+  private failed(id: string, why: string): void {
+    const failures = (this.retries.get(id)?.failures ?? 0) + 1
+    const wait = Math.min(RETRY_MS * 2 ** (failures - 1), RETRY_MAX_MS)
+    this.retries.set(id, { failures, at: this.now() + wait })
+    this.why.set(id, `${why}; it is tried again in ${wait < 60_000 ? `${wait / 1000} seconds` : `${Math.round(wait / 60_000)} minutes`}${failures > 1 ? ` (${failures} failures in a row)` : ""}`)
   }
 
   private async cut(record: LinkRecord, reason: string, from: Manifest): Promise<void> {
@@ -261,7 +282,7 @@ export class Links {
   private forgetRuntime(id: string, reason = "The link was removed."): void {
     const route = this.live.get(id); this.live.delete(id)
     void this.closeRoute(route, reason)
-    this.why.delete(id); this.measured.delete(id)
+    this.why.delete(id); this.measured.delete(id); this.retries.delete(id)
   }
 
   // One line per linked sandbox, for every link from this sandbox that is not cut; nothing else in the file changes.

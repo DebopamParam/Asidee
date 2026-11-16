@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { EventEmitter } from "node:events"
 import { connect } from "node:net"
-import { boundPort, listenLoopback, relay, validPort } from "../../core/forwards"
+import { boundPort, FORWARD_CONNECTIONS, listenLoopback, relay, validPort } from "../../core/forwards"
 import { PaddockError, type Session } from "../../core/types"
 
 test("ports are whole numbers from 1 to 65535, as numbers or digits", () => {
@@ -36,6 +36,25 @@ const through = async (session: Session, send: (client: ReturnType<typeof connec
   server.close()
   return got
 }
+
+test(`a forward's listener holds ${FORWARD_CONNECTIONS} connections at once, counting ones not relayed yet, and closes the rest`, async () => {
+  const server = await listenLoopback()
+  // Nothing is relayed: each connection waits, as one does while its session is being dialled.
+  const accepted: Array<{ destroy(): void }> = []; server.on("connection", (socket) => { accepted.push(socket) })
+  const closed: number[] = []
+  const clients = Array.from({ length: FORWARD_CONNECTIONS + 3 }, (_, at) => {
+    const client = connect(boundPort(server), "127.0.0.1"); client.on("error", () => {}); client.on("close", () => closed.push(at)); return client
+  })
+  await Bun.sleep(300)
+  expect(accepted.length).toBe(FORWARD_CONNECTIONS); expect(closed.length).toBe(3)
+  // One that ends frees its place.
+  accepted[0]!.destroy(); await Bun.sleep(100)
+  const late = connect(boundPort(server), "127.0.0.1"); late.on("error", () => {})
+  await Bun.sleep(200)
+  expect(accepted.length).toBe(FORWARD_CONNECTIONS + 1)
+  for (const client of [...clients, late]) client.destroy()
+  server.close()
+})
 
 test("a relayed connection carries bytes both ways, drops the sandbox's stderr, and passes on end of input", async () => {
   const bytes = Uint8Array.from({ length: 256 }, (_, index) => index)
