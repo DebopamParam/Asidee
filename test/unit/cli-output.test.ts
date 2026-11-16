@@ -465,7 +465,7 @@ test("start says what it checked and did not, and doctor and workspace create en
   expect(none.out).not.toContain("Next:")
 })
 
-test("audit B: doctor fails without a ready engine and stopped verify explains its scope", async () => {
+test("B11: doctor exits 5 with no engines or with unavailable engines", async () => {
   const paddock = await daemon({ engines: { ok: true, data: [] }, verify: { ok: true, data: { sandbox: { name: "demo", status: "stopped", engine: "fake" }, configurationOnly: true, checks: [], ok: true } } })
   expect((await paddock("doctor")).code).toBe(5)
   const unavailable = await daemon({ engines: { ok: true, data: [{ id: "fake", label: "Fake engine", ready: false, problems: ["Engine unavailable."] }] } })
@@ -480,7 +480,7 @@ test("audit B12: stopped verify explains its scope", async () => {
   expect(verified.out).toContain("paddock start demo")
 })
 
-test("audit B: usage errors point to the command and stdin help names the opt-in", async () => {
+test("B16: usage errors point to the command help", async () => {
   const paddock = await daemon({})
   for (const args of [["create"], ["snapshot", "demo"], ["workspace", "get"]]) {
     const result = await paddock(...args)

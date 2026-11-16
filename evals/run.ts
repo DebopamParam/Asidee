@@ -1616,6 +1616,7 @@ ev("U15", "An unavailable image leaves no record, network or Docker volume, and 
     expect(failed.code === 5 && !failed.reply.ok && failed.reply.error?.code === "dependency" && !failed.reply.error.message.includes("..") && /cannot download.*image/i.test(failed.reply.error?.message ?? "") && /Nothing was kept/.test(failed.reply.error?.message ?? ""), `failure did not explain download and cleanup: ${failed.out}`)
     await ensure(name)
     expect(await running(name), "same name could not be created with a good image")
+    return `exit ${failed.code}: ${failed.reply.error?.message}`
   } finally { await pdk(["remove", name, "--confirm", name]) }
 })
 
@@ -1624,7 +1625,7 @@ ev("U18", "Forward add keeps a closed target with a plain warning, while a liste
   const port = 54321
   const start = await pdk(["exec", A, "--", "sh", "-c", "(/.paddock/busybox nc -lk -s 127.0.0.1 -p 54322 -e /.paddock/busybox echo control </dev/null >/dev/null 2>&1 & echo $!)"])
   expect(start.code === 0 && /^\d+\s*$/.test(start.out), `control did not start: ${start.err}`)
-  const ids: string[] = []
+  const ids: string[] = []; const lines: string[] = []
   try {
     await Bun.sleep(200)
     for (const [target, closed] of [[port, true], [port + 1, false]] as const) {
@@ -1634,7 +1635,9 @@ ev("U18", "Forward add keeps a closed target with a plain warning, while a liste
       expect(result.code === 0 && id, `forward failed: ${result.out}${result.err}`)
       expect(result.out.includes(`nothing listens on ${target} inside yet`) === closed && !result.out.includes("Could not check"), `wrong listener result: ${result.out}`)
       expect(!result.out.includes("SSH"), `local forward printed remote limits: ${result.out}`)
+      lines.push(closed ? result.out.split("\n").find((line) => line.includes("nothing listens"))!.trim() : `port ${target} listened; no warning`)
     }
+    return lines.join("; ")
   } finally {
     for (const id of ids) await pdk(["forward", "remove", id])
     await pdk(["exec", A, "--", "kill", start.out.trim()])
@@ -4251,7 +4254,8 @@ print(json.dumps(dict(
       steps: [{ label: "Copy what was staged", argv: ["cp", "-R", `${stage}/gvisor`, installed], leaves: [installed] }],
     }) })
     const copied = await Bun.file(join(installed, "runsc")).exists()
-    return { code: run.code, report: JSON.parse(run.out.trim().split("\n").at(-1)!) as { ok: boolean; stale?: boolean; error?: string; completed: string[]; stageDir: string }, copied, staged: (await sh(["test", "-e", JSON.parse(run.out.trim().split("\n").at(-1)!).stageDir])).code === 0 }
+    const report = JSON.parse(run.out.trim().split("\n").at(-1)!) as { ok: boolean; stale?: boolean; error?: string; completed: string[]; stageDir: string }
+    return { code: run.code, report, copied, staged: (await sh(["test", "-e", report.stageDir])).code === 0 }
   }
   const good = await install("planned")
   expect(good.code === 0 && good.report.ok && good.report.completed.length === 1 && good.copied, `the planned archive was not installed: ${JSON.stringify(good.report)}`)
