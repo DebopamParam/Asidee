@@ -106,7 +106,7 @@ const SETTINGS = { requireProbes: "boolean", experimental: "boolean", workspaceF
 const FREE_SPACE: [string, number, number] = ["workspaceFreeSpaceGb", 0, 100_000]
 const settingProblem = (key: keyof typeof SETTINGS, value: unknown): string | undefined => SETTINGS[key] === "boolean"
   ? typeof value === "boolean" ? undefined : `${key} must be a boolean (true or false)`
-  : typeof value === "number" && Number.isFinite(value) && value >= FREE_SPACE[1] && value <= FREE_SPACE[2] ? undefined : `${key} must be a number of GB from ${FREE_SPACE[1]} to ${FREE_SPACE[2]}`
+  : typeof value === "number" && Number.isFinite(value) && value >= FREE_SPACE[1] && value <= FREE_SPACE[2] ? undefined : `${key} must be a number of GiB from ${FREE_SPACE[1]} to ${FREE_SPACE[2]}`
 // A config file with a mistake stops the request and says where, instead of being quietly ignored.
 async function configFile(dirs: Dirs): Promise<Record<string, unknown>> {
   const file = join(dirs.config, "config.json")

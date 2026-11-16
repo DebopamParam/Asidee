@@ -42,7 +42,7 @@ keys, proxy variables, `SSH_AUTH_SOCK`, `DYLD_*`, or arbitrary shell settings. S
 readable. npm global, pip user and uv tool installs were measured with local fixture packages in K02. Installing into
 Homebrew's outside Cellar or through the nix daemon is refused. SwiftPM remains unsupported by the current profile.
 
-Buffered `exec` uses pipes, carries stdin with `--stdin` byte for byte (up to 16 MiB), preserves the command's exit
+Buffered `exec` uses pipes, sends piped input only with `--stdin` or `--stream`. Buffered `--stdin` carries bytes exactly (up to 16 MiB), preserves the command's exit
 status and limits each output stream to 16 MiB. It waits for the command however long it runs (K29: 400 seconds). Its output is returned as text: invalid UTF-8 is replaced. `--stream`
 uses the existing private stream socket and is the byte-exact path for output. `shell` uses a PTY when the caller has a
 terminal and carries terminal input and resize. PTY output waiting for a slow client is capped at 1 MiB; exceeding

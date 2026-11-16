@@ -140,3 +140,13 @@ test("a routed exec carries stdinBase64 to the remote daemon unchanged", async (
   await machines.route("exec", { host: "build", name: "demo", argv: ["cat"], stdinBase64: BYTES.toString("base64") })
   expect(Buffer.from(String(sent[0]!.stdinBase64), "base64").equals(BYTES)).toBe(true)
 })
+
+
+test("piped exec input stays ignored unless --stdin or --stream was chosen", async () => {
+  const { bodies, run } = await daemon()
+  for (const [method, args] of [["exec", ["exec", "demo", "--", "cat"]], ["workspaceExec", ["workspace", "exec", "demo", "--", "cat"]]] as const) {
+    expect((await run([...args], BYTES)).code).toBe(0)
+    expect(bodies[method]!.stdin).toBeUndefined()
+    expect(bodies[method]!.stdinBase64).toBeUndefined()
+  }
+})
