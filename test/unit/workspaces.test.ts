@@ -11,6 +11,7 @@ import controlProfile from "../../core/workspace-control.sb" with { type: "text"
 import { WORKSPACE_DISCLOSURE, HOST_TEMP_DISCLOSURE, workspaceDisclosure, workspaceEnvironment, workspaceProfile } from "../../core/workspace-profile"
 import { acquire, canonical, validateRead, validWorkspaceSpec, Workspaces } from "../../core/workspaces"
 import { WorkspaceSession } from "../../core/workspace-session"
+import { ExplainedWorkspaces } from "./workspace-evidence"
 
 const mac = process.platform === "darwin" ? test : test.skip
 const fixture = async () => {
@@ -20,7 +21,7 @@ const fixture = async () => {
   const env = { ...process.env, PADDOCK_WORKSPACES_ROOT: join(root, "workspaces"), CLAUDE_CONFIG_DIR: join(root, "no-claude"), CODEX_HOME: join(root, "no-codex") }
   const commands: string[][] = []
   const runHost: Runner = (argv, options) => { commands.push([...argv]); return systemRunner(argv, options) }
-  return { root, env, commands, workspaces: new Workspaces({ state, config }, env, { home: root, platform: "linux", runner: async () => { throw new Error("No host command is needed for file fixtures.") } }, runHost), clean: () => rm(root, { recursive: true, force: true }) }
+  return { root, env, commands, workspaces: new ExplainedWorkspaces({ state, config }, env, { home: root, platform: "linux", runner: async () => { throw new Error("No host command is needed for file fixtures.") } }, runHost), clean: () => rm(root, { recursive: true, force: true }) }
 }
 
 mac("K15 finder control: empty workspace matches zero, known processes match exactly, and decoys do not match", async () => {

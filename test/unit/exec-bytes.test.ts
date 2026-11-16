@@ -13,7 +13,7 @@ import { systemRunner } from "../../core/run"
 import { socketPath, streamSocketPath, validSpec, writeManifest } from "../../core/state"
 import { serveStream, type OpenRequest } from "../../core/stream"
 import type { Manifest, Runner, Session } from "../../core/types"
-import { Workspaces } from "../../core/workspaces"
+import { ExplainedWorkspaces } from "./workspace-evidence"
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanups.splice(0)) await close() })
@@ -116,7 +116,7 @@ test("buffered sandbox exec delivers stdinBase64 to the engine's exec byte for b
   const root = await mkdtemp(join(import.meta.dir, "../../dist/workspace-bytes-"))
   const dirs = { state: join(root, "state"), config: join(root, "config") }
   const env = { ...process.env, PADDOCK_WORKSPACES_ROOT: join(root, "workspaces"), CLAUDE_CONFIG_DIR: join(root, "no-claude"), CODEX_HOME: join(root, "no-codex") }
-  const workspaces = new Workspaces(dirs, env, { home: root, platform: "linux", runner: async () => { throw new Error("No host command is needed.") } }, systemRunner)
+  const workspaces = new ExplainedWorkspaces(dirs, env, { home: root, platform: "linux", runner: async () => { throw new Error("No host command is needed.") } }, systemRunner)
   cleanups.push(async () => { for (const workspace of await workspaces.list()) await workspaces.remove(workspace.name, workspace.name); await rm(root, { recursive: true, force: true }) })
   expect((await workspaces.create({ name: "bytes" })).ok).toBe(true)
   const table = methods(new Core([], dirs, systemRunner, "/nowhere"), () => {}, undefined, undefined, undefined, workspaces)
