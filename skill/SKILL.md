@@ -43,6 +43,10 @@ Piped input is sent only with `--stdin` or `--stream`, for both sandbox and work
 `doctor` exits 5 if no engine is ready. A stopped sandbox can pass configuration checks with exit 0;
 start it with `paddock start NAME`, then run `paddock verify NAME` to check the rest.
 `list` shows the disk limit and how many minutes ago verification ran. Its results are history.
+Verify JSON includes `configurationOnly`; a runtime failure that stops a running sandbox is still a runtime check.
+Ctrl-C during buffered create, workspace create, resize or snapshot exits 130. The daemon keeps finishing the work.
+The CLI prints the list and exact remove commands. An image the engine cannot pull is a missing dependency (exit 5);
+the error names the image and the engine's reason. Doctor's manual gVisor recipe includes `--net-raw` for Docker inside.
 
 Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed or required probes could not run, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown.
 
@@ -68,7 +72,12 @@ artifact and package checksum, service, watched disk choice, Docker restart vict
 stops. `--json` never applies. Interactive enrollment needs
 the word `yes`; automation needs `--accept-plan HASH`. A revised plan requires new consent. Interactive sudo uses the
 primary's private terminal stream; never put a password in an API body, plan or log. Automation needs noninteractive
-sudo. Registration follows verified artifacts, enabled system service inspection, isolation/disk smoke checks and cleanup. The smoke sandbox has no links, so its `link-scope` must be `info`, not a claimed measurement.
+sudo. Interactive installs refresh `sudo -v` before every privileged step. Staging uses destination `mkdtemp` directories
+and `mkstemp` request files, so leftovers cannot block retry. Apply reports the stage path; the plan uses
+`@PADDOCK_STAGE@` and `@PADDOCK_REQUEST@` placeholders. Each root step copies its inputs into a root-owned private
+directory, checks SHA-256 there and uses only that copy. The script and digests are in the plan hash.
+An interactive request file is checked against a digest sent separately through the SSH command.
+Source URLs omit usernames and passwords; the plan binds original source bytes by their hashes. Registration follows verified artifacts, enabled system service inspection, isolation/disk smoke checks and cleanup. The smoke sandbox has no links, so its `link-scope` must be `info`, not a claimed measurement.
 Ctrl-C during verification requests cancellation; wait for cleanup and exit 130. Completed installation changes remain,
 and no new registration is written (N13). An update keeps its existing registration. The installed runtime has watched disks. Its sandboxes can run Docker inside only when
 the host is enrolled with `host add --docker`, which registers gVisor's raw sockets and shows that in the plan. Hard
@@ -139,6 +148,8 @@ persistence and automatic sandbox recovery are not measured.
   is removed, when the sandbox stops, restarts or is removed, and when the daemon stops; add it again after a restart.
   Any process on this machine can connect to it. On OrbStack, `host.docker.internal` relays to this machine's
   loopback, so the engine host and ordinary containers can reach the forward too. Guarded sandboxes cannot.
+  A closed target port still gets a forward, with a warning that nothing listens inside yet. The probe runs once;
+  services started later can use it. Remote daemon and SSH lifetime caveats appear only with a remote host.
   Remove a forward when you are done with it.
   A closed connection ends its relay process. A client that only finishes sending (FIN) keeps the relay while the
   port answers; after ten minutes of silence the relay is ended.
@@ -214,6 +225,10 @@ macOS may prompt. A denied or timed-out read stays not imported. Claude credenti
 private files inside. Product-path `claude auth status` reported logged in; authenticated calls and refresh remain
 unverified. Never log tokens or call a recognised file verified authentication. Paddock passes no flags to change an
 agent's inner sandbox. Describe failures and let the user choose the agent's configuration.
+
+Workspace size, disk and free-space values use GiB (1024³ bytes). Listener text shows at most eight distinct
+`port (process)` pairs; use `--json` for full listener evidence. When stop, remove or the disk watch ends a command,
+stderr says why before the session closes. Signal exits use 128 plus the signal number (137 for SIGKILL).
 
 Disk use is watched, not capped. While the daemon runs it measures each workspace with running processes every 30
 seconds (private `tmp` included) and stops them past the `--disk` limit, or when free space where workspaces live
@@ -328,35 +343,3 @@ only on the disposable Linux combinations named by the N evals.
 
 Mount a host folder, publish a port, pick a non-isolated runtime, choose capabilities, or skip a check. If the user needs
 one of these, say that Paddock does not offer it yet instead of reaching around Paddock.
-
-Ctrl-C during buffered create, workspace create, resize or snapshot exits 130. The daemon keeps
-finishing the work. The CLI prints the list and exact remove commands.
-
-When workspace stop, remove or the disk watch ends a command, its stderr says why before
-the session ends. Signal exits use 128 plus the signal number (137 for SIGKILL).
-
-An image the engine cannot pull is a missing dependency (exit 5). The error names the image
-and the engine's reason. Doctor's manual gVisor recipe includes `--net-raw` for Docker inside.
-
-Link tests send their test replies to the target listener through stdin. The listener keeps
-the reply in its environment so it does not appear in the sandbox process arguments.
-
-Host install staging uses fresh destination `mkdtemp` directories and `mkstemp` request files.
-Apply reports the stage path. The plan uses `@PADDOCK_STAGE@` and `@PADDOCK_REQUEST@` placeholders.
-Each privileged step that reads staged files copies them into a root-owned private directory,
-checks SHA-256 there, uses only those copies, then removes them. The script and digests are in the plan hash.
-Interactive installs refresh `sudo -v` before each privileged step. Repository source text in the
-plan removes URL usernames and passwords; the plan binds the original file bytes by their hash.
-
-Workspace size, disk and free-space values use GiB (1024³ bytes). Listener text is capped at
-eight distinct port/process pairs. Use `--json` for the full listener evidence.
-
-`forward add` keeps the forward when its target port is closed, and says nothing listens
-inside yet. It probes once; a service started later can use the forward. Remote daemon and
-SSH lifetime caveats appear only when selecting a remote host.
-
-For an interactive host install, the client also sends the private request file's SHA-256
-through the SSH command. Apply checks the read bytes against it before reading the plan.
-
-Verify JSON includes `configurationOnly`. The stopped-configuration message follows this
-scope, so a runtime failure that stops a running sandbox is still reported as a runtime check.

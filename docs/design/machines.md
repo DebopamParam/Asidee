@@ -243,6 +243,16 @@ It does not revoke the SSH user's access. Remote uninstall is a separate future 
 measurements; see the scorecard for the source revision and actual results. The changes below override the proposal
 where they differ. [Enrollment instructions](../host-enrollment.md) contain the commands and manual uninstall steps.
 
+Host install staging uses fresh destination `mkdtemp` directories and `mkstemp` request files.
+Apply reports the stage path. The plan uses `@PADDOCK_STAGE@` and `@PADDOCK_REQUEST@` placeholders.
+Each privileged step that reads staged files copies them into a root-owned private directory,
+checks SHA-256 there, uses only those copies, then removes them. The script and digests are in the plan hash.
+Interactive installs refresh `sudo -v` before each privileged step. Repository source text in the
+plan removes URL usernames and passwords; the plan binds the original file bytes by their hash.
+
+For an interactive host install, the client also sends the private request file's SHA-256
+through the SSH command. Apply checks the read bytes against it before reading the plan.
+
 | Choice or deviation | Reason and evidence |
 |---|---|
 | Explicit native Linux ELF and SHA-256 only; no implicit build or release channel | U6 remains conservative. Both endpoints check the artifact; N04 refuses a wrong primary checksum and N11 changes one uploaded byte to prove destination refusal. N06 checks the installed artifact digest and daemon source. |
@@ -253,7 +263,7 @@ where they differ. [Enrollment instructions](../host-enrollment.md) contain the 
 | Plan only what is missing | A binary, runtime, unit or registration that is already in place is not installed again, and Docker restarts only to load a runtime entry it lacks. N15 plans one step for a service enabled only until reboot. N17 installs another artifact with a Paddock service restart and no Docker restart; the plan names the running sandbox that restart stops. |
 | A report of success is not enough | The installer's SSH session has to exit 0 (N17 returns 77 after a complete report: outcome unknown), and the smoke sandbox's verify after the disk write has to hold with every blocking check passing (N14 alters that reply three ways, beside an unaltered control). |
 | Existing Python 3 and usable signed apt cache are prerequisites | The probe must not install tools or refresh indexes before consent. An empty or unreadable recipe refuses before installation. Existing Docker access must be readable to enumerate restart impact. |
-| Show existing repository contents and hash sources, keys and indexes; download the exact resolved .deb set and use `dpkg --install` | `apt-get --no-download` did not consume the staged local archives on the fixture. Direct installation avoids another dependency resolution or undeclared download after consent. N08 checks every installed version and unchanged login groups. No repository or key is added. |
+| Show repository URLs without userinfo and hash original sources, keys and indexes; download the exact resolved .deb set and use `dpkg --install` | `apt-get --no-download` did not consume the staged local archives on the fixture. Direct installation avoids another dependency resolution or undeclared download after consent. N08 checks every installed version and unchanged login groups. No repository or key is added. |
 | Debian/Ubuntu recipe also accepts Linux Mint based on Ubuntu noble | The owner's routing machine is Mint 22.3, an Ubuntu-noble derivative. Its read-only plan is measured; privileged Mint installation is not. Other distributions refuse automatic installation. |
 | System unit as SSH user; `--sudo never` only reuses a verified enabled system service | User-unit lingering and logout/reboot behavior remain unmeasured. No unattended service is installed from that assumption. A prepared service in another layout can use `host attach`. N04 refuses installation; N07 proves prepared reuse without sudo or restart. |
 | One primary socket terminal session carries interactive sudo and installation over the same SSH PTY | A separate `ssh sudo -v` cannot authorize another session with tty-scoped sudo timestamps. N10 first refuses a noninteractive sudo control, then supplies a disposable password through the terminal and completes enrollment with `timestamp_type=tty`. Passwords are absent from plan and journal. |
@@ -562,13 +572,3 @@ Sequence work into verifiable units. Each unit must pass its relevant outside me
 - **U10, unverified.** Guest relay and SSH stream/lease behavior support binary loopback services and the proposed forward-ending bounds, including sleep and partitions.
 - **U11, unverified.** Guest sshd inetd mode, pinned keys, SFTP, real editors, and T3 launch options work across both daemon hops without an open host port.
 - **U12, unverified.** Parser bounds, provenance checks, mount-race defenses, and method allowlists resist malformed or adversarial remote inputs as designed.
-
-Host install staging uses fresh destination `mkdtemp` directories and `mkstemp` request files.
-Apply reports the stage path. The plan uses `@PADDOCK_STAGE@` and `@PADDOCK_REQUEST@` placeholders.
-Each privileged step that reads staged files copies them into a root-owned private directory,
-checks SHA-256 there, uses only those copies, then removes them. The script and digests are in the plan hash.
-Interactive installs refresh `sudo -v` before each privileged step. Repository source text in the
-plan removes URL usernames and passwords; the plan binds the original file bytes by their hash.
-
-For an interactive host install, the client also sends the private request file's SHA-256
-through the SSH command. Apply checks the read bytes against it before reading the plan.

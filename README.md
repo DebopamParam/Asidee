@@ -13,6 +13,13 @@ it every 30 seconds and stops a sandbox that stopped holding.
 
 In text, `create` and `resize` count the checks that held on one line and print every other result in full;
 `verify` and `--json` list every check. Every command takes `--help`.
+`doctor` exits 5 when no engine is ready. On a stopped sandbox, `verify` checks configuration only and can exit 0.
+Run `paddock start NAME`, then `paddock verify NAME` to check the rest. `list` shows the disk limit and minutes
+since verification, with one footer explaining that those checks are historical.
+
+Piped input reaches sandbox and workspace exec only with `--stdin` or `--stream`.
+Ctrl-C during buffered create, workspace create, resize or snapshot exits 130. The daemon keeps finishing the work;
+the CLI prints the list and exact remove commands.
 
 Each check reports one of six results, and says whether it was probed (tried against the live sandbox) or inspected (read
 from the engine's configuration):
@@ -46,6 +53,8 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
 - Port forwards: `paddock forward add demo --port 3000` listens on this machine's 127.0.0.1 and relays each connection
   to port 3000 on the sandbox's own loopback through a daemon session, so the engine publishes no port. A forward
   belongs to one run of one sandbox and ends when it stops, restarts or is removed, or when the daemon stops.
+  If nothing listens inside yet, the forward is kept with a warning. A service started later can use it.
+  Remote daemon and SSH lifetime caveats appear only when selecting a remote host.
   **On OrbStack, `host.docker.internal` exposes this machine's loopback to the engine host and ordinary containers,
   including Paddock forwards.** Guarded sandboxes cannot reach that address.
 - Links between sandboxes on this machine: `paddock link add web db --port 5432` lets programs in `web` connect to
@@ -87,7 +96,9 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   and review of a hash-bound plan: every privileged command and what it leaves, every file diff and checksum, and every
   running container a planned Docker restart may interrupt. `--json` applies nothing; interactive consent requires
   `yes`, and automation uses `--accept-plan HASH`. The installer verifies artifacts, preserves unrelated Docker
-  configuration, installs a service as the SSH user and registers only after sandbox smoke verification. Disk limits are
+  configuration, installs a service as the SSH user and registers only after sandbox smoke verification.
+  Each root step uses a private copy whose checksum it checks before use. Staging paths are fresh on every attempt;
+  repository source URLs omit usernames and passwords, and interactive sudo is refreshed before each step. Disk limits are
   watched. The host's sandboxes can run Docker inside only when it is enrolled with `--docker`. `--sudo never` only
   reuses an installation that is already complete. The disposable-fixture N evals cover approval, stale plans, both
   checksum checks, partial failure, installation, inner Docker and manual uninstall. Read
@@ -123,6 +134,10 @@ selection or `--no-logins`. Claude's macOS Keychain login uses the shared sandbo
 timeout; it may prompt. Product-path `claude auth status` reported logged in after import. Authenticated calls and
 refresh remain **unverified**; no login or logout is attempted. Create and verify probe hardware-only VideoToolbox
 when ffmpeg is available. Command launches run only blocking checks, and dashboard summaries do no tree walks or repairs.
+
+Workspace size, disk limits and free-space floors use GiB (1024³ bytes). Create and verify text shows at most eight
+distinct `port (process)` listeners; `--json` keeps the full detail. When stop, remove or the disk watch ends a command,
+its stderr says why before the session ends. Signal exits use 128 plus the signal number (137 for SIGKILL).
 
 Workspaces require macOS and Bun, without a Docker engine. The separate workspace checklist never weakens the
 sandbox checklist. All workspace methods are socket-only; the dashboard displays them in their own section.
@@ -218,32 +233,3 @@ lives inside the sandbox and code there can read and send it out.** Logout leave
 Imports of file-backed Claude and Codex profiles and of this machine's `gh` login were checked live in one sandbox; the
 Claude Keychain guest-import path and agents accepting that sandbox import were not. The shared Keychain reader and
 Claude's login recognition are now measured separately for workspaces. Its README lists the sandbox measurements.
-
-Piped input reaches sandbox and workspace exec only with `--stdin` or `--stream`.
-`doctor` exits 5 when no engine is ready. On a stopped sandbox, `verify` checks configuration only
-and can exit 0. Run `paddock start NAME`, then `paddock verify NAME` to check the rest.
-`list` shows disk limits and minutes since verification; those checks are historical only.
-
-Ctrl-C during buffered create, workspace create, resize or snapshot exits 130. The daemon keeps
-finishing the work. The CLI prints the list and exact remove commands.
-
-When workspace stop, remove or the disk watch ends a command, its stderr says why before
-the session ends. Signal exits use 128 plus the signal number (137 for SIGKILL).
-
-Host install staging uses fresh destination `mkdtemp` directories and `mkstemp` request files.
-Apply reports the stage path. The plan uses `@PADDOCK_STAGE@` and `@PADDOCK_REQUEST@` placeholders.
-Each privileged step that reads staged files copies them into a root-owned private directory,
-checks SHA-256 there, uses only those copies, then removes them. The script and digests are in the plan hash.
-Interactive installs refresh `sudo -v` before each privileged step. Repository source text in the
-plan removes URL usernames and passwords; the plan binds the original file bytes by their hash.
-
-Workspace sizes, disk limits and free-space floors are shown in GiB (1 GiB is 1024³ bytes).
-Workspace create/verify text lists at most eight distinct `port (process)` listeners; `--json`
-keeps the full listener evidence.
-
-`forward add` keeps the forward when its target port is closed, and says nothing listens
-inside yet. It probes once; a service started later can use the forward. Remote daemon and
-SSH lifetime caveats appear only when selecting a remote host.
-
-For an interactive host install, the client also sends the private request file's SHA-256
-through the SSH command. Apply checks the read bytes against it before reading the plan.
