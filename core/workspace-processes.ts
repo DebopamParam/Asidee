@@ -20,6 +20,7 @@ function library() {
     } finally { rmSync(temporary, { recursive: true, force: true }) }
   })()
   const proc = dlopen("/usr/lib/libSystem.B.dylib", {
+    proc_pidpath: { args: ["i32", "ptr", "u32"], returns: "i32" },
     proc_listallpids: { args: ["ptr", "i32"], returns: "i32" },
     proc_pidinfo: { args: ["i32", "i32", "u64", "ptr", "i32"], returns: "i32" },
   })
@@ -64,8 +65,12 @@ export function belongs(pid: number, folder: string): boolean {
 export function profileEvidence(pid: number, folder: string): string {
   const info = new Uint8Array(64)
   if (!Number.isSafeInteger(pid) || pid <= 1 || lib().proc.symbols.proc_pidinfo(pid, 13, 0, ptr(info), info.byteLength) !== info.byteLength) return `pid ${pid} not found`
+  const executable = Buffer.alloc(4096)
+  const length = lib().proc.symbols.proc_pidpath(pid, ptr(executable), executable.byteLength)
+  const path = length > 0 ? JSON.stringify(executable.subarray(0, length).toString().replace(/\0.*$/, "")) : "unknown"
+  const parent = new DataView(info.buffer).getUint32(4, true)
   const answer = (value: number) => value === 0 ? "allowed" : value === 1 ? "denied" : `unknown (${value})`
-  return `pid ${pid} uid ${new DataView(info.buffer).getUint32(36, true)} (Paddock's ${process.getuid?.()}); sandboxed ${decision(pid, null) === 1 ? "yes" : "no"}; `
+  return `pid ${pid} executable ${path}; parent ${parent}; uid ${new DataView(info.buffer).getUint32(36, true)} (Paddock's ${process.getuid?.()}); sandboxed ${decision(pid, null) === 1 ? "yes" : "no"}; `
     + `folder read ${answer(decision(pid, "file-read-data", 1, folder))} and write ${answer(decision(pid, "file-write-create", 1, folder))} (expected allowed); `
     + `tag read ${answer(decision(pid, "file-read-data", 1, join(folder, ".paddock-tag")))} (expected denied)`
 }

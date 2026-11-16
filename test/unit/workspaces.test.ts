@@ -4,7 +4,7 @@ import { createServer } from "node:net"
 import { userInfo } from "node:os"
 import { dirname, join } from "node:path"
 import { blockers, complete, failures, WORKSPACE_CHECKLIST } from "../../core/checks"
-import { belongs, controlledDecision, decision, requireMac, signalWorkspacePid, workspacePids } from "../../core/workspace-processes"
+import { belongs, controlledDecision, decision, profileEvidence, requireMac, signalWorkspacePid, workspacePids } from "../../core/workspace-processes"
 import { systemRunner } from "../../core/run"
 import { writeConfig } from "../../core/state"
 import { PaddockError, type RunResult, type Runner } from "../../core/types"
@@ -480,6 +480,7 @@ mac("a starter that never carries its profile is refused with what was seen", as
     try {
       const refused = await acquire(running, folder, "The confined decision control").then(() => "", (error: Error) => error.message)
       expect(refused).toContain("it was still running; no stderr;")
+      expect(refused).toContain(`executable "/bin/sleep"; parent ${process.pid};`)
       expect(refused).toContain(`uid ${process.getuid!()} (Paddock's ${process.getuid!()}); sandboxed no;`)
       expect(Number(/after (\d+) ms/.exec(refused)?.[1])).toBeGreaterThanOrEqual(1000)
     } finally { process.kill(running.pid, "SIGKILL"); await running.finished }
@@ -643,3 +644,21 @@ mac("workspace stop, remove and disk watch deliver a reason before the command e
     }
   } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
 }, 30_000)
+
+mac("B27: the confined control pid is the sleep process carrying its expected decisions", async () => {
+  const folder = await mkdtemp(join(import.meta.dir, "../../dist/workspace-control-identity-"))
+  const tag = join(folder, ".paddock-tag"); const profile = join(folder, "control.sb")
+  let session: WorkspaceSession | undefined
+  try {
+    await writeFile(tag, "identity"); await writeFile(profile, controlProfile)
+    session = new WorkspaceSession({ argv: ["/usr/bin/sandbox-exec", "-f", profile, "-D", `WS=${folder}`, "-D", `TAGFILE=${tag}`, "--", "/bin/sleep", "30"], cwd: folder, env: { PATH: "/usr/bin:/bin" }, folder, tty: false })
+    await acquire(session, folder, "The confined decision control")
+    const evidence = profileEvidence(session.pid, folder)
+    expect(evidence).toContain(`pid ${session.pid} executable "/bin/sleep"; parent ${process.pid};`)
+    expect(evidence).toContain("sandboxed yes; folder read allowed and write allowed")
+    expect(evidence).toContain("tag read denied")
+  } finally {
+    if (session) { try { process.kill(session.pid, "SIGKILL") } catch {}; await session.finished }
+    await rm(folder, { recursive: true, force: true })
+  }
+})

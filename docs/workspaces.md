@@ -270,3 +270,6 @@ also verify PTY input/resize, mode-000 and missing-folder recovery, credential r
 Text listener output shows at most eight distinct `port (process)` pairs. `--json` keeps
 the full listener evidence. Stop, remove and disk-watch session endings print the reason
 on stderr before exit; signal exits use 128 plus the signal number.
+
+A profile-acquisition refusal includes the queried executable path and parent pid, as well as
+its uid and the folder/tag decisions. These facts describe the refusal; they do not establish its cause.
