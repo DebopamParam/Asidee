@@ -193,6 +193,20 @@ test("a link that does not carry its test value to the port it names fails and i
   expect((await core.links.list())[0]).toMatchObject({ state: "cut" })
 })
 
+test("a failure seen only inside the linking sandbox cuts the link but does not stop the sandbox it links to", async () => {
+  const fake = world(); const core = await paddock(fake)
+  await core.create({ name: "app" }); await core.create({ name: "db" })
+  await core.links.add("app", "db", 5432)
+  const hosts = fake.provider.links!.hosts
+  fake.provider.links!.hosts = async (manifest, lines) => { await hosts(manifest, lines); fake.boxes.get(manifest.name)!.hosts.unshift("127.0.0.9\tdb"); return `127.0.0.9\tdb\n${lines.join("\n")}\n` }
+  const verified = await core.verify("db")
+  expect(verified.checks.find((check) => check.id === "link-scope")).toMatchObject({ status: "info", detail: expect.stringContaining("The link was cut. This was seen only inside app, so db is not stopped for it.") })
+  expect(verified.ok).toBe(true)
+  expect((await core.get("db")).status).toBe("running")
+  expect((await core.links.list())[0]).toMatchObject({ state: "cut" })
+  expect(fake.listeners.size).toBe(0)
+})
+
 test("the test never uses a port another link of the pair names, so that link's answer is not taken for a leak", async () => {
   const fake = world(); const core = await paddock(fake)
   await core.create({ name: "app" }); await core.create({ name: "db" })

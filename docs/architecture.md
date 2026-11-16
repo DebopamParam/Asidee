@@ -373,7 +373,9 @@ that does not come through is the link failing (another `/etc/hosts` line naming
 named). With that route closed, the link's address on that port, the name TO on the second port, and TO's network address on the second port
 must not answer from FROM. A pass opens the link. A fail cuts it: it stays recorded as cut, carries nothing, and opens
 again only on a new `link add`. At add the link is then refused and not kept. On verify the "Links reach only…" check
-fails, which stops the sandbox being verified, not the other one. A measurement whose controls failed is unknown; with
+fails, which stops the sandbox being verified, not the other one. A failure seen only by what ran inside FROM (the
+value did not come through, or the closed test route still answered) cuts the link but does not fail TO's check, so
+nothing running in FROM can have TO stopped. A measurement whose controls failed is unknown; with
 `require-probes` on, the link stays closed. Both sandboxes' checklists disclose each link and the trust it gives:
 TO sees FROM's connections as local.
 

@@ -30,7 +30,8 @@ const MARK = "# paddock-link"
 
 type End = { name: string; sandboxId: string }
 export type LinkRecord = { id: string; from: End; to: End; port: number; address: string; createdAt: string; cut?: { at: string; reason: string } }
-export type Measure = { at: string; status: "pass" | "fail" | "unknown"; detail: string }
+// fromOnly: the failure was seen only by what ran inside `from`, with nothing `from` could not have made up itself.
+export type Measure = { at: string; status: "pass" | "fail" | "unknown"; detail: string; fromOnly?: boolean }
 export type LinkView = {
   from: string; to: string; port: number; address: string; createdAt: string
   state: "open" | "opening" | "waiting" | "closed" | "cut"; reason?: string; measured?: Measure; connections: number
@@ -296,13 +297,15 @@ export class Links {
       // Its controls answered, so a value that does not come through is the link failing, not the test.
       if (!carried) {
         const shadowed = this.shadowed.get(from.id)?.includes(to.name) ? ` (another line of /etc/hosts in ${from.name} names ${to.name} first)` : ""
-        return { at, status: "fail", detail: `a test value on ${to.name}'s port ${near} did not come through the link from ${from.name} by the name ${to.name}${shadowed}, though it answered ${to.name}'s own loopback.` }
+        return { at, status: "fail", fromOnly: true, detail: `a test value on ${to.name}'s port ${near} did not come through the link from ${from.name} by the name ${to.name}${shadowed}, though it answered ${to.name}'s own loopback.` }
       }
+      // The first value already came through to `from`, so `from` could repeat it; the second it has never been given.
       const reached: string[] = []
-      if ((await fromSupport.dial(from, record.address, near)).received.includes(one)) reached.push(`after its test route closed, ${from.name} still reached ${to.name}'s port ${near}`)
+      const stale = (await fromSupport.dial(from, record.address, near)).received.includes(one)
+      if (stale) reached.push(`after its test route closed, ${from.name} still reached ${to.name}'s port ${near}`)
       if ((await fromSupport.dial(from, to.name, far)).received.includes(two)) reached.push(`${from.name} reached ${to.name}'s port ${far} through the link's address, which the link does not name`)
       if ((await fromSupport.dial(from, ip, far)).received.includes(two)) reached.push(`${from.name} reached ${to.name} at its network address ${ip}:${far}`)
-      if (reached.length) return { at, status: "fail", detail: `${reached.join("; ")}.` }
+      if (reached.length) return { at, status: "fail", fromOnly: stale && reached.length === 1, detail: `${reached.join("; ")}.` }
       return { at, status: "pass", detail: `A test value on ${to.name}'s port ${near} came through the link from ${from.name}, and stopped once that test route closed; ${to.name}'s port ${far} answered ${to.name}'s own loopback and the engine's host, and did not answer from ${from.name} through the link's address or at ${ip}.` }
     } catch (error) {
       return unknown(`the test could not run (${(error as Error).message})`)
@@ -453,6 +456,8 @@ export class Links {
 
   // The blocking check: each open link touching this sandbox is tested live. A link that fails (it reaches what it does
   // not name, or does not carry what it names) is cut, and the sandbox being verified is stopped by the checklist's rule.
+  // One exception: a failure seen only inside `from` cuts the link but does not fail `to`'s check, so nothing running
+  // in `from` can have `to` stopped.
   scope(manifest: Manifest): Promise<CheckResult> {
     return this.queued(async () => {
       let records: LinkRecord[]; let manifests: Map<string, Manifest>
@@ -473,8 +478,10 @@ export class Links {
         if (measured.status === "fail") await this.cut(link, measured.detail, from)
         results.push({ link, measured })
       }
-      const status = results.some((entry) => entry.measured.status === "fail") ? "fail" : results.some((entry) => entry.measured.status === "unknown") ? "unknown" : "pass"
-      const detail = results.map(({ link, measured }) => `${link.from.name} to ${link.to.name}:${link.port}: ${measured.detail}${measured.status === "fail" ? " The link was cut." : ""}`).join(" ")
+      const excused = ({ link, measured }: { link: LinkRecord; measured: Measure }) => measured.status === "fail" && measured.fromOnly === true && link.to.sandboxId === manifest.id
+      const status = results.some((entry) => entry.measured.status === "fail" && !excused(entry)) ? "fail" : results.some((entry) => entry.measured.status === "unknown") ? "unknown"
+        : results.some((entry) => entry.measured.status === "pass") ? "pass" : "info"
+      const detail = results.map((entry) => `${entry.link.from.name} to ${entry.link.to.name}:${entry.link.port}: ${entry.measured.detail}${entry.measured.status === "fail" ? " The link was cut." : ""}${excused(entry) ? ` This was seen only inside ${entry.link.from.name}, so ${manifest.name} is not stopped for it.` : ""}`).join(" ")
       return { id: "link-scope", status, evidence: status === "unknown" ? "none" : "probed", detail } as CheckResult
     })
   }
