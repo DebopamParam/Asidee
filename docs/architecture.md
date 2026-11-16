@@ -73,11 +73,13 @@ is waived for it. A future microVM provider needs reviewed evidence or an explic
 | No engine-published ports; requested forwards are loopback-only | yes | before start | Engine configuration. Forwards are the daemon's, not the engine's. |
 | Forwards to this machine's loopback | no | before start | Checked by the core: each active forward's address, its port inside, and its id; a disclosure. |
 | SSH access for editors | no | before start | Checked by the core: whether `paddock ssh setup` was run for this sandbox, its user, and the editor key's fingerprint; a disclosure. |
+| Links to other sandboxes | no | before start | Checked by the core: each link from or to this sandbox, its state and last measurement, and what the other side trusts; a disclosure. |
 | Memory, process, CPU limits | yes | before start | Engine configuration: the values must be the spec's (as created or resized), with json-file host log rotation (10 MiB, two files) for every sandbox. |
 | Disk limit | no | before start | The engine's capability: hard, watched or none. Watched needs a runtime with `--overlay2=none`. |
 | The template it was made from | no | before start | The template recorded at creation and the image the container runs, which must be the template's; a disclosure. |
 | Cannot reach the host | yes | verify | Live probe with controls. |
 | Cannot reach other sandboxes | yes | verify | Live probe with controls. |
+| Links reach only the sandboxes and ports they name | yes | verify | Checked by the core: each open link from or to this sandbox is measured live (see Links); a fail cuts that link. |
 | Cannot reach LAN, tailnet, metadata, IPv6 | yes | verify | Live probe with controls of a stand-in address in each private range and the tailnet range; one attempt at the metadata address; IPv6 by the loaded rules. |
 | Internet access | no | verify | Live attempt; a disclosure. |
 | Logins inside | no | verify | Looks for the usual credential files; a disclosure. |
@@ -330,6 +332,49 @@ was refused with exit 4 and nothing recorded. W07: 64 MiB of random bytes each w
 change the first failed with `failed to load /.paddock/busybox`); after the guest removed the relay, `forward add` was
 refused with the restart named and nothing recorded, and after a stop and start the forward worked.
 
+### Links
+
+`paddock link add FROM TO --port P` lets programs in FROM connect to `TO:P` and reach port P on TO's loopback. It is
+one-way and TCP only, between two sandboxes of this machine: `route()` in `core/machines.ts` refuses `--host` before
+anything else. Nothing is shared at the network level. The guard is not changed, no engine network joins the two, and
+nothing new listens on this machine, so "Cannot reach other sandboxes" keeps its meaning for a linked pair.
+
+Inside FROM, the daemon runs a listener as root through the engine's exec API: BusyBox `nc -lk` on a loopback address
+of the link's own (`127.77.0.2` and up, one per linked TO; gVisor answers on all of 127.0.0.0/8) at port P. A line
+ending in `# paddock-link` in FROM's `/etc/hosts` names that address TO; Paddock rewrites only its own lines and says
+when another line names TO first. Each accepted connection runs a small shell that makes two FIFOs in
+`/.paddock/links/ID.P` (mode 0700) and reports its process id on the listener's output. The daemon then opens two exec
+sessions in FROM that read and write those FIFOs, and dials TO the way a forward does (`nc 127.0.0.1 P` from the
+relay), joining the three. A connection costs TO one relay process and the daemon three engine sessions. The port
+the daemon dials is the link's own, from its record. Nothing a program in FROM writes chooses where it goes: the
+listener's output may only say "ready", "error" or "connection PID", and any other line, a line over 32 bytes, or
+more than 200 lines a second closes the listener as hostile. TO's side is a client only, so nothing in TO can open
+a connection towards FROM.
+
+Bounds, enforced by `Links` in `core/links.ts` before a connection's sessions are opened: 64 connections at once per
+link, counting ones still being set up; 512 in the whole daemon; 20 new connections a second per link; 16 links per
+sandbox, counting both ends. A connection past a bound is refused (its process in FROM is killed), and the listener is
+paused while the daemon cannot write those refusals. The listener ends after 15 seconds without the daemon's
+heartbeat, or when its input closes.
+
+A link is bound to both sandboxes' ids, and while open to both runs (the engine id and start time, as a forward is).
+Within two seconds of either side restarting behind Paddock's back, and at once when either stops through Paddock,
+its connections end; it opens again, with a new measurement, when both run: after `paddock start` and at each
+30-second enforcement pass. Links are recorded in `links.json` in the state folder, so they come back after a daemon
+restart. While the daemon is down they are down. Removing either sandbox removes its links, and a sandbox made again
+under the name inherits none. `link remove` closes the listener and then measures that its address and port refuse a
+connection inside FROM.
+
+Each time a link opens, and on verify of either sandbox, the core measures it with two test listeners in TO on
+random ports, one on TO's loopback and one on every address, each answering a random value. The controls: both answer
+on TO's own loopback, and the second answers the engine's host at TO's network address. A temporary route through the link on the first test port must carry its value. With that route
+closed, the link's address on that port, the name TO on the second port, and TO's network address on the second port
+must not answer from FROM. A pass opens the link. A fail cuts it: it stays recorded as cut, carries nothing, and opens
+again only on a new `link add`. At add the link is then refused and not kept. On verify the "Links reach only…" check
+fails, which stops the sandbox being verified, not the other one. A measurement whose controls failed is unknown; with
+`require-probes` on, the link stays closed. Both sandboxes' checklists disclose each link and the trust it gives:
+TO sees FROM's connections as local.
+
 ### SSH for editors
 
 `paddock ssh setup NAME` runs a script as root inside the running sandbox (`GUEST_SETUP` in `core/ssh.ts`). It
@@ -439,6 +484,10 @@ uses is deleted at once (C05, C07). A stopped sandbox can be saved without start
   to, as can anything the engine relays to this machine's loopback. On OrbStack, `host.docker.internal` from the
   engine's host and from ordinary containers arrives at this machine's 127.0.0.1, so they reach a forward as they
   reach any loopback service (W03). Sandboxes do not: their guard blocks that address.
+- **A link makes TO trust FROM as much as it trusts its own loopback.** A service in TO that accepts local
+  connections without a password accepts FROM's. The measurement covers the link's address, TO's name on another port,
+  and TO's network address, each from FROM's own namespace; it does not repeat them from containers of FROM's inner
+  Docker (the network checks do). A link carries whatever bytes FROM sends to that one port.
 - **The editor key logs in.** Anything that can read `ssh/editor_ed25519` in the state folder, which is anything
   running as you, can log in to every sandbox set up for SSH as its user, run any command there, copy files in and out,
   and reach the sandbox's loopback with `ssh -L`. It cannot reach this machine or other addresses through sshd. The
@@ -490,6 +539,8 @@ finish, so a second daemon never runs beside it. It listens on:
 - `127.0.0.1` on port 7717 (or a free port), used by the dashboard. Requests need the token from `paddock ui` and a
   `Host` header naming this server. `shutdown`, `sshSetup` (it can change `~/.ssh/config`) and sessions are not
   available here.
+
+Links add no listener here: each link's listener runs inside the sandbox that uses it, on that sandbox's loopback.
 
 State is in `~/.local/state/paddock`, configuration in `~/.config/paddock` (`PADDOCK_STATE_DIR`, `PADDOCK_CONFIG_DIR`).
 Malformed request URLs, including invalid percent encoding in paths or query parameters, receive a generic HTTP 400

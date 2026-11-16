@@ -26,6 +26,8 @@ paddock exec NAME --stream -- COMMAND ARG…  # raw bytes in and out, no size li
 paddock start NAME | paddock stop NAME
 paddock forward add NAME --port P [--local-port L]  # 127.0.0.1:L here to 127.0.0.1:P in the sandbox
 paddock forward list [NAME] | paddock forward remove ID
+paddock link add FROM TO --port P            # programs in FROM connect to TO:P, reaching P on TO's loopback only
+paddock link list [NAME] | paddock link remove FROM TO --port P
 paddock ssh setup NAME [--write-config]     # then `ssh NAME.paddock`; ask the user before --write-config
 paddock ssh access NAME                     # alias, user, home, and whether ssh would log in now
 paddock verify NAME                         # exit 6 if a blocking check failed
@@ -133,6 +135,15 @@ persistence and automatic sandbox recovery are not measured.
   Remove a forward when you are done with it.
   A closed connection ends its relay process. A client that only finishes sending (FIN) keeps the relay while the
   port answers; after ten minutes of silence the relay is ended.
+- To let one sandbox use a service in another (an app and its database), add a link: `paddock link add FROM TO --port
+  P`. Programs in FROM then connect to `TO:P` (the name TO resolves inside FROM through a line Paddock keeps in its
+  `/etc/hosts`); they reach port P on TO's loopback and nothing else of TO. It is one-way and TCP only, on this machine
+  only (`--host` is refused), up to 64 connections at once, 16 links per sandbox. Tell the user the trust consequence
+  the command prints: TO sees these connections as coming from its own 127.0.0.1, so a service there that trusts local
+  connections (a database without a password, say) trusts FROM. The service in TO must listen on its loopback (or on
+  all addresses). Links come back after a stop and start and after a daemon restart, are down while the daemon is not
+  running, and end when either sandbox is removed. If `link list` shows a link `cut`, its test found it reaching more
+  than it names; tell the user, and `link add` it again only once they agree, since that runs the test again.
 - `paddock ssh setup NAME` is for editors and tools that speak SSH. It installs OpenSSH's server from the image's
   package manager when it has none (the sandbox needs internet for that), and opens no port. `ssh NAME.paddock` logs in
   as exec's user and allows `ssh -L` only to the sandbox's loopback. Running setup again makes a new host key. The
@@ -260,8 +271,8 @@ Copy the built-in page (`ui/index.html` in the Paddock source) to `~/.config/pad
 Other files in that folder are served next to it. The page calls `POST /api/METHOD` with a JSON body and the header
 `Authorization: Bearer TOKEN`; it reads the token from the `#token=` part of the link `paddock ui` prints. Methods:
 `checklist`, `engines`, `list`, `get`, `create`, `start`, `stop`, `remove`, `verify`, `resize`, `snapshot`, `templateList`,
-`templateRemove`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `sshAccess`, `extensions`, `action`, `summary`,
-`hostList`, `fleet`, `configGet`, `configSet`. `configGet` returns this machine's effective configuration. `configSet`
+`templateRemove`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `linkAdd`, `linkList`, `linkRemove`, `sshAccess`, `extensions`, `action`, `summary`,
+`hostList`, `fleet`, `configGet`, `configSet`. `linkAdd` and `linkRemove` take `from`, `to` and `port`; `linkList` takes an optional `name`. `configGet` returns this machine's effective configuration. `configSet`
 accepts only `requireProbes` and `experimental`, each a boolean, and `workspaceFreeSpaceGb`, a number, saves them to `config.json` and returns the new
 effective configuration. `requireProbes` affects later creates, not running sandboxes. With `experimental` off,
 `hostList`, `fleet` and any request with a `host` other than `local` are refused.

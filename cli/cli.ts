@@ -12,6 +12,7 @@ import type { ResizeChange, SandboxView } from "../core/core"
 import { BUILD, readDaemonFile, runDaemon, VERSION } from "../core/daemon"
 import type { Extension } from "../core/extensions"
 import { FORWARD_REACH, type ForwardView } from "../core/forwards"
+import { LINK_LIMITS, type LinkView } from "../core/links"
 import type { HostPlan } from "../core/hosts"
 import { hostOption, type FleetView, type HostView } from "../core/machines"
 import { bounded, PROTOCOL, transportStdio } from "../core/transport"
@@ -43,6 +44,8 @@ const GROUPS: Array<[string, string[]]> = [
   ["Reach in", [
     "paddock forward add NAME --port PORT [--local-port PORT]   127.0.0.1 here to PORT on the sandbox's loopback",
     "paddock forward list [NAME] | forward remove ID            a forward ends when its sandbox stops",
+    "paddock link add FROM TO --port PORT   programs in FROM connect to TO:PORT and reach PORT on TO's loopback, nothing else",
+    "paddock link list [NAME] | link remove FROM TO --port PORT   on this machine only; a link comes back after restarts",
     "paddock ssh setup NAME [--write-config]   sshd inside, reached as NAME.paddock through the daemon, no port",
     "paddock ssh access NAME                   the alias, user and home an editor uses, and whether it is ready",
   ]],
@@ -584,6 +587,32 @@ async function main(argv: string[]): Promise<void> {
           return out(closed, () => console.log(`Closed forward ${closed.closed}.`))
         }
         throw new PaddockError("usage", "Use `paddock forward add NAME --port PORT`, `paddock forward list [NAME]` or `paddock forward remove ID`.")
+      }
+      case "link": {
+        const { values, positionals } = parse({ port: { type: "string" } }, rest.slice(1))
+        const state = (link: LinkView) => link.state === "open" ? `open, ${link.connections} connection${link.connections === 1 ? "" : "s"}` : `${shown(link.state)}: ${shown(link.reason)}`
+        if (rest[0] === "add") {
+          const made = await call<LinkView>("linkAdd", { from: need(positionals[0], "FROM"), to: need(positionals[1], "TO"), port: need(values.port, "--port") })
+          return out(made, () => {
+            console.log(made.state === "open"
+              ? `Linked: programs in ${shown(made.from)} connect to ${shown(made.to)}:${made.port} (${shown(made.address)}:${made.port}) and reach port ${made.port} on ${shown(made.to)}'s loopback, nothing else. Measured just now.`
+              : `Linked ${shown(made.from)} to ${shown(made.to)}:${made.port}. It opens, and is measured, once both are running (${shown(made.reason)}).`)
+            console.log(`  ${shown(made.trust)}`)
+            console.log(`  ${LINK_LIMITS}`)
+          })
+        }
+        if (rest[0] === "list" || rest[0] === undefined) {
+          const list = await call<LinkView[]>("linkList", { name: positionals[0] })
+          return out(list, () => {
+            if (!list.length) console.log("No links. Add one with `paddock link add FROM TO --port PORT`.")
+            for (const link of list) console.log(`${shown(link.from)} -> ${shown(link.to)}:${link.port}  ${state(link)}${link.measured ? `; measured ${utc(link.measured.at)}: ${shown(link.measured.status)}` : ""}`)
+          })
+        }
+        if (rest[0] === "remove" || rest[0] === "rm") {
+          const removed = await call<{ removed: { from: string; to: string; port: number }; measured: string }>("linkRemove", { from: need(positionals[0], "FROM"), to: need(positionals[1], "TO"), port: need(values.port, "--port") })
+          return out(removed, () => console.log(`Removed the link from ${shown(removed.removed.from)} to ${shown(removed.removed.to)}:${removed.removed.port}. ${shown(removed.measured)}`))
+        }
+        throw new PaddockError("usage", "Use `paddock link add FROM TO --port PORT`, `paddock link list [NAME]` or `paddock link remove FROM TO --port PORT`.")
       }
       case "ssh": {
         const { values, positionals } = parse({ "write-config": { type: "boolean" }, "sandbox-id": { type: "string" } }, rest.slice(1))

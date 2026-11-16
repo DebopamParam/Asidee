@@ -48,6 +48,14 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   belongs to one run of one sandbox and ends when it stops, restarts or is removed, or when the daemon stops.
   **On OrbStack, `host.docker.internal` exposes this machine's loopback to the engine host and ordinary containers,
   including Paddock forwards.** Guarded sandboxes cannot reach that address.
+- Links between sandboxes on this machine: `paddock link add web db --port 5432` lets programs in `web` connect to
+  `db:5432` and reach port 5432 on `db`'s loopback, nothing else. No network is shared and the guard is unchanged:
+  inside `web` the name `db` points at a loopback address of the link's own, where a listener hands each connection to
+  the daemon, which relays it like a forward. `db` sees these connections as local, so a service there that trusts
+  local connections trusts `web`. Each link is measured when it opens and on verify (a test value comes through; other
+  ports and `db`'s network address do not answer), and one that reaches more is cut. A link comes back after either
+  sandbox restarts and after a daemon restart, is down while the daemon is not running, carries TCP only, up to 64
+  connections at once, and ends when either sandbox is removed.
 - SSH for editors: `paddock ssh setup demo` prepares sshd inside and an alias, `demo.paddock`, whose ProxyCommand
   runs sshd in inetd mode through a daemon session, so no port is opened anywhere. It trusts only a key made for this
   machine's editors and the host key made inside that sandbox; scp, SFTP and `ssh -L` to the sandbox's loopback work.

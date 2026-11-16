@@ -415,6 +415,22 @@ test("forward add says who can connect and how to remove it", async () => {
   expect(out).not.toContain("the sandbox run,")
 })
 
+test("link add says what it reaches and what the other side trusts; list and remove say their state", async () => {
+  const link = { from: "web", to: "db", port: 5432, address: "127.77.0.2", createdAt: "2026-11-15T20:16:00.000Z", state: "open", connections: 1,
+    measured: { at: "2026-11-15T20:16:00.000Z", status: "pass", detail: "ok" }, trust: "db sees these connections as local (from 127.0.0.1 inside db), so a service in db that trusts local connections trusts web." }
+  const paddock = await daemon({ linkAdd: { ok: true, data: link }, linkList: { ok: true, data: [link] },
+    linkRemove: { ok: true, data: { removed: { from: "web", to: "db", port: 5432 }, measured: "Measured: 127.77.0.2:5432 now refuses connections inside web." } } })
+  const added = (await paddock("link", "add", "web", "db", "--port", "5432")).out
+  expect(added).toContain("Linked: programs in web connect to db:5432 (127.77.0.2:5432) and reach port 5432 on db's loopback, nothing else.")
+  expect(added).toContain("a service in db that trusts local connections trusts web.")
+  expect(added).toContain("up to 64 connections at once, and is down while the daemon is not running.")
+  expect((await paddock("link", "list")).out.trim()).toBe("web -> db:5432  open, 1 connection; measured 2026-11-15 20:16 UTC: pass")
+  expect((await paddock("link", "remove", "web", "db", "--port", "5432")).out.trim()).toBe("Removed the link from web to db:5432. Measured: 127.77.0.2:5432 now refuses connections inside web.")
+  const help = await paddock("link", "add", "--help")
+  expect(help.out).toContain("paddock link add FROM TO --port PORT"); expect(help.out).not.toContain("forward add")
+  expect((await paddock("link", "add", "web", "db")).err).toContain("Missing --port")
+})
+
 test("ssh access says why it is not ready and what to run", async () => {
   const access = (user: string) => ({ alias: "demo.paddock", user, home: user ? "/home/agent" : "", batchReady: false, loopbackForwarding: Boolean(user) })
   const unset = await (await daemon({ sshAccess: { ok: true, data: access("") } }))("ssh", "access", "demo")
