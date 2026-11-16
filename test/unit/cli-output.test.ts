@@ -466,12 +466,12 @@ test("start says what it checked and did not, and doctor and workspace create en
 })
 
 test("audit B: doctor fails without a ready engine and stopped verify explains its scope", async () => {
-  const paddock = await daemon({ engines: { ok: true, data: [] }, verify: { ok: true, data: { sandbox: { name: "demo", status: "stopped", engine: "fake" }, checks: [], ok: true } } })
+  const paddock = await daemon({ engines: { ok: true, data: [] }, verify: { ok: true, data: { sandbox: { name: "demo", status: "stopped", engine: "fake" }, configurationOnly: true, checks: [], ok: true } } })
   expect((await paddock("doctor")).code).toBe(5)
 })
 
 test("audit B12: stopped verify explains its scope", async () => {
-  const paddock = await daemon({ verify: { ok: true, data: { sandbox: { name: "demo", status: "stopped", engine: "fake" }, checks: [], ok: true } } })
+  const paddock = await daemon({ verify: { ok: true, data: { sandbox: { name: "demo", status: "stopped", engine: "fake" }, configurationOnly: true, checks: [], ok: true } } })
   const verified = await paddock("verify", "demo")
   expect(verified.code).toBe(0)
   expect(verified.out.split("\n")[0]).toContain("stopped; only its configuration was checked")
@@ -544,4 +544,12 @@ test("B22: an empty port still gets a forward, and remote lifetime text is only 
   const remote = await paddock("--host", "build", "forward", "add", "demo", "--port", "9999")
   expect(remote.out).toContain("SSH")
   expect(remote.out).toContain("nothing listens on 9999 inside yet")
+})
+
+test("B12: a verify that stops a running sandbox does not claim only configuration was checked", async () => {
+  const paddock = await daemon({ verify: { ok: true, data: { sandbox: { name: "demo", status: "stopped", engine: "fake" }, configurationOnly: false, checks: [{ id: "net-host", status: "fail", evidence: "probed", detail: "Reached the host." }], ok: false } } })
+  const result = await paddock("verify", "demo")
+  expect(result.code).toBe(6)
+  expect(result.out).not.toContain("only its configuration was checked")
+  expect(result.out).toContain("Reached the host.")
 })

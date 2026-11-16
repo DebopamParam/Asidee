@@ -156,7 +156,7 @@ export class Core {
     await this.clearEnforcement(manifest, true)
   }
 
-  private async verifyNow(manifest: Manifest, requireProbes = false): Promise<{ checks: CheckResult[]; failed: CheckResult[] }> {
+  private async verifyNow(manifest: Manifest, requireProbes = false): Promise<{ checks: CheckResult[]; failed: CheckResult[]; configurationOnly: boolean }> {
     const running = (await this.provider(manifest).status(manifest)) === "running"
     this.activity.set(manifest.name, running ? "Running the checks (the live network tests take about 15 to 40 seconds)" : "Checking the configuration")
     const checks = await this.stage(manifest, ["config", "runtime", "probe"], running)
@@ -165,7 +165,7 @@ export class Core {
     const failed = running ? blockers(checks, CHECKLIST, requireProbes) : blockers(checks).filter((entry) => entry.status === "fail")
     if (failed.length && running) await this.stopBecause(manifest, `Stopped by verify: ${failed.map((entry) => titleOf(entry.id)).join("; ")}`)
     else await writeManifest(this.dirs, manifest)
-    return { checks, failed }
+    return { checks, failed, configurationOnly: !running }
   }
 
   async create(input: Record<string, unknown>): Promise<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }> }> {
@@ -384,10 +384,10 @@ export class Core {
     })
   }
 
-  verify(name: string): Promise<{ sandbox: SandboxView; checks: CheckResult[]; ok: boolean; diskUsedBytes?: number }> {
+  verify(name: string): Promise<{ sandbox: SandboxView; checks: CheckResult[]; ok: boolean; configurationOnly: boolean; diskUsedBytes?: number }> {
     return this.exclusive(validName(name), async () => {
-      const manifest = await readManifest(this.dirs, name); const { checks, failed } = await this.verifyNow(manifest)
-      return { sandbox: await this.view(manifest), checks, ok: failed.length === 0, diskUsedBytes: await this.provider(manifest).diskUsedBytes(manifest) }
+      const manifest = await readManifest(this.dirs, name); const { checks, failed, configurationOnly } = await this.verifyNow(manifest)
+      return { sandbox: await this.view(manifest), checks, ok: failed.length === 0, configurationOnly, diskUsedBytes: await this.provider(manifest).diskUsedBytes(manifest) }
     })
   }
 

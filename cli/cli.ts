@@ -531,8 +531,8 @@ async function main(argv: string[]): Promise<void> {
         })
       }
       case "verify": {
-        const report = await call<{ sandbox: SandboxView; checks: CheckResult[]; ok: boolean }>("verify", { name: need(rest[0], "a name") }, watching(rest[0]!))
-        out(report, () => { if (report.sandbox.status === "stopped") console.log(`${shown(report.sandbox.name)} is stopped; only its configuration was checked. Run \`${next("start", report.sandbox.name)}\`, then \`${next("verify", report.sandbox.name)}\` to check the rest.`); printSandbox(report.sandbox); printChecks(report.checks) })
+        const report = await call<{ sandbox: SandboxView; checks: CheckResult[]; ok: boolean; configurationOnly: boolean }>("verify", { name: need(rest[0], "a name") }, watching(rest[0]!))
+        out(report, () => { if (report.configurationOnly) console.log(`${shown(report.sandbox.name)} is stopped; only its configuration was checked. Run \`${next("start", report.sandbox.name)}\`, then \`${next("verify", report.sandbox.name)}\` to check the rest.`); printSandbox(report.sandbox); printChecks(report.checks) })
         if (!report.ok) process.exit(EXIT["check-failed"])
         return
       }

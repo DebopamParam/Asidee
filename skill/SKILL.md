@@ -357,3 +357,6 @@ SSH lifetime caveats appear only when selecting a remote host.
 
 For an interactive host install, the client also sends the private request file's SHA-256
 through the SSH command. Apply checks the read bytes against it before reading the plan.
+
+Verify JSON includes `configurationOnly`. The stopped-configuration message follows this
+scope, so a runtime failure that stops a running sandbox is still reported as a runtime check.

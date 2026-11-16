@@ -365,6 +365,7 @@ test("verify stops a running sandbox when a probe fails, and says why", async ()
   expect(report.ok).toBe(false)
   expect(report.sandbox.status).toBe("stopped")
   expect(report.sandbox.stopReason).toContain("Cannot reach the host")
+  expect(report.configurationOnly).toBe(false)
 })
 
 test("guard rules that could not be read block a start but do not stop a running sandbox", async () => {
@@ -905,4 +906,11 @@ test("a refused removal and a command on a stopped sandbox name the command to r
   const stopped = new GvisorProvider(async () => ({ exitCode: 1, stdout: "", stderr: "Error: No such object: paddock-demo" }))
   for (const attempt of [() => stopped.exec(manifest, ["true"]), () => stopped.openExec(manifest, ["true"], { tty: false }), () => stopped.prepareLoopback(manifest)])
     await expect(attempt()).rejects.toThrow("demo is not running. Start it with `paddock start demo`.")
+})
+
+
+test("stopped verification reports configuration scope and succeeds if that configuration holds", async () => {
+  const { provider } = fakeProvider(); const paddock = await core(provider)
+  await paddock.create({ name: "demo" }); await paddock.stop("demo")
+  expect(await paddock.verify("demo")).toMatchObject({ ok: true, configurationOnly: true })
 })
