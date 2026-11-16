@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events"
 import { createHash } from "node:crypto"
 import { resolve } from "node:path"
 import { CHECKLIST } from "./checks"
-import { HOST_APPLY, HOST_PROBE, HOST_REQUEST } from "./host-scripts"
+import { HOST_APPLY, HOST_PROBE, HOST_REQUEST, HOST_ROOT_STEP } from "./host-scripts"
 import { compatible, hostName, parseHello, readHosts, type Hello, type HostRecord, type Machines } from "./machines"
 import { HELPER_IMAGE, MANAGED_RUNTIME } from "./providers/gvisor"
 import HELPER_DOCKERFILE from "./providers/helper.Dockerfile" with { type: "text" }
@@ -282,7 +282,7 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
     throw new PaddockError("identity-changed", `${options.name} is registered to another machine, SSH host key or state directory. Nothing was installed. Inspect the destination; remove and enroll explicitly only if you intend to replace it.`)
   const releaseDir = `/opt/paddock/releases/${options.artifact.sha256}`; const binary = `${releaseDir}/paddock`
   const service = `paddock@${destination.uid}.service`
-  const stageDir = `/tmp/paddock-enroll-${sha256(`${destination.machine}:${destination.uid}:${options.artifact.sha256}`).slice(0, 24)}`
+  const stageDir = "@PADDOCK_STAGE@"
   const gvisor = GVISOR[destination.arch === "aarch64" ? "aarch64" : "x86_64"]
   const entry = { path: RUNTIME, runtimeArgs: runtimeArgs(options.docker) }
   const changes: Change[] = []; const steps: Step[] = []; const uploads: Upload[] = []
@@ -459,8 +459,19 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
       "Remove a successfully created verification sandbox even if later checks fail; a failed/lost create reply retains the diagnostic name for inspection; register only after successful cleanup",
     ],
   }
+  const checks = new Map<string, string>()
+  for (const upload of uploads) {
+    if (upload.kind === "download" && upload.extract) {
+      for (const [name, hash] of Object.entries(upload.extract.files)) checks.set(`${stageDir}/${upload.extract.directory}/${name}`, hash)
+    } else if (upload.algorithm === "sha256") checks.set(`${stageDir}/${upload.name}`, upload.checksum)
+  }
+  for (const change of changes) if (change.sha256) checks.set(`${stageDir}/${change.staged}`, change.sha256)
+  for (const step of steps) {
+    const inputs = Object.fromEntries(step.argv.filter((arg) => checks.has(arg)).map((arg) => [arg, checks.get(arg)!]))
+    if (Object.keys(inputs).length) step.argv = ["sudo", "-n", "python3", "-c", HOST_ROOT_STEP, JSON.stringify(inputs), ...step.argv.slice(2)]
+  }
   const plan = {
-    client, options, destination, stageDir, requestPath: `${stageDir}.json`, stateDir, binary, service,
+    client, options, destination, stageDir, requestPath: "@PADDOCK_REQUEST@", stateDir, binary, service,
     mode: previousHost ? "update" as const : reuse ? "reuse" as const : "install" as const, previousHost,
     runtime: { name: MANAGED_RUNTIME, release: GVISOR_RELEASE, ...entry, innerDocker: options.docker },
     changes, uploads, steps,
@@ -473,6 +484,7 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
     },
     verification,
     warnings: [
+      "Staging uses destination mkdtemp and mkstemp paths reported by apply. Each root step copies its inputs into a root-owned private mkdtemp directory, checks SHA-256 immediately before use, and removes the copy afterwards. Interactive sudo is refreshed before each step.",
       "Disk limit: watched. No hard disk helper, disk tools or sudoers rule is planned or installed.",
       "Docker access (SupplementaryGroups=docker) is effectively host-root authority. No login group membership is edited.",
       reuse || !restartDocker ? "No Docker restart is planned, so Docker interrupts no running container."
@@ -734,9 +746,12 @@ export class Hosts {
     const input = JSON.stringify({ ...plan, interactive: Boolean(terminal), probeScript: HOST_PROBE, probeRequest: probeRequest(plan.options), ...artifact })
     if (!terminal) return systemRunner(sshArgv(plan.options.ssh, ["python3", "-c", HOST_APPLY], pin), { stdin: input, timeoutMs: 20 * 60_000 })
     if (terminal.closed) throw new PaddockError("conflict", "Enrollment terminal closed before installation.")
-    must(await systemRunner(sshArgv(plan.options.ssh, ["python3", "-c", HOST_REQUEST, plan.requestPath], pin), { stdin: input, timeoutMs: 120_000 }), "Staging the private enrollment request")
-    if (terminal.closed) throw new PaddockError("outcome-unknown", `Terminal closed after staging ${plan.requestPath}. No installation was started; remove that staging file before retrying.`)
-    const argv = sshArgv(plan.options.ssh, ["python3", "-c", HOST_APPLY, plan.requestPath], pin); argv[1] = "-tt"
+    const staged = await systemRunner(sshArgv(plan.options.ssh, ["python3", "-c", HOST_REQUEST], pin), { stdin: input, timeoutMs: 120_000 })
+    must(staged, "Staging the private enrollment request")
+    const requestPath = staged.stdout.trim()
+    if (!/^\/tmp\/paddock-request-[a-zA-Z0-9_-]+$/.test(requestPath)) throw new PaddockError("runtime", "The host did not report a private request path.")
+    if (terminal.closed) throw new PaddockError("outcome-unknown", `Terminal closed after staging ${requestPath}. No installation was started; remove that staging file before retrying.`)
+    const argv = sshArgv(plan.options.ssh, ["python3", "-c", HOST_APPLY, requestPath], pin); argv[1] = "-tt"
     const child = spawn(argv[0]!, argv.slice(1), { stdio: ["pipe", "pipe", "pipe"] }); terminal.child = child
     child.stdin.on("error", () => {}); child.stdin.on("drain", terminal.drain)
     let output = ""; let size = 0

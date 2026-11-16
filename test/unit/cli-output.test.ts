@@ -138,7 +138,7 @@ test("an enrollment plan is shown as every command, file, download and restart, 
   const clean = (text: string) => text.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, " ")
   for (const step of plan.steps) {
     expect(out).toContain(clean(step.label))
-    expect(out).toContain(step.argv.join(" "))
+    expect(out).toContain(clean(step.argv.map((arg) => /^[A-Za-z0-9_@%+=:,./-]+$/.test(arg) ? arg : JSON.stringify(arg)).join(" ")))
     for (const left of step.leaves) expect(out).toContain(left)
   }
   for (const text of [

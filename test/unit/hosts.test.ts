@@ -624,3 +624,14 @@ test("the enrollment smoke sandbox has no links, so link-scope is informational 
     expect(() => requireSmokeChecks(checks.map((check) => check.id === "link-scope" ? { ...check, status } : check), true)).toThrow()
   expect(() => requireSmokeChecks(checks.map((check) => check.id === "kernel" ? { ...check, status: "info" } : check), true)).toThrow()
 })
+
+test("B7: every step consuming staged files checks a private copy before use", () => {
+  const plan = installationPlan(options, evidence(), client)
+  const consuming = plan.steps.filter((step) => step.argv.some((arg) => arg.startsWith(`${plan.stageDir}/`)))
+  expect(consuming.length).toBeGreaterThan(0)
+  for (const step of consuming) {
+    expect(step.argv.slice(0, 4)).toEqual(["sudo", "-n", "python3", "-c"])
+    expect(step.argv[4]).toContain("tempfile.mkdtemp")
+    expect(step.argv[4]).toContain("checksum mismatch")
+  }
+})

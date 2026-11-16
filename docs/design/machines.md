@@ -562,3 +562,10 @@ Sequence work into verifiable units. Each unit must pass its relevant outside me
 - **U10, unverified.** Guest relay and SSH stream/lease behavior support binary loopback services and the proposed forward-ending bounds, including sleep and partitions.
 - **U11, unverified.** Guest sshd inetd mode, pinned keys, SFTP, real editors, and T3 launch options work across both daemon hops without an open host port.
 - **U12, unverified.** Parser bounds, provenance checks, mount-race defenses, and method allowlists resist malformed or adversarial remote inputs as designed.
+
+Host install staging uses fresh destination `mkdtemp` directories and `mkstemp` request files.
+Apply reports the stage path. The plan uses `@PADDOCK_STAGE@` and `@PADDOCK_REQUEST@` placeholders.
+Each privileged step that reads staged files copies them into a root-owned private directory,
+checks SHA-256 there, uses only those copies, then removes them. The script and digests are in the plan hash.
+Interactive installs refresh `sudo -v` before each privileged step. Repository source text in the
+plan removes URL usernames and passwords; the plan binds the original file bytes by their hash.

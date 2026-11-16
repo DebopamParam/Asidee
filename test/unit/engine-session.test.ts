@@ -68,7 +68,7 @@ test("link test replies travel on stdin and never in the sandbox command line", 
     write(bytes: Uint8Array) { input += Buffer.from(bytes).toString(); return true }
     end() {} async resize() {} pause() {} resume() {} close() {}
   }
-  const provider = new GvisorProvider()
+  const provider = new GvisorProvider(async () => { throw new Error("No engine command is needed.") })
   provider.openExec = async (_manifest, argv) => { command = argv; return new Listener() }
   const secret = "abcd1234ef567890"
   await provider.links.canary(manifest, 5432, secret, true)

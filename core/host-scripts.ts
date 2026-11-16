@@ -1,9 +1,29 @@
+// Root copies each input into its own private directory, checks those bytes, then runs only from that copy.
+export const HOST_ROOT_STEP = String.raw`
+import os, sys, json, tempfile, shutil, hashlib, subprocess
+
+checks = json.loads(sys.argv[1])
+root = tempfile.mkdtemp(prefix='paddock-root-')
+try:
+    copies = {}
+    for source, checksum in checks.items():
+        target = os.path.join(root, str(len(copies)))
+        with open(source, 'rb') as incoming, open(target, 'xb') as outgoing:
+            shutil.copyfileobj(incoming, outgoing)
+        if hashlib.sha256(open(target, 'rb').read()).hexdigest() != checksum:
+            raise RuntimeError('Staged file checksum mismatch; nothing installed by this step')
+        copies[source] = target
+    subprocess.run([copies.get(arg, arg) for arg in sys.argv[2:]], check=True)
+finally:
+    shutil.rmtree(root)
+`
+
 // Bootstrap uses Python already on the destination. No shell interprets a package, path or argument from a plan.
 
 // Reads the destination without changing it and without sudo. The request on stdin names the artifact digest and the
 // runtime's files, so the probe knows which release paths to inspect. Prints one JSON object.
 export const HOST_PROBE = String.raw`
-import os, sys, json, subprocess, hashlib, platform, pwd, grp, glob, shlex, stat, urllib.parse
+import os, sys, json, subprocess, hashlib, platform, pwd, grp, glob, shlex, stat, urllib.parse, re
 
 request = json.load(sys.stdin)
 
@@ -107,7 +127,11 @@ evidence = (
     + glob.glob('/etc/apt/trusted.gpg.d/*') + glob.glob('/usr/share/keyrings/*')) if absent else []
 for path in sorted(sources):
     if os.path.isfile(path):
-        repositories[path] = open(path).read()
+        content = open(path).read()
+        def clean_url(match):
+            value = urllib.parse.urlsplit(match.group(0))
+            return urllib.parse.urlunsplit(value._replace(netloc=value.netloc.rsplit('@', 1)[-1]))
+        repositories[path] = re.sub(r'[a-zA-Z][a-zA-Z0-9+.-]*://[^\s<>"\x27]+', clean_url, content)
 for path in sorted(evidence):
     if os.path.isfile(path):
         try:
@@ -140,7 +164,7 @@ print(json.dumps(dict(
 // Runs the approved plan on the destination. The plan arrives on stdin, or in the private request file named by the
 // first argument when a terminal is attached for sudo. Prints one JSON report; the journal records each step.
 export const HOST_APPLY = String.raw`
-import os, sys, json, subprocess, hashlib, urllib.request, shutil, base64, tarfile, io
+import os, sys, json, subprocess, hashlib, urllib.request, shutil, base64, tarfile, io, tempfile
 
 p = json.load(open(sys.argv[1])) if len(sys.argv) > 1 else json.load(sys.stdin)
 completed = []
@@ -148,7 +172,7 @@ started = None
 stage = None
 
 def report(value):
-    print(('PADDOCK-RESULT ' if p.get('interactive') else '') + json.dumps(value), flush=True)
+    print(('PADDOCK-RESULT ' if p.get('interactive') else '') + json.dumps(dict(value, stageDir=stage)), flush=True)
 
 journal = p['stateDir'] + '/enrollment.json'
 
@@ -169,8 +193,7 @@ def run(argv):
 
 try:
     os.umask(0o077)
-    os.mkdir(p['stageDir'], 0o700)
-    stage = p['stageDir']
+    stage = tempfile.mkdtemp(prefix='paddock-enroll-')
     for item in p['uploads']:
         target = stage + '/' + item['name']
         if item['kind'] == 'artifact':
@@ -210,9 +233,6 @@ try:
         if change['after'] is not None:
             with open(stage + '/' + change['staged'], 'w') as f:
                 f.write(change['after'])
-    if p.get('interactive'):
-        subprocess.run(['sudo', '-v'], check=True, timeout=120)
-
     # Probe again, here and now: the steps below run only on the destination the plan was made for.
     check = subprocess.run(['python3', '-c', p['probeScript']], input=json.dumps(p['probeRequest']).encode(), capture_output=True, timeout=90)
     if check.returncode:
@@ -230,7 +250,9 @@ try:
     for step in p['steps']:
         started = step['label']
         save()
-        run(step['argv'])
+        if p.get('interactive'):
+            subprocess.run(['sudo', '-v'], check=True, timeout=120)
+        run([arg.replace(p['stageDir'], stage) for arg in step['argv']])
         completed.append(step['label'])
         started = None
         save()
@@ -252,9 +274,10 @@ finally:
 
 // Writes stdin to a new private file. It refuses a path that already exists or is a link.
 export const HOST_REQUEST = String.raw`
-import os, sys, shutil
+import os, sys, shutil, tempfile
 
-fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+fd, path = tempfile.mkstemp(prefix='paddock-request-')
 with os.fdopen(fd, 'wb') as f:
     shutil.copyfileobj(sys.stdin.buffer, f)
+print(path, flush=True)
 `

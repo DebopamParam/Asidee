@@ -340,3 +340,10 @@ and the engine's reason. Doctor's manual gVisor recipe includes `--net-raw` for 
 
 Link tests send their test replies to the target listener through stdin. The listener keeps
 the reply in its environment so it does not appear in the sandbox process arguments.
+
+Host install staging uses fresh destination `mkdtemp` directories and `mkstemp` request files.
+Apply reports the stage path. The plan uses `@PADDOCK_STAGE@` and `@PADDOCK_REQUEST@` placeholders.
+Each privileged step that reads staged files copies them into a root-owned private directory,
+checks SHA-256 there, uses only those copies, then removes them. The script and digests are in the plan hash.
+Interactive installs refresh `sudo -v` before each privileged step. Repository source text in the
+plan removes URL usernames and passwords; the plan binds the original file bytes by their hash.
