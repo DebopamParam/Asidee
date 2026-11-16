@@ -1591,7 +1591,9 @@ ev("U11", "The default image (no --image) makes a sandbox that passes every bloc
   const made = await socket("create", { name, image, cpus: 1, memoryGb: 2, diskGb: 20 })
   try {
     expect(made.reply.ok, `create failed: ${made.reply.error?.message}`)
-    const bad = (made.reply.data.checks as Array<{ id: string; status: string }>).filter((check) => CHECKLIST.find((item) => item.id === check.id)!.blocking && check.status !== "pass" && !(check.id === "docker" && check.status === "info" && !made.reply.data.sandbox.spec.docker))
+    const bad = (made.reply.data.checks as Array<{ id: string; status: string }>).filter((check) => CHECKLIST.find((item) => item.id === check.id)!.blocking && check.status !== "pass" && !(check.id === "docker" && check.status === "info" && !made.reply.data.sandbox.spec.docker)
+      // With no links there is nothing to measure, which the check says instead of passing.
+      && !(check.id === "link-scope" && check.status === "info"))
     expect(bad.length === 0, `not passing: ${bad.map((check) => `${check.id} ${check.status}`).join(", ")}`)
     expect((await pdk(["exec", name, "--user", "agent", "--", "sh", "-c", "id -un && command -v git node"])).code === 0, "the image's agent user, git or node is missing")
   } finally { await socket("remove", { name, confirm: name }) }
