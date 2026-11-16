@@ -53,7 +53,7 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   inside `web` the name `db` points at a loopback address of the link's own, where a listener hands each connection to
   the daemon, which relays it like a forward. `db` sees these connections as local, so a service there that trusts
   local connections trusts `web`. Each link is measured when it opens and on verify (a test value comes through; other
-  ports and `db`'s network address do not answer), and one that reaches more is cut. A link comes back after either
+  ports and `db`'s network address do not answer), and one that fails is cut. A link comes back after either
   sandbox restarts and after a daemon restart, is down while the daemon is not running, carries TCP only, up to 64
   connections at once, and ends when either sandbox is removed.
 - SSH for editors: `paddock ssh setup demo` prepares sshd inside and an alias, `demo.paddock`, whose ProxyCommand

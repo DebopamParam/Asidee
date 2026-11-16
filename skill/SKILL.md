@@ -142,8 +142,8 @@ persistence and automatic sandbox recovery are not measured.
   the command prints: TO sees these connections as coming from its own 127.0.0.1, so a service there that trusts local
   connections (a database without a password, say) trusts FROM. The service in TO must listen on its loopback (or on
   all addresses). Links come back after a stop and start and after a daemon restart, are down while the daemon is not
-  running, and end when either sandbox is removed. If `link list` shows a link `cut`, its test found it reaching more
-  than it names; tell the user, and `link add` it again only once they agree, since that runs the test again.
+  running, and end when either sandbox is removed. If `link list` shows a link `cut`, its test failed (its reason says
+  whether it reached something it does not name or did not carry a test value); tell the user, and `link add` it again only once they agree, since that runs the test again.
 - `paddock ssh setup NAME` is for editors and tools that speak SSH. It installs OpenSSH's server from the image's
   package manager when it has none (the sandbox needs internet for that), and opens no port. `ssh NAME.paddock` logs in
   as exec's user and allows `ssh -L` only to the sandbox's loopback. Running setup again makes a new host key. The

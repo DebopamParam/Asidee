@@ -366,9 +366,11 @@ under the name inherits none. `link remove` closes the listener and then measure
 connection inside FROM.
 
 Each time a link opens, and on verify of either sandbox, the core measures it with two test listeners in TO on
-random ports, one on TO's loopback and one on every address, each answering a random value. The controls: both answer
-on TO's own loopback, and the second answers the engine's host at TO's network address. A temporary route through the link on the first test port must carry its value. With that route
-closed, the link's address on that port, the name TO on the second port, and TO's network address on the second port
+random ports that no link from FROM or to TO names, one on TO's loopback and one on every address, each answering a random value. The controls: both answer
+on TO's own loopback, and the second answers the engine's host at TO's network address. A temporary route through
+the link on the first test port must carry its value to FROM, by the name TO; with the controls answering, a value
+that does not come through is the link failing (another `/etc/hosts` line naming TO first is one cause, and is
+named). With that route closed, the link's address on that port, the name TO on the second port, and TO's network address on the second port
 must not answer from FROM. A pass opens the link. A fail cuts it: it stays recorded as cut, carries nothing, and opens
 again only on a new `link add`. At add the link is then refused and not kept. On verify the "Links reach only…" check
 fails, which stops the sandbox being verified, not the other one. A measurement whose controls failed is unknown; with

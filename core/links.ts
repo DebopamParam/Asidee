@@ -251,7 +251,7 @@ export class Links {
     record.cut = { at: new Date().toISOString(), reason }
     await this.save(records.map((link) => link.id === record.id ? record : link))
     const route = this.live.get(record.id); this.live.delete(record.id)
-    await this.closeRoute(route, "The link was cut: its test found it reaching something it does not name.")
+    await this.closeRoute(route, "The link was cut: its test failed.")
     if (await this.generation(from)) await this.writeHosts(from).catch(() => {})
   }
 
@@ -277,7 +277,9 @@ export class Links {
     const at = new Date().toISOString()
     const unknown = (detail: string): Measure => ({ at, status: "unknown", detail: `Not checked: ${detail}, so a blocked attempt would prove nothing.` })
     const fromSupport = this.support(from); const toSupport = this.support(to)
-    const [near, far] = randomPorts(record.port)
+    // Not a port any link from `from` or to `to` names: one answering through another link is not this link reaching it.
+    const named = new Set((await this.load()).filter((link) => link.from.sandboxId === from.id || link.to.sandboxId === to.id).map((link) => link.port))
+    const [near, far] = randomPorts(named)
     const [one, two] = [randomBytes(8).toString("hex"), randomBytes(8).toString("hex")]
     const canaries: Session[] = []
     try {
@@ -291,7 +293,11 @@ export class Links {
       let carried: boolean
       try { carried = await retry(async () => (await fromSupport.dial(from, to.name, near)).received.includes(one)) }
       finally { await this.closeRoute(route, "The link's test ended.") }
-      if (!carried) return unknown(`a test value on ${to.name}'s port ${near} did not come through the link from ${from.name}`)
+      // Its controls answered, so a value that does not come through is the link failing, not the test.
+      if (!carried) {
+        const shadowed = this.shadowed.get(from.id)?.includes(to.name) ? ` (another line of /etc/hosts in ${from.name} names ${to.name} first)` : ""
+        return { at, status: "fail", detail: `a test value on ${to.name}'s port ${near} did not come through the link from ${from.name} by the name ${to.name}${shadowed}, though it answered ${to.name}'s own loopback.` }
+      }
       const reached: string[] = []
       if ((await fromSupport.dial(from, record.address, near)).received.includes(one)) reached.push(`after its test route closed, ${from.name} still reached ${to.name}'s port ${near}`)
       if ((await fromSupport.dial(from, to.name, far)).received.includes(two)) reached.push(`${from.name} reached ${to.name}'s port ${far} through the link's address, which the link does not name`)
@@ -445,8 +451,8 @@ export class Links {
     return { id: "links", status: "info", evidence: "inspected", detail: `${lines.join(" ")} ${LINK_LIMITS}` }
   }
 
-  // The blocking check: each open link touching this sandbox is tested live. A link that reaches what it does not name
-  // is cut, and the sandbox being verified is stopped by the checklist's rule.
+  // The blocking check: each open link touching this sandbox is tested live. A link that fails (it reaches what it does
+  // not name, or does not carry what it names) is cut, and the sandbox being verified is stopped by the checklist's rule.
   scope(manifest: Manifest): Promise<CheckResult> {
     return this.queued(async () => {
       let records: LinkRecord[]; let manifests: Map<string, Manifest>
@@ -460,6 +466,8 @@ export class Links {
       for (const link of open) {
         const route = this.live.get(link.id)!
         const from = manifests.get(link.from.name)!; const to = manifests.get(link.to.name)!
+        // Puts back Paddock's lines in `from`'s /etc/hosts if they were changed, and notes any other line naming `to`.
+        await this.writeHosts(from).catch(() => {})
         const measured = await this.measure(link, from, to, route.fromGen, route.toGen)
         this.measured.set(link.id, measured)
         if (measured.status === "fail") await this.cut(link, measured.detail, from)
@@ -517,9 +525,9 @@ async function retry(attempt: () => Promise<boolean>, attempts = 6): Promise<boo
   return false
 }
 
-function randomPorts(avoid: number): [number, number] {
+function randomPorts(avoid: Set<number>): [number, number] {
   const pick = () => 20_000 + Math.floor(Math.random() * 40_000)
-  let near = pick(); while (near === avoid) near = pick()
-  let far = pick(); while (far === avoid || far === near) far = pick()
+  let near = pick(); while (avoid.has(near)) near = pick()
+  let far = pick(); while (avoid.has(far) || far === near) far = pick()
   return [near, far]
 }

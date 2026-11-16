@@ -178,6 +178,37 @@ test("a link whose test reaches what it does not name is refused at add, and cut
   expect(await core.links.add("app", "db", 5432)).toMatchObject({ state: "open" })
 })
 
+test("a link that does not carry its test value to the port it names fails and is cut, naming a shadowing hosts line", async () => {
+  const fake = world(); const core = await paddock(fake)
+  await core.create({ name: "app" }); await core.create({ name: "db" })
+  await core.links.add("app", "db", 5432)
+  // Something in app names db first in /etc/hosts: by name, the test reaches nothing.
+  const hosts = fake.provider.links!.hosts
+  fake.provider.links!.hosts = async (manifest, lines) => { await hosts(manifest, lines); fake.boxes.get(manifest.name)!.hosts.unshift("127.0.0.9\tdb"); return `127.0.0.9\tdb\n${lines.join("\n")}\n` }
+  const verified = await core.verify("app")
+  expect(verified.checks.find((check) => check.id === "link-scope")).toMatchObject({ status: "fail",
+    detail: expect.stringContaining("did not come through the link from app by the name db (another line of /etc/hosts in app names db first)") })
+  expect((await core.get("app")).status).toBe("stopped")
+  expect((await core.get("db")).status).toBe("running")
+  expect((await core.links.list())[0]).toMatchObject({ state: "cut" })
+})
+
+test("the test never uses a port another link of the pair names, so that link's answer is not taken for a leak", async () => {
+  const fake = world(); const core = await paddock(fake)
+  await core.create({ name: "app" }); await core.create({ name: "db" })
+  const ports = Array.from({ length: 15 }, (_, at) => 20_000 + at)
+  for (const port of ports) await core.links.add("app", "db", port)
+  const used: number[] = []
+  const canary = fake.provider.links!.canary
+  fake.provider.links!.canary = async (manifest, port, reply, everywhere) => { used.push(port); return canary(manifest, port, reply, everywhere) }
+  const random = Math.random
+  // The first pick lands on a named port each time.
+  let calls = 0; Math.random = () => (calls++ % 2 === 0 ? (ports[calls % ports.length]! - 20_000) / 40_000 : random())
+  try { await core.links.add("app", "db", 30_000) } finally { Math.random = random }
+  expect(used.length).toBe(2)
+  expect(used.some((port) => ports.includes(port))).toBe(false)
+})
+
 test("links are recorded: they wait while a side is stopped and open again after a start and a daemon restart", async () => {
   const fake = world(); const core = await paddock(fake)
   await core.create({ name: "app" }); await core.create({ name: "db" })
