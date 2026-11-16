@@ -453,8 +453,9 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
     operations: [
       "Handshake: version, source, protocol, artifact digest and socket-only systemd service",
       `Inspect the boot unit (active, enabled, account, executable) and the engine: ready on ${MANAGED_RUNTIME}, watched disk, inner Docker ${options.docker ? "offered" : "not offered"}`,
-      `Create sandbox on gvisor:default${options.docker ? " with inner Docker" : ""}; require every blocking check to pass${options.docker ? ", the inner Docker check included" : ""}`,
-      "Write 1 MiB, verify again and require every blocking check to pass again with the disk use measured; disk limit remains watched",
+      `Create sandbox on gvisor:default${options.docker ? " with inner Docker" : ""}; require every applicable blocking check to pass${options.docker ? ", the inner Docker check included" : ""}`,
+      "No links are added to the smoke sandbox; link-scope must report info, without claiming a link measurement",
+      "Write 1 MiB, verify again and require every applicable blocking check to pass again with the disk use measured; disk limit remains watched",
       "Remove a successfully created verification sandbox even if later checks fail; a failed/lost create reply retains the diagnostic name for inspection; register only after successful cleanup",
     ],
   }
@@ -544,15 +545,16 @@ export function identityRegistered(identity: FileState | undefined, known: strin
   return identity?.kind === "file" && identity.text !== null && known.includes(identity.text.trim())
 }
 
-// The smoke sandbox is held to more than a sandbox's own start: every blocking check has to pass, where a probe that
+// The smoke sandbox is held to more than a sandbox's own start: every applicable blocking check has to pass, where a probe that
 // could not run would only be shown as unknown. Inner Docker's check has to pass where the plan registers it, and
-// reports "info" where it was not asked for.
+// reports "info" where it was not asked for. The smoke sandbox has no links, so link-scope must report "info" too.
 export function requireSmokeChecks(checks: unknown, docker: boolean): void {
   if (!Array.isArray(checks)) throw new PaddockError("check-failed", "No smoke verification evidence.")
   for (const item of CHECKLIST.filter((item) => item.blocking)) {
     const found: unknown = checks.find((check: unknown) => object(check) && check.id === item.id)
-    if (!object(found) || found.status !== (item.id === "docker" && !docker ? "info" : "pass"))
-      throw new PaddockError("check-failed", `Enrollment smoke check ${item.id} ${object(found) ? `was ${String(found.status).slice(0, 20)}` : "is missing"}; it must pass.`)
+    const expected = item.id === "link-scope" || item.id === "docker" && !docker ? "info" : "pass"
+    if (!object(found) || found.status !== expected)
+      throw new PaddockError("check-failed", `Enrollment smoke check ${item.id} ${object(found) ? `was ${String(found.status).slice(0, 20)}` : "is missing"}; expected ${expected}.`)
   }
 }
 

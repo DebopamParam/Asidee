@@ -404,7 +404,7 @@ test("a failure says what was changed: nothing when no step ran, otherwise what 
 })
 
 test("every final smoke check must pass, and inner Docker's exactly when the plan registered it", () => {
-  const checks = (docker: string) => CHECKLIST.filter((item) => item.blocking).map((item) => ({ id: item.id, status: item.id === "docker" ? docker : "pass" }))
+  const checks = (docker: string) => CHECKLIST.filter((item) => item.blocking).map((item) => ({ id: item.id, status: item.id === "link-scope" ? "info" : item.id === "docker" ? docker : "pass" }))
   expect(() => requireSmokeChecks(checks("info"), false)).not.toThrow()
   expect(() => requireSmokeChecks(checks("pass"), true)).not.toThrow()
   // Not asked for must not be mistaken for working, nor the reverse.
@@ -427,7 +427,7 @@ test("smoke verification requires the managed runtime, a watched disk, the plann
   ]) expect(() => requireSmokeEngine([changed], false)).toThrow()
   expect(() => requireSmokeEngine([engine], true)).toThrow()
   expect(() => requireSmokeEngine({}, false)).toThrow()
-  const checks = CHECKLIST.filter((item) => item.blocking).map((item) => ({ id: item.id, status: item.id === "docker" ? "info" : "pass" }))
+  const checks = CHECKLIST.filter((item) => item.blocking).map((item) => ({ id: item.id, status: item.id === "docker" || item.id === "link-scope" ? "info" : "pass" }))
   const verified = { ok: true, diskUsedBytes: 1048576, checks: [...checks, { id: "disk", status: "weak" }] }
   expect(() => requireSmokeVerified(verified, false)).not.toThrow()
   for (const changed of [
@@ -587,7 +587,7 @@ test("real enrollment verification waits for hello and uses that connection thro
       inspectService: async (plan) => ({ exitCode: 0, stderr: "", stdout: `User=alice\nSupplementaryGroups=docker\nActiveState=active\nUnitFileState=enabled\nExecStart={ path=${plan.binary} ; argv[]=${plan.binary} daemon run ; }` }),
       connect: () => {
         const id = ++connections
-        const checks = CHECKLIST.filter((item) => item.blocking).map((item) => ({ id: item.id, status: item.id === "docker" ? "info" : "pass" }))
+        const checks = CHECKLIST.filter((item) => item.blocking).map((item) => ({ id: item.id, status: item.id === "docker" || item.id === "link-scope" ? "info" : "pass" }))
         return { async close() { closed.push(id) }, async call(method) {
           calls.push(`${id}:${method}`)
           if (id === 1) throw new PaddockError("offline", "connect ENOENT daemon.sock")
@@ -610,4 +610,12 @@ test("real enrollment verification waits for hello and uses that connection thro
     expect(closed).toEqual([1, 2])
     expect(connections).toBe(2)
   } finally { await f.cleanup() }
+})
+
+test("the enrollment smoke sandbox has no links, so link-scope is informational rather than a measured pass", () => {
+  const checks = CHECKLIST.filter((item) => item.blocking).map((item) => ({ id: item.id, status: item.id === "link-scope" ? "info" : "pass" }))
+  expect(() => requireSmokeChecks(checks, true)).not.toThrow()
+  for (const status of ["fail", "unknown", "unsupported", "weak"])
+    expect(() => requireSmokeChecks(checks.map((check) => check.id === "link-scope" ? { ...check, status } : check), true)).toThrow()
+  expect(() => requireSmokeChecks(checks.map((check) => check.id === "kernel" ? { ...check, status: "info" } : check), true)).toThrow()
 })

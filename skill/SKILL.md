@@ -64,7 +64,7 @@ artifact and package checksum, service, watched disk choice, Docker restart vict
 stops. `--json` never applies. Interactive enrollment needs
 the word `yes`; automation needs `--accept-plan HASH`. A revised plan requires new consent. Interactive sudo uses the
 primary's private terminal stream; never put a password in an API body, plan or log. Automation needs noninteractive
-sudo. Registration follows verified artifacts, enabled system service inspection, isolation/disk smoke checks and cleanup.
+sudo. Registration follows verified artifacts, enabled system service inspection, isolation/disk smoke checks and cleanup. The smoke sandbox has no links, so its `link-scope` must be `info`, not a claimed measurement.
 Ctrl-C during verification requests cancellation; wait for cleanup and exit 130. Completed installation changes remain,
 and no new registration is written (N13). An update keeps its existing registration. The installed runtime has watched disks. Its sandboxes can run Docker inside only when
 the host is enrolled with `host add --docker`, which registers gVisor's raw sockets and shows that in the plan. Hard

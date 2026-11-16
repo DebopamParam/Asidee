@@ -741,7 +741,8 @@ primary's source stays usable even after a smoke failure. A daemon from another 
 
 Registration follows the artifact/source/protocol handshake, active/enabled service inspection, a ready local engine on
 the runtime `paddock-runsc`, all applicable blocking smoke checks at creation and again after a real disk write with
-host-side byte measurement, and smoke cleanup. `verify` returns `diskUsedBytes` when measurable and omits it otherwise.
+host-side byte measurement, and smoke cleanup. The smoke sandbox has no links; enrollment requires its `link-scope`
+result to be `info`, without claiming a link measurement. `verify` returns `diskUsedBytes` when measurable and omits it otherwise.
 Disk enforcement remains watched. The daemon prefers `paddock-runsc` to any other gVisor runtime registered on its
 engine (N16). That runtime is registered without `--net-raw` and does not advertise inner Docker, unless the host is
 enrolled with `--docker`; the option is part of the plan and its hash, and the smoke sandbox then has to pass the inner
