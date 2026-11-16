@@ -468,6 +468,8 @@ test("start says what it checked and did not, and doctor and workspace create en
 test("audit B: doctor fails without a ready engine and stopped verify explains its scope", async () => {
   const paddock = await daemon({ engines: { ok: true, data: [] }, verify: { ok: true, data: { sandbox: { name: "demo", status: "stopped", engine: "fake" }, configurationOnly: true, checks: [], ok: true } } })
   expect((await paddock("doctor")).code).toBe(5)
+  const unavailable = await daemon({ engines: { ok: true, data: [{ id: "fake", label: "Fake engine", ready: false, problems: ["Engine unavailable."] }] } })
+  expect((await unavailable("doctor")).code).toBe(5)
 })
 
 test("audit B12: stopped verify explains its scope", async () => {

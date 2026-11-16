@@ -1370,6 +1370,8 @@ ev("U01", "Exit codes tell the kinds of failure apart, as the help says", async 
   for (const [command, code] of cases) { const run = await pdk(command); if (run.code !== code) wrong.push(`${command.join(" ")} exited ${run.code}, expected ${code}`) }
   await socket("stop", { name: A })
   const stopped = await pdk(["exec", A, "--", "id"]); if (stopped.code !== 4) wrong.push(`exec on a stopped sandbox exited ${stopped.code}, expected 4`)
+  const verifiedStopped = await pdk(["verify", A])
+  if (verifiedStopped.code !== 0 || !verifiedStopped.out.split("\n")[0]?.includes("stopped; only its configuration was checked") || !verifiedStopped.out.includes(`paddock start ${A}`)) wrong.push(`stopped verify: exit ${verifiedStopped.code} ${verifiedStopped.out}`)
   await socket("start", { name: A })
   expect(wrong.length === 0, wrong.join("; "))
 })
@@ -1611,10 +1613,54 @@ ev("U15", "An unavailable image leaves no record, network or Docker volume, and 
     const net = await docker(["network", "inspect", `paddock-net-${name}`])
     const volumes = await docker(["volume", "ls", "-q", "--filter", `label=dev.paddock.name=${name}`])
     expect(!rows.some((row) => row.name === name) && net.code !== 0 && !volumes.out.trim(), `failed create kept record=${rows.some((row) => row.name === name)}, network=${net.code === 0}, volumes=${volumes.out.trim()}`)
-    expect(!failed.reply.ok && /cannot download.*image/i.test(failed.reply.error?.message ?? "") && /Nothing was kept/.test(failed.reply.error?.message ?? ""), `failure did not explain download and cleanup: ${failed.out}`)
+    expect(failed.code === 5 && !failed.reply.ok && failed.reply.error?.code === "dependency" && !failed.reply.error.message.includes("..") && /cannot download.*image/i.test(failed.reply.error?.message ?? "") && /Nothing was kept/.test(failed.reply.error?.message ?? ""), `failure did not explain download and cleanup: ${failed.out}`)
     await ensure(name)
     expect(await running(name), "same name could not be created with a good image")
   } finally { await pdk(["remove", name, "--confirm", name]) }
+})
+
+ev("U18", "Forward add keeps a closed target with a plain warning, while a listening control gets no warning", async () => {
+  await ensure(A)
+  const port = 54321
+  const start = await pdk(["exec", A, "--", "sh", "-c", "(/.paddock/busybox nc -lk -s 127.0.0.1 -p 54322 -e /.paddock/busybox echo control </dev/null >/dev/null 2>&1 & echo $!)"])
+  expect(start.code === 0 && /^\d+\s*$/.test(start.out), `control did not start: ${start.err}`)
+  const ids: string[] = []
+  try {
+    await Bun.sleep(200)
+    for (const [target, closed] of [[port, true], [port + 1, false]] as const) {
+      const result = await pdk(["forward", "add", A, "--port", String(target)])
+      const id = /\(forward ([a-f0-9]+)\)/.exec(result.out)?.[1]
+      if (id) ids.push(id)
+      expect(result.code === 0 && id, `forward failed: ${result.out}${result.err}`)
+      expect(result.out.includes(`nothing listens on ${target} inside yet`) === closed && !result.out.includes("Could not check"), `wrong listener result: ${result.out}`)
+      expect(!result.out.includes("SSH"), `local forward printed remote limits: ${result.out}`)
+    }
+  } finally {
+    for (const id of ids) await pdk(["forward", "remove", id])
+    await pdk(["exec", A, "--", "kill", start.out.trim()])
+  }
+})
+
+ev("U19", "Ctrl-C during create reports continued daemon work, exits 130 and leaves a listed sandbox", async () => {
+  const name = `${PREFIX}-interrupted`
+  const child = Bun.spawn([BIN, "create", name, "--image", "alpine:latest"], { env: { ...process.env, ...env }, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+  let error = ""
+  const reading = (async () => { for await (const bytes of child.stderr) error += Buffer.from(bytes).toString() })()
+  const output = new Response(child.stdout).text()
+  try {
+    expect(await until(async () => error.includes("Creating") || error.includes("Running the checks"), 15), `create did not report progress: ${error}`)
+    child.kill("SIGINT")
+    expect(await child.exited === 130, "interrupted create did not exit 130")
+    await reading; await output
+    expect(error.includes(`The daemon is still finishing ${name}`) && error.includes("paddock list") && error.includes(`paddock remove ${name} --confirm ${name}`), `interruption did not explain continued work: ${error}`)
+    expect(await until(async () => Boolean((await view(name))?.lastVerify), 60), "the daemon did not finish the interrupted create")
+    const listed = await pdk(["list"])
+    expect(listed.out.includes(name) && await running(name), `finished sandbox was not listed and running: ${listed.out}`)
+    return error.trim().split("\n").at(-1)
+  } finally {
+    if (child.exitCode === null) { child.kill("SIGINT"); await child.exited }
+    await pdk(["remove", name, "--confirm", name])
+  }
 })
 
 // Bun's fetch gives up after 360 seconds unless told otherwise; the CLI asked the daemon over fetch, so a longer exec
@@ -3458,7 +3504,7 @@ ev("N01", "A read-only host plan against the routing fixture preserves system fi
   // The same plan as a person reads it: without a terminal it is shown and not applied.
   const text = await pdk(["host", "add", name, "--ssh", TEST_HOST!, "--artifact", artifact, "--sha256", digest])
   expect(text.code === 2 && text.out.includes(`Plan hash: ${plan.hash}`), `the plan as text differed or was applied: exit ${text.code} ${text.err}`)
-  for (const step of plan.steps) expect(text.out.includes(step.argv.join(" ")), `the plan as text omitted ${step.label}`)
+  for (const step of plan.steps) expect(text.out.includes(step.argv.map((arg) => /^[A-Za-z0-9_@%+=:,./-]+$/.test(arg) ? arg : JSON.stringify(arg)).join(" ")), `the plan as text omitted ${step.label}`)
   const after = await remote(["python3", "-c", enrollmentSnapshotScript]); const engineAfter = await engine()
   expect(after.code === 0 && before.out === after.out, "planning changed system files, service definitions or installation paths")
   expect(engineBefore.fixed === engineAfter.fixed, "planning restarted Docker or changed its images")
@@ -3491,7 +3537,7 @@ ev("N02", "The enrollment plan names every sudo argv and what it leaves, file by
   expect(!Object.keys(plan.destination.apt).length && !Object.keys(plan.destination.repositories).length, "apt evidence was gathered where Docker is installed")
   const text = await pdk(enrollArgs())
   expect(text.code === 2 && text.out.includes(`Plan hash: ${plan.hash}`), `the plan as text differed or was applied: exit ${text.code} ${text.err}`)
-  for (const step of plan.steps) expect(text.out.includes(step.argv.join(" ")) && step.leaves.every((left) => text.out.includes(left)), `the plan as text omitted ${step.label}`)
+  for (const step of plan.steps) expect(text.out.includes(step.argv.map((arg) => /^[A-Za-z0-9_@%+=:,./-]+$/.test(arg) ? arg : JSON.stringify(arg)).join(" ")) && step.leaves.every((left) => text.out.includes(left)), `the plan as text omitted ${step.label}`)
   expect(before === await enrollSnapshot(), "planning made installation changes")
   await unregistered()
   return `${plan.steps.length} exact sudo vectors, ${plan.changes.length} content changes, ${plan.uploads.length} verified deliveries with ${GVISOR_FILES.length} gVisor files; no writes`
@@ -4157,7 +4203,7 @@ ev("N12", "The documented manual uninstall removes the disposable fixture's Padd
   return `${ENROLL_HOST}: unit, release, runtime, state, backups, firewall tables and helper image removed; pulled sandbox images and distro Docker packages retained; fixture can be deleted`
 })
 
-ev("N20", "The installer takes from a downloaded archive only the files the plan names, each with its planned checksum, and runs no step when the archive, the staging folder or the destination is not what the plan says", async () => {
+ev("N20", "The installer takes from a downloaded archive only the files the plan names, each with its planned checksum, and refuses altered archives and destinations while ignoring planted staging folders", async () => {
   const folder = join(tmp, "installer"); await mkdir(join(folder, "state"), { recursive: true })
   // The planned archive, and ones with other bytes in a file, an entry that climbs out, a link, and a file missing.
   const archives = await sh(["python3", "-c", `
@@ -4205,7 +4251,7 @@ print(json.dumps(dict(
       steps: [{ label: "Copy what was staged", argv: ["cp", "-R", `${stage}/gvisor`, installed], leaves: [installed] }],
     }) })
     const copied = await Bun.file(join(installed, "runsc")).exists()
-    return { code: run.code, report: JSON.parse(run.out.trim().split("\n").at(-1)!) as { ok: boolean; stale?: boolean; error?: string; completed: string[] }, copied, staged: await Bun.file(stage).exists() || (await sh(["test", "-e", stage])).code === 0 }
+    return { code: run.code, report: JSON.parse(run.out.trim().split("\n").at(-1)!) as { ok: boolean; stale?: boolean; error?: string; completed: string[]; stageDir: string }, copied, staged: (await sh(["test", "-e", JSON.parse(run.out.trim().split("\n").at(-1)!).stageDir])).code === 0 }
   }
   const good = await install("planned")
   expect(good.code === 0 && good.report.ok && good.report.completed.length === 1 && good.copied, `the planned archive was not installed: ${JSON.stringify(good.report)}`)
@@ -4222,12 +4268,12 @@ print(json.dumps(dict(
   // A destination that no longer answers the probe as the plan recorded it: nothing runs, and the reply says stale.
   const stale = await install("planned", { probed: { ...destination, machine: "another" } })
   expect(stale.code === 0 && stale.report.stale === true && !stale.report.ok && !stale.copied && !stale.staged, `a destination that changed after consent was installed on: ${JSON.stringify(stale.report)}`)
-  // A staging folder someone else made first is not used, and not removed.
+  // A planted folder cannot block retry; a fresh stage is used and removed.
   await mkdir(stage); await writeFile(join(stage, "planted"), "x")
   const planted = await install("planned")
-  expect(planted.code === 1 && !planted.report.ok && !planted.copied && await Bun.file(join(stage, "planted")).exists(), `a staging folder that already existed was used or removed: ${JSON.stringify(planted.report)}`)
+  expect(planted.code === 0 && planted.report.ok && planted.copied && !planted.staged && planted.report.stageDir !== stage && await Bun.file(join(stage, "planted")).exists(), `a planted folder blocked retry, was used or was removed: ${JSON.stringify(planted.report)}`)
   await rm(stage, { recursive: true })
-  return `the planned archive installed; ${refusals.length} altered archives, a changed destination and a planted staging folder ran no step`
+  return `the planned archive installed; ${refusals.length} altered archives and a changed destination ran no step; a planted staging folder stayed untouched and did not block retry`
 })
 
 // J: links between two sandboxes on this machine. FROM is JA, TO is JB; a link carries one port, through the daemon.
