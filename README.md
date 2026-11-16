@@ -14,12 +14,12 @@ it every 30 seconds and stops a sandbox that stopped holding.
 In text, `create` and `resize` count the checks that held on one line and print every other result in full;
 `verify` and `--json` list every check. Every command takes `--help`.
 `doctor` exits 5 when no engine is ready. On a stopped sandbox, `verify` checks configuration only and can exit 0.
-Run `paddock start NAME`, then `paddock verify NAME` to check the rest. `list` shows the disk limit and minutes
+Run `paddock start NAME`, then `paddock verify NAME` to check the rest. `list` shows the disk limit and the time
 since verification, with one footer explaining that those checks are historical.
 
 Piped input reaches sandbox and workspace exec only with `--stdin` or `--stream`.
 Ctrl-C during buffered create, workspace create, resize or snapshot exits 130. The daemon keeps finishing the work;
-the CLI prints the list and exact remove commands.
+the CLI says where the result will appear and, for a create, the exact remove command.
 
 Each check reports one of six results, and says whether it was probed (tried against the live sandbox) or inspected (read
 from the engine's configuration):

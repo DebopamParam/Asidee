@@ -81,7 +81,7 @@ test("list describes saved verification as dated history with current checks unk
     lastVerify: { at: "2026-11-10T10:00:00Z", results: [{ id: "kernel", status: "pass" }] } }] } })
   const { out, code } = await paddock("list")
   expect(code).toBe(0)
-  expect(out).toMatch(/verified \d+ min ago/)
+  expect(out).toMatch(/verified \d+ d ago/)
   expect(out.split("historical only")).toHaveLength(2)
   expect(out).toContain("disk limit 20 GB")
   expect(out).not.toContain("0 failed")
@@ -514,9 +514,13 @@ test("audit B1: interrupted buffered mutations explain continued daemon work", a
     expect(await child.exited).toBe(130)
     const err = await new Response(child.stderr).text()
     expect(err.trim().split("\n")).toHaveLength(1)
-    expect(err).toContain("The daemon is still finishing demo")
-    expect(err).toContain(`paddock ${workspace ? "workspace " : ""}list`)
-    expect(err).toContain(`paddock ${workspace ? "workspace " : ""}remove demo --confirm demo`)
+    if (method === "resize") { expect(err).toContain("The daemon is still resizing demo"); expect(err).not.toContain("remove") }
+    else if (method === "snapshot") { expect(err).toContain("still saving demo as template saved"); expect(err).toContain("paddock template remove saved"); expect(err).not.toContain("--confirm") }
+    else {
+      expect(err).toContain("The daemon is still finishing demo")
+      expect(err).toContain(`paddock ${workspace ? "workspace " : ""}list`)
+      expect(err).toContain(`paddock ${workspace ? "workspace " : ""}remove demo --confirm demo`)
+    }
   }
 }, 10_000)
 

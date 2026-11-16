@@ -42,10 +42,10 @@ Text output of `create` and `resize` counts the checks that held and prints ever
 Piped input is sent only with `--stdin` or `--stream`, for both sandbox and workspace exec.
 `doctor` exits 5 if no engine is ready. A stopped sandbox can pass configuration checks with exit 0;
 start it with `paddock start NAME`, then run `paddock verify NAME` to check the rest.
-`list` shows the disk limit and how many minutes ago verification ran. Its results are history.
+`list` shows the disk limit and how long ago verification ran. Its results are history.
 Verify JSON includes `configurationOnly`; a runtime failure that stops a running sandbox is still a runtime check.
 Ctrl-C during buffered create, workspace create, resize or snapshot exits 130. The daemon keeps finishing the work.
-The CLI prints the list and exact remove commands. An image the engine cannot pull is a missing dependency (exit 5);
+The CLI says where the result will appear and, for a create, the exact remove command. An image the engine cannot pull is a missing dependency (exit 5);
 the error names the image and the engine's reason. Doctor's manual gVisor recipe includes `--net-raw` for Docker inside.
 
 Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed or required probes could not run, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown.
@@ -152,7 +152,7 @@ persistence and automatic sandbox recovery are not measured.
   services started later can use it. Remote daemon and SSH lifetime caveats appear only with a remote host.
   Remove a forward when you are done with it.
   A closed connection ends its relay process. A client that only finishes sending (FIN) keeps the relay while the
-  port answers; after ten minutes of silence the relay is ended.
+  port answers; after a minute of silence the relay is ended.
 - To let one sandbox use a service in another (an app and its database), add a link: `paddock link add FROM TO --port
   P`. Programs in FROM then connect to `TO:P` (the name TO resolves inside FROM through a line Paddock keeps in its
   `/etc/hosts`); they reach port P on TO's loopback and nothing else of TO. It is one-way and TCP only, on this machine

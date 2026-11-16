@@ -250,7 +250,10 @@ async function call<T>(method: string, body: object = {}, watch?: string): Promi
   const interrupted = () => {
     const name = "name" in body ? shown(body.name) : "NAME"
     const workspace = method === "workspaceCreate" ? ["workspace"] : []
-    console.error(`The daemon is still finishing ${name}; it will appear in \`${next(...workspace, "list")}\`. Remove it with \`${next(...workspace, "remove", name, "--confirm", name)}\`.`)
+    // Only a create makes something to remove; a resize or snapshot of an existing sandbox must not suggest removing it.
+    if (method === "resize") console.error(`The daemon is still resizing ${name}. See the result with \`${next("list")}\`.`)
+    else if (method === "snapshot") { const template = "as" in body ? shown(body.as) : "TEMPLATE"; console.error(`The daemon is still saving ${name} as template ${template}; it will appear in \`${next("template", "list")}\`. Remove it with \`${next("template", "remove", template)}\`.`) }
+    else console.error(`The daemon is still finishing ${name}; it will appear in \`${next(...workspace, "list")}\`. Remove it with \`${next(...workspace, "remove", name, "--confirm", name)}\`.`)
     process.exit(130)
   }
   const buffered = ["create", "workspaceCreate", "resize", "snapshot"].includes(method)
@@ -515,7 +518,8 @@ async function main(argv: string[]): Promise<void> {
         return out(list, () => {
           if (!list.length) console.log("No sandboxes. Create one with `paddock create NAME`.")
           for (const view of list) {
-            const verified = view.lastVerify ? `verified ${Math.max(0, Math.floor((Date.now() - Date.parse(view.lastVerify.at)) / 60000))} min ago` : "never verified"
+            const minutes = view.lastVerify ? Math.max(0, Math.floor((Date.now() - Date.parse(view.lastVerify.at)) / 60000)) : 0
+            const verified = view.lastVerify ? `verified ${minutes < 120 ? `${minutes} min` : minutes < 2880 ? `${Math.floor(minutes / 60)} h` : `${Math.floor(minutes / 1440)} d`} ago` : "never verified"
             if (view.status === "damaged") { console.log(`${displayName(view.name).padEnd(24)} damaged\n    ${shown(view.stopReason)}`); continue }
             console.log(`${displayName(view.name).padEnd(24)} ${shown(view.status).padEnd(8)} ${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  disk limit ${view.spec.diskGb} GB  ${shown(view.engine)}${view.template ? `  template ${shown(view.template.name)}` : ""}  (${verified})${view.stopReason ? `\n    ${shown(view.stopReason)}` : ""}`)
             if (view.enforcementProblem) console.log(`    Enforcement problem at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}`)
