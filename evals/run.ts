@@ -4556,7 +4556,7 @@ ev("J11", "A link broken from inside TO does not get FROM stopped: verify of FRO
   }
 })
 
-ev("J12", "A link connection whose client sent FIN goes within seconds when TO stays silent, instead of holding a slot for minutes, and a reply that keeps coming after FIN arrives whole", async () => {
+ev("J12", "A link connection whose client sent FIN goes about a minute after TO falls silent, instead of holding a slot for ten minutes, and a reply that keeps coming after FIN arrives whole", async () => {
   await ensure(JA); await ensure(JB)
   const port = LINK_PORT + 1
   // A service in TO that answers once and then holds every connection open without reading or writing.
@@ -4568,7 +4568,7 @@ ev("J12", "A link connection whose client sent FIN goes within seconds when TO s
     const after = await held()
     expect(after > 0, `control: no connection was held after the clients ended (${after}), so the service does not hold them`)
     const start = Date.now()
-    expect(await until(async () => await held() === 0, 40), `${await held()} connections were still held 40 s after their clients ended`)
+    expect(await until(async () => await held() === 0, 100), `${await held()} connections were still held 100 s after their clients ended`)
     const gone = Math.round((Date.now() - start) / 1000)
     // A client that sends FIN at once and then reads a reply that comes over 24 s, a line every 2 s, gets all of it.
     await inside(JB, `(nc -lk -s 127.0.0.1 -p ${port + 1} -e sh -c 'for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo s$i; sleep 2; done' </dev/null >/dev/null 2>&1 &)`)

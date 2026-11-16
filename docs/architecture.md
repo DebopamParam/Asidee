@@ -334,9 +334,9 @@ restart to make, instead of listening and relaying the engine's error. The relay
 connections at once, counting ones still being dialled; past that a connection is closed before anything is opened for
 it. The engine publishes nothing and gets no
 listener on its host. Each direction waits for the other side. End of input passes on as a half-close: the relay
-stays while the port answers and is ended after ten seconds of silence, since a client that has gone after its FIN
+stays while the port answers and is ended after a minute of silence, since a client that has gone after its FIN
 looks the same as one still waiting. Links do the same. A reply that keeps coming keeps the connection; a reply that
-starts more than ten seconds after the client's FIN is cut. Before this was ten minutes, and five `nc </dev/null`
+starts more than a minute after the client's FIN is cut. Before this was ten minutes, and five `nc </dev/null`
 connections held five of a link's 64 slots, five relay processes in TO and their engine sessions for that long. W09 keeps a control connected
 while dropping another connection and checks that its `nc` process ends within five seconds. A forward
 belongs to one run of one sandbox (its id and the engine's start time): it ends on `forward remove`, when the sandbox

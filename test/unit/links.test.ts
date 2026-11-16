@@ -400,8 +400,8 @@ test("new connections past the rate are refused inside the sandbox, not relayed"
   core.closeSessions()
 })
 
-test("a link connection whose client has ended goes once TO is silent for seconds, and stays while TO's reply keeps coming", async () => {
-  expect(FIN_QUIET_MS).toBeLessThanOrEqual(30_000)
+test("a link connection whose client has ended goes once TO is silent for the allowed time, and stays while TO's reply keeps coming", async () => {
+  expect(FIN_QUIET_MS).toBeLessThanOrEqual(60_000)
   const connection = () => {
     const halves = { fromClient: new FakeSession(), toClient: new FakeSession(), target: new FakeSession() }
     let finished = 0
