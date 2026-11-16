@@ -85,7 +85,7 @@ test("stored verification is dated history with current properties unknown acros
 
 test("a check the provider does not report is unknown, never a pass", () => {
   const results = complete([pass("hardening")], ["config"])
-  expect(results.map((entry) => entry.id)).toEqual(["hardening", "mounts", "network-guard", "inbound", "forwards", "ssh", "limits", "disk", "template"])
+  expect(results.map((entry) => entry.id)).toEqual(["hardening", "mounts", "network-guard", "inbound", "forwards", "ssh", "links", "limits", "disk", "template"])
   expect(results.find((entry) => entry.id === "mounts")!.status).toBe("unknown")
   expect(blockers(results).map((entry) => entry.id)).toEqual(["mounts", "network-guard", "inbound", "limits"])
 })
@@ -702,7 +702,9 @@ test("turning the requirement off permits unknown probes without inventing a pas
   const made = await paddock.create({ name: "demo" })
   expect(state.running).toBe(true)
   const unknown = made.checks.filter((check) => check.status === "unknown")
-  expect(unknown.map((check) => check.id)).toEqual(CHECKLIST.filter((item) => item.stage === "probe").map((item) => item.id))
+  // The core answers link-scope itself: with no links it is a disclosure, not an unknown.
+  expect(unknown.map((check) => check.id)).toEqual(CHECKLIST.filter((item) => item.stage === "probe" && item.id !== "link-scope").map((item) => item.id))
+  expect(made.checks.find((check) => check.id === "link-scope")).toMatchObject({ status: "info", evidence: "none" })
   expect(unknown.every((check) => check.evidence === "none")).toBe(true)
   expect((await paddock.list())[0]?.lastVerify?.results.find((check) => check.id === "net-host")?.detail).toContain("unknown (none)")
   await paddock.configSet({ requireProbes: true })

@@ -18,6 +18,7 @@ export const CATALOG = {
   resize: ["dashboard", "write"], snapshot: ["dashboard", "write"], templateList: ["dashboard", "read"], templateRemove: ["dashboard", "write"],
   exec: ["dashboard", "write"], extensions: ["dashboard", "read"], action: ["dashboard", "write"],
   forwardAdd: ["dashboard", "primary"], forwardList: ["dashboard", "primary"], forwardRemove: ["dashboard", "primary"],
+  linkAdd: ["dashboard", "primary"], linkList: ["dashboard", "primary"], linkRemove: ["dashboard", "primary"],
   sshAccess: ["dashboard", "primary"], sshSetup: ["socket", "primary"], shutdown: ["socket", "write"],
   hostList: ["dashboard", "primary"], fleet: ["dashboard", "primary"], hostAttach: ["socket", "primary"], hostPlan: ["socket", "primary"], hostApply: ["socket", "primary"], hostRemove: ["socket", "primary"],
   sessionTarget: ["socket", "read"],
@@ -25,6 +26,7 @@ export const CATALOG = {
 } as const
 export type MethodName = keyof typeof CATALOG
 export const EXPERIMENTAL_OFF = "Other machines are experimental and off on this machine: they are not yet proven on enough machines. To turn them on: paddock config set experimental on"
+export const LINKS_LOCAL = "Links join two sandboxes on this machine only, so they cannot be used with --host."
 export const isMethod = (method: string): method is MethodName => Object.hasOwn(CATALOG, method)
 export const mutates = (method: MethodName) => CATALOG[method][1] === "write"
 
@@ -294,6 +296,7 @@ export class Machines {
   async route(method: MethodName, body: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
     const { host: selected, ...payload } = body
     if (selected === undefined || selected === "local") return undefined
+    if (method === "linkAdd" || method === "linkList" || method === "linkRemove") throw new PaddockError("usage", LINKS_LOCAL)
     await this.experimental()
     const host = await this.resolve(selected)
     if (body.machineId !== undefined && body.machineId !== host.machineId) throw new PaddockError("identity-changed", `${host.name} is machine ${host.machineId}, not the ${String(body.machineId)} the request names. Nothing was sent.`)

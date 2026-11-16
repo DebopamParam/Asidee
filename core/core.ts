@@ -4,6 +4,7 @@ import type { Server } from "node:net"
 import { blockers, CHECKLIST, complete, failures, historical, titleOf } from "./checks"
 import { fieldValues, loadExtensions, runCommand } from "./extensions"
 import { boundPort, FORWARD_REACH, LEASE_TTL_MS, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
+import { Links } from "./links"
 import { OUTPUT_LIMIT } from "./run"
 import { addInclude, alias, editorKey, GUEST_SETUP, GUEST_SSH, includeLine, included, keyFingerprint, parseGuestSetup, userConfig, validPublicKey, writeClientFiles, type SshAccess } from "./ssh"
 import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSizes, validSpec, validTemplateName, writeManifest, writeConfig, type Dirs } from "./state"
@@ -13,7 +14,7 @@ import { PaddockError, type CheckResult, type DiskWarning, type Engine, type Lim
 // A running sandbox is stopped when a blocking check could not be made this many timer passes in a row.
 export const UNCHECKED_PASSES = 4
 // Checks the core answers from what it holds itself; a provider's answer for them is ignored.
-const CORE_CHECKS = new Set<CheckResult["id"]>(["forwards", "ssh"])
+const CORE_CHECKS = new Set<CheckResult["id"]>(["forwards", "ssh", "links", "link-scope"])
 // A running sandbox's memory or task limit is not lowered to within this share of what it uses now: the engine kills a
 // sandbox that passes either (measured: one using 351 MB was killed within seconds of a 256 MB limit).
 export const SHRINK_HEADROOM = 0.9
@@ -50,7 +51,11 @@ export class Core {
   private readonly forwards = new Map<string, { view: Omit<ForwardView, "connections">; server: Server; connections: Set<Session>; watch: ReturnType<typeof setInterval> }>()
   // A hosted forward's lease ends after this long without a renewal from the primary (core/forwards.ts).
   leaseTtlMs = LEASE_TTL_MS
-  constructor(private readonly providers: readonly Provider[], readonly dirs: Dirs, private readonly run: Runner, private readonly cliDir: string, readonly machineId = "") {}
+  // Links between sandboxes (core/links.ts). Unlike forwards they are recorded, and come back after a restart.
+  readonly links: Links
+  constructor(private readonly providers: readonly Provider[], readonly dirs: Dirs, private readonly run: Runner, private readonly cliDir: string, readonly machineId = "") {
+    this.links = new Links(dirs, (manifest) => this.provider(manifest))
+  }
 
   // One operation per sandbox at a time.
   private exclusive<T>(name: string, task: () => Promise<T>): Promise<T> {
@@ -97,8 +102,13 @@ export class Core {
     for (const stage of stages) {
       if (stage !== "config" && !running) continue
       results.push(...(await provider.checks(manifest, stage)).filter((result) => !CORE_CHECKS.has(result.id)))
+      if (stage === "probe") {
+        const peers = results.find((result) => result.id === "net-peers")
+        if (peers) peers.detail += await this.links.peers(manifest)
+        results.push(await this.links.scope(manifest))
+      }
     }
-    if (stages.includes("config")) results.push(this.forwardCheck(manifest), this.sshCheck(manifest))
+    if (stages.includes("config")) results.push(this.forwardCheck(manifest), this.sshCheck(manifest), await this.links.check(manifest))
     return complete(results, stages, running ? undefined : "Not checked: the sandbox is not running.")
   }
 
@@ -111,6 +121,7 @@ export class Core {
     for (const session of this.sessions.get(name) ?? []) session.close(reason)
     this.sessions.delete(name)
     for (const forward of [...this.forwards.values()]) if (forward.view.name === name) this.endForward(forward.view.id, reason)
+    this.links.end(name, reason)
   }
 
   private async stopBecause(manifest: Manifest, reason: string): Promise<void> {
@@ -220,7 +231,14 @@ export class Core {
     return { sandbox: await this.get(spec.name).catch(() => this.view(manifest)), checks, hooks }
   }
 
-  start(name: string): Promise<SandboxView> {
+  // Its links open once it runs, outside its lock: opening one touches the sandbox at its other end too.
+  async start(name: string): Promise<SandboxView> {
+    const sandbox = await this.startOnly(name)
+    await this.links.sync(name).catch(() => {})
+    return sandbox
+  }
+
+  private startOnly(name: string): Promise<SandboxView> {
     return this.exclusive(validName(name), async () => {
       const manifest = await readManifest(this.dirs, name)
       await this.startChecked(manifest)
@@ -252,6 +270,7 @@ export class Core {
       this.activity.set(name, "Removing")
       this.endSessions(name, `The session ended: ${name} was removed.`)
       await this.provider(manifest).remove(manifest); await deleteManifest(this.dirs, name)
+      await this.links.forget(manifest).catch(() => {})
       this.enforcementProblems.delete(name); this.unchecked.delete(name)
       if (manifest.ssh) await writeClientFiles(this.dirs, await listManifests(this.dirs))
       return { removed: name }
@@ -430,6 +449,7 @@ export class Core {
 
   closeSessions(): void {
     for (const name of new Set([...this.sessions.keys(), ...[...this.forwards.values()].map((forward) => forward.view.name)])) this.endSessions(name, "The session ended: the Paddock daemon stopped.")
+    this.links.close()
   }
 
   // A listener on 127.0.0.1 only, bound once, for this run of the sandbox. Each connection is relayed to the same port on
@@ -589,6 +609,8 @@ export class Core {
         }
       }).catch((error) => { this.enforcementProblems.set(listed.name, { at: new Date().toISOString(), message: `Enforcement could not read its state: ${(error as Error).message}` }) })
     }
+    // Then links: a sandbox that started behind Paddock's back, or a daemon that just started, opens them again here.
+    await this.links.sync().catch(() => {})
   }
 
   private async recordEnforcement(manifest: Manifest, message: string): Promise<void> {

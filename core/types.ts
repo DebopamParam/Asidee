@@ -60,8 +60,8 @@ export type Engine = {
 }
 
 export type CheckId =
-  | "kernel" | "hardening" | "mounts" | "network-guard" | "inbound" | "forwards" | "ssh" | "limits" | "disk" | "docker" | "dns"
-  | "template" | "net-host" | "net-peers" | "net-private" | "egress" | "credentials"
+  | "kernel" | "hardening" | "mounts" | "network-guard" | "inbound" | "forwards" | "ssh" | "links" | "limits" | "disk" | "docker" | "dns"
+  | "template" | "net-host" | "net-peers" | "link-scope" | "net-private" | "egress" | "credentials"
   | "seatbelt" | "writes" | "home-closed" | "daemons" | "user-data" | "processes" | "gpu" | "network" | "loopback" | "not-covered" | "hard-links" | "free-space"
 
 export type WorkspaceLogins = { kind: "none" } | { kind: "profiles"; claude: string; codex: string }
@@ -138,6 +138,28 @@ export interface Session {
   on(event: "end", listener: (exit: { code?: number; error?: string }) => void): this
 }
 
+// What links (core/links.ts) need from a provider. Each call acts inside one sandbox, and every address, port and path
+// in it comes from the daemon, never from inside a sandbox.
+export interface LinkSupport {
+  // Starts a link's listener inside the sandbox, as root, on its loopback address:port. It prints "r" once bound, or
+  // "e REASON"; then "o PID" for each connection it accepts, which waits in dir until attached or ended. An input line
+  // "x PID" ends that connection; it ends with its input, or after 15 seconds without a line.
+  listen(manifest: Manifest, dir: string, address: string, port: number): Promise<Session>
+  // One accepted connection's two halves: fromClient's output is what the client sends, toClient's input goes to it.
+  // Both come back paused, so nothing they print is lost before the daemon listens.
+  attach(manifest: Manifest, dir: string, pid: number): Promise<{ fromClient: Session; toClient: Session }>
+  // Replaces Paddock's link lines in the sandbox's /etc/hosts with these, writing only when that changes it, and
+  // returns the file as read back.
+  hosts(manifest: Manifest, lines: readonly string[]): Promise<string>
+  // A test listener that answers each connection with reply: on the sandbox's loopback only, or on every address.
+  canary(manifest: Manifest, port: number, reply: string, everywhere: boolean): Promise<Session>
+  // A connection from inside the sandbox to host:port, as any program there would make it, and what it received.
+  dial(manifest: Manifest, host: string, port: number): Promise<{ connected: boolean; received: string }>
+  // The sandbox's address on its engine network, and what a connection to ip:port from the engine's host receives.
+  address(manifest: Manifest): Promise<string | undefined>
+  hostDial(manifest: Manifest, ip: string, port: number): Promise<string>
+}
+
 export interface Provider {
   id: string
   detect(): Promise<Engine[]>
@@ -172,6 +194,8 @@ export interface Provider {
   templates(engine: Engine): Promise<Template[]>
   // Removes the template's name. Sandboxes made from it keep their image; it goes with the last of them.
   removeTemplate(engine: Engine, name: string): Promise<{ imageId: string; dependants: string[] }>
+  // Absent: this provider cannot link its sandboxes.
+  links?: LinkSupport
 }
 
 export type ErrorCode = "usage" | "not-found" | "conflict" | "dependency" | "check-failed" | "probes-required" | "runtime" | "offline" | "incompatible" | "identity-changed" | "outcome-unknown"

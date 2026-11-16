@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { connect, type Socket } from "node:net"
 import { must } from "../run"
-import { PaddockError, type CheckResult, type Engine, type Limits, type Manifest, type Provider, type RunOptions, type RunResult, type Runner, type Session, type Stage, type Template } from "../types"
+import { PaddockError, type CheckResult, type Engine, type Limits, type LinkSupport, type Manifest, type Provider, type RunOptions, type RunResult, type Runner, type Session, type Stage, type Template } from "../types"
 import { probeCleanupScript, WAIT_FOR_PROBE_ROUTES } from "./probe"
 import GUARD_RULES from "./guard.nft" with { type: "text" }
 import HELPER_DOCKERFILE from "./helper.Dockerfile" with { type: "text" }
@@ -114,6 +114,52 @@ echo ready; wait`
 const END_EXEC = `marked() { for p in /proc/[0-9]*; do tr '\\0' '\\n' < "$p/environ" 2>/dev/null | grep -qx "PADDOCK_EXEC=$1" && echo "\${p#/proc/}"; done; true; }
 for pass in 1 2 3; do pids=$(marked "$1"); [ -z "$pids" ] && exit 0; kill -9 $pids 2>/dev/null; sleep 0.2; done
 [ -z "$(marked "$1")" ]`
+// A link's listener inside `from` (core/links.ts), run as root with Paddock's busybox: $1 address, $2 port, $3 its folder.
+// busybox nc accepts each connection and runs the part in quotes in a session of its own, which makes two named pipes
+// in the folder (root only), says "o PID" on the listener's output and waits for the daemon to attach to them; "x PID"
+// ends that session, its background copy of the client's input included. The input is passed as fd 3 because a
+// background command's own input is /dev/null in a shell without job control. A
+// listener an earlier daemon left is ended first, by the tag it wrote; this one ends its own processes when its input
+// ends or is silent for 15 seconds (the daemon sends a line every 5).
+export const LINK_LISTEN = `B=$0 d=$3
+marked() { for p in /proc/[0-9]*; do $B tr '\\0' '\\n' < "$p/environ" 2>/dev/null | $B grep -qx "PADDOCK_EXEC=$1" && echo "\${p#/proc/}"; done; true; }
+stop() { for p in $(marked "$1"); do [ "$p" = "$$" ] || kill -9 "$p" 2>/dev/null; done; }
+$B mkdir -p -m 700 /.paddock/links || { echo "e mkdir"; exit 3; }
+old=$($B head -c 32 "$d/tag" 2>/dev/null)
+case $old in ''|*[!0-9a-f]*) ;; *) stop "$old";; esac
+$B rm -rf "$d"; $B mkdir -m 700 "$d" || { echo "e mkdir"; exit 3; }
+echo "$PADDOCK_EXEC" > "$d/tag"
+exec 4>&1
+$B nc -lk -s "$1" -p "$2" -e $B setsid $B sh -c 'exec 2>/dev/null 3<&0; B=${RELAY} c=$$
+$B mkfifo -m 600 "$1/$c.i" "$1/$c.o" || exit 1
+echo "o $c" >&4; exec 4>&-
+$B cat <&3 > "$1/$c.o" & w=$!
+$B cat "$1/$c.i"
+kill -9 $w; $B rm -f "$1/$c.i" "$1/$c.o"' conn "$d" </dev/null >/dev/null 2>&1 &
+n=$!
+exec 4>&-
+i=0
+until $B netstat -ltn 2>/dev/null | $B grep -q " $1:$2 "; do
+  kill -0 $n 2>/dev/null && [ $i -lt 50 ] || { kill -9 $n 2>/dev/null; echo "e bind"; exit 4; }
+  i=$((i + 1)); $B sleep 0.1
+done
+echo r
+while read -t 15 -r k p; do
+  [ "$k" = x ] || continue
+  case $p in ''|*[!0-9]*) continue;; esac
+  $B tr '\\0' '\\n' < "/proc/$p/environ" 2>/dev/null | $B grep -qx "PADDOCK_EXEC=$PADDOCK_EXEC" && $B pkill -9 -s "$p"
+  $B rm -f "$d/$p.i" "$d/$p.o"
+done
+kill -9 $n 2>/dev/null; stop "$PADDOCK_EXEC"; $B rm -rf "$d"`
+// Replaces the lines ending in the link mark in /etc/hosts with $1, writing only when that changes the file, in place
+// (the engine mounts it), and prints the file as it is afterwards.
+const LINK_HOSTS = `B=$0 f=/etc/hosts
+old=$($B cat "$f") || exit 3
+want=$(printf '%s\\n' "$old" | $B grep -v '# paddock-link$'; [ -z "$1" ] || printf '%s\\n' "$1")
+[ "$want" = "$old" ] || printf '%s\\n' "$want" > "$f" || exit 4
+$B cat "$f"`
+const LINK_DIR = /^\/\.paddock\/links\/[0-9a-f]{8}\.\d{1,5}$/
+const IPV4 = /^(\d{1,3}\.){3}\d{1,3}$/
 // Shell globs under each home. Profile directories (~/.claude-NAME, ~/.codex-NAME) are where the bundled logins
 // extension puts imported logins.
 export const CREDENTIAL_FILES = [".claude*/.credentials.json", ".codex*/auth.json", ".config/gh/hosts.yml", ".git-credentials", ".ssh/id_ed25519", ".ssh/id_rsa", ".aws/credentials", ".netrc"]
@@ -257,6 +303,49 @@ export class GvisorProvider implements Provider {
   private readonly probing = new Map<string, Promise<unknown>>()
   // owner: marks this daemon's probe helpers, so a second Paddock on the same engine does not sweep them away.
   constructor(private readonly run: Runner, private readonly owner = "1") {}
+
+  // Links (core/links.ts). Every process they start inside a sandbox runs Paddock's busybox, with arguments that come
+  // from the daemon.
+  readonly links: LinkSupport = {
+    listen: (manifest, dir, address, port) => {
+      if (!LINK_DIR.test(dir) || !IPV4.test(address) || !Number.isInteger(port)) throw new PaddockError("usage", "A link listener needs a link folder, an address and a port.")
+      return this.openExec(manifest, [RELAY, "sh", "-c", LINK_LISTEN, RELAY, address, String(port), dir], { user: "0", tty: false })
+    },
+    attach: async (manifest, dir, pid) => {
+      if (!LINK_DIR.test(dir) || !Number.isInteger(pid) || pid < 1) throw new PaddockError("usage", "A link connection needs its folder and process.")
+      const fromClient = await this.openExec(manifest, [RELAY, "cat", `${dir}/${pid}.o`], { user: "0", tty: false })
+      fromClient.pause()
+      try {
+        const toClient = await this.openExec(manifest, [RELAY, "sh", "-c", 'exec "$0" cat > "$1"', RELAY, `${dir}/${pid}.i`], { user: "0", tty: false })
+        toClient.pause()
+        return { fromClient, toClient }
+      } catch (error) { fromClient.close(); throw error }
+    },
+    hosts: async (manifest, lines) => {
+      const written = await this.exec(manifest, [RELAY, "sh", "-c", LINK_HOSTS, RELAY, lines.join("\n")], { user: "0" })
+      if (written.exitCode !== 0) throw new PaddockError("runtime", `Could not write the link names into /etc/hosts in ${manifest.name}: ${written.stderr.trim() || `exit ${written.exitCode}`}`)
+      return written.stdout
+    },
+    canary: (manifest, port, reply, everywhere) => {
+      if (!/^[0-9a-f]{1,32}$/.test(reply)) throw new PaddockError("usage", "A test reply is hexadecimal.")
+      return this.openExec(manifest, [RELAY, "nc", "-lk", ...(everywhere ? [] : ["-s", "127.0.0.1"]), "-p", String(port), "-e", RELAY, "echo", reply], { tty: false })
+    },
+    dial: async (manifest, host, port) => {
+      if (!/^[a-z0-9][a-z0-9.-]{0,62}$/.test(host)) throw new PaddockError("usage", "A test connection needs a host name or address.")
+      const tried = await this.exec(manifest, [RELAY, "nc", "-w", "3", host, String(port)])
+      return { connected: tried.exitCode === 0, received: tried.stdout }
+    },
+    address: async (manifest) => {
+      const read = await this.docker(manifest.engine, ["inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", container(manifest.name)])
+      const ip = read.stdout.trim()
+      return read.exitCode === 0 && IPV4.test(ip) ? ip : undefined
+    },
+    hostDial: async (manifest, ip, port) => {
+      if (!IPV4.test(ip)) throw new PaddockError("usage", "A test connection from the engine's host needs an address.")
+      await this.ensureHelper(manifest.engine)
+      return (await this.docker(manifest.engine, ["run", "--rm", "--label", `dev.paddock.probe=${this.owner}`, "--runtime", "runc", "--network", "host", "--memory", "64m", "--pids-limit", "64", HELPER_IMAGE, "nc", "-w", "2", ip, String(port)], { timeoutMs: 30_000 })).stdout
+    },
+  }
 
   private docker(engine: Engine, args: readonly string[], options?: RunOptions): Promise<RunResult> {
     return this.run(["docker", "--context", engine.data.context!, ...args], options)
