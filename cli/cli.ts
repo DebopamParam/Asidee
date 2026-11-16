@@ -246,7 +246,15 @@ async function call<T>(method: string, body: object = {}, watch?: string): Promi
     const view = await request<SandboxView>("get", { name: watch, host: selectedHost }).catch(() => undefined)
     if (view?.activity && view.activity !== last) { last = view.activity; console.error(`  … ${last}`) }
   }, 400)
-  try { return await request<T>(method, { ...body, host: selectedHost }) } finally { clearInterval(timer) }
+  const interrupted = () => {
+    const name = "name" in body ? shown(body.name) : "NAME"
+    const workspace = method === "workspaceCreate" ? ["workspace"] : []
+    console.error(`The daemon is still finishing ${name}; it will appear in \`${next(...workspace, "list")}\`. Remove it with \`${next(...workspace, "remove", name, "--confirm", name)}\`.`)
+    process.exit(130)
+  }
+  const buffered = ["create", "workspaceCreate", "resize", "snapshot"].includes(method)
+  if (buffered) process.once("SIGINT", interrupted)
+  try { return await request<T>(method, { ...body, host: selectedHost }) } finally { clearInterval(timer); if (buffered) process.off("SIGINT", interrupted) }
 }
 
 // A session on the daemon's stream socket (core/stream.ts). This process only moves bytes between its own stdio and the

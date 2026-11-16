@@ -328,3 +328,6 @@ only on the disposable Linux combinations named by the N evals.
 
 Mount a host folder, publish a port, pick a non-isolated runtime, choose capabilities, or skip a check. If the user needs
 one of these, say that Paddock does not offer it yet instead of reaching around Paddock.
+
+Ctrl-C during buffered create, workspace create, resize or snapshot exits 130. The daemon keeps
+finishing the work. The CLI prints the list and exact remove commands.

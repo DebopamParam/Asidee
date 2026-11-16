@@ -25,7 +25,7 @@ async function daemon(replies: Record<string, unknown>, binary?: string) {
     const method = new URL(request.url).pathname.slice(5)
     if (method === "version") return Response.json({ ok: true, data: { version: VERSION, build } })
     const reply = replies[method]
-    return method in replies ? Response.json(typeof reply === "function" ? reply(await request.json()) : reply) : Response.json({ ok: false, error: { code: "not-found", message: "No such method." } }, { status: 404 })
+    return method in replies ? Response.json(typeof reply === "function" ? await reply(await request.json()) : reply) : Response.json({ ok: false, error: { code: "not-found", message: "No such method." } }, { status: 404 })
   } })
   cleanups.push(async () => { server.stop(true); await rm(state, { recursive: true, force: true }) })
   // Asynchronous, so this process keeps answering while the CLI runs.
@@ -497,3 +497,23 @@ test("audit B2: workspace get and list include the saved stop reason", async () 
   const paddock = await daemon({ workspaceGet: { ok: true, data: view }, workspaceList: { ok: true, data: [view] } })
   for (const args of [["workspace", "get", "demo"], ["workspace", "list"]]) expect((await paddock(...args)).out).toContain(view.stopReason)
 })
+
+
+test("audit B1: interrupted buffered mutations explain continued daemon work", async () => {
+  for (const [method, args, workspace] of [
+    ["create", ["create", "demo"], false], ["workspaceCreate", ["workspace", "create", "demo", "--no-logins"], true],
+    ["resize", ["resize", "demo", "--memory", "2"], false], ["snapshot", ["snapshot", "demo", "--as", "saved"], false],
+  ] as const) {
+    let received!: () => void
+    const ready = new Promise<void>((resolve) => { received = resolve })
+    const paddock = await daemon({ [method]: async () => { received(); await Bun.sleep(1000); return { ok: true, data: {} } } })
+    const child = Bun.spawn([process.execPath, CLI, ...args], { env: paddock.env, stdout: "pipe", stderr: "pipe" })
+    await ready; child.kill("SIGINT")
+    expect(await child.exited).toBe(130)
+    const err = await new Response(child.stderr).text()
+    expect(err.trim().split("\n")).toHaveLength(1)
+    expect(err).toContain("The daemon is still finishing demo")
+    expect(err).toContain(`paddock ${workspace ? "workspace " : ""}list`)
+    expect(err).toContain(`paddock ${workspace ? "workspace " : ""}remove demo --confirm demo`)
+  }
+}, 10_000)

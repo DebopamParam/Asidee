@@ -223,3 +223,6 @@ Piped input reaches sandbox and workspace exec only with `--stdin` or `--stream`
 `doctor` exits 5 when no engine is ready. On a stopped sandbox, `verify` checks configuration only
 and can exit 0. Run `paddock start NAME`, then `paddock verify NAME` to check the rest.
 `list` shows disk limits and minutes since verification; those checks are historical only.
+
+Ctrl-C during buffered create, workspace create, resize or snapshot exits 130. The daemon keeps
+finishing the work. The CLI prints the list and exact remove commands.
