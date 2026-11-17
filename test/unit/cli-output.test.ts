@@ -542,7 +542,8 @@ test("B14/B19: workspace text summarizes listeners and uses GiB; JSON keeps list
 })
 
 test("B22: an empty port still gets a forward, and remote lifetime text is only for a host", async () => {
-  const paddock = await daemon({ forwardAdd: { ok: true, data: { id: "abcd", name: "demo", port: 9999, localPort: 4567 } }, exec: { ok: true, data: { exitCode: 1, stdout: "", stderr: "" } } })
+  const asked: string[][] = []
+  const paddock = await daemon({ forwardAdd: { ok: true, data: { id: "abcd", name: "demo", port: 9999, localPort: 4567 } }, exec: (body: { argv: string[] }) => { asked.push(body.argv.slice(1)); return { ok: true, data: { exitCode: 0, stdout: "Proto Recv-Q Send-Q Local Address Foreign Address State\ntcp        0      0 127.0.0.1:19999         0.0.0.0:*               LISTEN\ntcp        0      0 0.0.0.0:8080            0.0.0.0:*               LISTEN\n", stderr: "" } } } })
   const local = await paddock("forward", "add", "demo", "--port", "9999")
   expect(local.code).toBe(0)
   expect(local.out).toContain("nothing listens on 9999 inside yet")
@@ -550,6 +551,12 @@ test("B22: an empty port still gets a forward, and remote lifetime text is only 
   const remote = await paddock("--host", "build", "forward", "add", "demo", "--port", "9999")
   expect(remote.out).toContain("SSH")
   expect(remote.out).toContain("nothing listens on 9999 inside yet")
+  // The check reads the listeners; it never connects to the port, which would use up a one-connection server.
+  for (const argv of asked) expect(argv).toEqual(["netstat", "-ltn"])
+  const open = await daemon({ forwardAdd: { ok: true, data: { id: "abcd", name: "demo", port: 8080, localPort: 4567 } }, exec: { ok: true, data: { exitCode: 0, stdout: "tcp        0      0 0.0.0.0:8080            0.0.0.0:*               LISTEN\n", stderr: "" } } })
+  expect((await open("forward", "add", "demo", "--port", "8080")).out).not.toMatch(/nothing listens|Could not check/)
+  const blind = await daemon({ forwardAdd: { ok: true, data: { id: "abcd", name: "demo", port: 8080, localPort: 4567 } }, exec: { ok: true, data: { exitCode: 127, stdout: "", stderr: "" } } })
+  expect((await blind("forward", "add", "demo", "--port", "8080")).out).toContain("Could not check whether port 8080 listens inside")
 })
 
 test("B12: a verify that stops a running sandbox does not claim only configuration was checked", async () => {

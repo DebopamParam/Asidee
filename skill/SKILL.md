@@ -148,7 +148,7 @@ persistence and automatic sandbox recovery are not measured.
   is removed, when the sandbox stops, restarts or is removed, and when the daemon stops; add it again after a restart.
   Any process on this machine can connect to it. On OrbStack, `host.docker.internal` relays to this machine's
   loopback, so the engine host and ordinary containers can reach the forward too. Guarded sandboxes cannot.
-  A closed target port still gets a forward, with a warning that nothing listens inside yet. The probe runs once;
+  A closed target port still gets a forward, with a warning that nothing listens inside yet. The check reads the sandbox's listening ports once and never connects to the port;
   services started later can use it. Remote daemon and SSH lifetime caveats appear only with a remote host.
   Remove a forward when you are done with it.
   A closed connection ends its relay process. A client that only finishes sending (FIN) keeps the relay while the

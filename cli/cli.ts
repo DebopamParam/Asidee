@@ -597,11 +597,13 @@ async function main(argv: string[]): Promise<void> {
         const { values, positionals } = parse({ port: { type: "string" }, "local-port": { type: "string" } }, rest.slice(1))
         if (rest[0] === "add") {
           const made = await call<ForwardView>("forwardAdd", { name: need(positionals[0], "a name"), port: need(values.port, "--port"), localPort: values["local-port"] })
-          const probe = await call<RunResult>("exec", { name: made.name, argv: [RELAY, "nc", "-z", "-w", "1", "127.0.0.1", String(made.port)] }).catch(() => undefined)
+          // Read the listeners instead of connecting: a connection would use up a server that takes only one.
+          const probe = await call<RunResult>("exec", { name: made.name, argv: [RELAY, "netstat", "-ltn"] }).catch(() => undefined)
+          const listening = probe?.exitCode === 0 && new RegExp(`^tcp\\S*\\s+\\d+\\s+\\d+\\s+(127\\.0\\.0\\.1|0\\.0\\.0\\.0|::|::ffff:127\\.0\\.0\\.1):${made.port}\\s`, "m").test(probe.stdout)
           return out(made, () => {
             console.log(`Forwarding 127.0.0.1:${made.localPort} to port ${made.port} in ${displayName(made.name)} (forward ${shown(made.id)}). It ends when the sandbox stops or the daemon stops${selectedHost && selectedHost !== "local" ? "; also when the remote daemon stops or its SSH link is silent for 15 seconds" : ""}. Then add it again.`)
-            if (probe?.exitCode === 1) console.log(`  nothing listens on ${made.port} inside yet.`)
-            else if (probe?.exitCode !== 0) console.log(`  Could not check whether port ${made.port} listens inside.`)
+            if (probe?.exitCode !== 0) console.log(`  Could not check whether port ${made.port} listens inside.`)
+            else if (!listening) console.log(`  nothing listens on ${made.port} inside yet.`)
             console.log(`  ${FORWARD_REACH.replace("these", "it")}`)
             console.log(`Remove it: ${next("forward", "remove", made.id)}`)
           })
