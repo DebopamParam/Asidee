@@ -1,12 +1,11 @@
 # Environment documentation
 
-Run `bun extensions/env-docs/env-docs.ts NAME [WORKSPACE]` with Bun and `asd` on PATH. The guest must be running,
-have Node and an existing workspace. Relative paths are resolved under the guest home; the default is `workspace`.
-Guest Git is optional and is used only to exclude `/env_docs/` locally when the workspace is a Git repository.
-
-Copy the whole folder to `$ASIDEE_CONFIG_DIR/extensions/env-docs` (normally `~/.config/asidee/extensions/env-docs`),
-preserving the executable bit on `env-docs.ts`. Use the dashboard action or
-`asd ext run env-docs write NAME --set workspace=/workspace/repo`.
+Install it with `asd ext install env-docs` (or the dashboard's Install button), then use the dashboard action or
+`asd ext run env-docs write NAME --set workspace=/workspace/repo`. `asd ext remove env-docs` takes it out again. The
+guest must be running, have Node and an existing workspace. Relative paths are resolved under the guest home; the
+default is `workspace`. Guest Git is optional and is used only to exclude `/env_docs/` locally when the workspace is a
+Git repository. From the Asidee source, for development, `bun extensions/env-docs/env-docs.ts NAME [WORKSPACE]` with
+Bun and `asd` on PATH does the same.
 
 The client calls `asd --json list`, then `asd --json verify NAME`, validates the result, and sends a Markdown
 document on exec stdin for an atomic private write to `WORKSPACE/env_docs/SANDBOX.md`. A successful JSON envelope

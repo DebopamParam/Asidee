@@ -79,6 +79,15 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   shell history, `.env` files and tokens other than the usual login files are in it.** The usual login files are
   removed before saving; volumes (inner Docker's images and containers), memory and `/dev/shm` are not saved. Removing
   a template leaves the sandboxes made from it working. See [Templates](docs/architecture.md#templates).
+- An agent template: `asd template prepare` makes a sandbox from the built-in image, installs tmux, fd, zip, htop, vim
+  and nano from its packages and Claude Code and Codex from npm (at this machine's versions when they are installed
+  here, else latest; `--claude` and `--codex` choose), runs an optional `--script FILE` as the sandbox's user, checks
+  each tool, saves the template `agent` and removes the sandbox. `--default`, or `asd config set default-template
+  agent`, makes new sandboxes start from it when a create names neither an image nor a template.
+- One-step create: `asd create demo --gh --claude PROFILE --codex PROFILE --repo OWNER/REPO --t3` runs the bundled
+  extensions after the create: this machine's GitHub login, each login with its setup, a clone into `~/workspace`, and
+  T3 Code. The first failure stops the rest and keeps the sandbox. On this machine only.
+- `asd claude demo [PROFILE]` and `asd codex demo [PROFILE]` open the agent in `~/workspace` with an imported login.
 - The daemon, the CLI with `--json`, a web dashboard, and extensions.
 - Other machines are **experimental and off by default**: they are not yet proven on enough machines. While off, the
   daemon refuses every `host` command, `--host NAME` and `list --all`, contacts no registered machine and leaves the
@@ -229,7 +238,11 @@ dashboard and add extensions freely, and none of that can change what a sandbox 
 ## Customizing
 
 - **Extensions** add actions and hooks. An extension is a folder in `~/.config/asidee/extensions/` with an
-  `extension.json`; see [extensions/examples/agent-tools](extensions/examples/agent-tools).
+  `extension.json`; see [extensions/examples/agent-tools](extensions/examples/agent-tools). Five extensions ship
+  inside `asd`: [logins](extensions/logins), [repo](extensions/repo), [env-docs](extensions/env-docs),
+  [t3](extensions/t3) and [rotator](extensions/rotator). `asd ext list` shows the ones not yet installed;
+  `asd ext install NAME` (or the dashboard's Install button) installs one and `asd ext remove NAME` removes it. They
+  need neither Bun nor the Asidee source.
 - **The dashboard** is replaced by putting your own `index.html` in `~/.config/asidee/ui/`.
 - **Defaults** (image, sizes, Docker, engine) go in `~/.config/asidee/config.json`.
 
@@ -239,10 +252,14 @@ dashboard and add extensions freely, and none of that can change what a sandbox 
 
 The bundled [logins extension](extensions/logins) imports one selected Claude or Codex profile, optionally its setup,
 and a GitHub token from stdin, a hidden prompt, or this machine's `gh` login. It also lists and removes guest logins.
-Run `bun extensions/logins/login.ts --help` with `asd` on PATH, or install its folder as an Asidee extension.
-It needs Bun on this machine and Node in an already running sandbox; GitHub also needs guest `gh` and `git`.
-Existing credentials require an explicit replace choice. **There is no secret proxy in a gVisor container: the token
-lives inside the sandbox and code there can read and send it out.** Logout leaves this machine logged in.
-Imports of file-backed Claude and Codex profiles and of this machine's `gh` login were checked live in one sandbox; the
-Claude Keychain guest-import path and agents accepting that sandbox import were not. The shared Keychain reader and
+Install it with `asd ext install logins`, then use the dashboard or `asd ext run logins ACTION SANDBOX`. From the
+Asidee source, `bun extensions/logins/login.ts --help` with Bun and `asd` on PATH shows the direct commands, including
+a pasted GitHub token. It needs Node in an already running sandbox; GitHub also needs guest `gh` and `git`.
+Existing credentials require an explicit replace choice. **A login token imported into a sandbox can be read by
+anything running in that sandbox, which can also send it out. There is no host-side token proxy yet.** The sandbox and
+this machine then hold the same refresh token; when one side refreshes it, the other may be logged out (not measured).
+Logout leaves this machine logged in.
+Imports of file-backed Claude and Codex profiles and of this machine's `gh` login were checked live in one sandbox. On
+2026-11-18 a Keychain Claude login with its setup (1050 files, 19 MB) was imported and Claude Code inside answered a
+prompt with it; Codex accepting an import was not checked. The shared Keychain reader and
 Claude's login recognition are now measured separately for workspaces. Its README lists the sandbox measurements.

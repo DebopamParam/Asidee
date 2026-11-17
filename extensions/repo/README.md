@@ -1,20 +1,24 @@
 # Repository clone and save
 
-This independent bundled client requires Bun and `asd` on this machine, Node and Git in an already running sandbox,
-and host Git for saves. It does not create, start or remove sandboxes, publish ports, mount folders, or call an engine.
+This independent bundled client runs inside `asd` on this machine. It needs Node and Git in an already running
+sandbox, and host Git for saves. It does not create, start or remove sandboxes, publish ports, mount folders, or call
+an engine.
+
+Install it with `asd ext install repo` (or the dashboard's Install button) to expose clone and save in the dashboard
+and the extension CLI; `asd ext remove repo` takes it out again.
 
 ```sh
+asd ext run repo clone NAME --set repository=OWNER/REPO --set workspace=workspace
+asd ext run repo save NAME --set workspace=workspace
+asd ext run repo save NAME --set workspace=/workspace/repo --set branch=feature --set target=/absolute/host/repo.git
+
+# From the Asidee source, for development, with Bun and asd on PATH.
 bun extensions/repo/repo.ts clone NAME OWNER/REPO --workspace workspace
-bun extensions/repo/repo.ts save NAME --workspace workspace
 bun extensions/repo/repo.ts save NAME --workspace /workspace/repo --branch feature --target /absolute/host/repo.git
 ```
 
-Copy the complete folder to `$ASIDEE_CONFIG_DIR/extensions/repo` (normally `~/.config/asidee/extensions/repo`), preserving
-the executable bit on `repo.ts`, to expose clone/save in the dashboard. For example,
-`asd ext run repo clone NAME --set repository=OWNER/REPO`, then `asd ext run repo save NAME`.
-
 Clone accepts only `OWNER/REPO`, constructs an HTTPS GitHub URL without credentials, and requires a new guest checkout
-path. If `gh auth status` succeeds inside the guest, the command-scoped `gh auth git-credential` helper supplies its
+path or an empty directory (the default image ships an empty `~/workspace`, the default path). If `gh auth status` succeeds inside the guest, the command-scoped `gh auth git-credential` helper supplies its
 existing login. Without it, clone is anonymous. It never reads a host token, accepts a token argument, embeds one in
 Git config, or prints Git/gh subprocess output. Use the logins extension first for private repositories. The token
 remains readable by code in the guest and can leave over its internet connection. Login status does not establish

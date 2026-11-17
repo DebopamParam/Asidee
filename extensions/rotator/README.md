@@ -1,20 +1,22 @@
 # T3 account rotator
 
-Run with Bun and `asd` on PATH against an already running sandbox. The guest needs Node, `ps`, Python 3, an installed
+Run against an already running sandbox. The guest needs Node, `ps`, Python 3, an installed
 T3 CLI and T3's `~/.t3/userdata/settings.json` and database. Start T3 in the guest once before starting the rotator.
 Each selected provider needs at least two enabled, authenticated accounts for a switch to be possible.
 
-```sh
-bun extensions/rotator/rotator.ts NAME                 # state and last 20 sanitized log lines
-bun extensions/rotator/rotator.ts NAME claude
-bun extensions/rotator/rotator.ts NAME codex
-bun extensions/rotator/rotator.ts NAME claude,codex
-bun extensions/rotator/rotator.ts NAME off
-```
+Install it with `asd ext install rotator` (or the dashboard's Install button); `asd ext remove rotator` takes it out
+again. The default mode, `status`, only reads.
 
-Copy the whole folder to `$ASIDEE_CONFIG_DIR/extensions/rotator` (normally `~/.config/asidee/extensions/rotator`),
-preserving `rotator.ts`'s executable bit. Then use the dashboard or
-`asd ext run rotator mode NAME --set mode=claude,codex`. The default action only reads status.
+```sh
+asd ext run rotator mode NAME                          # state and last 20 sanitized log lines
+asd ext run rotator mode NAME --set mode=claude
+asd ext run rotator mode NAME --set mode=codex
+asd ext run rotator mode NAME --set mode=claude,codex
+asd ext run rotator mode NAME --set mode=off
+
+# From the Asidee source, for development, with Bun and asd on PATH.
+bun extensions/rotator/rotator.ts NAME claude,codex
+```
 
 Each start transfers the bundled `t3-account-rotator.py` on `asd exec` stdin to
 `~/.t3/account-rotator/rotate.py`. It replaces the old watcher and starts Python detached with closed stdin and private

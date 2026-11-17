@@ -1,12 +1,10 @@
 # T3 Code setup
 
-Run `bun extensions/t3/t3.ts setup NAME` with `asd` on PATH. The sandbox must already be running and have Node and
-tar. This machine needs Bun and either `t3` on PATH or the desktop launcher at `~/.t3/bin/t3`. No host settings or
-credentials are read. The launcher is run only with `--version`.
-
-Copy this entire folder to `$ASIDEE_CONFIG_DIR/extensions/t3` (normally `~/.config/asidee/extensions/t3`), preserving
-the executable bit on `t3.ts`, to expose the setup and sync actions in the dashboard and `asd ext run t3 setup NAME`.
-It is independent of the other bundled extensions and adds no runtime dependency.
+Install it with `asd ext install t3` (or the dashboard's Install button), then run `asd ext run t3 setup NAME`;
+`asd ext remove t3` takes it out again. The sandbox must already be running and have Node and tar. This machine needs
+either `t3` on PATH or the desktop launcher at `~/.t3/bin/t3`. No host settings or credentials are read. The launcher
+is run only with `--version`. It is independent of the other bundled extensions and adds no runtime dependency. From
+the Asidee source, for development, `bun extensions/t3/t3.ts setup NAME` with Bun and `asd` on PATH does the same.
 
 Setup installs the exact reported version, including a nightly suffix, from the matching GitHub release. The guest
 downloads `SHA256SUMS` and `t3-VERSION-linux-arm64.tar.gz` or `linux-x64.tar.gz` over HTTPS. It requires exactly one
@@ -17,7 +15,7 @@ may leave that lock; check for an active install before removing it. Downloads h
 limits, a 1 MiB checksum-file bound and a 256 MiB archive bound. Checksums authenticate integrity relative to the
 HTTPS release, not an independent signature. The archive's upstream contents remain trusted.
 
-Setup also refreshes `~/.t3/userdata/settings.json`. Run `bun extensions/t3/t3.ts sync NAME` after a later login import
+Setup also refreshes `~/.t3/userdata/settings.json`. Run `asd ext run t3 sync NAME` after a later login import
 or logout. The logins extension does not call this client automatically. Canonical and named Claude/Codex credential
 files are discovered inside the guest without reading their contents. Symlinked credential files/directories are skipped.
 The current managed primary is retained, otherwise `-default`, the canonical directory, then the first named profile
@@ -38,7 +36,7 @@ publication so retries recover ownership after an interrupted update. No extensi
 ## SSH access
 
 The core owns it: `asd ssh setup NAME` prepares it, `--write-config` adds its `Include` line to `~/.ssh/config`,
-and the checklist discloses it. Setup's result carries the core's `sshAccess`, and `bun extensions/t3/t3.ts ssh NAME`
+and the checklist discloses it. Setup's result carries the core's `sshAccess`, and `asd ext run t3 ssh NAME`
 (or the dashboard's "Show SSH access for T3") prints it alone: `{alias, user, home, batchReady, loopbackForwarding}`,
 each field checked. Connect the desktop app to `alias` once `batchReady` is true. The alias logs in without a prompt
 and without agent forwarding, as the same user and HOME as `exec`, and allows `ssh -L` to the sandbox's loopback for

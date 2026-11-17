@@ -1,30 +1,31 @@
 # Import logins into a sandbox
 
-This bundled extension runs on your machine with Bun and calls only `asd exec`. It needs an already running sandbox
+This bundled extension runs on your machine inside `asd` and calls only `asd exec`. It needs an already running sandbox
 with Node on PATH. GitHub import also needs `gh`, `git`, and HTTPS access to `api.github.com` inside the sandbox.
 It does not create or start a sandbox, install tools, or change the core.
 
-To install the actions, copy this folder to `$ASIDEE_CONFIG_DIR/extensions/logins` (normally
-`~/.config/asidee/extensions/logins`), preserving the executable bit on `login.ts`. Run `asd ext list` to check it.
-An installed extension reads files and, for Claude on macOS, the login Keychain with your machine's rights.
+Install its actions with `asd ext install logins` (or the dashboard's Install button) and check with `asd ext list`;
+`asd ext remove logins` takes them out again. Neither Bun nor the Asidee source is needed. An installed extension reads
+files and, for Claude on macOS, the login Keychain with your machine's rights. The token it copies into a sandbox can be
+read there by anything that runs in it, and there is no host-side token proxy yet. Both copies then hold the same refresh
+token: when one side refreshes it, the other may be logged out (not measured).
 
 ```sh
-# Run directly from the Asidee source, with asd on PATH.
-bun extensions/logins/login.ts profiles claude
-bun extensions/logins/login.ts import demo claude --profile work --setup
-bun extensions/logins/login.ts import demo codex --profile default --target personal
-bun extensions/logins/login.ts github demo --gh --account octocat
-bun extensions/logins/login.ts github demo          # hidden prompt, or a token piped on stdin
-bun extensions/logins/login.ts list demo
-bun extensions/logins/login.ts logout demo claude --profile work
-bun extensions/logins/login.ts logout demo codex --profile '~'
-bun extensions/logins/login.ts logout demo all
-
 # After installation, the dashboard and extension CLI offer the same non-secret fields.
+asd ext run logins profiles --set agent=claude
 asd ext run logins import demo --set agent=claude --set profile=work --set setup=true
+asd ext run logins import demo --set agent=codex --set profile=default --set target=personal
 asd ext run logins github demo --set account=octocat
 asd ext run logins list demo
+asd ext run logins logout demo --set agent=claude --set profile=work
 asd ext run logins logout demo --set agent=all
+
+# From the Asidee source, for development, with Bun and asd on PATH. Paste a GitHub token this way, in a terminal.
+bun extensions/logins/login.ts profiles claude
+bun extensions/logins/login.ts import demo claude --profile work --setup
+bun extensions/logins/login.ts github demo --gh --account octocat
+bun extensions/logins/login.ts github demo          # hidden prompt, or a token piped on stdin
+bun extensions/logins/login.ts logout demo codex --profile '~'
 ```
 
 `default` selects the host's canonical `~/.claude` or `~/.codex`. Other names select `~/.claude-PROFILE` or

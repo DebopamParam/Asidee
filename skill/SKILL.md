@@ -17,6 +17,8 @@ Add `--json` to any command for `{"ok":true,"data":…}` or `{"ok":false,"error"
 asd setup [--docker]                    # macOS, once: give OrbStack gVisor after a plan the user approves
 asd doctor                              # engines and what each needs
 asd create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--pids N] [--disk GB]
+asd create NAME --gh --claude PROFILE --codex PROFILE --repo OWNER/REPO --t3  # then logins, clone, T3; this Mac only
+asd claude NAME [PROFILE] [-- ARG…]   # Claude Code in ~/workspace with an imported login; also asd codex
 asd list
 asd config get                         # effective settings on the selected machine
 asd config set require-probes on|off    # require blocking isolation probes at create, default on
@@ -25,6 +27,7 @@ asd config set workspace-free-space GiB  # below this, workspace launches are re
 asd config set disk-watch SECONDS       # pause between two measurements of a watched disk limit, default 5, 1 to 30
 asd config set engine ID|auto           # engine for new sandboxes (auto: the first ready one)
 asd config set default-cpus N|auto      # also default-image, default-memory, default-pids, default-disk, default-docker on|off
+asd config set default-template T|auto  # new sandboxes start from template T unless a create names an image or template
 asd config set terminal NAME            # the dashboard's Terminal button: default, terminal, ghostty, iterm or custom
 asd config set terminal-command CMD|none  # custom terminal, e.g. 'kitty sh -c {command}'; CLI only
 asd exec NAME [--stdin] -- COMMAND ARG… # exit code, stdout and stderr are the command's; output as text
@@ -40,6 +43,7 @@ asd verify NAME                         # exit 6 if a blocking check failed; sto
 asd resize NAME [--cpus N] [--memory GB] [--pids N] [--disk GB]  # says what applies now, what at the next start
 asd snapshot NAME --as TEMPLATE         # saves its files as a template; read what it says is inside
 asd template list | asd template remove TEMPLATE
+asd template prepare [TEMPLATE] [--script FILE] [--replace] [--default]  # agent template (default name agent)
 asd remove NAME --confirm NAME          # deletes everything in it; ask the user first
 ```
 
@@ -297,13 +301,22 @@ Create `~/.config/asidee/extensions/ID/extension.json`:
   prints what is wrong with an extension that did not load.
 - Because the command runs with the user's rights, tell the user what it does before installing it.
 
+### Install a bundled extension
+
+Five extensions ship inside `asd`: `logins`, `repo`, `env-docs`, `t3` and `rotator`. `asd ext list` shows the ones not
+yet installed under "Bundled, not installed". `asd ext install NAME` writes `~/.config/asidee/extensions/NAME/` with an
+`extension.json` of only `{"bundled":"NAME"}`; its actions then run from the `asd` binary, so neither Bun nor the
+Asidee source is needed. `asd ext remove NAME` deletes only such a folder. If the user already has a folder of that
+name, install refuses and remove leaves it alone; do not move or delete it for them without asking. Each extension's
+README in `extensions/NAME/` lists its actions and what they need.
+
 ### Change the dashboard
 
 Copy the built-in page (`ui/index.html` in the Asidee source) to `~/.config/asidee/ui/index.html` and edit the copy.
 Other files in that folder are served next to it. The page calls `POST /api/METHOD` with a JSON body and the header
 `Authorization: Bearer TOKEN`; it reads the token from the `#token=` part of the link `asd ui` prints. Methods:
 `checklist`, `engines`, `list`, `get`, `create`, `start`, `stop`, `remove`, `verify`, `resize`, `snapshot`, `templateList`,
-`templateRemove`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `linkAdd`, `linkList`, `linkRemove`, `sshAccess`, `extensions`, `action`, `summary`,
+`templateRemove`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `linkAdd`, `linkList`, `linkRemove`, `sshAccess`, `extensions`, `extensionInstall`, `extensionRemove`, `action`, `summary`,
 `hostList`, `fleet`, `configGet`, `configSet`, `usage`, `about`, `openTerminal`. `linkAdd` and `linkRemove` take `from`, `to` and `port`; `linkList` takes an optional `name`. `configGet` returns this machine's effective configuration. `configSet`
 accepts only `requireProbes` and `experimental`, each a boolean, `workspaceFreeSpaceGb` and `diskWatchSeconds`, each a number, `defaults` and `engine` (`null` removes either) and `terminal`, saves them to `config.json` and returns the new
 effective configuration; the custom terminal command is CLI only. `usage` returns each sandbox's CPU, memory, tasks and last disk measurement against its limits;
@@ -321,6 +334,7 @@ Keep showing each check's status and detail as the API returns them.
 ### Change defaults
 
 `~/.config/asidee/config.json`: `{ "defaults": { "image": "docker/sandbox-templates:shell-docker", "cpus": 2, "memoryGb": 4, "diskGb": 20, "docker": false }, "engine": "gvisor:orbstack" }`.
+`defaults` may hold `template` (a template name) instead of `image`, not both.
 The defaults obey the same limits as the flags. A mistake in this file makes `asd create` fail with a message that
 names it, so run a create after editing it.
 `docker` accepts only JSON `true` or `false`; it defaults to `false`. With `true`, the image must include `docker`,
@@ -334,12 +348,15 @@ After changing anything, run `asd verify NAME` on a sandbox. If you changed Asid
 ## Import or remove logins
 
 Use the bundled [logins extension](../extensions/logins/README.md), which calls only `asd exec` and needs Node in an
-already running sandbox. `bun extensions/logins/login.ts import NAME claude --profile work --setup` imports a selected
-profile and its allowlisted setup; omit `--setup` for login only. Existing logins require `--replace` explicitly.
-`login.ts github NAME --gh [--account ACCOUNT]` imports this machine's gh login. Without `--gh`, the direct terminal
-command reads a token from stdin or a hidden prompt. Never put a token in argv, `--set`, a manifest, or logs.
+already running sandbox. Install it with `asd ext install logins`.
+`asd ext run logins import NAME --set agent=claude --set profile=work --set setup=true` imports a selected profile and
+its allowlisted setup; leave `setup` off for login only. Existing logins require `--set replace=true` explicitly.
+`asd ext run logins github NAME [--set account=ACCOUNT]` imports this machine's gh login. To import a pasted token,
+run `bun extensions/logins/login.ts github NAME` from the Asidee source; it reads the token from stdin or a hidden
+prompt. Never put a token in argv, `--set`, a manifest, or logs.
 There is no secret proxy in a gVisor container: the token lives inside it and code there can read and send it out.
-Use `login.ts list NAME` and `login.ts logout NAME all` (or an agent and `--profile PROFILE`); the machine stays logged in.
+Use `asd ext run logins list NAME` and `asd ext run logins logout NAME --set agent=all` (or an agent and
+`--set profile=PROFILE`); the machine stays logged in.
 Guest imported profiles use `CLAUDE_CONFIG_DIR="$HOME/.claude-PROFILE"` or `CODEX_HOME="$HOME/.codex-PROFILE"`.
 File-profile and `gh` sandbox imports were checked live once; the Claude Keychain guest path was not. Workspaces
 separately measure the shared Keychain reader and Claude recognition. Extension unit tests run actual guest programs

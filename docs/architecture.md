@@ -935,13 +935,49 @@ option, and the core resizes sandboxes and saves them as templates. Buffered ope
 daemon; streams, forwards and editor aliases use the same route. Reviewed system-service enrollment is available
 with explicit artifacts. A hard disk cap, user-service installation and automatic reboot recovery are not built.
 
+### Bundled extensions
+
+logins, repo, env-docs, t3 and rotator are compiled into the `asd` binary (`extensions/catalog.ts`, `cli/bundled.ts`).
+Installing one writes a marker folder, `~/.config/asidee/extensions/NAME/extension.json` containing only
+`{"bundled":"NAME"}`. When the daemon loads extensions, a marker takes its declaration from the binary and each action's
+`run` becomes `asd extension-run NAME …`, a hidden subcommand the daemon starts from its own binary. Neither Bun nor
+PATH is needed to find it, and upgrading `asd` updates the extension. A marker that names an id this `asd` does not
+have, or a different id from its folder's name, is reported as an extension error and not loaded.
+
+Two daemon methods manage the markers. `extensionInstall` (`asd ext install NAME`) writes a missing folder or rewrites
+the same marker; `extensionRemove` (`asd ext remove NAME`) deletes only a marker folder. A user's own folder of the same
+name is never written over or removed: both refuse with code `conflict`. Both are open to the dashboard, whose
+Extensions tab has Install and Remove buttons, and are writes, so a request with `host` routes them like other writes.
+`extensions` also returns `available`: every bundled id with whether its marker is installed.
+
+They are clients of the daemon like any other extension. Their commands run on this machine as the user, with
+`ASIDEE_*` variables and `asd` first on PATH, and call only `asd`. Run directly with `bun extensions/NAME/….ts` from the
+source, the same code still works for development.
+
+### Agent template and one-step create
+
+Both are CLI compositions of methods any client may call, so they hold whatever a create holds. `asd template prepare`
+(`cli/prepare.ts`) chooses the engine as create would, creates a sandbox from the built-in image (never the default
+template, which may be the one being made), runs its install steps with `exec` (versions and the user's script travel
+as arguments and input, never as shell text), checks each tool, removes an existing template of that name on that
+engine only with `--replace`, snapshots, and removes the sandbox whatever happened. The config's `defaults.template`
+is used by `validSpec` only when a request names neither an image nor a template; a default image and a default
+template exclude each other.
+
+`asd create … --gh --claude P --codex P --repo OWNER/REPO --t3` (`cli/create-setup.ts`) checks its options before the
+create, then runs `asd extension-run` for GitHub, each login with its setup, the clone and T3, in that order, stopping
+at the first failure and keeping the sandbox. The logins read this machine's credentials and the extensions reach
+local sandboxes only, so these options are refused with `--host`. `asd claude|codex NAME [PROFILE]` is a session like
+`shell` that selects an imported login with `CLAUDE_CONFIG_DIR` or `CODEX_HOME`.
+
 ## Dashboard
 
 `ui/index.html` is one page with no build step, a client of the API like any other. Its tabs: **Sandboxes** (each
 sandbox's controls and live use; under More, resize, a command run with `sh -c`, save as template, forwards, links,
 SSH access and CLI commands; and the create form, which also shows the same create as a CLI command), **Usage**,
 **Workspaces**, **Templates**, **Machines** (with `experimental` on), **Extensions** (every installed extension's actions;
-a sandbox action asks which sandbox) and **Settings** (every setting above, the engines and what this daemon is).
+a sandbox action asks which sandbox; Install for each bundled extension not installed, Remove for an installed one)
+and **Settings** (every setting above, the engines and what this daemon is).
 Whatever is socket-only (workspace changes, SSH setup, machines, daemon stop) is shown as the command, with a Copy
 button. A unit test fails if the page calls a method that is not open to the dashboard.
 
