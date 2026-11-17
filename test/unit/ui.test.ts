@@ -366,3 +366,23 @@ test("setup inputs appear only for installed extensions", async () => {
   expect(ui.text("#create-setup")).not.toContain("token")
   expect(ui.calls.some((call) => call.method === "action")).toBe(false)
 })
+
+test("the Prepare form starts from this machine's versions and sends one templatePrepare, the CLI's own method", async () => {
+  const done = { template: { name: "uitest", engine: "fake:1", sizeBytes: 2 * 1024 ** 3 }, versions: { claude: "2.1.310", codex: "0.164.0" }, tools: ["2.1.310 (Claude Code)"], default: false, lines: ["Creating the sandbox x…"] }
+  const ui = await page({ ...base, list: () => [], templateList: () => [], templatePreparing: () => [], templatePrepare: () => done,
+    templatePrepareInfo: () => ({ versions: { claude: "2.1.310", codex: "0.164.0" }, script: { path: "/Users/me/.config/asidee/agent-template.sh", exists: true } }) })
+  ui.button("Templates").click(); await ui.settle()
+  const form = ui.window.document.getElementById("prepare") as any
+  expect(form.elements.namedItem("claude").value).toBe("2.1.310")
+  expect(ui.text("#p-script")).toContain("/Users/me/.config/asidee/agent-template.sh")
+  form.elements.namedItem("name").value = "uitest"; form.elements.namedItem("script").value = "file"; form.elements.namedItem("replace").checked = true
+  form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
+  expect(ui.text("#prepare-command")).toContain("asd template prepare uitest --claude 2.1.310 --codex 0.164.0 --script /Users/me/.config/asidee/agent-template.sh --replace")
+  form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  expect(ui.calls.filter((call) => call.method === "templatePrepare").map((call) => call.body)).toEqual([{ name: "uitest", claude: "2.1.310", codex: "0.164.0", engine: "fake:1", replace: true, default: false, scriptFile: true }])
+  expect(ui.text("#prepare-progress")).toContain("Saved template uitest (2.00 GB) on fake:1")
+  form.elements.namedItem("script").value = "paste"; form.elements.namedItem("scriptText").value = "echo hi"
+  form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  expect(ui.calls.filter((call) => call.method === "templatePrepare").at(-1)!.body).toMatchObject({ script: "echo hi" })
+  expect(ui.calls.filter((call) => call.method === "templatePrepare").at(-1)!.body).not.toHaveProperty("scriptFile")
+})

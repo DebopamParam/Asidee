@@ -2,7 +2,9 @@ import { expect, test } from "bun:test"
 import { mkdtemp, readFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { hostVersion, prepareSteps, prepareTemplate, validVersion, type Call } from "../../cli/prepare"
+import { mkdir, writeFile } from "node:fs/promises"
+import { AGENT_SCRIPT, hostVersion, Preparations, prepareSteps, prepareTemplate, validVersion, type Call } from "../../core/prepare"
+import { CATALOG } from "../../core/machines"
 import { DEFAULT_SPEC, readConfig, validSpec, writeConfig } from "../../core/state"
 import type { RunResult, Template } from "../../core/types"
 
@@ -96,6 +98,79 @@ test("an existing template of that name on that engine is replaced only with --r
   const order = replaced.calls.map(([method]) => method)
   expect(order.indexOf("templateRemove")).toBeLessThan(order.indexOf("snapshot"))
   expect(order.lastIndexOf("exec")).toBeLessThan(order.indexOf("templateRemove"))
+})
+
+// The daemon's templatePrepare, which the CLI and the dashboard both call.
+async function preparations(templates: Array<Partial<Template>> = [], gate?: Promise<void>) {
+  const root = await mkdtemp(join(tmpdir(), "asidee-prepare-"))
+  const dirs = { state: join(root, "state"), config: join(root, "config") }
+  const run = fake(templates); let config: Record<string, unknown> = { defaults: { image: "ubuntu:24.04", cpus: 2 } }
+  const call = (async (method: string, body: Record<string, unknown> = {}) => {
+    if (method === "create" && gate) await gate
+    if (method === "configGet") { run.calls.push([method, body]); return config }
+    if (method === "configSet") { run.calls.push([method, body]); config = { ...config, ...body }; return config }
+    return run.call(method, body)
+  }) as Call
+  const versions: string[][] = []
+  const runner = async (argv: readonly string[]) => { versions.push([...argv]); return { exitCode: 0, stdout: argv[0] === "claude" ? "2.1.310 (Claude Code)\n" : "codex-cli 0.164.0\n", stderr: "" } }
+  return { dirs, run, versions, prepare: new Preparations(call, dirs, runner) }
+}
+const script = (calls: Fake["calls"]) => calls.find(([method, body]) => method === "exec" && (body.argv as string[])[0] === "bash")?.[1].stdinBase64
+
+test("templatePrepare takes this machine's versions unless given, and reports its progress while it runs", async () => {
+  let release!: () => void
+  const { run, versions, prepare } = await preparations([], new Promise<void>((resolve) => { release = resolve }))
+  const pending = prepare.prepare({})
+  await Bun.sleep(5)
+  expect(prepare.list()).toMatchObject([{ name: "agent", lines: [expect.stringContaining("Creating the sandbox")] }])
+  await expect(prepare.prepare({ name: "agent" })).rejects.toMatchObject({ code: "conflict" })
+  release()
+  const done = await pending
+  expect(done).toMatchObject({ template: { name: "agent" }, versions: { claude: "2.1.310", codex: "0.164.0" }, default: false })
+  expect(done.lines.at(-1)).toContain("Removing the sandbox")
+  expect(prepare.list()).toEqual([])
+  expect(versions).toEqual([["claude", "--version"], ["codex", "--version"]])
+  const npm = run.calls.find(([method, body]) => method === "exec" && (body.argv as string[]).includes("npm"))![1].argv as string[]
+  expect(npm.slice(-2)).toEqual(["@anthropic-ai/claude-code@2.1.310", "@openai/codex@0.164.0"])
+  expect(script(run.calls)).toBeUndefined()
+
+  const given = await preparations()
+  expect((await given.prepare.prepare({ name: "mine", claude: "2.0.0", codex: "latest" })).versions).toEqual({ claude: "2.0.0", codex: "latest" })
+  expect(given.versions).toEqual([])
+})
+
+test("templatePrepare checks its request before it creates anything", async () => {
+  const { run, prepare } = await preparations()
+  for (const body of [{ name: "Bad Name" }, { claude: "1.0.0; rm -rf /" }, { codex: "^2" }, { replace: "yes" }, { default: 1 }, { scriptFile: "x" }, { script: 5 }, { engine: 3 },
+    { script: "x".repeat(1024 ** 2 + 1) }, { script: "echo", scriptFile: true }, { scriptFile: true }]) await expect(prepare.prepare(body)).rejects.toMatchObject({ code: "usage" })
+  expect(run.calls.map(([method]) => method)).not.toContain("create")
+  expect(prepare.list()).toEqual([])
+})
+
+test("templatePrepare runs pasted text or the user's agent-template.sh inside the sandbox, as input", async () => {
+  const pasted = await preparations()
+  await pasted.prepare.prepare({ script: "echo 'pasted' \"$HOME\"" })
+  expect(Buffer.from(script(pasted.run.calls) as string, "base64").toString()).toBe("echo 'pasted' \"$HOME\"")
+  const file = await preparations()
+  await mkdir(file.dirs.config, { recursive: true }); await writeFile(join(file.dirs.config, AGENT_SCRIPT), "apt-get install -y ripgrep\n")
+  await file.prepare.prepare({ scriptFile: true })
+  expect(Buffer.from(script(file.run.calls) as string, "base64").toString()).toBe("apt-get install -y ripgrep\n")
+  expect(await file.prepare.info()).toEqual({ versions: { claude: "2.1.310", codex: "0.164.0" }, script: { path: join(file.dirs.config, AGENT_SCRIPT), exists: true } })
+})
+
+test("templatePrepare with default makes the template the default and drops a default image", async () => {
+  const { run, prepare } = await preparations()
+  expect((await prepare.prepare({ name: "agent", default: true })).default).toBe(true)
+  expect(run.calls.find(([method]) => method === "configSet")![1]).toEqual({ defaults: { cpus: 2, template: "agent" } })
+  const plain = await preparations()
+  await plain.prepare.prepare({})
+  expect(plain.run.calls.map(([method]) => method)).not.toContain("configSet")
+})
+
+test("templatePrepare and its progress are open to the dashboard and can be routed; its info stays on this machine", () => {
+  expect(CATALOG.templatePrepare).toEqual(["dashboard", "write"])
+  expect(CATALOG.templatePreparing).toEqual(["dashboard", "read"])
+  expect(CATALOG.templatePrepareInfo).toEqual(["dashboard", "primary"])
 })
 
 test("a create's --gh, --claude, --codex, --repo and --t3 become extension runs in dependency order, checked first", async () => {

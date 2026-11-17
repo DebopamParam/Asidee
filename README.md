@@ -83,11 +83,15 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   and nano from its packages and Claude Code and Codex from npm (at this machine's versions when they are installed
   here, else latest; `--claude` and `--codex` choose), runs an optional `--script FILE` as the sandbox's user, checks
   each tool, saves the template `agent` and removes the sandbox. `--default`, or `asd config set default-template
-  agent`, makes new sandboxes start from it when a create names neither an image nor a template.
+  agent`, makes new sandboxes start from it when a create names neither an image nor a template. The dashboard's
+  Templates tab has the same form, with the versions filled in from this machine; its script is
+  `~/.config/asidee/agent-template.sh` or pasted text. Both call one daemon method, and the script runs only inside
+  the sandbox being prepared.
 - One-step create: `asd create demo --gh --claude PROFILE --codex PROFILE --repo OWNER/REPO --t3` runs the bundled
   extensions after the create: this machine's GitHub login, each login with its setup, a clone into `~/workspace`, and
   T3 Code. The first failure stops the rest and keeps the sandbox. On this machine only.
 - `asd claude demo [PROFILE]` and `asd codex demo [PROFILE]` open the agent in `~/workspace` with an imported login.
+  The dashboard opens the same in a terminal window on the Mac.
 - The daemon, the CLI with `--json`, a web dashboard, and extensions.
 - Other machines are **experimental and off by default**: they are not yet proven on enough machines. While off, the
   daemon refuses every `host` command, `--host NAME` and `list --all`, contacts no registered machine and leaves the

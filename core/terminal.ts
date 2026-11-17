@@ -5,18 +5,21 @@ import { readConfig, validName, type Dirs, type Terminal } from "./state"
 import { AsideeError, type Runner } from "./types"
 
 // Opens a shell in a sandbox or workspace in a terminal window on this Mac, for the dashboard's Terminal button. The
-// caller chooses only what to open, never the command: the window runs `asd shell NAME` (or `asd workspace shell NAME`),
-// which the caller could run anyway, and nothing the window prints comes back. The command is written to a script that
+// caller chooses only what to open, never the command: the window runs `asd shell NAME` (or `asd workspace shell NAME`,
+// or `asd claude|codex NAME [PROFILE]`), which the caller could run anyway, and nothing the window prints comes back. The command is written to a script that
 // deletes itself when it starts, so any terminal that can run a file can open it.
-export type TerminalTarget = { name: string; kind: "sandbox" | "workspace"; machine?: string }
+export type TerminalTarget = { name: string; kind: "sandbox" | "workspace" | "claude" | "codex"; machine?: string; profile?: string }
+const PROFILE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/
 
 export const quote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`
 
 export function terminalArgv(cliDir: string, target: TerminalTarget): string[] {
   const machine = target.machine === undefined || target.machine === "local" ? undefined : hostName(target.machine)
   if (target.kind === "workspace" && machine) throw new AsideeError("usage", "Workspaces run on this Mac; there is no workspace on another machine.")
-  if (target.kind !== "sandbox" && target.kind !== "workspace") throw new AsideeError("usage", "kind must be sandbox or workspace.")
-  return [join(cliDir, "asd"), ...(machine ? ["--host", machine] : []), ...(target.kind === "workspace" ? ["workspace", "shell"] : ["shell"]), validName(target.name)]
+  if (!["sandbox", "workspace", "claude", "codex"].includes(target.kind)) throw new AsideeError("usage", "kind must be sandbox, workspace, claude or codex.")
+  const agent = target.kind === "claude" || target.kind === "codex"
+  if (target.profile !== undefined && (!agent || typeof target.profile !== "string" || !PROFILE.test(target.profile))) throw new AsideeError("usage", "A login profile is 1 to 48 letters, digits, underscores or hyphens, for claude or codex.")
+  return [join(cliDir, "asd"), ...(machine ? ["--host", machine] : []), ...(target.kind === "workspace" ? ["workspace", "shell"] : agent ? [target.kind] : ["shell"]), validName(target.name), ...(target.profile ? [target.profile] : [])]
 }
 
 // What opens the script in each terminal. custom: the user's own command, set through the CLI only (core/state.ts).

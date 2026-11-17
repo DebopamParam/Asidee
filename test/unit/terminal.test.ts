@@ -14,6 +14,13 @@ test("the command opens only a shell in the named sandbox or workspace, with nam
     expect(() => terminalArgv("/opt/bin", target as never)).toThrow()
 })
 
+test("an agent opens with asd claude or asd codex, and a profile only for those, checked", () => {
+  expect(terminalArgv("/opt/bin", { name: "demo", kind: "claude" })).toEqual(["/opt/bin/asd", "claude", "demo"])
+  expect(terminalArgv("/opt/bin", { name: "demo", kind: "codex", profile: "work_1", machine: "home-linux" })).toEqual(["/opt/bin/asd", "--host", "home-linux", "codex", "demo", "work_1"])
+  for (const target of [{ name: "demo", kind: "claude", profile: "--setup" }, { name: "demo", kind: "claude", profile: "a b" }, { name: "demo", kind: "claude", profile: 5 }, { name: "demo", kind: "sandbox", profile: "deb" }])
+    expect(() => terminalArgv("/opt/bin", target as never)).toThrow("profile")
+})
+
 test("each terminal opens the script; a custom command gets it quoted", () => {
   expect(launchArgv("default", "/s/x.command")).toEqual(["/usr/bin/open", "/s/x.command"])
   expect(launchArgv("terminal", "/s/x.command")).toEqual(["/usr/bin/open", "-a", "Terminal", "/s/x.command"])

@@ -956,8 +956,19 @@ source, the same code still works for development.
 
 ### Agent template and one-step create
 
-Both are CLI compositions of methods any client may call, so they hold whatever a create holds. `asd template prepare`
-(`cli/prepare.ts`) chooses the engine as create would, creates a sandbox from the built-in image (never the default
+Both are compositions of methods any client may call, so they hold whatever a create holds. `asd template prepare` and
+the dashboard's Prepare form call one daemon method, `templatePrepare` (`core/prepare.ts`), which calls the daemon's own
+method table as a client would. It takes `name` (default `agent`), `engine`, `claude` and `codex` versions (default:
+this machine's, read with `--version`; the CLI sends its own machine's), `script` (text) or `scriptFile: true`
+(`CONFIG/agent-template.sh`, at most 1 MiB either way), `replace` and `default`. `templatePreparing` lists what is being
+prepared with its progress lines, which the CLI prints and the page shows while their call waits; a second prepare of a
+name already being prepared is refused. `templatePrepareInfo` gives the page this machine's versions and whether the
+script file exists; it is not routed. All three are open to the dashboard: everything a prepare runs runs inside its
+sandbox, and the token could already create, exec in and snapshot a sandbox. Reading the script file lets a token holder
+see its text inside the sandbox; the token can already copy logins into a sandbox through the logins extension. Both
+listeners have no idle timeout (`idleTimeout: 0`), so the minute or two a prepare takes is not cut off; a Ctrl-C in the
+CLI leaves the daemon finishing, and it removes its sandbox itself. The prepare
+chooses the engine as create would, creates a sandbox from the built-in image (never the default
 template, which may be the one being made), runs its install steps with `exec` (versions and the user's script travel
 as arguments and input, never as shell text), checks each tool, removes an existing template of that name on that
 engine only with `--replace`, snapshots, and removes the sandbox whatever happened. The config's `defaults.template`
@@ -973,9 +984,9 @@ local sandboxes only, so these options are refused with `--host`. `asd claude|co
 ## Dashboard
 
 `ui/index.html` is one page with no build step, a client of the API like any other. Its tabs: **Sandboxes** (each
-sandbox's controls and live use; under More, resize, a command run with `sh -c`, save as template, forwards, links,
+sandbox's controls and live use; under More, Claude Code or Codex in a terminal window, resize, a command run with `sh -c`, save as template, forwards, links,
 SSH access and CLI commands; and the create form, which also shows the same create as a CLI command), **Usage**,
-**Workspaces**, **Templates**, **Machines** (with `experimental` on), **Extensions** (every installed extension's actions;
+**Workspaces**, **Templates** (with the Prepare form above), **Machines** (with `experimental` on), **Extensions** (every installed extension's actions;
 a sandbox action asks which sandbox; Install for each bundled extension not installed, Remove for an installed one)
 and **Settings** (every setting above, the engines and what this daemon is).
 Whatever is socket-only (workspace changes, SSH setup, machines, daemon stop) is shown as the command, with a Copy
@@ -985,8 +996,9 @@ Three methods exist for it. `usage` gives each sandbox's use against its limits:
 two calls (none on the first; the engine's own CPU-time counter), memory and tasks as the engine reports them, and
 disk as the last measurement the disk watch, a start or a verify made, with its time. It measures nothing new on disk.
 Routed with `host`, it answers for that machine. `about` gives the version, platform, process, folders and built-in
-defaults of this daemon. `openTerminal` takes `name`, `kind` (`sandbox` or `workspace`) and an optional `machine`; it is
-macOS only and never routed. The caller chooses what to open, never the command: it writes a script under
-`STATE/terminal/` (mode 0700, removed by itself when it starts, or after an hour) that runs `asd shell NAME` (or
-`asd --host MACHINE shell NAME`, or `asd workspace shell NAME`) with this daemon's folders, and opens it in the chosen
+defaults of this daemon. `openTerminal` takes `name`, `kind` (`sandbox`, `workspace`, `claude` or `codex`), an optional `machine` and,
+for `claude` and `codex`, an optional login `profile`; it is macOS only and never routed. The caller chooses what to
+open, never the command: it writes a script under `STATE/terminal/` (mode 0700, removed by itself when it starts, or
+after an hour) that runs `asd shell NAME` (or `asd --host MACHINE shell NAME`, `asd workspace shell NAME`, or
+`asd claude|codex NAME [PROFILE]`) with this daemon's folders, and opens it in the chosen
 terminal. Nothing the window shows comes back to the caller.

@@ -23,7 +23,7 @@ import { bounded, PROTOCOL, transportStdio } from "../core/transport"
 import { included, userConfig, type SshAccess } from "../core/ssh"
 import { systemRunner } from "../core/run"
 import { createSteps, runCreateSteps } from "./create-setup"
-import { hostVersion, prepareTemplate, validVersion } from "./prepare"
+import { hostVersion, validVersion, type Prepared, type Preparing } from "../core/prepare"
 import { applySetup, DOCKER_DESKTOP_UNSUPPORTED, installedEngines, orbstackEngine, planSetup, SETUP_DOWNLOADS, SETUP_ENGINE_NAMES, SETUP_ENGINES, setupChanges, setupPlanLines, type SetupEngine } from "../core/setup"
 import { checkSocketPath, DEFAULT_SPEC, defaultDirs, socketPath, streamSocketPath, validTemplateName, type Config, type Defaults } from "../core/state"
 import { dataFrames, frame, FrameReader, type OpenRequest, type EnrollmentRequest } from "../core/stream"
@@ -298,11 +298,12 @@ async function call<T>(method: string, body: object = {}, watch?: string): Promi
     const workspace = method === "workspaceCreate" ? ["workspace"] : []
     // Only a create makes something to remove; a resize or snapshot of an existing sandbox must not suggest removing it.
     if (method === "resize") console.error(`The daemon is still resizing ${name}. See the result with \`${next("list")}\`.`)
+    else if (method === "templatePrepare") { const template = "name" in body ? shown(body.name) : "agent"; console.error(`The daemon is still preparing template ${template}; it will appear in \`${next("template", "list")}\`, and it removes its sandbox itself.`) }
     else if (method === "snapshot") { const template = "as" in body ? shown(body.as) : "TEMPLATE"; console.error(`The daemon is still saving ${name} as template ${template}; it will appear in \`${next("template", "list")}\`. Remove it with \`${next("template", "remove", template)}\`.`) }
     else console.error(`The daemon is still finishing ${name}; it will appear in \`${next(...workspace, "list")}\`. Remove it with \`${next(...workspace, "remove", name, "--confirm", name)}\`.`)
     process.exit(130)
   }
-  const buffered = ["create", "workspaceCreate", "resize", "snapshot"].includes(method)
+  const buffered = ["create", "workspaceCreate", "resize", "snapshot", "templatePrepare"].includes(method)
   if (buffered) process.once("SIGINT", interrupted)
   try { return await request<T>(method, { ...body, host: selectedHost }) } finally { clearInterval(timer); if (buffered) process.off("SIGINT", interrupted) }
 }
@@ -697,12 +698,22 @@ async function main(argv: string[]): Promise<void> {
           if (given.script !== undefined) {
             try { script = await Bun.file(resolve(given.script)).text() } catch { throw new AsideeError("usage", `Cannot read the script ${given.script}.`) }
           }
+          // The versions and the script are this machine's, also when the template is made on another one.
           const versions = { claude: given.claude === undefined ? await hostVersion(systemRunner, "claude") : validVersion("claude", given.claude), codex: given.codex === undefined ? await hostVersion(systemRunner, "codex") : validVersion("codex", given.codex) }
-          const prepared = await prepareTemplate(call, { name, engine: given.engine, versions, script, replace: Boolean(given.replace) }, (line) => { if (!asJson) console.log(line) })
-          const config = given.default ? await call<Config>("configSet", { defaults: { ...Object.fromEntries(Object.entries((await call<Config>("configGet")).defaults).filter(([key]) => key !== "image")), template: name } }) : await call<Config>("configGet")
+          // The daemon does the work (core/prepare.ts); its progress is read back and printed as it comes.
+          let printed = 0, reading = false
+          const print = (lines: string[]) => { for (const line of lines.slice(printed)) console.log(shown(line)); printed = Math.max(printed, lines.length) }
+          const progress = asJson ? undefined : setInterval(async () => {
+            if (reading) return
+            reading = true
+            print((await request<Preparing[]>("templatePreparing", { host: selectedHost }).catch(() => [])).find((entry) => entry.name === name)?.lines ?? [])
+            reading = false
+          }, 400)
+          const prepared = await call<Prepared & { default: boolean; lines: string[] }>("templatePrepare", { name, engine: given.engine, ...versions, ...(script !== undefined ? { script } : {}), replace: Boolean(given.replace), default: Boolean(given.default) }).finally(() => clearInterval(progress))
           return out(prepared, () => {
+            print(prepared.lines)
             console.log(`\nSaved template ${shown(prepared.template.name)} (${(prepared.template.sizeBytes / 1024 ** 2).toFixed(0)} MB) on ${shown(prepared.template.engine)}. It has:\n${prepared.tools.map((line) => `  ${shown(line)}`).join("\n")}`)
-            console.log(config.defaults.template === name ? `New sandboxes start from it. Back to the plain image: ${next("config", "set", "default-template", "auto")}` : `Use it: ${next("create", "NAME", "--template", name)}. Make it the default: ${next("config", "set", "default-template", name)}`)
+            console.log(prepared.default ? `New sandboxes start from it. Back to the plain image: ${next("config", "set", "default-template", "auto")}` : `Use it: ${next("create", "NAME", "--template", name)}. Make it the default: ${next("config", "set", "default-template", name)}`)
           })
         }
         if (rest[0] === "list" || rest[0] === undefined) {

@@ -43,7 +43,7 @@ asd verify NAME                         # exit 6 if a blocking check failed; sto
 asd resize NAME [--cpus N] [--memory GB] [--pids N] [--disk GB]  # says what applies now, what at the next start
 asd snapshot NAME --as TEMPLATE         # saves its files as a template; read what it says is inside
 asd template list | asd template remove TEMPLATE
-asd template prepare [TEMPLATE] [--script FILE] [--replace] [--default]  # agent template (default name agent)
+asd template prepare [TEMPLATE] [--script FILE] [--replace] [--default]  # agent template (default name agent); also the dashboard's Templates tab
 asd remove NAME --confirm NAME          # deletes everything in it; ask the user first
 ```
 
@@ -316,11 +316,14 @@ Copy the built-in page (`ui/index.html` in the Asidee source) to `~/.config/asid
 Other files in that folder are served next to it. The page calls `POST /api/METHOD` with a JSON body and the header
 `Authorization: Bearer TOKEN`; it reads the token from the `#token=` part of the link `asd ui` prints. Methods:
 `checklist`, `engines`, `list`, `get`, `create`, `start`, `stop`, `remove`, `verify`, `resize`, `snapshot`, `templateList`,
-`templateRemove`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `linkAdd`, `linkList`, `linkRemove`, `sshAccess`, `extensions`, `extensionInstall`, `extensionRemove`, `action`, `summary`,
+`templateRemove`, `templatePrepare`, `templatePreparing`, `templatePrepareInfo`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `linkAdd`, `linkList`, `linkRemove`, `sshAccess`, `extensions`, `extensionInstall`, `extensionRemove`, `action`, `summary`,
 `hostList`, `fleet`, `configGet`, `configSet`, `usage`, `about`, `openTerminal`. `linkAdd` and `linkRemove` take `from`, `to` and `port`; `linkList` takes an optional `name`. `configGet` returns this machine's effective configuration. `configSet`
 accepts only `requireProbes` and `experimental`, each a boolean, `workspaceFreeSpaceGb` and `diskWatchSeconds`, each a number, `defaults` and `engine` (`null` removes either) and `terminal`, saves them to `config.json` and returns the new
 effective configuration; the custom terminal command is CLI only. `usage` returns each sandbox's CPU, memory, tasks and last disk measurement against its limits;
-`openTerminal` with `name` and `kind` (`sandbox` or `workspace`) opens a shell in a terminal window on this Mac. `requireProbes` affects later creates, not running sandboxes. With `experimental` off,
+`openTerminal` with `name` and `kind` (`sandbox`, `workspace`, `claude` or `codex`, the last two with an optional `profile`) opens a shell or the agent in a terminal window on this Mac.
+`templatePrepare` takes `name`, `engine`, `claude`, `codex`, `script` or `scriptFile: true`, `replace` and `default` and
+answers when the template is saved (a minute or two); `templatePreparing` lists the progress lines meanwhile, and
+`templatePrepareInfo` gives this machine's versions and whether `~/.config/asidee/agent-template.sh` exists. `requireProbes` affects later creates, not running sandboxes. With `experimental` off,
 `hostList`, `fleet` and any request with a `host` other than `local` are refused.
 
 Requests can include `host` to select a registered machine. A sandbox's API address is `{host, name}` and its returned

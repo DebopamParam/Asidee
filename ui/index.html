@@ -24,7 +24,7 @@
   button:hover { border-color: var(--accent); } button:disabled { opacity: .5; cursor: default; }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
   button.danger { color: var(--bad); } button.small { font-size: 13px; padding: 2px 8px; }
-  input, select { font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); width: 100%; }
+  input, select, textarea { font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); width: 100%; }
   input[type=checkbox] { width: auto; }
   label { display: block; font-size: 13px; color: var(--muted); }
   .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 10px; }
@@ -109,6 +109,27 @@
     <h2>Templates</h2>
     <p class="muted">A template is a sandbox's files, saved without the usual login files. Save one from a sandbox's More menu. Removing a template keeps the sandboxes made from it working.</p>
     <div id="templates"></div>
+    <h2>Prepare an agent template</h2>
+    <form id="prepare" class="panel">
+      <p class="muted">Makes a sandbox from the built-in image, installs tmux, fd, zip, htop, vim and nano from its packages and Claude Code and Codex from npm, runs your script if you choose one, checks each tool, saves the template and removes the sandbox. All of it runs inside that sandbox. It takes a minute or two.</p>
+      <div class="fields">
+        <div><label for="p-name">Template name</label><input id="p-name" name="name" value="agent" required pattern="[a-z0-9][a-z0-9-]{0,30}"></div>
+        <div><label for="p-claude">Claude Code version</label><input id="p-claude" name="claude" placeholder="latest"></div>
+        <div><label for="p-codex">Codex version</label><input id="p-codex" name="codex" placeholder="latest"></div>
+        <div><label for="p-engine">Engine</label><select id="p-engine" name="engine"></select></div>
+        <div><label for="p-script">Script, run as the sandbox's user</label><select id="p-script" name="script"><option value="">None</option><option value="file">Your agent-template.sh</option><option value="paste">Paste one</option></select></div>
+      </div>
+      <p class="muted" id="prepare-info">The versions start as this machine's, as the CLI chooses them; blank means latest.</p>
+      <div id="p-script-box" hidden><label for="p-script-text">Script (bash)</label><textarea id="p-script-text" name="scriptText" rows="6" spellcheck="false"></textarea></div>
+      <div class="row" style="margin:10px 0">
+        <label><input id="p-replace" name="replace" type="checkbox"> Replace a template of this name (sandboxes made from the old one keep working)</label>
+        <label><input id="p-default" name="default" type="checkbox"> Make it the default for new sandboxes</label>
+      </div>
+      <button class="primary">Prepare template</button>
+      <div class="error" id="prepare-error" role="status"></div>
+      <pre id="prepare-progress" hidden></pre>
+      <details><summary>The same from the CLI</summary><div id="prepare-command"></div></details>
+    </form>
   </section>
 
   <section id="machine-section" aria-labelledby="machines-tab" hidden>
@@ -198,6 +219,8 @@ let sandboxes = [], engines = [], workspaces = [], workspaceProblem = "", forwar
 let usage = [], usageProblem = "", remoteUsage = {}, machines, machineProblem = "", about, settings, savingSettings = false
 // profiles: this Mac's login profiles per agent, as the logins extension lists them; null when the listing failed.
 let profiles
+// prepareInfo: this machine's versions and the user's script, read once; preparing: what the daemon prepares now.
+let prepareInfo, preparing = [], preparingName
 
 async function api(method, body = {}) {
   const response = await fetch(`/api/${method}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(body) })
@@ -355,7 +378,7 @@ function miniForm(key, what, label, fields, send) {
   return form
 }
 
-const terminal = (name, kind, machine) => api("openTerminal", { name, kind, ...(machine ? { machine } : {}) })
+const terminal = (name, kind, machine, profile) => api("openTerminal", { name, kind, ...(machine ? { machine } : {}), ...(profile ? { profile } : {}) })
   .then((done) => `Opened in ${done.terminal === "default" ? "the default terminal" : done.terminal}. If no window appeared, run: ${done.command}`)
 
 function sandboxPanel(sandbox) {
@@ -391,7 +414,10 @@ function sandboxPanel(sandbox) {
   const mine = forwards.filter((forward) => forward.name === name)
   const myLinks = links.filter((link) => link.from === name || link.to === name)
   const access = ssh[name]
-  panel.append(group(`more:${name}`, "More: resize, run a command, template, forwards, links, SSH, commands",
+  panel.append(group(`more:${name}`, "More: agents, resize, run a command, template, forwards, links, SSH, commands",
+    running ? group(`agents:${name}`, "Claude Code or Codex in a terminal", el("p", { class: "muted" }, "Opens a terminal window on this Mac running asd claude or asd codex: the agent in ~/workspace with an imported login, the one named, else the only one."),
+      miniForm(name, "agent", "Open Claude Code", [["profile", "Login profile (blank: the only one)"]], (values) => terminal(name, "claude", undefined, values.profile)),
+      miniForm(name, "agent-codex", "Open Codex", [["profile", "Login profile (blank: the only one)"]], (values) => terminal(name, "codex", undefined, values.profile))) : null,
     group(`resize:${name}`, "Resize", el("p", { class: "muted" }, "Blank keeps a limit as it is. CPUs, memory and tasks change now when the engine allows; the disk limit is the daemon's own and applies at its next measurement."),
       miniForm(name, "resize", "Resize", [["cpus", "CPUs", "number"], ["memoryGb", "Memory (GB)", "number"], ["pids", "Tasks", "number"], ["diskGb", "Disk (GB)", "number"]], async (values) => {
         const body = Object.fromEntries(Object.entries(values).filter(([, value]) => value !== ""))
@@ -570,6 +596,7 @@ function render() {
   const ready = engines.filter((engine) => engine.ready)
   const fill = (select, options, fallback) => { const chosen = select.value; select.replaceChildren(...options.map(([value, label]) => el("option", { value }, label))); select.value = options.some(([value]) => value === chosen) ? chosen : fallback }
   fill(document.getElementById("f-engine"), ready.length ? ready.map((engine) => [engine.id, engine.label]) : [["", "No engine is ready"]], ready.some((engine) => engine.id === settings?.engine) ? settings.engine : ready[0]?.id ?? "")
+  fill(document.getElementById("p-engine"), ready.length ? ready.map((engine) => [engine.id, engine.label]) : [["", "No engine is ready"]], ready.some((engine) => engine.id === settings?.engine) ? settings.engine : ready[0]?.id ?? "")
   fill(document.getElementById("default-engine"), [["", "The first ready engine"], ...engines.map((engine) => [engine.id, `${engine.label}${engine.ready ? "" : " (not ready)"}`])], settings?.engine ?? "")
   fill(document.getElementById("f-template"), [["", settings?.defaults?.template ? `Default (${settings.defaults.template})` : "None"], ...templates.map((template) => [template.name, template.name])], "")
   // The setup a create can run, for the bundled extensions that are installed. What was chosen survives a rebuild.
@@ -585,7 +612,7 @@ function render() {
     node.append(el("p", { class: "muted" }, `After the create, in this order; the first failure stops the rest and keeps the sandbox.${logins ? " A login's token is copied into the sandbox, where anything running there can read it." : ""}`), el("div", { class: "fields" }, ...fields))
     for (const input of node.querySelectorAll("input, select")) if (input.id in kept) input.type === "checkbox" ? input.checked = kept[input.id] : input.value = kept[input.id]
   })
-  createCommand()
+  createCommand(); prepareCommand(); showPreparing()
 }
 
 function createCommand() {
@@ -658,6 +685,8 @@ async function refresh() {
     api("forwardList").then((data) => { forwards = data }, () => { forwards = [] }),
     api("linkList").then((data) => { links = data }, () => { links = [] }),
     api("templateList").then((data) => { templates = data; templateProblem = "" }, (error) => { templates = []; templateProblem = error.message }),
+    tab === "templates" ? api("templatePreparing").then((data) => { preparing = data }, () => { preparing = [] }) : null,
+    tab === "templates" && !prepareInfo ? readPrepareInfo() : null,
     tab === "settings" || !about ? api("about").then((data) => { about = data }, () => {}) : null,
     tab === "extensions" ? api("extensions").then((data) => { extensions = data.extensions; extensionErrors = data.errors ?? []; available = data.available ?? [] }, () => {}) : null,
     tab === "machines" || tab === "usage" ? refreshMachines() : null,
@@ -672,6 +701,56 @@ async function refreshMachines() {
   const online = (machines?.machines ?? []).filter(({ machine }) => machine.host.name !== "local" && machine.state === "online").map(({ machine }) => machine.host.name)
   remoteUsage = Object.fromEntries(await Promise.all(online.map((host) => api("usage", { host }).then((data) => [host, data], (error) => [host, `usage unknown: ${error.message}`]))))
 }
+
+// Template prepare is one daemon method, the same the CLI calls; this form only collects its options.
+const prepareForm = document.getElementById("prepare")
+async function readPrepareInfo() {
+  try {
+    prepareInfo = await api("templatePrepareInfo")
+    for (const agent of ["claude", "codex"]) { const input = document.getElementById(`p-${agent}`); if (!input.value) input.value = prepareInfo.versions[agent] }
+    const option = document.querySelector("#p-script option[value=file]")
+    option.textContent = `${prepareInfo.script.path}${prepareInfo.script.exists ? "" : " (not found)"}`; option.disabled = !prepareInfo.script.exists
+  } catch (error) { document.getElementById("prepare-info").textContent = `This machine's versions are unknown (${error.message}); blank means latest.` }
+}
+function prepareBody() {
+  const value = (name) => prepareForm.elements[name].value.trim()
+  const script = value("script")
+  return { name: value("name") || "agent", claude: value("claude") || "latest", codex: value("codex") || "latest", ...(value("engine") ? { engine: value("engine") } : {}),
+    replace: prepareForm.elements.replace.checked, default: prepareForm.elements.default.checked,
+    ...(script === "file" ? { scriptFile: true } : script === "paste" ? { script: prepareForm.elements.scriptText.value } : {}) }
+}
+function prepareCommand() {
+  const body = prepareBody()
+  const parts = ["asd template prepare", body.name, "--claude", body.claude, "--codex", body.codex]
+  if (body.engine && body.engine !== (settings?.engine ?? engines.find((engine) => engine.ready)?.id)) parts.push("--engine", body.engine)
+  if (body.scriptFile) parts.push("--script", prepareInfo?.script.path ?? "~/.config/asidee/agent-template.sh"); else if (body.script !== undefined) parts.push("--script", "FILE")
+  if (body.replace) parts.push("--replace"); if (body.default) parts.push("--default")
+  const text = parts.join(" "); const node = document.getElementById("prepare-command")
+  if (node.textContent !== `${text}Copy`) node.replaceChildren(command(text))
+  document.getElementById("p-script-box").hidden = prepareForm.elements.script.value !== "paste"
+}
+// The daemon's progress lines for the template this page asked for, or for one another client is preparing.
+function showPreparing() {
+  const node = document.getElementById("prepare-progress")
+  const entry = preparing.find((item) => item.name === preparingName) ?? (preparingName ? undefined : preparing[0])
+  if (!entry) return
+  node.hidden = false; node.textContent = [`Preparing ${entry.name} since ${new Date(entry.startedAt).toLocaleTimeString()}:`, ...entry.lines].join("\n")
+}
+prepareForm.addEventListener("input", prepareCommand)
+prepareForm.addEventListener("submit", async (event) => {
+  event.preventDefault()
+  const button = prepareForm.querySelector("button.primary"); const error = document.getElementById("prepare-error"); const progress = document.getElementById("prepare-progress")
+  const body = prepareBody()
+  button.disabled = true; button.textContent = "Preparing…"; error.textContent = ""; preparingName = body.name; progress.hidden = false; progress.textContent = `Preparing ${body.name}…`
+  const timer = setInterval(() => { api("templatePreparing").then((data) => { preparing = data; showPreparing() }, () => {}) }, 1000)
+  try {
+    const done = await api("templatePrepare", body)
+    progress.textContent = [...done.lines, "", `Saved template ${done.template.name} (${gib(done.template.sizeBytes)}) on ${done.template.engine}. It has:`, ...done.tools.map((line) => `  ${line}`),
+      done.default ? "New sandboxes start from it." : `Use it: choose it under New sandbox, or make it the default in Settings.`].join("\n")
+  } catch (failure) { error.textContent = failure.message }
+  clearInterval(timer); preparingName = undefined
+  button.disabled = false; button.textContent = "Prepare template"; await refresh()
+})
 
 document.getElementById("create").addEventListener("submit", async (event) => {
   event.preventDefault()

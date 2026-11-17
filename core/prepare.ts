@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
-import { DEFAULT_SPEC, type Config } from "../core/state"
-import { AsideeError, type Engine, type RunResult, type Runner, type Template } from "../core/types"
+import { join } from "node:path"
+import { DEFAULT_SPEC, validTemplateName, type Config, type Dirs } from "./state"
+import { AsideeError, type Engine, type RunResult, type Runner, type Template } from "./types"
 
 // `asd template prepare`: a template for coding agents, made only from what any client may do (create, exec, snapshot,
 // remove), so it holds whatever checks a create holds. The tools come from the image's own package sources and npm.
@@ -65,5 +66,60 @@ export async function prepareTemplate(call: Call, options: PrepareOptions, progr
   } finally {
     progress(`Removing the sandbox ${name}…`)
     await call("remove", { name, confirm: name }).catch((error) => progress(`Could not remove ${name}: ${error instanceof Error ? error.message : String(error)}. Remove it with asd remove ${name} --confirm ${name}.`))
+  }
+}
+
+// The user's own script for agent templates, in the config folder. It runs only inside the sandbox being prepared.
+export const AGENT_SCRIPT = "agent-template.sh"
+const SCRIPT_LIMIT = 1024 ** 2
+export type Preparing = { name: string; startedAt: string; lines: string[] }
+
+// `templatePrepare`, which the CLI and the dashboard both call: one implementation, in the daemon. call is the daemon's
+// own method table, so a prepare still does only what any client could (create, exec, snapshot, remove, configSet).
+export class Preparations {
+  private readonly running = new Map<string, Preparing>()
+  constructor(private readonly call: Call, private readonly dirs: Dirs, private readonly run: Runner) {}
+
+  // What is being prepared now, with its progress so far; a client polls it while its own call waits.
+  list(): Preparing[] { return [...this.running.values()].map((entry) => ({ ...entry, lines: [...entry.lines] })) }
+
+  // What the dashboard's form starts from: the versions the CLI would choose here, and whether the user's script exists.
+  async info(): Promise<{ versions: Record<Agent, string>; script: { path: string; exists: boolean } }> {
+    const path = join(this.dirs.config, AGENT_SCRIPT)
+    const [claude, codex] = await Promise.all([hostVersion(this.run, "claude"), hostVersion(this.run, "codex")])
+    return { versions: { claude, codex }, script: { path, exists: await Bun.file(path).exists() } }
+  }
+
+  // body: name (default agent), engine, claude and codex (default: this machine's), script (its text) or scriptFile
+  // (true: CONFIG/agent-template.sh), replace, default.
+  async prepare(body: Record<string, unknown>): Promise<Prepared & { default: boolean; lines: string[] }> {
+    const name = validTemplateName(body.name ?? "agent")
+    for (const key of ["replace", "default", "scriptFile"]) if (body[key] !== undefined && typeof body[key] !== "boolean") throw new AsideeError("usage", `${key} must be a boolean.`)
+    if (body.engine !== undefined && typeof body.engine !== "string") throw new AsideeError("usage", "engine must be an engine id.")
+    if (body.script !== undefined && (typeof body.script !== "string" || Buffer.byteLength(body.script) > SCRIPT_LIMIT)) throw new AsideeError("usage", `script must be the script's text, at most ${SCRIPT_LIMIT / 1024 ** 2} MiB.`)
+    if (body.script !== undefined && body.scriptFile === true) throw new AsideeError("usage", "Send script or scriptFile, not both.")
+    for (const agent of ["claude", "codex"] as const) if (body[agent] !== undefined) validVersion(agent, String(body[agent]))
+    // Taken before the first wait, so two requests for one name cannot both pass.
+    if (this.running.has(name)) throw new AsideeError("conflict", `Template ${name} is being prepared already. Wait for it to finish.`)
+    const entry: Preparing = { name, startedAt: new Date().toISOString(), lines: [] }
+    this.running.set(name, entry)
+    try {
+      let script = body.script as string | undefined
+      if (body.scriptFile === true) {
+        const path = join(this.dirs.config, AGENT_SCRIPT)
+        const file = Bun.file(path)
+        if (!await file.exists()) throw new AsideeError("usage", `There is no script at ${path}.`)
+        if (file.size > SCRIPT_LIMIT) throw new AsideeError("usage", `${path} is larger than ${SCRIPT_LIMIT / 1024 ** 2} MiB.`)
+        script = await file.text()
+      }
+      const version = async (agent: Agent) => body[agent] === undefined ? hostVersion(this.run, agent) : String(body[agent])
+      const versions = { claude: await version("claude"), codex: await version("codex") }
+      const prepared = await prepareTemplate(this.call, { name, engine: body.engine as string | undefined, versions, script, replace: body.replace === true }, (line) => { entry.lines.push(line) })
+      const config = await this.call<Config>("configGet")
+      if (body.default !== true) return { ...prepared, default: config.defaults.template === name, lines: entry.lines }
+      entry.lines.push(`Making ${name} the default template…`)
+      const set = await this.call<Config>("configSet", { defaults: { ...Object.fromEntries(Object.entries(config.defaults).filter(([key]) => key !== "image")), template: name } })
+      return { ...prepared, default: set.defaults.template === name, lines: entry.lines }
+    } finally { this.running.delete(name) }
   }
 }

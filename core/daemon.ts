@@ -9,6 +9,7 @@ import { Core } from "./core"
 import { CATALOG, isMethod, machineIdentity, Machines, type Hello } from "./machines"
 import { Hosts } from "./hosts"
 import { PROTOCOL } from "./transport"
+import { Preparations } from "./prepare"
 import { DockerSandboxesProvider } from "./providers/docker-sandboxes"
 import { GvisorProvider } from "./providers/gvisor"
 import { OUTPUT_LIMIT, systemRunner } from "./run"
@@ -59,7 +60,9 @@ type Method = { run: (body: Body, signal?: AbortSignal) => Promise<unknown>; soc
 // The whole API. The CLI, the UI and extensions all come through this table, so each has exactly these abilities.
 // keepSandboxes: the daemon is being replaced (an upgrade), not stopped, so the sandboxes it watches keep running.
 export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, stopping: () => boolean = () => false, machines?: Machines, hosts = machines ? new Hosts(machines) : undefined, workspaces = new Workspaces(core.dirs)): Record<string, Method> {
-  return {
+  // A prepare calls this same table, as any client would.
+  const preparations = new Preparations((method, body = {}) => table[method]!.run(body as Body) as never, core.dirs, systemRunner)
+  const table: Record<string, Method> = {
     version: { run: async () => ({ version: VERSION, build: BUILD, stopping: stopping() }) },
     hello: { run: async () => machines?.hello, socketOnly: true },
     summary: { run: async () => ({ hello: machines?.hello, sandboxes: await core.list(), workspaces: process.platform === "darwin" ? await workspaces.summary() : [], checkedAt: new Date().toISOString() }) },
@@ -90,7 +93,7 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     }, socketOnly: true },
     about: { run: async () => ({ version: VERSION, build: BUILD, platform: process.platform, arch: process.arch, pid: process.pid, startedAt: STARTED, stopping: stopping(), stateDir: core.dirs.state, configDir: core.dirs.config, cli: join(core.cliDir, "asd"), builtInDefaults: DEFAULT_SPEC }) },
     usage: { run: () => core.usage() },
-    openTerminal: { run: (body) => openTerminal(core.dirs, core.cliDir, systemRunner, { name: String(body.name), kind: body.kind === "workspace" ? "workspace" : body.kind === undefined ? "sandbox" : body.kind as "sandbox", ...(typeof body.machine === "string" ? { machine: body.machine } : {}) }) },
+    openTerminal: { run: (body) => openTerminal(core.dirs, core.cliDir, systemRunner, { name: String(body.name), kind: body.kind === undefined ? "sandbox" : body.kind as "sandbox", ...(typeof body.machine === "string" ? { machine: body.machine } : {}), ...(body.profile !== undefined ? { profile: body.profile as string } : {}) }) },
     checklist: { run: async () => CHECKLIST },
     engines: { run: () => core.engines() },
     list: { run: () => core.list() },
@@ -104,6 +107,10 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     snapshot: { run: (body) => core.snapshot(String(body.name), body.as) },
     templateList: { run: () => core.templateList() },
     templateRemove: { run: (body) => core.templateRemove(body.name, body.engine) },
+    // A sandbox from the built-in image, set up, saved and removed (core/prepare.ts): nothing leaves the sandbox but the template.
+    templatePrepare: { run: (body) => preparations.prepare(body) },
+    templatePreparing: { run: async () => preparations.list() },
+    templatePrepareInfo: { run: () => preparations.info() },
     exec: { run: (body, signal) => core.exec(String(body.name), body.argv, { user: typeof body.user === "string" ? body.user : undefined, stdin: execStdin(body), signal }) },
     extensions: { run: () => core.extensions() },
     extensionInstall: { run: (body) => core.installExtension(body.id) },
@@ -120,6 +127,7 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     sshSetup: { run: (body) => core.sshSetup(String(body.name), body.writeConfig === true), socketOnly: true },
     shutdown: { run: async (body) => { setTimeout(() => shutdown(body.keepSandboxes === true), 50); return { stopping: true } }, socketOnly: true },
   }
+  return table
 }
 
 const STATUS: Record<ErrorCode, number> = { usage: 400, "not-found": 404, conflict: 409, dependency: 424, "check-failed": 422, "probes-required": 422, runtime: 500, offline: 503, incompatible: 409, "identity-changed": 409, "outcome-unknown": 504 }
