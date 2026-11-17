@@ -110,6 +110,9 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
 Not built yet:
 
 - Docker Sandboxes (microVM) support. It is detected and reported as not supported.
+- Apple `container` support (a VM per sandbox; Apple silicon, macOS 26). It could become the macOS default once it
+  passes the same checklist. Open questions first: a network guard the sandbox cannot switch off, without admin rights;
+  the disk limit; whether freed memory returns to macOS; exec streams and loopback relay.
 - A hard disk cap, Windows execution, a desktop app, and a signed release installer. The remote dashboard
   is later.
 - Docker Desktop and Colima measurements. Native Linux Docker and OrbStack have separate scorecards.
