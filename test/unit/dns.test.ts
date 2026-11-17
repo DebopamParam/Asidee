@@ -7,7 +7,7 @@ import { validSpec } from "../../core/state"
 import type { Manifest, Runner } from "../../core/types"
 
 // The engine's archive API, where the relay is copied: each request is recorded in the calls of the fixture that made it.
-const folder = await mkdtemp(join(tmpdir(), "pdk-dns-"))
+const folder = await mkdtemp(join(tmpdir(), "asd-dns-"))
 let archived: string[][] = []
 const engine = Bun.serve({ unix: join(folder, "engine.sock"), fetch: (request) => { archived.push(["archive", request.method, new URL(request.url).pathname]); return new Response("") } })
 afterAll(async () => { engine.stop(true); await rm(folder, { recursive: true, force: true }) })
@@ -59,7 +59,7 @@ test("the enforcement runtime checks read DNS, restore it only when reset, and d
   const repaired = await dns()
   expect(state.resolver).toContain("nameserver 1.1.1.1"); expect(state.writes).toBe(1)
   expect(repaired).toMatchObject({ status: "pass", evidence: "inspected" })
-  expect(repaired?.detail).toContain("had been reset to other content; Paddock restored")
+  expect(repaired?.detail).toContain("had been reset to other content; Asidee restored")
   // Already right: read, not rewritten, and the detail says nothing was written.
   for (let pass = 0; pass < 3; pass++) expect((await dns())?.detail).toContain("nothing was written")
   expect(state.writes).toBe(1)

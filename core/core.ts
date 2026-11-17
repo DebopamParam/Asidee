@@ -9,7 +9,7 @@ import { OUTPUT_LIMIT } from "./run"
 import { addInclude, alias, editorKey, GUEST_SETUP, GUEST_SSH, includeLine, included, keyFingerprint, parseGuestSetup, userConfig, validPublicKey, writeClientFiles, type SshAccess } from "./ssh"
 import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSizes, validSpec, validTemplateName, writeManifest, writeConfig, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
-import { PaddockError, type CheckResult, type DiskWarning, type Engine, type Limits, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage, type Template, type SshSetup } from "./types"
+import { AsideeError, type CheckResult, type DiskWarning, type Engine, type Limits, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage, type Template, type SshSetup } from "./types"
 
 // A running sandbox is stopped when a blocking check could not be made this many timer passes in a row.
 export const UNCHECKED_PASSES = 4
@@ -19,7 +19,7 @@ const CORE_CHECKS = new Set<CheckResult["id"]>(["forwards", "ssh", "links", "lin
 // sandbox that passes either (measured: one using 351 MB was killed within seconds of a 256 MB limit).
 export const SHRINK_HEADROOM = 0.9
 // Said with every template, since a template is shared on purpose.
-export const TEMPLATE_CONTENTS = "A template holds every file in the sandbox's own filesystem, home folders included, as it was at one moment: shell history, .env files, package-manager tokens and any login not in Paddock's list are inside. Removed before saving: the usual login files (Claude, Codex, GitHub, git, SSH keys, AWS, netrc) under /root and /home/*, and Paddock's own relay and SSH host key. Not in it: running processes and memory, /dev/shm and any other folder gVisor keeps in memory (it does so for /tmp when the image's /tmp is empty; /proc/mounts inside shows them as tmpfs), volumes (inner Docker's /var/lib/docker, so no inner images or containers, and any volume the image declares), and the engine's /etc/hosts, /etc/hostname and /etc/resolv.conf."
+export const TEMPLATE_CONTENTS = "A template holds every file in the sandbox's own filesystem, home folders included, as it was at one moment: shell history, .env files, package-manager tokens and any login not in Asidee's list are inside. Removed before saving: the usual login files (Claude, Codex, GitHub, git, SSH keys, AWS, netrc) under /root and /home/*, and Asidee's own relay and SSH host key. Not in it: running processes and memory, /dev/shm and any other folder gVisor keeps in memory (it does so for /tmp when the image's /tmp is empty; /proc/mounts inside shows them as tmpfs), volumes (inner Docker's /var/lib/docker, so no inner images or containers, and any volume the image declares), and the engine's /etc/hosts, /etc/hostname and /etc/resolv.conf."
 
 export type ResizeChange = { limit: "cpus" | "memoryGb" | "pids" | "diskGb"; from: number; to: number; applies: "now" | "next start" | "unchanged" | "not enforced"; note?: string }
 
@@ -66,7 +66,7 @@ export class Core {
 
   private provider(manifest: Manifest): Provider {
     const provider = this.providers.find((entry) => entry.id === manifest.engine.provider)
-    if (!provider) throw new PaddockError("dependency", `${manifest.name} was made with the ${manifest.engine.provider} provider, which this build does not have.`)
+    if (!provider) throw new AsideeError("dependency", `${manifest.name} was made with the ${manifest.engine.provider} provider, which this build does not have.`)
     return provider
   }
 
@@ -80,9 +80,9 @@ export class Core {
     let stopReason = manifest.stopReason
     try {
       status = await this.provider(manifest).status(manifest)
-      // Paddock did not stop it, so ask the engine why it is not running.
+      // Asidee did not stop it, so ask the engine why it is not running.
       if (status === "stopped" && !stopReason) stopReason = await this.provider(manifest).stoppedWhy(manifest)
-    } catch (error) { if (error instanceof PaddockError && error.code === "conflict") stopReason = error.message }
+    } catch (error) { if (error instanceof AsideeError && error.code === "conflict") stopReason = error.message }
     return { name: manifest.name, machineId: this.machineId, sandboxId: manifest.id, status, engine: manifest.engine.label, spec: manifest.spec, createdAt: manifest.createdAt, capabilities: manifest.engine.capabilities,
       lastVerify: historical(manifest.lastVerify),
       enforcementProblem: this.enforcementProblems.get(manifest.name) ?? manifest.enforcementProblem,
@@ -93,7 +93,7 @@ export class Core {
     const { manifests, damaged } = await scanManifests(this.dirs)
     return [...await Promise.all(manifests.map((manifest) => this.view(manifest))),
       ...damaged.map((entry): SandboxView => ({ name: entry.name, machineId: this.machineId, status: "damaged", engine: "", spec: { name: entry.name, image: "", cpus: 0, memoryGb: 0, pids: 0, diskGb: 0, docker: false }, createdAt: "",
-        stopReason: `Its state file ${entry.file} cannot be read (${entry.problem}). Paddock does nothing with it; fix the file or delete it.` }))]
+        stopReason: `Its state file ${entry.file} cannot be read (${entry.problem}). Asidee does nothing with it; fix the file or delete it.` }))]
   }
   async get(name: string): Promise<SandboxView> { return this.view(await readManifest(this.dirs, name)) }
 
@@ -113,7 +113,7 @@ export class Core {
   }
 
   private refuse(name: string, failed: CheckResult[], consequence: string): never {
-    throw new PaddockError("check-failed", `${name} ${consequence}: ${failed.map((entry) => `${titleOf(entry.id)} (${entry.detail})`).join("; ")}`, failed)
+    throw new AsideeError("check-failed", `${name} ${consequence}: ${failed.map((entry) => `${titleOf(entry.id)} (${entry.detail})`).join("; ")}`, failed)
   }
 
   // Before the engine stops it, so each client is told why its session ended.
@@ -172,13 +172,13 @@ export class Core {
     const config = await readConfig(this.dirs)
     const spec = validSpec(input, config.defaults)
     const { manifest, checks } = await this.exclusive(spec.name, async () => {
-      if ((await listManifests(this.dirs)).some((entry) => entry.name === spec.name)) throw new PaddockError("conflict", `A sandbox named ${spec.name} already exists.`)
+      if ((await listManifests(this.dirs)).some((entry) => entry.name === spec.name)) throw new AsideeError("conflict", `A sandbox named ${spec.name} already exists.`)
       const engines = await this.engines()
       const wanted = typeof input.engine === "string" && input.engine ? input.engine : config.engine
       const engine = wanted ? engines.find((entry) => entry.id === wanted) : engines.find((entry) => entry.ready)
-      if (!engine) throw new PaddockError("dependency", wanted ? `There is no engine ${wanted}. Run \`paddock doctor\`.` : "No engine is ready for sandboxes. Run `paddock doctor` to see what each one needs.")
-      if (!engine.ready) throw new PaddockError("dependency", `${engine.label} is not ready: ${engine.problems.join(" ")} ${engine.fix ?? ""}`.trim())
-      if (spec.docker && !engine.capabilities?.docker) throw new PaddockError("dependency", `${engine.label} cannot run Docker inside a sandbox. Choose an engine with the docker capability (gVisor needs --net-raw and --overlay2=none).`)
+      if (!engine) throw new AsideeError("dependency", wanted ? `There is no engine ${wanted}. Run \`asd doctor\`.` : "No engine is ready for sandboxes. Run `asd doctor` to see what each one needs.")
+      if (!engine.ready) throw new AsideeError("dependency", `${engine.label} is not ready: ${engine.problems.join(" ")} ${engine.fix ?? ""}`.trim())
+      if (spec.docker && !engine.capabilities?.docker) throw new AsideeError("dependency", `${engine.label} cannot run Docker inside a sandbox. Choose an engine with the docker capability (gVisor needs --net-raw and --overlay2=none).`)
       // Written before the engine is touched, so a half-made sandbox can always be removed.
       const manifest: Manifest = { version: 1, name: spec.name, id: randomBytes(16).toString("hex"), engine, spec, createdAt: new Date().toISOString() }
       const provider = this.provider(manifest)
@@ -192,16 +192,16 @@ export class Core {
             if (await provider.status(manifest) !== "missing") throw new Error("the container remains after cleanup")
             await deleteManifest(this.dirs, spec.name)
           } catch (cleanup) {
-            throw new PaddockError("runtime", `${reason}. Cleanup incomplete: the record for ${spec.name} is kept; ${cleanup instanceof Error ? cleanup.message : String(cleanup)}. Run \`paddock remove ${spec.name} --confirm ${spec.name}\` to remove what remains.`)
+            throw new AsideeError("runtime", `${reason}. Cleanup incomplete: the record for ${spec.name} is kept; ${cleanup instanceof Error ? cleanup.message : String(cleanup)}. Run \`asd remove ${spec.name} --confirm ${spec.name}\` to remove what remains.`)
           }
-          throw new PaddockError(error instanceof PaddockError ? error.code : "runtime", `${reason}. Nothing was kept for ${spec.name}.`)
+          throw new AsideeError(error instanceof AsideeError ? error.code : "runtime", `${reason}. Nothing was kept for ${spec.name}.`)
         }
       }
       if (spec.template) {
         // Held until the container exists: from then on a removal of the template leaves its image to this sandbox.
         await this.exclusive(`template:${spec.template}`, async () => {
           const template = (await provider.templates(engine)).find((entry) => entry.name === spec.template)
-          if (!template) throw new PaddockError("not-found", `There is no template named ${spec.template} on ${engine.label}. See \`paddock template list\`.`)
+          if (!template) throw new AsideeError("not-found", `There is no template named ${spec.template} on ${engine.label}. See \`asd template list\`.`)
           spec.image = template.imageId
           manifest.template = { name: template.name, imageId: template.imageId, source: template.source, createdAt: template.createdAt }
           await writeManifest(this.dirs, manifest)
@@ -220,14 +220,14 @@ export class Core {
         // Whatever require-probes says: turning it off accepts an unknown probe, not a run with no verification at all.
         const reason = error instanceof Error ? error.message : String(error)
         try { await this.stopBecause(manifest, `Stopped after creation: its first checks could not finish. ${reason}`) }
-        catch (stop) { throw new PaddockError("runtime", `${spec.name} was created, but its first checks could not finish (${reason}), and stopping it failed too (${stop instanceof Error ? stop.message : String(stop)}). The daemon stops it on its next pass, within 30 seconds.`) }
-        throw new PaddockError("runtime", `${spec.name} was created but stopped, and is kept for diagnosis: its first checks could not finish. ${reason} To try again: \`paddock start ${spec.name}\`, then \`paddock verify ${spec.name}\`; or \`paddock remove ${spec.name} --confirm ${spec.name}\` and create it again.`)
+        catch (stop) { throw new AsideeError("runtime", `${spec.name} was created, but its first checks could not finish (${reason}), and stopping it failed too (${stop instanceof Error ? stop.message : String(stop)}). The daemon stops it on its next pass, within 30 seconds.`) }
+        throw new AsideeError("runtime", `${spec.name} was created but stopped, and is kept for diagnosis: its first checks could not finish. ${reason} To try again: \`asd start ${spec.name}\`, then \`asd verify ${spec.name}\`; or \`asd remove ${spec.name} --confirm ${spec.name}\` and create it again.`)
       }
       const { checks, failed } = verified
       if (failed.length) {
         // Only when turning the requirement off would let this create through: a failure beside an unknown probe is a failed check.
         const unknown = failed.every((check) => check.status === "unknown" && CHECKLIST.find((item) => item.id === check.id)?.stage === "probe")
-        if (unknown) throw new PaddockError("probes-required", `${spec.name} was created but stopped, and is kept for diagnosis: ${failed.map((check) => `${titleOf(check.id)} (${check.detail})`).join("; ")}. Required isolation probes could not run. To try again: \`paddock remove ${spec.name} --confirm ${spec.name}\`, then create it again. Only to allow creation without them: run \`paddock config set require-probes off\` on this machine, or turn off Require isolation probes in Settings.`, failed)
+        if (unknown) throw new AsideeError("probes-required", `${spec.name} was created but stopped, and is kept for diagnosis: ${failed.map((check) => `${titleOf(check.id)} (${check.detail})`).join("; ")}. Required isolation probes could not run. To try again: \`asd remove ${spec.name} --confirm ${spec.name}\`, then create it again. Only to allow creation without them: run \`asd config set require-probes off\` on this machine, or turn off Require isolation probes in Settings.`, failed)
         this.refuse(spec.name, failed, "was created but stopped, and is kept for diagnosis")
       }
       return { manifest, checks }
@@ -237,7 +237,7 @@ export class Core {
     for (const extension of (await loadExtensions(this.dirs)).extensions) {
       if (!extension.hooks.postCreate) continue
       this.activity.set(spec.name, `Running ${extension.name}'s setup`)
-      const output = await runCommand(this.run, extension, extension.hooks.postCreate, { PADDOCK_SANDBOX: spec.name }, this.cliDir).finally(() => this.activity.delete(spec.name))
+      const output = await runCommand(this.run, extension, extension.hooks.postCreate, { ASIDEE_SANDBOX: spec.name }, this.cliDir).finally(() => this.activity.delete(spec.name))
       hooks.push({ extension: extension.id, exitCode: output.exitCode, output: `${output.stdout}${output.stderr}`.trim() })
     }
     return { sandbox: await this.get(spec.name).catch(() => this.view(manifest)), checks, hooks }
@@ -259,7 +259,7 @@ export class Core {
         const usedBytes = await this.provider(manifest).diskUsedBytes(manifest)
         const limitBytes = manifest.spec.diskGb * 1024 ** 3
         if (usedBytes !== undefined && usedBytes > limitBytes) sandbox.diskWarning = { usedBytes, limitBytes,
-          message: `${name} uses ${(usedBytes / 1024 ** 3).toFixed(2)} GB of its ${manifest.spec.diskGb} GB disk limit. It will be stopped again within about 30 seconds unless space is freed or the disk is resized. Run \`paddock exec ${name} -- …\` to free space, or \`paddock resize ${name} --disk N\` to raise the limit.` }
+          message: `${name} uses ${(usedBytes / 1024 ** 3).toFixed(2)} GB of its ${manifest.spec.diskGb} GB disk limit. It will be stopped again within about 30 seconds unless space is freed or the disk is resized. Run \`asd exec ${name} -- …\` to free space, or \`asd resize ${name} --disk N\` to raise the limit.` }
       }
       return sandbox
     })
@@ -278,7 +278,7 @@ export class Core {
   remove(name: string, confirm: unknown): Promise<{ removed: string }> {
     return this.exclusive(validName(name), async () => {
       const manifest = await readManifest(this.dirs, name)
-      if (confirm !== name) throw new PaddockError("usage", `Removing ${name} deletes everything in it.${typeof confirm === "string" && confirm ? ` --confirm ${confirm} does not match ${name}; nothing was removed.` : ""} To confirm: \`paddock remove ${name} --confirm ${name}\`.`)
+      if (confirm !== name) throw new AsideeError("usage", `Removing ${name} deletes everything in it.${typeof confirm === "string" && confirm ? ` --confirm ${confirm} does not match ${name}; nothing was removed.` : ""} To confirm: \`asd remove ${name} --confirm ${name}\`.`)
       this.activity.set(name, "Removing")
       this.endSessions(name, `The session ended: ${name} was removed.`)
       await this.provider(manifest).remove(manifest); await deleteManifest(this.dirs, name)
@@ -296,26 +296,26 @@ export class Core {
     return this.exclusive(validName(name), async () => {
       const manifest = await readManifest(this.dirs, name); const provider = this.provider(manifest); const before = manifest.spec
       const keys = ["cpus", "memoryGb", "pids", "diskGb"] as const
-      if (!keys.some((key) => input[key] !== undefined && input[key] !== null && input[key] !== "")) throw new PaddockError("usage", "Give at least one of --cpus, --memory, --pids and --disk.")
+      if (!keys.some((key) => input[key] !== undefined && input[key] !== null && input[key] !== "")) throw new AsideeError("usage", "Give at least one of --cpus, --memory, --pids and --disk.")
       const next = validSizes(input, before)
-      if (manifest.engine.capabilities?.resize === "none") throw new PaddockError("dependency", `${manifest.engine.label} cannot change a sandbox's limits.`)
+      if (manifest.engine.capabilities?.resize === "none") throw new AsideeError("dependency", `${manifest.engine.label} cannot change a sandbox's limits.`)
       const status = await provider.status(manifest)
-      if (status === "missing") throw new PaddockError("not-found", `${name} has no container on ${manifest.engine.label}.`)
+      if (status === "missing") throw new AsideeError("not-found", `${name} has no container on ${manifest.engine.label}.`)
       this.activity.set(name, "Resizing")
       const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(2)} GB`
       if (status === "running" && (next.memoryGb < before.memoryGb || next.pids < before.pids)) {
         const use = await provider.usage(manifest).catch(() => undefined)
-        if (!use) throw new PaddockError("conflict", `What ${name} uses now could not be read, so its limits were not lowered while it runs. Stop it and resize again; the new limits then apply at its next start.`)
+        if (!use) throw new AsideeError("conflict", `What ${name} uses now could not be read, so its limits were not lowered while it runs. Stop it and resize again; the new limits then apply at its next start.`)
         const memory = Math.round(next.memoryGb * 1024) * 1024 ** 2
         if (next.memoryGb < before.memoryGb && use.memoryBytes >= memory * SHRINK_HEADROOM)
-          throw new PaddockError("conflict", `${name} uses ${gb(use.memoryBytes)} of memory now; a limit of ${next.memoryGb} GB would leave it under ${Math.round((1 - SHRINK_HEADROOM) * 100)}% headroom, and the engine kills a sandbox that passes its limit. Nothing was changed. Free memory inside it, or stop it first.`)
+          throw new AsideeError("conflict", `${name} uses ${gb(use.memoryBytes)} of memory now; a limit of ${next.memoryGb} GB would leave it under ${Math.round((1 - SHRINK_HEADROOM) * 100)}% headroom, and the engine kills a sandbox that passes its limit. Nothing was changed. Free memory inside it, or stop it first.`)
         if (next.pids < before.pids && use.tasks >= next.pids * SHRINK_HEADROOM)
-          throw new PaddockError("conflict", `${name} runs ${use.tasks} tasks now (gVisor's own threads count); a limit of ${next.pids} would leave it under ${Math.round((1 - SHRINK_HEADROOM) * 100)}% headroom, and a gVisor sandbox that passes it ends. Nothing was changed.`)
+          throw new AsideeError("conflict", `${name} runs ${use.tasks} tasks now (gVisor's own threads count); a limit of ${next.pids} would leave it under ${Math.round((1 - SHRINK_HEADROOM) * 100)}% headroom, and a gVisor sandbox that passes it ends. Nothing was changed.`)
       }
       if (next.diskGb < before.diskGb && manifest.engine.capabilities?.diskLimit !== "none") {
         const used = await provider.diskUsedBytes(manifest)
-        if (used === undefined) throw new PaddockError("conflict", `${name}'s disk use could not be measured, so its disk limit was not lowered. Nothing was changed.`)
-        if (used > next.diskGb * 1024 ** 3) throw new PaddockError("conflict", `${name} uses ${gb(used)} of disk, more than ${next.diskGb} GB; the watch would stop it at once. Nothing was changed.`)
+        if (used === undefined) throw new AsideeError("conflict", `${name}'s disk use could not be measured, so its disk limit was not lowered. Nothing was changed.`)
+        if (used > next.diskGb * 1024 ** 3) throw new AsideeError("conflict", `${name} uses ${gb(used)} of disk, more than ${next.diskGb} GB; the watch would stop it at once. Nothing was changed.`)
       }
       const limitsChanged = (["cpus", "memoryGb", "pids"] as const).some((key) => next[key] !== before[key])
       const live = limitsChanged ? await provider.resize(manifest, next) : undefined
@@ -344,8 +344,8 @@ export class Core {
     const templateName = validTemplateName(as)
     return this.exclusive(validName(name), async () => {
       const manifest = await readManifest(this.dirs, name); const provider = this.provider(manifest)
-      if (manifest.engine.capabilities?.snapshot === false) throw new PaddockError("dependency", `${manifest.engine.label} cannot make templates: its gVisor runtime lacks --overlay2=none, so the engine does not see a sandbox's files.`)
-      if ((await provider.status(manifest)) === "missing") throw new PaddockError("not-found", `${name} has no container on ${manifest.engine.label}.`)
+      if (manifest.engine.capabilities?.snapshot === false) throw new AsideeError("dependency", `${manifest.engine.label} cannot make templates: its gVisor runtime lacks --overlay2=none, so the engine does not see a sandbox's files.`)
+      if ((await provider.status(manifest)) === "missing") throw new AsideeError("not-found", `${name} has no container on ${manifest.engine.label}.`)
       return this.exclusive(`template:${templateName}`, async () => {
         this.activity.set(name, `Saving template ${templateName}`)
         return { template: await provider.snapshot(manifest, templateName), contents: TEMPLATE_CONTENTS }
@@ -375,8 +375,8 @@ export class Core {
         if (typeof engineId === "string" && engineId && entry.engine.id !== engineId) continue
         if ((await entry.provider.templates(entry.engine)).some((template) => template.name === templateName)) found.push(entry)
       }
-      if (!found.length) throw new PaddockError("not-found", `There is no template named ${templateName}. See \`paddock template list\`.`)
-      if (found.length > 1) throw new PaddockError("usage", `Templates named ${templateName} are on ${found.map((entry) => entry.engine.id).join(" and ")}. Choose one with --engine.`)
+      if (!found.length) throw new AsideeError("not-found", `There is no template named ${templateName}. See \`asd template list\`.`)
+      if (found.length > 1) throw new AsideeError("usage", `Templates named ${templateName} are on ${found.map((entry) => entry.engine.id).join(" and ")}. Choose one with --engine.`)
       const removed = await found[0]!.provider.removeTemplate(found[0]!.engine, templateName)
       return { removed: templateName, ...removed, note: removed.dependants.length
         ? `Sandboxes made from it keep working (they run, stop and start as before): ${removed.dependants.join(", ")}. Its image is deleted when the last of them is removed.`
@@ -392,27 +392,27 @@ export class Core {
   }
 
   async exec(name: string, argv: unknown, options: { user?: string; stdin?: string | Uint8Array; signal?: AbortSignal } = {}): Promise<RunResult> {
-    if (!Array.isArray(argv) || argv.length === 0 || !argv.every((part) => typeof part === "string")) throw new PaddockError("usage", "exec needs a command.")
-    if (options.user !== undefined && !/^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}$/.test(options.user)) throw new PaddockError("usage", "The user must be a user name or id.")
+    if (!Array.isArray(argv) || argv.length === 0 || !argv.every((part) => typeof part === "string")) throw new AsideeError("usage", "exec needs a command.")
+    if (options.user !== undefined && !/^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}$/.test(options.user)) throw new AsideeError("usage", "The user must be a user name or id.")
     const manifest = await readManifest(this.dirs, name)
     const result = await this.provider(manifest).exec(manifest, argv as string[], options)
-    if (result.overflow) throw new PaddockError("runtime", `The command printed more than ${OUTPUT_LIMIT / 1024 ** 2} MiB on ${result.overflow}, the most one exec may return, so Paddock stopped reading and discarded its output. ${result.stderr} Write large output to a file inside the sandbox and read it in parts.`.replace(/  +/g, " "))
+    if (result.overflow) throw new AsideeError("runtime", `The command printed more than ${OUTPUT_LIMIT / 1024 ** 2} MiB on ${result.overflow}, the most one exec may return, so Asidee stopped reading and discarded its output. ${result.stderr} Write large output to a file inside the sandbox and read it in parts.`.replace(/  +/g, " "))
     return result
   }
 
   // A session on the stream socket. It never starts a sandbox: a client that reconnects on its own (an editor) must not
   // undo a stop.
   async openSession(request: OpenRequest): Promise<Session> {
-    if (request.kind === "workspace") throw new PaddockError("usage", "Use the workspace session handler.")
+    if (request.kind === "workspace") throw new AsideeError("usage", "Use the workspace session handler.")
     const manifest = await readManifest(this.dirs, request.name); const provider = this.provider(manifest)
-    if (request.machineId !== undefined && request.machineId !== this.machineId) throw new PaddockError("identity-changed", "The session names another machine.")
-    if (request.sandboxId !== undefined && request.sandboxId !== manifest.id) throw new PaddockError("identity-changed", "The sandbox was recreated; open a new session or forward explicitly.")
-    if (request.generation !== undefined && request.generation !== await provider.generation(manifest)) throw new PaddockError("conflict", "The sandbox's run changed; open a new forward explicitly.")
-    if (manifest.engine.capabilities?.execStream === false) throw new PaddockError("dependency", `${manifest.engine.label} cannot relay a session's bytes.`)
-    if ((await provider.status(manifest)) !== "running") throw new PaddockError("conflict", `${request.name} is not running. Start it with \`paddock start ${request.name}\`.`)
+    if (request.machineId !== undefined && request.machineId !== this.machineId) throw new AsideeError("identity-changed", "The session names another machine.")
+    if (request.sandboxId !== undefined && request.sandboxId !== manifest.id) throw new AsideeError("identity-changed", "The sandbox was recreated; open a new session or forward explicitly.")
+    if (request.generation !== undefined && request.generation !== await provider.generation(manifest)) throw new AsideeError("conflict", "The sandbox's run changed; open a new forward explicitly.")
+    if (manifest.engine.capabilities?.execStream === false) throw new AsideeError("dependency", `${manifest.engine.label} cannot relay a session's bytes.`)
+    if ((await provider.status(manifest)) !== "running") throw new AsideeError("conflict", `${request.name} is not running. Start it with \`asd start ${request.name}\`.`)
     if (request.kind === "lease") {
-      if (this.leases.has(request.leaseId)) throw new PaddockError("conflict", "This relay lease already exists.")
-      if (manifest.engine.capabilities?.loopbackRelay === false) throw new PaddockError("dependency", "This engine cannot relay sandbox loopback.")
+      if (this.leases.has(request.leaseId)) throw new AsideeError("conflict", "This relay lease already exists.")
+      if (manifest.engine.capabilities?.loopbackRelay === false) throw new AsideeError("dependency", "This engine cannot relay sandbox loopback.")
       await provider.prepareLoopback(manifest)
       const events = new EventEmitter(); let ended = false; let paused = false; let checking = false; let renewed = Date.now()
       const close = (reason = "The relay control stream ended.") => { if (ended) return; ended = true; clearInterval(watch); clearInterval(heartbeat); this.leases.delete(request.leaseId); for (const dial of lease.dials) dial.close(reason); events.emit("end", { error: reason }) }
@@ -433,14 +433,14 @@ export class Core {
     }
     if (request.kind === "dial") {
       const lease = this.leases.get(request.leaseId)
-      if (!lease || lease.name !== manifest.name || lease.sandboxId !== manifest.id || lease.generation !== request.generation || lease.port !== request.port) throw new PaddockError("conflict", "The forward lease is no longer open for this run and port.")
+      if (!lease || lease.name !== manifest.name || lease.sandboxId !== manifest.id || lease.generation !== request.generation || lease.port !== request.port) throw new AsideeError("conflict", "The forward lease is no longer open for this run and port.")
       const session = await provider.dialLoopback(manifest, request.port)
-      if (this.leases.get(request.leaseId) !== lease) { session.close(); throw new PaddockError("conflict", "The forward lease ended while connecting.") }
+      if (this.leases.get(request.leaseId) !== lease) { session.close(); throw new AsideeError("conflict", "The forward lease ended while connecting.") }
       lease.dials.add(session); session.on("end", () => lease.dials.delete(session)); this.trackSession(manifest.name, session)
       return session
     }
     // sshd in inetd mode serves this one connection; -e sends its complaints to the client's stderr.
-    if (request.kind === "ssh" && !manifest.ssh) throw new PaddockError("conflict", `SSH is not set up for ${request.name}. Run \`paddock ssh setup ${request.name}\`.`)
+    if (request.kind === "ssh" && !manifest.ssh) throw new AsideeError("conflict", `SSH is not set up for ${request.name}. Run \`asd ssh setup ${request.name}\`.`)
     const session = request.kind === "ssh" ? await provider.openExec(manifest, [manifest.ssh!.sshd, "-i", "-e", "-f", `${GUEST_SSH}/sshd_config`], { user: "0", tty: false })
       : await provider.openExec(manifest, request.argv, request)
     this.trackSession(request.name, session)
@@ -455,12 +455,12 @@ export class Core {
 
   async sessionTarget(name: unknown): Promise<{ name: string; machineId: string; sandboxId: string; generation: string }> {
     const manifest = await readManifest(this.dirs, validName(name)); const generation = await this.provider(manifest).generation(manifest)
-    if (!generation) throw new PaddockError("conflict", `${manifest.name} is not running. Start it with \`paddock start ${manifest.name}\`.`)
+    if (!generation) throw new AsideeError("conflict", `${manifest.name} is not running. Start it with \`asd start ${manifest.name}\`.`)
     return { name: manifest.name, machineId: this.machineId, sandboxId: manifest.id, generation }
   }
 
   closeSessions(): void {
-    for (const name of new Set([...this.sessions.keys(), ...[...this.forwards.values()].map((forward) => forward.view.name)])) this.endSessions(name, "The session ended: the Paddock daemon stopped.")
+    for (const name of new Set([...this.sessions.keys(), ...[...this.forwards.values()].map((forward) => forward.view.name)])) this.endSessions(name, "The session ended: the Asidee daemon stopped.")
     this.links.close()
   }
 
@@ -470,9 +470,9 @@ export class Core {
     const target = validPort(port, "The port"); const local = localPort === undefined || localPort === null || localPort === "" ? undefined : validPort(localPort, "The local port")
     return this.exclusive(validName(name), async () => {
       const manifest = await readManifest(this.dirs, name); const provider = this.provider(manifest)
-      if (manifest.engine.capabilities?.loopbackRelay === false) throw new PaddockError("dependency", `${manifest.engine.label} cannot relay a connection into a sandbox.`)
+      if (manifest.engine.capabilities?.loopbackRelay === false) throw new AsideeError("dependency", `${manifest.engine.label} cannot relay a connection into a sandbox.`)
       const generation = await provider.generation(manifest)
-      if (!generation) throw new PaddockError("conflict", `${name} is not running. Start it with \`paddock start ${name}\`, then add the forward.`)
+      if (!generation) throw new AsideeError("conflict", `${name} is not running. Start it with \`asd start ${name}\`, then add the forward.`)
       await provider.prepareLoopback(manifest)
       const server = await listenLoopback(local)
       const id = randomBytes(4).toString("hex")
@@ -515,7 +515,7 @@ export class Core {
   }
 
   forwardRemove(id: unknown): { closed: string } {
-    if (typeof id !== "string" || !this.forwards.has(id)) throw new PaddockError("not-found", `There is no forward ${String(id)}. See \`paddock forward list\`.`)
+    if (typeof id !== "string" || !this.forwards.has(id)) throw new AsideeError("not-found", `There is no forward ${String(id)}. See \`asd forward list\`.`)
     this.endForward(id, "The forward was removed.")
     return { closed: id }
   }
@@ -524,8 +524,8 @@ export class Core {
   private forwardCheck(manifest: Manifest): CheckResult {
     const mine = [...this.forwards.values()].filter((forward) => forward.view.sandboxId === manifest.id)
     const leases = [...this.leases.entries()].filter(([, lease]) => lease.sandboxId === manifest.id)
-    if (leases.length) return { id: "forwards", status: "info", evidence: "inspected", detail: `${leases.map(([id, lease]) => `SSH lease ${id} to sandbox loopback port ${lease.port}`).join(", ")}. This daemon checked the sandbox run and port. The primary's loopback listener address and current reachability are unknown here; \`paddock --host HOST forward list\` on the primary shows its listener. The lease ends with its control stream or sandbox run, or ${this.leaseTtlMs / 1000} seconds after the primary last renewed it.` }
-    if (!mine.length) return { id: "forwards", status: "info", evidence: "inspected", detail: "None. A forward added with `paddock forward add` listens on 127.0.0.1 only and ends when the sandbox stops." }
+    if (leases.length) return { id: "forwards", status: "info", evidence: "inspected", detail: `${leases.map(([id, lease]) => `SSH lease ${id} to sandbox loopback port ${lease.port}`).join(", ")}. This daemon checked the sandbox run and port. The primary's loopback listener address and current reachability are unknown here; \`asd --host HOST forward list\` on the primary shows its listener. The lease ends with its control stream or sandbox run, or ${this.leaseTtlMs / 1000} seconds after the primary last renewed it.` }
+    if (!mine.length) return { id: "forwards", status: "info", evidence: "inspected", detail: "None. A forward added with `asd forward add` listens on 127.0.0.1 only and ends when the sandbox stops." }
     const listed = mine.map((forward) => { const address = forward.server.address(); return `${typeof address === "object" && address ? `${address.address}:${address.port}` : "not listening"} to port ${forward.view.port} (${forward.view.id})` })
     return { id: "forwards", status: "info", evidence: "inspected", detail: `${listed.join(", ")}. ${FORWARD_REACH}` }
   }
@@ -535,17 +535,17 @@ export class Core {
   sshSetup(name: string, writeConfig = false, publicKey?: string): Promise<SshAccess & { config: string; include: string; included: boolean; editorKey: string; keyFile: string; sandboxId: string; setup: SshSetup }> {
     return this.exclusive(validName(name), async () => {
       const manifest = await readManifest(this.dirs, name); const provider = this.provider(manifest)
-      if (manifest.engine.capabilities?.execStream === false) throw new PaddockError("dependency", `${manifest.engine.label} cannot relay a session's bytes, which SSH needs.`)
-      if ((await provider.status(manifest)) !== "running") throw new PaddockError("conflict", `${name} is not running. Start it with \`paddock start ${name}\`, then set up SSH.`)
-      if (publicKey !== undefined && !validPublicKey(publicKey)) throw new PaddockError("usage", "SSH preparation needs an Ed25519 public key.")
+      if (manifest.engine.capabilities?.execStream === false) throw new AsideeError("dependency", `${manifest.engine.label} cannot relay a session's bytes, which SSH needs.`)
+      if ((await provider.status(manifest)) !== "running") throw new AsideeError("conflict", `${name} is not running. Start it with \`asd start ${name}\`, then set up SSH.`)
+      if (publicKey !== undefined && !validPublicKey(publicKey)) throw new AsideeError("usage", "SSH preparation needs an Ed25519 public key.")
       const key = publicKey === undefined ? await editorKey(this.dirs) : { path: "", publicKey, fingerprint: keyFingerprint(publicKey) }
       this.activity.set(name, "Preparing SSH")
       try {
         const who = await provider.exec(manifest, ["id", "-un"])
         const user = who.stdout.trim()
-        if (who.exitCode !== 0 || !/^[a-z_][a-z0-9_.-]{0,31}$/i.test(user)) throw new PaddockError("runtime", `Could not tell which user exec runs as in ${name}: ${who.stderr.trim() || user}`)
+        if (who.exitCode !== 0 || !/^[a-z_][a-z0-9_.-]{0,31}$/i.test(user)) throw new AsideeError("runtime", `Could not tell which user exec runs as in ${name}: ${who.stderr.trim() || user}`)
         const done = await provider.exec(manifest, ["sh", "-c", GUEST_SETUP, "sh", user, key.publicKey], { user: "0" })
-        if (done.exitCode !== 0) throw new PaddockError(done.exitCode === 4 ? "dependency" : "runtime", `Could not prepare sshd in ${name}: ${done.stderr.trim().split("\n").slice(-3).join(" ")}`)
+        if (done.exitCode !== 0) throw new AsideeError(done.exitCode === 4 ? "dependency" : "runtime", `Could not prepare sshd in ${name}: ${done.stderr.trim().split("\n").slice(-3).join(" ")}`)
         // A second setup finds the password already unlocked; the first one's word for it is kept.
         const guest = parseGuestSetup(done.stdout)
         manifest.ssh = { user, ...guest, unlocked: guest.unlocked || Boolean(manifest.ssh?.unlocked), editorKey: key.fingerprint, at: new Date().toISOString(), ...(publicKey === undefined ? {} : { editorKeyOrigin: "client" as const }) }
@@ -566,8 +566,8 @@ export class Core {
   }
 
   private sshCheck(manifest: Manifest): CheckResult {
-    if (!manifest.ssh) return { id: "ssh", status: "info", evidence: "inspected", detail: "Not set up. `paddock ssh setup` opens no port; it reaches sshd through the daemon." }
-    return { id: "ssh", status: "info", evidence: "inspected", detail: `Set up ${manifest.ssh.at.slice(0, 10)} for ${manifest.ssh.user} (${manifest.ssh.home}) with ${manifest.ssh.editorKeyOrigin === "client" ? "the requesting client's editor public key" : "this machine's editor key"} ${manifest.ssh.editorKey}, ${manifest.ssh.editorKeyOrigin === "client" ? "whose private half is not installed by this daemon" : "kept in Paddock's state folder"}. Anything that can read that private key can log in as ${manifest.ssh.user} and forward to the sandbox's loopback; no agent forwarding, no other key.${manifest.ssh.unlocked ? ` Setup replaced ${manifest.ssh.user}'s locked password with * (still no password) because sshd refuses a locked account.` : ""}` }
+    if (!manifest.ssh) return { id: "ssh", status: "info", evidence: "inspected", detail: "Not set up. `asd ssh setup` opens no port; it reaches sshd through the daemon." }
+    return { id: "ssh", status: "info", evidence: "inspected", detail: `Set up ${manifest.ssh.at.slice(0, 10)} for ${manifest.ssh.user} (${manifest.ssh.home}) with ${manifest.ssh.editorKeyOrigin === "client" ? "the requesting client's editor public key" : "this machine's editor key"} ${manifest.ssh.editorKey}, ${manifest.ssh.editorKeyOrigin === "client" ? "whose private half is not installed by this daemon" : "kept in Asidee's state folder"}. Anything that can read that private key can log in as ${manifest.ssh.user} and forward to the sandbox's loopback; no agent forwarding, no other key.${manifest.ssh.unlocked ? ` Setup replaced ${manifest.ssh.user}'s locked password with * (still no password) because sshd refuses a locked account.` : ""}` }
   }
 
   extensions() { return loadExtensions(this.dirs) }
@@ -575,15 +575,15 @@ export class Core {
   async runAction(extensionId: unknown, actionId: unknown, sandbox: unknown, values: unknown): Promise<RunResult> {
     const extension = (await loadExtensions(this.dirs)).extensions.find((entry) => entry.id === extensionId)
     const action = extension?.actions.find((entry) => entry.id === actionId)
-    if (!extension || !action) throw new PaddockError("not-found", `There is no action ${String(actionId)} in an extension ${String(extensionId)}.`)
+    if (!extension || !action) throw new AsideeError("not-found", `There is no action ${String(actionId)} in an extension ${String(extensionId)}.`)
     const env = fieldValues(action, (values ?? {}) as Record<string, unknown>)
-    if (action.scope === "sandbox") env.PADDOCK_SANDBOX = (await readManifest(this.dirs, validName(sandbox))).name
+    if (action.scope === "sandbox") env.ASIDEE_SANDBOX = (await readManifest(this.dirs, validName(sandbox))).name
     return runCommand(this.run, extension, action.run, env, this.cliDir)
   }
 
   // Called on a timer by the daemon, for every running sandbox: repeats the checks that are cheap (configuration, the
   // guard rules, the kernel) and measures disk use. A sandbox that fails one, or passed its watched disk limit, is
-  // stopped. This is what catches a guard that was flushed, a container started behind Paddock's back, or an engine
+  // stopped. This is what catches a guard that was flushed, a container started behind Asidee's back, or an engine
   // whose runtime was reconfigured, without waiting for someone to run verify.
   async enforce(): Promise<void> {
     for (const listed of await listManifests(this.dirs)) {
@@ -601,7 +601,7 @@ export class Core {
           // until theirs do). It is stopped rather than checked now: a check can fail to finish too.
           if (manifest.checksPending) {
             stoppingFor = `it was started at ${manifest.checksPending}, but its checks never finished: the daemon that started it ended first.`
-            await this.stopBecause(manifest, `Stopped by the daemon at ${new Date().toISOString()}: ${stoppingFor} It is kept for diagnosis. Start it and run \`paddock verify ${manifest.name}\`, or remove it and create it again.`)
+            await this.stopBecause(manifest, `Stopped by the daemon at ${new Date().toISOString()}: ${stoppingFor} It is kept for diagnosis. Start it and run \`asd verify ${manifest.name}\`, or remove it and create it again.`)
             this.unchecked.delete(manifest.name); return
           }
           const results = await this.stage(manifest, ["config", "runtime"], true)
@@ -632,7 +632,7 @@ export class Core {
         }
       }).catch((error) => { this.enforcementProblems.set(listed.name, { at: new Date().toISOString(), message: `Enforcement could not read its state: ${(error as Error).message}` }) })
     }
-    // Then links: a sandbox that started behind Paddock's back, or a daemon that just started, opens them again here.
+    // Then links: a sandbox that started behind Asidee's back, or a daemon that just started, opens them again here.
     await this.links.sync().catch(() => {})
   }
 

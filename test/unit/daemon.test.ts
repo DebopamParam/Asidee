@@ -3,16 +3,16 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createHandler } from "../../core/daemon"
-import { PaddockError } from "../../core/types"
+import { AsideeError } from "../../core/types"
 
 const TOKEN = "t".repeat(48)
 async function handler() {
-  const config = await mkdtemp(join(tmpdir(), "paddock-daemon-"))
+  const config = await mkdtemp(join(tmpdir(), "asidee-daemon-"))
   const table = {
     list: { run: async () => ["demo"] },
     echo: { run: async (body: Record<string, unknown>) => body },
     shutdown: { run: async () => ({ stopping: true }), socketOnly: true },
-    missing: { run: async () => { throw new PaddockError("not-found", "There is no sandbox named x.") } },
+    missing: { run: async () => { throw new AsideeError("not-found", "There is no sandbox named x.") } },
   }
   return { config, handle: createHandler(table, TOKEN, config) }
 }
@@ -59,7 +59,7 @@ test("unknown methods, inherited names and bad bodies are refused cleanly", asyn
 test("the dashboard is served without a token, a custom one replaces it, and paths stay inside its folder", async () => {
   const { handle, config } = await handler()
   const get = (path: string) => handle(new Request(`http://127.0.0.1:7717${path}`, { headers: { host: "127.0.0.1:7717" } }), false, 7717)
-  expect(await (await get("/")).text()).toContain("<title>Paddock</title>")
+  expect(await (await get("/")).text()).toContain("<title>Asidee</title>")
   await writeFile(join(config, "secret.txt"), "outside the ui folder")
   expect((await get("/../secret.txt")).status).toBe(404)
   expect((await get("/..%2Fsecret.txt")).status).toBe(404)

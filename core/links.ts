@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { FIN_QUIET_MS, validPort } from "./forwards"
 import { listManifests, readConfig, validName, type Dirs } from "./state"
-import { PaddockError, type CheckResult, type LinkSupport, type Manifest, type Provider, type Session } from "./types"
+import { AsideeError, type CheckResult, type LinkSupport, type Manifest, type Provider, type Session } from "./types"
 
 // A link lets programs in one sandbox (from) connect to one port on another's loopback (to), on this machine. Inside
 // `from`, a listener on a loopback address of the link's own, which /etc/hosts there names `to`, hands each connection
@@ -33,7 +33,7 @@ const READY_MS = 10_000
 const WATCH_MS = 2000
 // The loopback range links listen on inside `from`; gVisor answers on all of 127.0.0.0/8 without configuring it.
 const ADDRESSES = "127.77.0."
-const MARK = "# paddock-link"
+const MARK = "# asidee-link"
 
 type End = { name: string; sandboxId: string }
 export type LinkRecord = { id: string; from: End; to: End; port: number; address: string; createdAt: string; cut?: { at: string; reason: string } }
@@ -85,7 +85,7 @@ export class Links {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return this.records = []
       throw error
     }
-    const damaged = (why: string) => new PaddockError("conflict", `${this.file} cannot be read (${why}). No link opens until it is fixed or deleted.`)
+    const damaged = (why: string) => new AsideeError("conflict", `${this.file} cannot be read (${why}). No link opens until it is fixed or deleted.`)
     let data: unknown
     try { data = JSON.parse(text) } catch { throw damaged("it is not JSON") }
     const end = (value: unknown): value is End => typeof value === "object" && value !== null && typeof (value as End).name === "string" && /^[a-z0-9][a-z0-9-]{0,30}$/.test((value as End).name) && typeof (value as End).sandboxId === "string" && /^[0-9a-f]{32}$/.test((value as End).sandboxId)
@@ -108,7 +108,7 @@ export class Links {
 
   private support(manifest: Manifest): LinkSupport {
     const support = this.providerOf(manifest).links
-    if (!support || manifest.engine.capabilities?.loopbackRelay === false || manifest.engine.capabilities?.execStream === false) throw new PaddockError("dependency", `${manifest.engine.label} cannot link ${manifest.name} to another sandbox.`)
+    if (!support || manifest.engine.capabilities?.loopbackRelay === false || manifest.engine.capabilities?.execStream === false) throw new AsideeError("dependency", `${manifest.engine.label} cannot link ${manifest.name} to another sandbox.`)
     return support
   }
   private generation(manifest: Manifest): Promise<string | undefined> { return this.providerOf(manifest).generation(manifest).catch(() => undefined) }
@@ -128,18 +128,18 @@ export class Links {
 
   async add(fromName: unknown, toName: unknown, portValue: unknown): Promise<LinkView> {
     const from = validName(fromName); const to = validName(toName); const port = validPort(portValue, "The port")
-    if (from === to) throw new PaddockError("usage", "A sandbox cannot be linked to itself; its own loopback already reaches its ports.")
-    if (to === "localhost") throw new PaddockError("usage", "A sandbox named localhost cannot be linked to: inside the other sandbox that name means its own loopback.")
+    if (from === to) throw new AsideeError("usage", "A sandbox cannot be linked to itself; its own loopback already reaches its ports.")
+    if (to === "localhost") throw new AsideeError("usage", "A sandbox named localhost cannot be linked to: inside the other sandbox that name means its own loopback.")
     return this.queued(async () => {
       const { records, manifests } = await this.current()
       const fromManifest = manifests.get(from); const toManifest = manifests.get(to)
-      if (!fromManifest || !toManifest) throw new PaddockError("not-found", `There is no sandbox named ${!fromManifest ? from : to}.`)
+      if (!fromManifest || !toManifest) throw new AsideeError("not-found", `There is no sandbox named ${!fromManifest ? from : to}.`)
       this.support(fromManifest); this.support(toManifest)
       const existing = records.find((link) => link.from.sandboxId === fromManifest.id && link.to.sandboxId === toManifest.id && link.port === port)
       const others = records.filter((link) => link !== existing)
       for (const manifest of [fromManifest, toManifest]) {
         if (others.filter((link) => link.from.sandboxId === manifest.id || link.to.sandboxId === manifest.id).length >= LINKS_PER_SANDBOX)
-          throw new PaddockError("conflict", `${manifest.name} already has ${LINKS_PER_SANDBOX} links, the most a sandbox may have. Remove one with \`paddock link remove FROM TO --port PORT\`.`)
+          throw new AsideeError("conflict", `${manifest.name} already has ${LINKS_PER_SANDBOX} links, the most a sandbox may have. Remove one with \`asd link remove FROM TO --port PORT\`.`)
       }
       if (existing && !existing.cut && this.live.has(existing.id)) return this.view(existing, manifests)
       const used = new Set(others.filter((link) => link.from.sandboxId === fromManifest.id).map((link) => link.address))
@@ -156,16 +156,16 @@ export class Links {
       this.forgetRuntime(record.id)
       await this.writeHosts(fromManifest).catch(() => {})
       const refused = `The link from ${from} to ${to}:${port} was not added`
-      if (outcome === "cut") throw new PaddockError("check-failed", `${refused}: its test found that ${reason}`)
-      if (outcome === "unmeasured") throw new PaddockError("probes-required", `${refused}: it could not be measured (${reason}). Only to allow links without that measurement: \`paddock config set require-probes off\`.`)
-      throw new PaddockError("runtime", `${refused}: ${reason}`)
+      if (outcome === "cut") throw new AsideeError("check-failed", `${refused}: its test found that ${reason}`)
+      if (outcome === "unmeasured") throw new AsideeError("probes-required", `${refused}: it could not be measured (${reason}). Only to allow links without that measurement: \`asd config set require-probes off\`.`)
+      throw new AsideeError("runtime", `${refused}: ${reason}`)
     })
   }
 
   async list(name?: unknown): Promise<LinkView[]> {
     const only = name === undefined || name === null || name === "" ? undefined : validName(name)
     const { records, manifests } = await this.queued(() => this.current())
-    if (only && !manifests.has(only)) throw new PaddockError("not-found", `There is no sandbox named ${only}.`)
+    if (only && !manifests.has(only)) throw new AsideeError("not-found", `There is no sandbox named ${only}.`)
     return Promise.all(records.filter((link) => !only || link.from.name === only || link.to.name === only).map((link) => this.view(link, manifests)))
   }
 
@@ -174,7 +174,7 @@ export class Links {
     return this.queued(async () => {
       const { records, manifests } = await this.current()
       const record = records.find((link) => link.from.name === from && link.to.name === to && link.port === port)
-      if (!record) throw new PaddockError("not-found", `There is no link from ${from} to ${to}:${port}. See \`paddock link list\`.`)
+      if (!record) throw new AsideeError("not-found", `There is no link from ${from} to ${to}:${port}. See \`asd link list\`.`)
       await this.save(records.filter((link) => link !== record))
       await this.closeRoute(this.live.get(record.id), "The link was removed.")
       this.forgetRuntime(record.id)
@@ -212,11 +212,11 @@ export class Links {
     }
   }
 
-  close(): void { for (const route of [...this.live.values()]) { this.live.delete(route.record.id); void this.closeRoute(route, "The link ended: the Paddock daemon stopped.") } }
+  close(): void { for (const route of [...this.live.values()]) { this.live.delete(route.record.id); void this.closeRoute(route, "The link ended: the Asidee daemon stopped.") } }
 
   // Makes the running links match the records: drops links of removed sandboxes, restores each running `from`'s
   // /etc/hosts lines, and opens (and measures) each link whose two sandboxes run and that is not waiting to be tried
-  // again. A start through Paddock (`only`) tries that sandbox's links now.
+  // again. A start through Asidee (`only`) tries that sandbox's links now.
   sync(only?: string): Promise<void> {
     return this.queued(async () => {
       const { records, manifests } = await this.current()
@@ -340,7 +340,7 @@ export class Links {
   // the destination is never taken from it.
   private async route(record: LinkRecord, from: Manifest, to: Manifest, fromGen: string, toGen: string, port: number): Promise<Route> {
     const support = this.support(from)
-    const dir = `/.paddock/links/${record.id}.${port}`
+    const dir = `/.asidee/links/${record.id}.${port}`
     const listener = await support.listen(from, dir, record.address, port)
     let markFinished: () => void = () => {}
     const finished = new Promise<void>((resolve) => { markFinished = resolve })
@@ -375,7 +375,7 @@ export class Links {
     listener.on("end", () => { route.gone = true; settle(`its listener in ${from.name} ended`); void this.closeRoute(route, "The link's listener ended.") })
     const failed = await started
     clearTimeout(timer)
-    if (failed) { await this.closeRoute(route, failed); throw new PaddockError("runtime", failed) }
+    if (failed) { await this.closeRoute(route, failed); throw new AsideeError("runtime", failed) }
     return route
   }
 
@@ -389,7 +389,7 @@ export class Links {
       // As a forward does, each connection first checks that `to` is still the run the link was opened for.
       if (await this.generation(to) !== route.toGen) return this.finish(route, conn)
       // Each half is held as it arrives, so what it prints, or its end, while the other is still connecting waits for the pump.
-      const [halves, target] = await Promise.allSettled([this.support(from).attach(from, `/.paddock/links/${route.record.id}.${route.port}`, pid),
+      const [halves, target] = await Promise.allSettled([this.support(from).attach(from, `/.asidee/links/${route.record.id}.${route.port}`, pid),
         this.providerOf(to).dialLoopback(to, route.port, true)])
       if (halves.status === "fulfilled") conn.sessions.push(halves.value.fromClient, halves.value.toClient)
       if (target.status === "fulfilled") conn.sessions.push(target.value)
@@ -465,7 +465,7 @@ export class Links {
     let records: LinkRecord[]
     try { records = (await this.load()).filter((link) => link.from.sandboxId === manifest.id || link.to.sandboxId === manifest.id) }
     catch (error) { return { id: "links", status: "info", evidence: "inspected", detail: (error as Error).message } }
-    if (!records.length) return { id: "links", status: "info", evidence: "none", detail: "None. `paddock link add FROM TO --port PORT` lets programs in one sandbox reach one port on another's loopback through the daemon; no network is shared." }
+    if (!records.length) return { id: "links", status: "info", evidence: "none", detail: "None. `asd link add FROM TO --port PORT` lets programs in one sandbox reach one port on another's loopback through the daemon; no network is shared." }
     const manifests = new Map((await listManifests(this.dirs)).map((entry) => [entry.name, entry]))
     const lines = await Promise.all(records.map(async (link) => {
       const view = await this.view(link, manifests)
@@ -497,7 +497,7 @@ export class Links {
       for (const link of open) {
         const route = this.live.get(link.id)!
         const from = manifests.get(link.from.name)!; const to = manifests.get(link.to.name)!
-        // Puts back Paddock's lines in `from`'s /etc/hosts if they were changed, and notes any other line naming `to`.
+        // Puts back Asidee's lines in `from`'s /etc/hosts if they were changed, and notes any other line naming `to`.
         await this.writeHosts(from).catch(() => {})
         const measured = await this.measure(link, from, to, route.fromGen, route.toGen)
         this.measured.set(link.id, measured)

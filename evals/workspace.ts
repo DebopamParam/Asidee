@@ -25,23 +25,23 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
   const init = async () => {
     if (process.platform !== "darwin") skip("Workspaces require macOS.")
     if (root) return
-    root = await mkdtemp(join(import.meta.dir, "../dist/paddock-workspace-evals-"))
+    root = await mkdtemp(join(import.meta.dir, "../dist/asidee-workspace-evals-"))
     // nix develop's TMPDIR disappears when its command exits; a daemon must remain inspectable on failure.
-    state = await mkdtemp("/private/tmp/pdk-k-")
-    env = { ...process.env, PADDOCK_STATE_DIR: join(state, "s"), PADDOCK_CONFIG_DIR: join(state, "c"), PADDOCK_PORT: "0", PADDOCK_WORKSPACES_ROOT: join(root, "workspaces"),
-      PADDOCK_WORKSPACE_ONLY: "1", CLAUDE_CONFIG_DIR: join(root, "no-claude"), CODEX_HOME: join(root, "no-codex") }
+    state = await mkdtemp("/private/tmp/asd-k-")
+    env = { ...process.env, ASIDEE_STATE_DIR: join(state, "s"), ASIDEE_CONFIG_DIR: join(state, "c"), ASIDEE_PORT: "0", ASIDEE_WORKSPACES_ROOT: join(root, "workspaces"),
+      ASIDEE_WORKSPACE_ONLY: "1", CLAUDE_CONFIG_DIR: join(root, "no-claude"), CODEX_HOME: join(root, "no-codex") }
   }
-  const pdk = async (args: string[], stdin?: string) => { await init(); return sh([binary, ...args], { env, stdin, timeout: 90_000 }) }
-  const json = async (args: string[]) => { const result = await pdk(["--json", "workspace", ...args]); const reply = JSON.parse(result.out); expect(result.code === 0 && reply.ok, `workspace ${args[0]} refused: ${reply.error?.message ?? reply.data?.checks?.filter((check: { status: string }) => check.status === "fail").map((check: { detail: string }) => check.detail).join("; ") ?? result.err}`); return reply.data }
-  const manifest = async (name: string) => JSON.parse(await readFile(join(env.PADDOCK_STATE_DIR!, "workspaces", `${name}.json`), "utf8")) as WorkspaceManifest
+  const asd = async (args: string[], stdin?: string) => { await init(); return sh([binary, ...args], { env, stdin, timeout: 90_000 }) }
+  const json = async (args: string[]) => { const result = await asd(["--json", "workspace", ...args]); const reply = JSON.parse(result.out); expect(result.code === 0 && reply.ok, `workspace ${args[0]} refused: ${reply.error?.message ?? reply.data?.checks?.filter((check: { status: string }) => check.status === "fail").map((check: { detail: string }) => check.detail).join("; ") ?? result.err}`); return reply.data }
+  const manifest = async (name: string) => JSON.parse(await readFile(join(env.ASIDEE_STATE_DIR!, "workspaces", `${name}.json`), "utf8")) as WorkspaceManifest
   const make = async (args: string[] = []) => { await init(); const name = `k-${++counter}`; const report = await json(["create", name, "--no-logins", ...args]); return { name, folder: report.workspace.folder as string, manifest: await manifest(name) } }
   const inside = async (ws: { name: string }, argv: string[]) => {
     const m = await manifest(ws.name); const profile = workspaceProfile(m)
-    return sh(["/usr/bin/sandbox-exec", "-f", join(env.PADDOCK_STATE_DIR!, "workspaces", `${ws.name}.sb`), ...profile.params.flatMap((value) => ["-D", value]), "--", ...argv], { env: workspaceEnvironment(m), cwd: join(m.folder, "work"), timeout: 30_000 })
+    return sh(["/usr/bin/sandbox-exec", "-f", join(env.ASIDEE_STATE_DIR!, "workspaces", `${ws.name}.sb`), ...profile.params.flatMap((value) => ["-D", value]), "--", ...argv], { env: workspaceEnvironment(m), cwd: join(m.folder, "work"), timeout: 30_000 })
   }
   const spawnInside = async (ws: { name: string }, argv: string[]) => {
     const m = await manifest(ws.name); const profile = workspaceProfile(m)
-    const child = Bun.spawn(["/usr/bin/sandbox-exec", "-f", join(env.PADDOCK_STATE_DIR!, "workspaces", `${ws.name}.sb`), ...profile.params.flatMap((value) => ["-D", value]), "--", ...argv],
+    const child = Bun.spawn(["/usr/bin/sandbox-exec", "-f", join(env.ASIDEE_STATE_DIR!, "workspaces", `${ws.name}.sb`), ...profile.params.flatMap((value) => ["-D", value]), "--", ...argv],
       { env: workspaceEnvironment(m), cwd: join(m.folder, "work"), stdout: "pipe", stderr: "pipe" })
     started.push(child); void new Response(child.stdout).arrayBuffer(); void new Response(child.stderr).arrayBuffer(); return child
   }
@@ -49,20 +49,20 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
   const bundle = async (folder: string, label: string) => {
     const app = join(folder, `${label}.app`); const marker = join(folder, `${label}.ran`)
     await mkdir(join(app, "Contents/MacOS"), { recursive: true })
-    await writeFile(join(app, "Contents/Info.plist"), `<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>org.paddock.eval.${label}</string><key>CFBundleName</key><string>${label}</string><key>CFBundleExecutable</key><string>run</string><key>CFBundlePackageType</key><string>APPL</string><key>LSUIElement</key><true/></dict></plist>`)
+    await writeFile(join(app, "Contents/Info.plist"), `<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.asidee.eval.${label}</string><key>CFBundleName</key><string>${label}</string><key>CFBundleExecutable</key><string>run</string><key>CFBundlePackageType</key><string>APPL</string><key>LSUIElement</key><true/></dict></plist>`)
     await writeFile(join(app, "Contents/MacOS/run"), `#!/bin/sh\nprintf ran > '${marker}'\n`); await chmod(join(app, "Contents/MacOS/run"), 0o700)
     cleanup.push(() => sh([LSREGISTER, "-u", app])); return { app, marker }
   }
 
   ev("K15", "The finder lists zero for an empty workspace and exactly known pids, excluding decoys", async () => {
     await init()
-    const folder = join(root, "finder-control"); await mkdir(folder); const tag = join(folder, ".paddock-tag"); await writeFile(tag, "control")
+    const folder = join(root, "finder-control"); await mkdir(folder); const tag = join(folder, ".asidee-tag"); await writeFile(tag, "control")
     const temp = (await sh(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"])).out.trim()
     const profile = workspaceProfile({ folder, tag, home: await realpath(userInfo().homedir), userVar: await realpath(dirname(temp)), reads: [] })
     const file = join(root, "finder.sb"); await writeFile(file, profile.text)
     expect(workspacePids(folder).length === 0, "empty workspace matched unrelated pids; do not signal any finder result")
     const known = [0, 1].map(() => Bun.spawn(["/usr/bin/sandbox-exec", "-f", file, ...profile.params.flatMap((value) => ["-D", value]), "/bin/sleep", "60"], { stdout: "pipe", stderr: "pipe" }))
-    const decoy = Bun.spawn(["/bin/sleep", "60"], { env: { ...process.env, PADDOCK_WORKSPACE: "finder-control" }, stdout: "pipe", stderr: "pipe" })
+    const decoy = Bun.spawn(["/bin/sleep", "60"], { env: { ...process.env, ASIDEE_WORKSPACE: "finder-control" }, stdout: "pipe", stderr: "pipe" })
     started.push(...known, decoy)
     await Bun.sleep(150)
     expect(JSON.stringify(workspacePids(folder).sort()) === JSON.stringify(known.map((child) => child.pid).sort()), "finder did not match exactly the two known pids")
@@ -75,7 +75,7 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
     const ws = await make(); const paths = [join(root, "outside-write"), join(state, "tmp-write")]
     const created: string[] = []
     const userTemp = (await sh(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"])).out.trim()
-    const extra = [`${userTemp}paddock-k-${process.pid}`, `/Users/Shared/.paddock-k-${process.pid}`, `/opt/homebrew/Cellar/.paddock-k-${process.pid}`]
+    const extra = [`${userTemp}asidee-k-${process.pid}`, `/Users/Shared/.asidee-k-${process.pid}`, `/opt/homebrew/Cellar/.asidee-k-${process.pid}`]
     try {
       paths.push(...extra)
       for (const path of paths) {
@@ -93,20 +93,20 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
   ev("K02", "npm global, pip user and uv tool installs land in the workspace", async () => {
     const ws = await make(); const work = join(ws.folder, "work"); const pkg = join(work, "npm-pkg")
     try {
-      await mkdir(pkg); await writeFile(join(pkg, "package.json"), JSON.stringify({ name: "paddock-k-fixture", version: "1.0.0", bin: { "paddock-k-fixture": "cli.js" } })); await writeFile(join(pkg, "cli.js"), "#!/usr/bin/env node\nconsole.log('local package')\n")
+      await mkdir(pkg); await writeFile(join(pkg, "package.json"), JSON.stringify({ name: "asidee-k-fixture", version: "1.0.0", bin: { "asidee-k-fixture": "cli.js" } })); await writeFile(join(pkg, "cli.js"), "#!/usr/bin/env node\nconsole.log('local package')\n")
       const npm = await inside(ws, ["npm", "install", "--global", "--ignore-scripts", "--no-audit", "--no-fund", pkg])
       expect(npm.code === 0, `npm local install failed: ${npm.err.slice(0, 500)}`)
-      expect((await lstat(join(ws.folder, "home/.local/bin/paddock-k-fixture"))).isSymbolicLink(), "npm global bin is not under workspace home")
-      const wheel = join(work, "paddock_k_fixture-1.0.0-py3-none-any.whl")
-      const wheelCode = 'import zipfile,sys\nz=zipfile.ZipFile(sys.argv[1],"w")\nz.writestr("paddock_k_fixture.py","def main(): print(42)\\n")\np="paddock_k_fixture-1.0.0.dist-info/"\nz.writestr(p+"METADATA","Metadata-Version: 2.1\\nName: paddock-k-fixture\\nVersion: 1.0.0\\n")\nz.writestr(p+"WHEEL","Wheel-Version: 1.0\\nGenerator: paddock\\nRoot-Is-Purelib: true\\nTag: py3-none-any\\n")\nz.writestr(p+"entry_points.txt","[console_scripts]\\npaddock-k-python = paddock_k_fixture:main\\n")\nz.writestr(p+"RECORD","")\nz.close()'
+      expect((await lstat(join(ws.folder, "home/.local/bin/asidee-k-fixture"))).isSymbolicLink(), "npm global bin is not under workspace home")
+      const wheel = join(work, "asidee_k_fixture-1.0.0-py3-none-any.whl")
+      const wheelCode = 'import zipfile,sys\nz=zipfile.ZipFile(sys.argv[1],"w")\nz.writestr("asidee_k_fixture.py","def main(): print(42)\\n")\np="asidee_k_fixture-1.0.0.dist-info/"\nz.writestr(p+"METADATA","Metadata-Version: 2.1\\nName: asidee-k-fixture\\nVersion: 1.0.0\\n")\nz.writestr(p+"WHEEL","Wheel-Version: 1.0\\nGenerator: asidee\\nRoot-Is-Purelib: true\\nTag: py3-none-any\\n")\nz.writestr(p+"entry_points.txt","[console_scripts]\\nasidee-k-python = asidee_k_fixture:main\\n")\nz.writestr(p+"RECORD","")\nz.close()'
       expect((await sh(["/usr/bin/python3", "-c", wheelCode, wheel])).code === 0, "could not make the local wheel control")
       const pip = await inside(ws, ["/usr/bin/python3", "-m", "pip", "install", "--user", "--no-index", "--no-deps", wheel])
       expect(pip.code === 0, `pip user install failed: ${pip.err.slice(0, 500)}`)
-      const location = await inside(ws, ["/usr/bin/python3", "-c", "import paddock_k_fixture; print(paddock_k_fixture.__file__)"])
+      const location = await inside(ws, ["/usr/bin/python3", "-c", "import asidee_k_fixture; print(asidee_k_fixture.__file__)"])
       expect(location.code === 0 && location.out.startsWith(ws.folder), "pip module is not inside the workspace")
       const uv = await inside(ws, ["uv", "tool", "install", "--no-index", "--no-managed-python", "--python", "/usr/bin/python3", wheel])
       expect(uv.code === 0, `uv local tool install failed: ${uv.err.slice(0, 500)}`)
-      expect((await realpath(join(ws.folder, "home/.local/bin/paddock-k-python"))).startsWith(ws.folder), "uv tool executable is outside the workspace")
+      expect((await realpath(join(ws.folder, "home/.local/bin/asidee-k-python"))).startsWith(ws.folder), "uv tool executable is outside the workspace")
       return "Only local fixture packages installed; no package registry contacted."
     } finally { await drop(ws) }
   })
@@ -122,8 +122,8 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
         expect((await inside(ws, ["/bin/cat", path])).code !== 0, `closed read succeeded through ${path}`)
       }
       expect((await inside(ws, ["/bin/cat", join(shared, "file")])).out === "allowed", "declared read failed")
-      for (const path of [userInfo().homedir, join(userInfo().homedir, ".ssh"), env.PADDOCK_WORKSPACES_ROOT!, env.PADDOCK_STATE_DIR!, dirname(env.PADDOCK_WORKSPACES_ROOT!)]) {
-        const refused = await pdk(["workspace", "create", "forbidden", "--read", path]); expect(refused.code !== 0, "a sensitive --read was accepted")
+      for (const path of [userInfo().homedir, join(userInfo().homedir, ".ssh"), env.ASIDEE_WORKSPACES_ROOT!, env.ASIDEE_STATE_DIR!, dirname(env.ASIDEE_WORKSPACES_ROOT!)]) {
+        const refused = await asd(["workspace", "create", "forbidden", "--read", path]); expect(refused.code !== 0, "a sensitive --read was accepted")
       }
     } finally { await drop(ws) }
   })
@@ -191,7 +191,7 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
   })
 
   ev("K09", "A launchd job is refused beside a working harmless unconfined job", async () => {
-    const ws = await make(); const label = `org.paddock.eval.k${process.pid}`; const marker = join(root, "launchd-marker")
+    const ws = await make(); const label = `com.asidee.eval.k${process.pid}`; const marker = join(root, "launchd-marker")
     const argv = ["/bin/launchctl", "submit", "-l", label, "--", "/bin/sh", "-c", 'printf ran > "$1"', "probe", marker]
     try {
       expect((await sh(argv)).code === 0 && await wait(async () => Bun.file(marker).exists()), "unconfined launchd control did not run")
@@ -250,7 +250,7 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
     const ws = await make(); const other = await make(); const record = join(ws.folder, "work/pids")
     const script = join(ws.folder, "work/detach.py")
     await writeFile(script, `import os,time,subprocess\nrecord=${JSON.stringify(record)}\ndef note(pid):\n with open(record,'a') as f:f.write(str(pid)+'\\n')\nif os.fork():os._exit(0)\nos.setsid()\nif os.fork():os._exit(0)\nos.environ.clear()\nnote(os.getpid())\nfor mode in range(3):\n p=os.fork()\n if p==0:\n  if mode==1:os.setsid()\n  if mode==2:os.setpgid(0,0)\n  note(os.getpid());os.execl('/bin/sleep','sleep','60')\nfor i in range(80):\n p=subprocess.Popen(['/bin/sleep','60']);note(p.pid);time.sleep(.05)\ntime.sleep(60)\n`)
-    const decoy = Bun.spawn(["/bin/sleep", "60"], { env: { ...process.env, PADDOCK_WORKSPACE: ws.name }, stdout: "pipe", stderr: "pipe" }); started.push(decoy)
+    const decoy = Bun.spawn(["/bin/sleep", "60"], { env: { ...process.env, ASIDEE_WORKSPACE: ws.name }, stdout: "pipe", stderr: "pipe" }); started.push(decoy)
     try {
       const outside = await spawnInside(other, ["/bin/sleep", "60"])
       await spawnInside(ws, ["/usr/bin/python3", script])
@@ -278,7 +278,7 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
       expect(workspacePids(ws.folder).includes(pid), "control: command was not alive in workspace")
       client.kill("SIGKILL"); await client.exited
       expect(await wait(async () => !workspacePids(ws.folder).includes(pid), 10_000), `workspace command PID ${pid} still runs after its CLI client died`)
-      const control = await pdk(["workspace", "exec", ws.name, "--", "/bin/sh", "-c", "sleep 1; echo connected; exit 3"])
+      const control = await asd(["workspace", "exec", ws.name, "--", "/bin/sh", "-c", "sleep 1; echo connected; exit 3"])
       expect(control.code === 3 && control.out === "connected\n", `connected control: ${control.out}${control.err}`)
       return "disconnected client's command ended within 10 s; connected client received output and exit 3"
     } finally { client.kill("SIGKILL"); await json(["stop", ws.name]); await drop(ws) }
@@ -291,14 +291,14 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
       await link(outside, join(ws.folder, "work/shared"))
       expect((await inside(ws, ["/bin/sh", "-c", "printf changed > shared"])).code === 0, "hard-link write control did not work")
       expect((await sh([LSREGISTER, "-f", app.app])).code === 0 && (await sh([LSREGISTER, "-dump"])).out.includes(app.app), "app registration control failed")
-      expect((await pdk(["workspace", "remove", ws.name])).code === 2, "remove did not require --confirm")
+      expect((await asd(["workspace", "remove", ws.name])).code === 2, "remove did not require --confirm")
       const result = await drop(ws)
       expect(result.hardLinks.includes(join(ws.folder, "work/shared")), "hard-linked file was not reported")
-      expect(!await Bun.file(join(ws.folder, ".paddock-tag")).exists() && await readFile(outside, "utf8") === "changed", "remove retained workspace or touched outside hard link")
+      expect(!await Bun.file(join(ws.folder, ".asidee-tag")).exists() && await readFile(outside, "utf8") === "changed", "remove retained workspace or touched outside hard link")
       const remaining = (await sh([LSREGISTER, "-dump"])).out.split("\n").filter((line) => line.includes(app.app))
       expect(!remaining.length && result.launchServices.length === 0, `removed app remains registered or unregistration failed: ${JSON.stringify({ reported: result.launchServices, remaining })}`)
       expect(result.notRemoved.length > 0 && result.disclosure.includes("not a sandbox"), "removal residuals were not disclosed")
-    } finally { if (await Bun.file(join(ws.folder, ".paddock-tag")).exists()) await drop(ws) }
+    } finally { if (await Bun.file(join(ws.folder, ".asidee-tag")).exists()) await drop(ws) }
   })
 
   ev("K17", "Open loopback reaches a controlled outside listener and is disclosed with current listeners", async () => {
@@ -309,7 +309,7 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
       expect(got.code === 0 && got.out.includes("outside-loopback"), "open loopback did not reach outside listener")
       const report = await json(["verify", ws.name]); const loopback = report.checks.find((check: { id: string }) => check.id === "loopback")
       expect(loopback.status === "weak" && loopback.detail.includes(String(address.port)), "verify did not disclose the controlled current listener")
-      expect((await pdk(["workspace", "create", "ports", "--loopback", "80"])).code !== 0, "declared-ports mode was accepted")
+      expect((await asd(["workspace", "create", "ports", "--loopback", "80"])).code !== 0, "declared-ports mode was accepted")
       return "Random-port listener reached. Declared-ports mode is deliberately absent."
     } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await drop(ws) }
   })
@@ -325,7 +325,7 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
   })
 
   ev("K19", "A known outside process command line is visible inside, as disclosed", async () => {
-    const ws = await make(); const marker = `paddock-k-command-${process.pid}`
+    const ws = await make(); const marker = `asidee-k-command-${process.pid}`
     const child = Bun.spawn([process.execPath, "-e", "setInterval(()=>{},1000)", marker], { stdout: "pipe", stderr: "pipe" }); started.push(child)
     const code = `import{dlopen,ptr}from"bun:ffi";const l=dlopen("/usr/lib/libSystem.B.dylib",{sysctl:{args:["ptr","u32","ptr","ptr","ptr","u64"],returns:"i32"}});const mib=new Int32Array([1,49,${child.pid}]),data=new Uint8Array(262144),size=new BigUint64Array([262144n]);const rc=l.symbols.sysctl(ptr(mib),3,ptr(data),ptr(size),null,0);process.exit(rc===0&&Buffer.from(data).includes(${JSON.stringify(marker)})?0:1);`
     try { await Bun.sleep(150); expect((await inside(ws, [process.execPath, "-e", code])).code === 0, "known outside command line was not visible") }
@@ -341,7 +341,7 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
       if (control.code !== 0) skip(`The unconfined Codex sandbox control failed with exit ${control.code}: ${control.err.trim().slice(0, 600)}. Failure inside proves nothing.`)
       const result = await inside(ws, argv)
       expect(result.code !== 0 && /sandbox_apply|Operation not permitted/.test(result.err), "Codex inner sandbox failure was not established")
-      return "Only the eval explicitly invoked Codex's sandbox. Paddock supplies no agent sandbox flags."
+      return "Only the eval explicitly invoked Codex's sandbox. Asidee supplies no agent sandbox flags."
     } finally { await drop(ws) }
   })
 
@@ -361,19 +361,19 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
       expect((await inside(ws, ["/bin/sh", "-c", "printf changed > data"])).code === 0, "copy cannot be modified inside")
       await drop(ws)
       expect((await stat(join(source, "data"))).size === 4 * 1024 * 1024, "workspace execution or removal changed original")
-      return "Both cp -cR and cp -R produced independent inodes and preserved source bytes. Paddock uses cp -R -P -X for a plain, non-dereferencing copy; no speed claim."
-    } finally { if (await Bun.file(join(ws.folder, ".paddock-tag")).exists()) await drop(ws) }
+      return "Both cp -cR and cp -R produced independent inodes and preserved source bytes. Asidee uses cp -R -P -X for a plain, non-dereferencing copy; no speed claim."
+    } finally { if (await Bun.file(join(ws.folder, ".asidee-tag")).exists()) await drop(ws) }
   })
 
   ev("K22", "Workspace CLI pipes carry stdin, separate stderr and preserve exit codes through the socket", async () => {
     const ws = await make()
     try {
-      const result = await pdk(["workspace", "exec", ws.name, "--stdin", "--", "/bin/sh", "-c", "cat; printf separate >&2; exit 7"], "input\u0000bytes")
+      const result = await asd(["workspace", "exec", ws.name, "--stdin", "--", "/bin/sh", "-c", "cat; printf separate >&2; exit 7"], "input\u0000bytes")
       expect(result.code === 7 && result.out === "input\u0000bytes" && result.err.includes("separate"), "buffered stdin/stdout/stderr or exit code changed")
-      const streamed = await pdk(["workspace", "exec", ws.name, "--stream", "--", "/bin/cat"], "streamed bytes")
+      const streamed = await asd(["workspace", "exec", ws.name, "--stream", "--", "/bin/cat"], "streamed bytes")
       expect(streamed.code === 0 && streamed.out === "streamed bytes", "stream socket did not relay workspace bytes")
-      const text = await pdk(["workspace", "list"]); expect(text.out.includes("not a sandbox"), "list lacks disclosure")
-      const daemon = JSON.parse(await readFile(join(env.PADDOCK_STATE_DIR!, "daemon.json"), "utf8"))
+      const text = await asd(["workspace", "list"]); expect(text.out.includes("not a sandbox"), "list lacks disclosure")
+      const daemon = JSON.parse(await readFile(join(env.ASIDEE_STATE_DIR!, "daemon.json"), "utf8"))
       for (const method of ["workspaceList", "workspaceGet", "workspaceCreate", "workspaceExec", "workspaceShell", "workspaceStop", "workspaceRemove", "workspaceVerify"]) {
         const response = await fetch(`http://127.0.0.1:${daemon.port}/api/${method}`, { method: "POST", headers: { authorization: `Bearer ${daemon.token}` }, body: JSON.stringify({ name: ws.name }) })
         expect(response.status === 403, `${method} was available over TCP`)
@@ -393,14 +393,14 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
       const credential = join(m.folder, "home/.claude/.credentials.json")
       expect((await stat(credential)).nlink === 1 && ((await stat(credential)).mode & 0o777) === 0o600, "Claude login file is not private")
       expect(((await stat(join(m.folder, "home/.claude/.claude.json"))).mode & 0o777) === 0o600, "Claude state is not private")
-      const status = await pdk(["workspace", "exec", name, "--", "claude", "auth", "status"])
+      const status = await asd(["workspace", "exec", name, "--", "claude", "auth", "status"])
       let loggedIn = false
       try { loggedIn = JSON.parse(status.out).loggedIn === true } catch {}
       expect(status.code === 0 && loggedIn, "Claude credential and state were written, but auth status inside did not report loggedIn true (exit " + status.code + "); output withheld")
       expect(report.checks.find((check: { id: string }) => check.id === "credentials").detail.includes("CLI reports logged in"), "create did not report the measured login status")
       return "Default profile selected independently of daemon environment; timed Keychain reader reused from sandbox login import. Private credential and onboarding/account state copied. Product-path claude auth status reported loggedIn true. "
         + report.checks.find((check: { id: string }) => check.id === "credentials").detail + " No login, logout, authenticated API call or refresh was performed."
-    } finally { if (await Bun.file(join(env.PADDOCK_STATE_DIR!, "workspaces", name + ".json")).exists()) await json(["remove", name, "--confirm", name]) }
+    } finally { if (await Bun.file(join(env.ASIDEE_STATE_DIR!, "workspaces", name + ".json")).exists()) await json(["remove", name, "--confirm", name]) }
   })
 
   ev("K24", "Time Machine reports the workspace folder excluded after creation", async () => {
@@ -418,7 +418,7 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
     try {
       await rm(ws.manifest.tag); await chmod(ws.folder, 0o555)
       const before = await stat(ws.folder)
-      const response = await fetch("http://paddock/api/summary", { unix: join(env.PADDOCK_STATE_DIR!, "daemon.sock"), method: "POST", body: "{}" } as RequestInit)
+      const response = await fetch("http://asidee/api/summary", { unix: join(env.ASIDEE_STATE_DIR!, "daemon.sock"), method: "POST", body: "{}" } as RequestInit)
       const reply = await response.json() as { ok: boolean; data: { workspaces: Array<{ name: string; status: string; sizeBytes?: number }> } }
       const row = reply.data.workspaces.find((entry) => entry.name === ws.name)
       expect(reply.ok && row?.status === "unknown" && row.sizeBytes === undefined, "summary repaired missing identity or returned a size walk")
@@ -435,9 +435,9 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
       await mkdir(bin, { recursive: true }); await writeFile(join(bin, "ffmpeg"), '#!/bin/sh\nprintf called > "$HOME/information-called"\nexit 1\n'); await chmod(join(bin, "ffmpeg"), 0o700)
       await mkdir(closed); await chmod(closed, 0)
       const previous = (await manifest(ws.name)).lastVerify?.at
-      const output = await pdk(["workspace", "exec", ws.name, "--", "/usr/bin/true"])
+      const output = await asd(["workspace", "exec", ws.name, "--", "/usr/bin/true"])
       expect(output.code === 0 && !await Bun.file(join(home, "information-called")).exists() && ((await stat(closed)).mode & 0o777) === 0, "exec ran information probes or changed directory permissions")
-      const shell = await pdk(["workspace", "shell", ws.name, "--", "/usr/bin/true"])
+      const shell = await asd(["workspace", "shell", ws.name, "--", "/usr/bin/true"])
       expect(shell.code === 0 && !await Bun.file(join(home, "information-called")).exists(), "shell ran informational probes")
       expect((await manifest(ws.name)).lastVerify?.at === previous, "exec replaced the last full verify")
       const report = await json(["verify", ws.name])
@@ -452,10 +452,10 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
     const ws = await make(); const target = join(root, "argument-control")
     try {
       const argv = ["-D", "WS=/", "/bin/sh", "-c", 'printf escaped > "$1"', "control", target]
-      const confined = await pdk(["workspace", "exec", ws.name, "--", ...argv])
+      const confined = await asd(["workspace", "exec", ws.name, "--", ...argv])
       expect(confined.code === 71 && !await Bun.file(target).exists(), "the product parsed command arguments as sandbox-exec options")
       const profile = workspaceProfile(ws.manifest)
-      const control = await sh(["/usr/bin/sandbox-exec", "-f", join(env.PADDOCK_STATE_DIR!, "workspaces", `${ws.name}.sb`), ...profile.params.flatMap((value) => ["-D", value]), ...argv], { env: workspaceEnvironment(ws.manifest), cwd: join(ws.folder, "work") })
+      const control = await sh(["/usr/bin/sandbox-exec", "-f", join(env.ASIDEE_STATE_DIR!, "workspaces", `${ws.name}.sb`), ...profile.params.flatMap((value) => ["-D", value]), ...argv], { env: workspaceEnvironment(ws.manifest), cwd: join(ws.folder, "work") })
       expect(control.code === 0 && await readFile(target, "utf8") === "escaped", "the old unseparated form did not demonstrate parameter replacement")
       return "Old form accepted -D WS=/ and wrote only this eval's outside control file. Product -- separator caused execvp of -D to fail, with no outside write. The tested -p two-profile form itself returned usage error on this macOS."
     } finally { await drop(ws) }
@@ -468,7 +468,7 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
       child = Bun.spawn(["/usr/bin/sandbox-exec", "-f", file, "-D", `WS=${ws.folder}`, "-D", `TAGFILE=${ws.manifest.tag}`, "--", "/bin/sleep", "30"], { stdout: "pipe", stderr: "pipe" }); started.push(child)
       await Bun.sleep(100)
       expect(controlledDecision(child.pid, child.pid, "file-read-data", 1, ws.folder) === "allowed", "valid same-operation confined control failed")
-      expect(controlledDecision(child.pid, child.pid, "paddock-misspelled-operation") === "unknown", "misspelled operation was treated as measured")
+      expect(controlledDecision(child.pid, child.pid, "asidee-misspelled-operation") === "unknown", "misspelled operation was treated as measured")
       expect(controlledDecision(child.pid, process.pid, "file-read-data", 1, ws.folder) === "unknown", "an unconfined decision control was accepted")
       const report = await json(["verify", ws.name])
       expect(report.checks.find((entry: { id: string }) => entry.id === "daemons").status === "pass", "live Unix socket and confined decision controls did not pass")
@@ -502,23 +502,23 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
       started.push(writer)
       const began = Date.now(); const view = await stoppedWithin(ws.name)
       notes.push(`stopped ${((Date.now() - began) / 1000).toFixed(0)} s after the write began`)
-      expect(view.status === "idle" && /^Stopped by the daemon at \S+: k-\d+ uses 1\.0\d GiB of its 1 GiB disk limit\. Free space in .+, or raise the limit: paddock workspace set k-\d+ disk N$/.test(view.stopReason), `get: ${JSON.stringify(view)}`)
+      expect(view.status === "idle" && /^Stopped by the daemon at \S+: k-\d+ uses 1\.0\d GiB of its 1 GiB disk limit\. Free space in .+, or raise the limit: asd workspace set k-\d+ disk N$/.test(view.stopReason), `get: ${JSON.stringify(view)}`)
       const exited = await Promise.race([writer.exited, Bun.sleep(10_000).then(() => "running")])
       expect(exited !== "running", "the writer's exec was still running after the stop")
-      const listed = await pdk(["workspace", "list"])
+      const listed = await asd(["workspace", "list"])
       expect(listed.out.includes(view.stopReason), `list did not show the reason: ${listed.out.slice(0, 500)}`)
       notes.push(`reason: ${view.stopReason.replace(/^Stopped by the daemon at \S+: /, "")}`)
-      const relaunch = await pdk(["--json", "workspace", "exec", ws.name, "--", "/bin/ls", "big"])
+      const relaunch = await asd(["--json", "workspace", "exec", ws.name, "--", "/bin/ls", "big"])
       const warned = JSON.parse(relaunch.out).data
       expect(relaunch.code === 0 && warned.diskWarning?.limitBytes === 1024 ** 3 && warned.diskWarning.usedBytes > 1024 ** 3, `JSON relaunch: ${relaunch.out.slice(0, 500)}`)
-      const cleanup = await pdk(["workspace", "exec", ws.name, "--", "/bin/rm", "big"])
+      const cleanup = await asd(["workspace", "exec", ws.name, "--", "/bin/rm", "big"])
       expect(cleanup.code === 0 && cleanup.err.includes(warned.diskWarning.message), `text relaunch: exit ${cleanup.code}, err ${cleanup.err.slice(0, 500)}`)
-      const after = await pdk(["--json", "workspace", "exec", ws.name, "--", "/usr/bin/true"])
-      const plain = await pdk(["workspace", "exec", ws.name, "--", "/usr/bin/true"])
+      const after = await asd(["--json", "workspace", "exec", ws.name, "--", "/usr/bin/true"])
+      const plain = await asd(["workspace", "exec", ws.name, "--", "/usr/bin/true"])
       expect(after.code === 0 && JSON.parse(after.out).data.diskWarning === undefined && plain.code === 0 && !plain.err.includes("disk limit"), `after cleanup: ${after.out.slice(0, 300)} ${plain.err.slice(0, 300)}`)
       expect((await json(["get", ws.name])).stopReason === undefined, "the stop reason stayed after a launch under the limit")
       // Private tmp is inside the folder, so it is measured and removed with it.
-      const tmp = await pdk(["workspace", "exec", ws.name, "--", "/bin/sh", "-c", 'printf kept > "$TMPDIR/left" && printf %s "$TMPDIR"'])
+      const tmp = await asd(["workspace", "exec", ws.name, "--", "/bin/sh", "-c", 'printf kept > "$TMPDIR/left" && printf %s "$TMPDIR"'])
       const left = join(ws.folder, "tmp", "left")
       expect(tmp.out === `${join(ws.folder, "tmp")}/` && await readFile(left, "utf8") === "kept", `TMPDIR ${tmp.out}`)
       await drop(ws)
@@ -530,21 +530,21 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
 
   ev("K32", "Below the free-space floor a launch is refused with the setting's command and a running workspace is stopped; the floor is restored", async () => {
     const ws = await make()
-    const before = (JSON.parse((await pdk(["--json", "config", "get"])).out).data as { workspaceFreeSpaceGb: number }).workspaceFreeSpaceGb
+    const before = (JSON.parse((await asd(["--json", "config", "get"])).out).data as { workspaceFreeSpaceGb: number }).workspaceFreeSpaceGb
     try {
       const sleeper = Bun.spawn([binary, "workspace", "exec", ws.name, "--", "/bin/sleep", "300"], { env, stdout: "pipe", stderr: "pipe" }); started.push(sleeper)
       for (let i = 0; i < 100 && (await json(["get", ws.name])).status !== "running"; i++) await Bun.sleep(100)
       // Far above this Mac's free space, so the floor is not met.
-      const set = await pdk(["config", "set", "workspace-free-space", "100000"])
+      const set = await asd(["config", "set", "workspace-free-space", "100000"])
       expect(set.code === 0 && set.out === "workspace-free-space 100000 GiB\n", `set: ${set.out}${set.err}`)
-      const refused = await pdk(["workspace", "exec", ws.name, "--", "/usr/bin/true"])
-      const sentence = /This Mac has [\d.]+ GiB free where workspaces live, below the 100000 GiB floor\. Free space on this Mac, or change the floor: paddock config set workspace-free-space GiB/
+      const refused = await asd(["workspace", "exec", ws.name, "--", "/usr/bin/true"])
+      const sentence = /This Mac has [\d.]+ GiB free where workspaces live, below the 100000 GiB floor\. Free space on this Mac, or change the floor: asd config set workspace-free-space GiB/
       expect(refused.code === 6 && sentence.test(refused.err), `exit ${refused.code}: ${refused.err.slice(0, 600)}`)
       const view = await stoppedWithin(ws.name)
       expect(view.status === "idle" && sentence.test(view.stopReason), `get: ${JSON.stringify(view)}`)
       return `refused with: ${sentence.exec(refused.err)![0]}`
     } finally {
-      const restored = await pdk(["config", "set", "workspace-free-space", String(before)])
+      const restored = await asd(["config", "set", "workspace-free-space", String(before)])
       expect(restored.code === 0 && restored.out === `workspace-free-space ${before} GiB\n`, `the floor was not restored: ${restored.out}${restored.err}`)
       await drop(ws)
     }
@@ -556,10 +556,10 @@ export function workspaceSuite(binary: string, skip: (reason: string) => never) 
     const list = await json(["list"])
     for (const ws of list) await drop(ws)
     for (const child of started) { if (child.exitCode === null) { child.kill("SIGKILL"); await child.exited } }
-    const daemonFile = join(env.PADDOCK_STATE_DIR!, "daemon.json")
+    const daemonFile = join(env.ASIDEE_STATE_DIR!, "daemon.json")
     let daemonPid: number | undefined
     try { daemonPid = JSON.parse(await readFile(daemonFile, "utf8")).pid } catch {}
-    await pdk(["daemon", "stop"])
+    await asd(["daemon", "stop"])
     if (daemonPid) { try { process.kill(daemonPid, 0); throw new Error("workspace eval daemon survived its stop") } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error } }
     await rm(root, { recursive: true, force: true }); await rm(state, { recursive: true, force: true })
   } }
@@ -583,7 +583,7 @@ export async function runWorkspaceEvals(args: string[], binary: string): Promise
   console.log(summary)
   if (args.includes("--write")) {
     const path = join(import.meta.dir, "SCORECARD.workspace.md")
-    const revision = process.env.PADDOCK_EVAL_REVISION ?? (await sh(["git", "rev-parse", "--short", "HEAD"])).out.trim()
+    const revision = process.env.ASIDEE_EVAL_REVISION ?? (await sh(["git", "rev-parse", "--short", "HEAD"])).out.trim()
     const dirty = (await sh(["git", "status", "--porcelain", "--", "core", "cli", "ui", "package.json", "evals/run.ts", "evals/workspace.ts", "evals/workspace-metal.m"])).out.trim()
     await writeFile(path, `# Workspace scorecard\n\nOnly ${outcomes.map((ev) => ev.id).join(", ")}, on macOS ${(await sh(["/usr/bin/sw_vers", "-productVersion"])).out.trim()}, ${process.arch}, ${new Date().toISOString()}, revision ${revision}${dirty ? " plus uncommitted implementation changes" : ""}.\nThe sandbox scorecards are unchanged.\n\n${summary}.\n\n| Id | Result | Claim | Evidence or limit |\n|---|---|---|---|\n${outcomes.map((ev) => `| ${ev.id} | ${ev.result} | ${ev.claim} | ${ev.note.replace(/\|/g, "\\|").replace(/\n/g, " ")} |`).join("\n")}\n`)
   }

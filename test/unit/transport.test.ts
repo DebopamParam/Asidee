@@ -12,17 +12,17 @@ const host = { ssh: "unused", binary: "/unused", stateDir: "/unused" }
 
 const KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEU61N7KJmkiTPSmrOfaemXZu/1hocrAC0WXPcRUyjQ8"
 const OTHER = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-// A stand-in ssh that holds `actual` and behaves as OpenSSH does with the options Paddock passes: it compares the key in
+// A stand-in ssh that holds `actual` and behaves as OpenSSH does with the options Asidee passes: it compares the key in
 // the UserKnownHostsFile it is given and, if that is not its key, refuses before reading stdin or printing anything.
 async function keyedSsh(actual: string, output: Uint8Array) {
-  const root = await mkdtemp(join(tmpdir(), "pdk-pin-")); const path = process.env.PATH
+  const root = await mkdtemp(join(tmpdir(), "asd-pin-")); const path = process.env.PATH
   await writeFile(join(root, "output"), output)
   await writeFile(join(root, "ssh"), `#!/bin/sh
 printf '%s\\n' "$@" > '${root}/argv'
 for arg in "$@"; do case "$arg" in UserKnownHostsFile=*) file="\${arg#UserKnownHostsFile=}";; esac; done
 cp "$file" '${root}/pinned' 2>/dev/null
-if [ "$(cat "$file" 2>/dev/null)" != "paddock-enrolled-host ${actual}" ]; then
-  printf 'The fingerprint for the ED25519 key sent by the remote host is\\nSHA256:${"C".repeat(43)}.\\nHost key for paddock-enrolled-host has changed and you have requested strict checking.\\nHost key verification failed.\\n' >&2; exit 255
+if [ "$(cat "$file" 2>/dev/null)" != "asidee-enrolled-host ${actual}" ]; then
+  printf 'The fingerprint for the ED25519 key sent by the remote host is\\nSHA256:${"C".repeat(43)}.\\nHost key for asidee-enrolled-host has changed and you have requested strict checking.\\nHost key verification failed.\\n' >&2; exit 255
 fi
 cat '${root}/output'; cat > '${root}/sent'
 `)
@@ -41,9 +41,9 @@ test("a recorded host public key pins every request and stream, and a refused ke
   finally { await client.close() }
   expect(await Bun.file(join(root, "sent")).exists()).toBe(false)
   const argv = (await Bun.file(join(root, "argv")).text()).split("\n")
-  for (const option of ["GlobalKnownHostsFile=/dev/null", "HostKeyAlias=paddock-enrolled-host", "CheckHostIP=no", "VerifyHostKeyDNS=no", "KnownHostsCommand=none", "StrictHostKeyChecking=yes"]) expect(argv).toContain(option)
+  for (const option of ["GlobalKnownHostsFile=/dev/null", "HostKeyAlias=asidee-enrolled-host", "CheckHostIP=no", "VerifyHostKeyDNS=no", "KnownHostsCommand=none", "StrictHostKeyChecking=yes"]) expect(argv).toContain(option)
   expect(argv).not.toContain("-v")
-  expect(await Bun.file(join(root, "pinned")).text()).toBe(`paddock-enrolled-host ${KEY}\n`)
+  expect(await Bun.file(join(root, "pinned")).text()).toBe(`asidee-enrolled-host ${KEY}\n`)
   // The private known_hosts file is gone once ssh is.
   expect(await Bun.file(argv.find((arg) => arg.startsWith("UserKnownHostsFile="))!.slice("UserKnownHostsFile=".length)).exists()).toBe(false)
   await expect(RemoteSession.open(pinned, { kind: "exec", name: "demo", argv: ["true"], tty: false })).rejects.toMatchObject({ code: "identity-changed", message: expect.stringContaining("re-enroll") })
@@ -64,7 +64,7 @@ test("a fingerprint is computed as ssh-keygen prints it, and only plain known_ho
   for (const bad of ["ssh-ed25519", `${KEY}\nevil ${KEY}`, `ssh-ed25519-cert-v01@openssh.com ${KEY.split(" ")[1]}`, `${KEY} comment`, `-o ${KEY.split(" ")[1]}`]) expect(() => hostPublicKey(bad)).toThrow()
 })
 async function peer(answer: (socket: Socket) => void) {
-  const root = await mkdtemp(join(tmpdir(), "pdk-wire-")); const path = join(root, "peer.sock")
+  const root = await mkdtemp(join(tmpdir(), "asd-wire-")); const path = join(root, "peer.sock")
   const sockets = new Set<Socket>()
   const server = createServer((socket) => { sockets.add(socket); socket.on("error", () => {}); socket.once("data", () => answer(socket)) })
   await new Promise<void>((resolve) => server.listen(path, resolve))
@@ -130,7 +130,7 @@ test("a remote error message that fills a whole frame reaches the client cut sho
   const connection = await peer((socket) => socket.write(Buffer.concat([frame("ready", { tty: false }), frame("error", { code: "usage", message })])))
   let closed = false; const close = connection.close; connection.close = async () => { closed = true; await close() }
   let session: RemoteSession | undefined
-  const root = await mkdtemp(join(tmpdir(), "pdk-relay-")); const path = join(root, "stream.sock")
+  const root = await mkdtemp(join(tmpdir(), "asd-relay-")); const path = join(root, "stream.sock")
   const server = createServer((socket) => serveStream(socket, async (request) => (session = await RemoteSession.open(host, request, connection))))
   await new Promise<void>((resolve) => server.listen(path, resolve))
   cleanups.push(async () => { await new Promise<void>((resolve) => server.close(() => resolve())); await rm(root, { recursive: true, force: true }) })
@@ -154,7 +154,7 @@ test("a session's SSH connection closes even when a listener of its end throws",
 })
 
 test("closing an SSH process that was stopped (SIGSTOP) finishes within its kill bound", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pdk-ssh-")); const path = process.env.PATH
+  const root = await mkdtemp(join(tmpdir(), "asd-ssh-")); const path = process.env.PATH
   // Real ssh handles SIGTERM, and a stopped process runs no handler, so SIGTERM alone never ends it.
   await writeFile(join(root, "ssh"), "#!/bin/sh\ntrap '' TERM\nexec sleep 600\n"); await chmod(join(root, "ssh"), 0o755)
   process.env.PATH = `${root}:${path}`
@@ -171,7 +171,7 @@ test("closing an SSH process that was stopped (SIGSTOP) finishes within its kill
 
 // A stand-in ssh on PATH that prints `output` and exits without reading its stdin.
 async function exitingSsh(output: Uint8Array) {
-  const root = await mkdtemp(join(tmpdir(), "pdk-ssh-")); const path = process.env.PATH
+  const root = await mkdtemp(join(tmpdir(), "asd-ssh-")); const path = process.env.PATH
   await writeFile(join(root, "output"), output)
   await writeFile(join(root, "ssh"), `#!/bin/sh\nexec cat '${join(root, "output")}'\n`); await chmod(join(root, "ssh"), 0o755)
   process.env.PATH = `${root}:${path}`

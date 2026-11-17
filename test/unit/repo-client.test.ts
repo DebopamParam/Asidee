@@ -33,9 +33,9 @@ test("save round-trips binary committed history only into a new host branch with
   expect(await host(["ls-tree", "-r", "--name-only", result.branch])).toBe("binary\ntracked")
   expect(await host(["for-each-ref", "--format=%(refname)"])).toBe(`refs/heads/${result.branch}`)
   expect((await run(["git", "-C", target, "cat-file", "-e", other])).exitCode).not.toBe(0)
-  expect(await git(["for-each-ref", "--format=%(refname)", "refs/paddock-export"])).toBe("")
+  expect(await git(["for-each-ref", "--format=%(refname)", "refs/asidee-export"])).toBe("")
   expect(await git(["status", "--porcelain"])).toContain("MM tracked")
-  expect(transport.calls.filter(call => call.argv[0] === "paddock").every(call => call.argv[1] === "exec" && call.argv[3] === "--stream")).toBe(true)
+  expect(transport.calls.filter(call => call.argv[0] === "asd").every(call => call.argv[1] === "exec" && call.argv[3] === "--stream")).toBe(true)
   expect(JSON.stringify(transport.calls)).not.toContain("untracked-secret")
   const second = await save(transport.runner, { name: "demo", workspace: work, target, branch: "main" }, transport.streamer)
   expect(second.branch).not.toBe(result.branch)
@@ -51,7 +51,7 @@ test("save into a host working clone preserves its checked-out branch and dirty 
   expect(await readFile(join(host.work, "tracked"), "utf8")).toBe("host dirty")
 })
 test("export rejects corrupt or oversized payloads before touching a host target", () => {
-  const data = Buffer.from([98, 0, 255, 10, 13, 128]), header = { branch: "main", tip: "a".repeat(40), ref: "refs/paddock-export/12345678-1234-1234-1234-123456789abc", size: data.length, sha256: createHash("sha256").update(data).digest("hex") }
+  const data = Buffer.from([98, 0, 255, 10, 13, 128]), header = { branch: "main", tip: "a".repeat(40), ref: "refs/asidee-export/12345678-1234-1234-1234-123456789abc", size: data.length, sha256: createHash("sha256").update(data).digest("hex") }
   const output = (value: object, body = data) => Buffer.concat([Buffer.from(JSON.stringify(value) + "\n"), body])
   expect(parseBundle(output(header)).data).toEqual(data)
   for (const changed of [output({ ...header, size: MAX_BUNDLE_BYTES + 1 }), output(header, Buffer.concat([data, Buffer.from("\n")])), output(header, data.subarray(1)), output({ ...header, sha256: "0".repeat(64) }), output({ ...header, ref: "refs/heads/main" }), data, Buffer.concat([Buffer.alloc(5000, 32), output(header)])]) expect(() => parseBundle(changed)).toThrow()
@@ -72,7 +72,7 @@ test("an oversized guest bundle fails before transfer and cleans up its export r
   await put(home, "workspace/large", Buffer.from(data)); await git(["add", "large"]); await git(["commit", "-qm", "Large fixture"])
   await expect(save(transport.runner, { name: "demo", workspace: work, target: join(home, "never.git") }, transport.streamer)).rejects.toThrow("exit 73")
   expect(await Bun.file(join(home, "never.git/HEAD")).exists()).toBe(false)
-  expect(await git(["for-each-ref", "--format=%(refname)", "refs/paddock-export"])).toBe("")
+  expect(await git(["for-each-ref", "--format=%(refname)", "refs/asidee-export"])).toBe("")
 }, 30_000)
 test("save carries a raw bundle beyond the 16 MiB text exec limit", async () => {
   const { home, work, run, git } = await repositoryFixture(), transport = fakeExec(home), target = join(home, "large.git")
@@ -134,7 +134,7 @@ test("a highly compressed large object is rejected before host Git or target cre
 
 test("dishonest guest bundles cannot add refs, depend on host history or change their pack checksum", async () => {
   const guest = await repositoryFixture(), transport = fakeExec(guest.home), target = join(guest.home, "never.git")
-  const exported = await transport.streamer(["paddock", "exec", "demo", "--stream", "--", "node", "-e", await Bun.file(join(import.meta.dir, "../../extensions/repo/guest.cjs")).text()], JSON.stringify({ action: "save", workspace: guest.work }), MAX_BUNDLE_BYTES + 4096)
+  const exported = await transport.streamer(["asd", "exec", "demo", "--stream", "--", "node", "-e", await Bun.file(join(import.meta.dir, "../../extensions/repo/guest.cjs")).text()], JSON.stringify({ action: "save", workspace: guest.work }), MAX_BUNDLE_BYTES + 4096)
   expect(exported.exitCode).toBe(0)
   const bundle = parseBundle(exported.stdout), end = bundle.data.indexOf("\n\n"), pack = bundle.data.subarray(end + 2)
   const header = bundle.data.subarray(0, end).toString(), reference = bundle.tip + " " + bundle.ref
@@ -163,7 +163,7 @@ test("pack resource checks include delta result sizes, aggregate expansion and o
     while (size) { const low = size % 128; size = Math.floor(size / 128); bytes.push(low | (size ? 128 : 0)) }
     return Buffer.concat([Buffer.from(bytes), Buffer.alloc(20), deflateSync(data)])
   }
-  const tip = "a".repeat(40), ref = "refs/paddock-export/12345678-1234-1234-1234-123456789abc"
+  const tip = "a".repeat(40), ref = "refs/asidee-export/12345678-1234-1234-1234-123456789abc"
   const bundle = (objects: Buffer[], count = objects.length) => {
     const header = Buffer.alloc(12); header.write("PACK"); header.writeUInt32BE(2, 4); header.writeUInt32BE(count, 8)
     const body = Buffer.concat([header, ...objects])

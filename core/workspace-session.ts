@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { constants } from "node:os"
 import { EventEmitter } from "node:events"
 import { OUTPUT_LIMIT } from "./run"
-import { PaddockError, type DiskWarning, type RunResult, type Session } from "./types"
+import { AsideeError, type DiskWarning, type RunResult, type Session } from "./types"
 import { signalWorkspacePid } from "./workspace-processes"
 
 export class WorkspaceSession extends EventEmitter implements Session {
@@ -70,7 +70,7 @@ export class WorkspaceSession extends EventEmitter implements Session {
     this.emit("end", { error: reason })
   }
   collect(stdin?: string | Uint8Array, timeoutMs = 0): Promise<RunResult> {
-    if (this.tty) throw new PaddockError("usage", "Buffered workspace output needs pipes.")
+    if (this.tty) throw new AsideeError("usage", "Buffered workspace output needs pipes.")
     return new Promise((resolve) => {
       const chunks = { stdout: [] as Uint8Array[], stderr: [] as Uint8Array[] }; const sizes = { stdout: 0, stderr: 0 }
       let overflow: "stdout" | "stderr" | undefined; let timedOut = false

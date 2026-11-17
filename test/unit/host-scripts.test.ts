@@ -11,7 +11,7 @@ async function python(script: string, input: unknown) {
 }
 
 test("B7: a swapped input is refused and the command uses the checked private copy", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pdk-root-step-"))
+  const root = await mkdtemp(join(tmpdir(), "asd-root-step-"))
   try {
     const source = join(root, "source"); const result = join(root, "result")
     await writeFile(source, "checked")
@@ -28,7 +28,7 @@ test("B7: a swapped input is refused and the command uses the checked private co
 })
 
 test("B8/B10: leftover staging cannot block retry and each privileged step refreshes interactive sudo", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pdk-apply-"))
+  const root = await mkdtemp(join(tmpdir(), "asd-apply-"))
   const script = `import sys,json,subprocess,tempfile,types\nx=json.load(sys.stdin)\ntempfile.tempdir=x['root']\np=x['plan']\nsys.stdin=__import__('io').StringIO(json.dumps(p))\ncalls=[]\ndef run(argv,**kw):\n if argv==['sudo','-v']:\n  calls.append(argv); return types.SimpleNamespace(returncode=0,stdout=b'',stderr=b'')\n if argv[0]=='python3': return types.SimpleNamespace(returncode=0,stdout=b'{}',stderr=b'')\n if not calls or calls[-1]!=['sudo','-v']: raise RuntimeError('sudo timestamp expired')\n calls.append(argv)\n return types.SimpleNamespace(returncode=0,stdout=b'',stderr=b'')\nsubprocess.run=run\nexec(x['script'])\nprint(json.dumps(calls))`
   try {
     const plan = { hash: "x", stageDir: join(root, "stage"), stateDir: join(root, "state"), uploads: [], changes: [], interactive: true, probeScript: "", probeRequest: {}, destination: {}, steps: [{ label: "one", argv: ["sudo", "-n", "slow"] }, { label: "two", argv: ["sudo", "-n", "next"] }] }
@@ -38,7 +38,7 @@ test("B8/B10: leftover staging cannot block retry and each privileged step refre
       expect(result.out).not.toContain("sudo timestamp expired")
       expect(result.code).toBe(0)
       const [line, calls] = result.out.trim().split("\n")
-      const report = JSON.parse(line!.replace(/^PADDOCK-RESULT /, ""))
+      const report = JSON.parse(line!.replace(/^ASIDEE-RESULT /, ""))
       expect(report.ok).toBe(true)
       paths.push(report.stageDir)
       expect(JSON.parse(calls!)).toEqual([["sudo", "-v"], ["sudo", "-v"], ["sudo", "-n", "slow"], ["sudo", "-v"], ["sudo", "-n", "next"]])
@@ -48,7 +48,7 @@ test("B8/B10: leftover staging cannot block retry and each privileged step refre
 })
 
 test("B8: request files use fresh destination paths and report them", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pdk-request-"))
+  const root = await mkdtemp(join(tmpdir(), "asd-request-"))
   try {
     const script = `import sys,json,tempfile,io\nx=json.load(sys.stdin)\ntempfile.tempdir=x['root']\nsys.stdin=io.TextIOWrapper(io.BytesIO(b'private request'))\nexec(x['script'])`
     const paths: string[] = []
@@ -63,7 +63,7 @@ test("B8: request files use fresh destination paths and report them", async () =
 })
 
 test("B9: repository text removes URL userinfo and binds original bytes by hash", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pdk-repository-"))
+  const root = await mkdtemp(join(tmpdir(), "asd-repository-"))
   try {
     const source = join(root, "private.sources")
     const content = "deb https://fixture-user:fixture-password@repo.example/private stable main\nURIs: http://name:password@repo.example/other\n"
@@ -80,7 +80,7 @@ test("B9: repository text removes URL userinfo and binds original bytes by hash"
 })
 
 test("B7: a replaced interactive request is refused before its plan can run", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pdk-request-swap-"))
+  const root = await mkdtemp(join(tmpdir(), "asd-request-swap-"))
   try {
     const path = join(root, "request")
     await writeFile(path, JSON.stringify({ uploads: [], changes: [], steps: [], stateDir: root, stageDir: root }))
@@ -91,7 +91,7 @@ test("B7: a replaced interactive request is refused before its plan can run", as
 })
 
 test("B7: private copies preserve basenames for install -t", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pdk-install-names-"))
+  const root = await mkdtemp(join(tmpdir(), "asd-install-names-"))
   try {
     const source = join(root, "runsc"); const target = join(root, "bin")
     await writeFile(source, "runtime")

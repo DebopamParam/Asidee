@@ -122,8 +122,8 @@ test("creating sends the form, and an error from the core is shown as it is", as
 })
 
 test("without a token the page says how to open it", async () => {
-  const ui = await page({ ...base, list: () => { throw new Error("Open the dashboard with the link from `paddock ui`.") } }, "http://127.0.0.1:7717/")
-  expect(ui.text("#notice")).toContain("paddock ui")
+  const ui = await page({ ...base, list: () => { throw new Error("Open the dashboard with the link from `asd ui`.") } }, "http://127.0.0.1:7717/")
+  expect(ui.text("#notice")).toContain("asd ui")
 })
 
 test("a refresh that changes nothing leaves a half-filled form alone", async () => {
@@ -131,12 +131,12 @@ test("a refresh that changes nothing leaves a half-filled form alone", async () 
   const input = (ui.button("Install thing").closest("form") as any).elements.namedItem("version")
   input.value = "typing"
   // The page's own refresh, as its timer would call it.
-  await (ui.window as any).paddockRefresh(); await ui.settle()
+  await (ui.window as any).asideeRefresh(); await ui.settle()
   expect(ui.window.document.contains(input)).toBe(true)
 })
 
 test("an unknown-probe create refusal opens Settings and focuses the toggle without changing the requirement", async () => {
-  const ui = await page({ ...base, list: () => [], create: () => { throw Object.assign(new Error("Cannot reach the host: helper unavailable. Use paddock config set require-probes off."), { code: "probes-required" }) } })
+  const ui = await page({ ...base, list: () => [], create: () => { throw Object.assign(new Error("Cannot reach the host: helper unavailable. Use asd config set require-probes off."), { code: "probes-required" }) } })
   const form = ui.window.document.getElementById("create") as any
   form.elements.namedItem("name").value = "demo"
   form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
@@ -183,7 +183,7 @@ test("an unavailable setting cannot be changed and a sandbox with unknown probes
 
 
 test("a workspace row shows why the daemon stopped it and a disk watch it could not make, with no control added", async () => {
-  const stopReason = "Stopped by the daemon at 2026-11-16T10:00:00Z: render uses 2.00 GB of its 1 GB disk limit. Free space in /w/render, or raise the limit: paddock workspace set render disk N"
+  const stopReason = "Stopped by the daemon at 2026-11-16T10:00:00Z: render uses 2.00 GB of its 1 GB disk limit. Free space in /w/render, or raise the limit: asd workspace set render disk N"
   const ui = await page({ ...base, list: () => [], summary: () => ({ workspaces: [{ name: "render", status: "idle", processes: 0, folder: "/w/render", spec: { hostTemp: false, diskGb: 1 }, disclosure: workspaceDisclosure(false), stopReason,
     enforcementProblem: { at: "2026-11-16T10:00:30Z", message: "Its size could not be measured." } }] }) })
   const row = ui.window.document.querySelector("#workspaces .panel")!

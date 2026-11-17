@@ -8,7 +8,7 @@ import type { Streamer } from "../../extensions/repo/repo"
 const roots: string[] = []
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 export async function fixture(): Promise<string> {
-  const root = await mkdtemp(join(await realpath(tmpdir()), "paddock-client-unit-")); roots.push(root)
+  const root = await mkdtemp(join(await realpath(tmpdir()), "asidee-client-unit-")); roots.push(root)
   await mkdir(join(root, ".config"))
   // TMPDIR may be inside this ESM repository; fixture executables use Node's CommonJS API.
   await writeFile(join(root, "package.json"), '{"type":"commonjs"}\n')
@@ -37,13 +37,13 @@ export function fakeExec(home: string, extra: Record<string, string> = {}): { ca
   const calls: Array<{ argv: string[]; stdin?: string }> = [], execute = local(home, extra)
   return { calls, streamer: async (argv, stdin, limit) => {
     calls.push({ argv, stdin })
-    if (argv.slice(0, 5).join(" ") !== "paddock exec demo --stream --") throw new Error("Fake stream refuses every operation except exec demo --stream.")
+    if (argv.slice(0, 5).join(" ") !== "asd exec demo --stream --") throw new Error("Fake stream refuses every operation except exec demo --stream.")
     const child = spawnLocal(home, extra, argv.slice(5), stdin), stdout = Buffer.from(await new Response(child.stdout).arrayBuffer())
     if (stdout.length > limit) throw new Error("Fake stream output exceeded its limit.")
     return { exitCode: await child.exited, stdout }
   }, runner: async (argv, stdin) => {
     calls.push({ argv, stdin })
-    if (argv[0] === "paddock") {
+    if (argv[0] === "asd") {
       if (argv[1] !== "exec" || argv[2] !== "demo" || !argv.includes("--")) throw new Error("Fake transport refuses every operation except exec demo.")
       return execute(argv.slice(argv.indexOf("--") + 1), stdin)
     }

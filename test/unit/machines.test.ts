@@ -8,16 +8,16 @@ import { Hosts } from "../../core/hosts"
 import { CATALOG, compatible, type MachineIo, hostName, hostOption, machineIdentity, Machines, parseHello, parseHosts, parseSummary, staleSummary, type Hello, type HostRecord, type MachineSummary } from "../../core/machines"
 import { frame, FrameReader, type Frame } from "../../core/stream"
 import { MAX_REPLY, parseReply, RemoteSession, sshArgv, sshDestination, transportCommand } from "../../core/transport"
-import { PaddockError, type ErrorCode } from "../../core/types"
+import { AsideeError, type ErrorCode } from "../../core/types"
 
 const LOCAL: Hello = { machineId: "a".repeat(32), bootId: "b".repeat(32), buildDigest: "c".repeat(64), sourceDigest: "9".repeat(64), version: "0.4.0", methods: Object.keys(CATALOG), protocols: [1], features: ["machines", "remote-streams", "remote-forwards", "lease-renewal"] }
 const REMOTE: Hello = { ...LOCAL, machineId: "d".repeat(32), bootId: "e".repeat(32) }
-const HOST: HostRecord = { name: "build", ssh: "home-linux", binary: "/opt/paddock/bin", stateDir: "/home/me/state", machineId: REMOTE.machineId, addedAt: "2026-11-11T00:00:00Z", diskPolicy: "watched", service: "prepared" }
+const HOST: HostRecord = { name: "build", ssh: "home-linux", binary: "/opt/asidee/bin", stateDir: "/home/me/state", machineId: REMOTE.machineId, addedAt: "2026-11-11T00:00:00Z", diskPolicy: "watched", service: "prepared" }
 const folders: string[] = []
 afterEach(async () => { for (const folder of folders.splice(0)) await rm(folder, { recursive: true, force: true }) })
 // Other machines are experimental, so each test that uses them turns the setting on, as a person would.
 async function setup(experimental = true) {
-  const root = await mkdtemp(join(tmpdir(), "pdk-machines-")); folders.push(root)
+  const root = await mkdtemp(join(tmpdir(), "asd-machines-")); folders.push(root)
   const dirs = { state: join(root, "s"), config: join(root, "c") }
   await mkdir(dirs.config)
   if (experimental) await writeFile(join(dirs.config, "config.json"), JSON.stringify({ experimental: true }))
@@ -64,7 +64,7 @@ test("handshake refuses incompatible versions, protocols, identity changes and m
   expect(parseHello(REMOTE)).toEqual(REMOTE)
   compatible(REMOTE, LOCAL, HOST.machineId)
   for (const [hello, expected] of [[{ ...REMOTE, version: "old" }, "incompatible"], [{ ...REMOTE, protocols: [2] }, "incompatible"], [{ ...REMOTE, machineId: LOCAL.machineId }, "identity-changed"]] satisfies Array<[Hello, ErrorCode]>) {
-    try { compatible(hello, LOCAL, HOST.machineId); throw new Error("accepted") } catch (error) { expect(error).toBeInstanceOf(PaddockError); expect((error as PaddockError).code).toBe(expected) }
+    try { compatible(hello, LOCAL, HOST.machineId); throw new Error("accepted") } catch (error) { expect(error).toBeInstanceOf(AsideeError); expect((error as AsideeError).code).toBe(expected) }
   }
   for (const value of [null, {}, { ...REMOTE, buildDigest: "mtime" }, { ...REMOTE, sourceDigest: undefined }, { ...REMOTE, listener: "public" }, { ...REMOTE, methods: [1] }, { ...REMOTE, protocols: ["1"] }]) expect(() => parseHello(value)).toThrow()
   for (const value of [null, {}, { ok: true }, { ok: false, error: { code: "made-up", message: "bad" } }]) expect(() => parseReply(value)).toThrow()
@@ -73,7 +73,7 @@ test("handshake refuses incompatible versions, protocols, identity changes and m
 
 test("routing strips the host, handshakes first and never retries a mutation or falls back locally", async () => {
   const dirs = await setup(); const calls: Array<{ method: string; body: object }> = []; let closed = 0; let bad: Hello | undefined
-  const machines = new Machines(dirs, LOCAL, async () => summary(LOCAL), { ...identity, connectPeer: () => ({ async close() { closed++ }, async call(method: string, body: object = {}) { calls.push({ method, body }); if (method === "hello") return bad ?? REMOTE; if (method === "stop") throw new PaddockError("outcome-unknown", "link lost"); return summary().sandboxes[0] } }) })
+  const machines = new Machines(dirs, LOCAL, async () => summary(LOCAL), { ...identity, connectPeer: () => ({ async close() { closed++ }, async call(method: string, body: object = {}) { calls.push({ method, body }); if (method === "hello") return bad ?? REMOTE; if (method === "stop") throw new AsideeError("outcome-unknown", "link lost"); return summary().sandboxes[0] } }) })
   await machines.attach(HOST)
   expect((await stat(join(dirs.config, "hosts.json"))).mode & 0o777).toBe(0o600)
   expect(JSON.parse(await readFile(join(dirs.config, "hosts.json"), "utf8")).hosts[0].machineId).toBe(REMOTE.machineId)
@@ -115,7 +115,7 @@ test("bad summaries cannot replace evidence; stale sandboxes and checks are unkn
 
 test("fleet returns while a failed host refresh is pending and retains unknown last-known sandboxes", async () => {
   const dirs = await setup(); let fail = false
-  const machines = new Machines(dirs, LOCAL, async () => summary(LOCAL), { ...identity, connectPeer: () => ({ async close() {}, async call(method: string) { if (fail) throw new PaddockError("offline", "unreachable"); return method === "hello" ? REMOTE : summary() } }) })
+  const machines = new Machines(dirs, LOCAL, async () => summary(LOCAL), { ...identity, connectPeer: () => ({ async close() {}, async call(method: string) { if (fail) throw new AsideeError("offline", "unreachable"); return method === "hello" ? REMOTE : summary() } }) })
   await machines.attach(HOST); await machines.list()
   fail = true; await machines.list()
   const fleet = await machines.fleet()
@@ -138,7 +138,7 @@ const opened: Array<{ request: Record<string, unknown>; frames: Frame[]; session
 const servers: Array<() => void> = []
 afterEach(() => { for (const close of servers.splice(0)) close(); opened.length = 0 })
 async function openStream(_endpoint: unknown, request: object): Promise<RemoteSession> {
-  const root = await mkdtemp(join(tmpdir(), "pdk-stream-")); folders.push(root); const path = join(root, "s.sock")
+  const root = await mkdtemp(join(tmpdir(), "asd-stream-")); folders.push(root); const path = join(root, "s.sock")
   const record = { request: request as Record<string, unknown>, frames: [] as Frame[], session: undefined as unknown as RemoteSession }
   const server = createServer((socket: Socket) => { const reader = new FrameReader(); let first = true; socket.on("error", () => {})
     socket.on("data", (chunk) => { for (const got of reader.push(chunk as Buffer)) { record.frames.push(got); if (first) { first = false; socket.write(frame("ready", { tty: false })) } } }) })
@@ -148,7 +148,7 @@ async function openStream(_endpoint: unknown, request: object): Promise<RemoteSe
   record.session = await RemoteSession.open(HOST, request as never, { wire, diagnostic: () => "fixture", close: async () => { wire.destroy(); await closed } })
   opened.push(record); return record.session
 }
-const outcome = (promise: Promise<unknown>) => promise.then((value) => ({ value }), (error: PaddockError) => ({ code: error.code, message: error.message }))
+const outcome = (promise: Promise<unknown>) => promise.then((value) => ({ value }), (error: AsideeError) => ({ code: error.code, message: error.message }))
 async function attached(answer: Answer, io: Partial<MachineIo> = {}) {
   const dirs = await setup(); const peers = fakePeers(answer)
   const machines = new Machines(dirs, LOCAL, async () => summary(LOCAL), { ...identity, connectPeer: peers.connectPeer, openStream, ...io })
@@ -156,7 +156,7 @@ async function attached(answer: Answer, io: Partial<MachineIo> = {}) {
   return { dirs, machines, log: peers.log }
 }
 
-test("one sandbox row in a form this Paddock cannot read is shown damaged; the machine stays online with its other rows", async () => {
+test("one sandbox row in a form this Asidee cannot read is shown damaged; the machine stays online with its other rows", async () => {
   const odd = { ...ROW, name: "odd", status: "paused" }
   const { machines } = await attached(answers({ summary: { ...summary(), sandboxes: [ROW, odd] } }))
   const [view] = await machines.list()
@@ -247,7 +247,7 @@ test("a mutation has a finite deadline, and a client that goes away ends its SSH
   expect(stop.options).toMatchObject({ mutation: true, build: LOCAL.sourceDigest })
   expect(Number.isFinite(stop.options.timeoutMs)).toBe(true)
   // A real HTTP peer over a socket whose daemon never answers stop.
-  const root = await mkdtemp(join(tmpdir(), "pdk-http-")); folders.push(root); const path = join(root, "d.sock")
+  const root = await mkdtemp(join(tmpdir(), "asd-http-")); folders.push(root); const path = join(root, "d.sock")
   const server = Bun.serve({ unix: path, fetch: async (request) => new URL(request.url).pathname === "/api/hello" ? Response.json({ ok: true, data: REMOTE }) : new Promise<Response>(() => {}) })
   servers.push(() => server.stop(true))
   const { HttpPeer } = await import("../../core/transport")
@@ -299,7 +299,7 @@ test("the hosts file is read record by record: an unknown or damaged record is s
 
 test("two builds of one version are refused in both directions, saying how to update the other machine", async () => {
   try { compatible({ ...REMOTE, sourceDigest: "8".repeat(64) }, LOCAL, HOST.machineId, HOST.binary); throw new Error("accepted") } catch (error) {
-    expect((error as PaddockError).code).toBe("incompatible")
+    expect((error as AsideeError).code).toBe("incompatible")
     expect((error as Error).message).toContain("other source")
     expect((error as Error).message).toContain(`bun build --compile`)
     expect((error as Error).message).toContain(HOST.binary)
@@ -307,7 +307,7 @@ test("two builds of one version are refused in both directions, saying how to up
   const dirs = await setup(); let ran = 0
   const machines = new Machines(dirs, REMOTE, async () => summary())
   const handle = createHandler({ get: { run: async () => { ran++; return ROW } } }, "token", dirs.config, machines)
-  const call = (build: string) => handle(new Request("http://paddock/api/get", { method: "POST", headers: { "x-paddock-machine": REMOTE.machineId, "x-paddock-protocol": "1", "x-paddock-version": REMOTE.version, "x-paddock-build": build }, body: JSON.stringify({ name: "demo" }) }), true, 0)
+  const call = (build: string) => handle(new Request("http://asidee/api/get", { method: "POST", headers: { "x-asidee-machine": REMOTE.machineId, "x-asidee-protocol": "1", "x-asidee-version": REMOTE.version, "x-asidee-build": build }, body: JSON.stringify({ name: "demo" }) }), true, 0)
   const refused = await (await call("8".repeat(64))).json() as { ok: boolean; error: { code: string; message: string } }
   expect(refused).toMatchObject({ ok: false, error: { code: "incompatible" } }); expect(ran).toBe(0)
   expect(await (await call(REMOTE.sourceDigest)).json()).toMatchObject({ ok: true }); expect(ran).toBe(1)
@@ -344,8 +344,8 @@ test("with experimental off, the daemon refuses host commands and --host and con
     return "local"
   } }]))
   const handle = createHandler(table, "token", dirs.config, machines)
-  const call = async (method: string, body: object) => await (await handle(new Request(`http://paddock/api/${method}`, { method: "POST", body: JSON.stringify(body) }), true, 0)).json() as { ok: boolean; data?: unknown; error?: { code: string; message: string } }
-  const off = { ok: false, error: { code: "dependency" as const, message: "Other machines are experimental and off on this machine: they are not yet proven on enough machines. To turn them on: paddock config set experimental on" } }
+  const call = async (method: string, body: object) => await (await handle(new Request(`http://asidee/api/${method}`, { method: "POST", body: JSON.stringify(body) }), true, 0)).json() as { ok: boolean; data?: unknown; error?: { code: string; message: string } }
+  const off = { ok: false, error: { code: "dependency" as const, message: "Other machines are experimental and off on this machine: they are not yet proven on enough machines. To turn them on: asd config set experimental on" } }
   for (const [method, body] of [["hostList", {}], ["fleet", {}], ["hostAttach", { name: "other", ssh: HOST.ssh, binary: HOST.binary, stateDir: HOST.stateDir }], ["hostRemove", { name: "build", confirm: "build" }], ["list", { host: "build" }], ["forwardAdd", { host: "build", name: "demo", port: 80 }], ["sshSetup", { host: "build", name: "demo" }]] as const)
     expect(await call(method, body)).toEqual(off)
   expect(await outcome(machines.openSession({ kind: "exec", name: "demo", argv: ["true"], tty: false, host: "build" }, async () => { throw new Error("local") }))).toEqual(off.error)
@@ -364,16 +364,16 @@ test("hosts refuse enrollment while experimental is off, before reading the arti
   const dirs = await setup(false)
   const hosts = new Hosts(new Machines(dirs, LOCAL, async () => summary(LOCAL)))
   for (const attempt of [hosts.plan({ name: "build", ssh: "home-linux", artifact: { path: "/nonexistent", sha256: "0".repeat(64) } }), hosts.apply({ hash: "0".repeat(64), accepted: true })])
-    expect(await outcome(attempt)).toMatchObject({ code: "dependency", message: expect.stringContaining("paddock config set experimental on") })
+    expect(await outcome(attempt)).toMatchObject({ code: "dependency", message: expect.stringContaining("asd config set experimental on") })
 })
 
 test("the target side answers another machine's primary whatever its own experimental setting", async () => {
   const dirs = await setup(false)
   const machines = new Machines(dirs, REMOTE, async () => summary())
   const handle = createHandler({ hello: { run: async () => REMOTE, socketOnly: true }, get: { run: async () => ROW }, summary: { run: async () => summary() } }, "token", dirs.config, machines)
-  const headers = { "x-paddock-machine": REMOTE.machineId, "x-paddock-protocol": "1", "x-paddock-version": REMOTE.version, "x-paddock-build": REMOTE.sourceDigest }
+  const headers = { "x-asidee-machine": REMOTE.machineId, "x-asidee-protocol": "1", "x-asidee-version": REMOTE.version, "x-asidee-build": REMOTE.sourceDigest }
   for (const method of ["hello", "get", "summary"])
-    expect(await (await handle(new Request(`http://paddock/api/${method}`, { method: "POST", headers, body: JSON.stringify({ name: "demo" }) }), true, 0)).json()).toMatchObject({ ok: true })
+    expect(await (await handle(new Request(`http://asidee/api/${method}`, { method: "POST", headers, body: JSON.stringify({ name: "demo" }) }), true, 0)).json()).toMatchObject({ ok: true })
   let local = 0
   await machines.openSession({ kind: "exec", name: "demo", argv: ["true"], tty: false, machineId: REMOTE.machineId, bootId: REMOTE.bootId, protocol: 1, version: REMOTE.version, build: REMOTE.sourceDigest } as never, async () => { local++; return {} as never })
   expect(local).toBe(1)
@@ -388,7 +388,7 @@ test("an enrollment update rechecks the old record, host key and daemon identity
   const machines = new Machines(dirs, LOCAL, async () => summary(LOCAL), io)
   const old = await machines.attach(HOST)
   const path = join(dirs.config, "hosts.json"); const before = await readFile(path, "utf8")
-  const input = { ...old, binary: "/opt/paddock/releases/new/paddock", service: "systemd" }
+  const input = { ...old, binary: "/opt/asidee/releases/new/asd", service: "systemd" }
   remote = { ...REMOTE, machineId: "1".repeat(32) }
   await expect(machines.attach(input, undefined, old)).rejects.toMatchObject({ code: "identity-changed" })
   expect(await readFile(path, "utf8")).toBe(before)
@@ -414,7 +414,7 @@ test("host list source mismatches name host add with the registered alias and SS
   remote = { ...REMOTE, sourceDigest: "1".repeat(64) }
   const [view] = await machines.list()
   expect(view).toMatchObject({ state: "incompatible" })
-  expect(view?.error).toContain("paddock host add build --ssh home-linux --artifact PATH --sha256 HASH")
+  expect(view?.error).toContain("asd host add build --ssh home-linux --artifact PATH --sha256 HASH")
   expect(view?.error).not.toContain("put it in place")
   await machines.close()
 })

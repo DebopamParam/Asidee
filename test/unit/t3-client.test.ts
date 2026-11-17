@@ -13,10 +13,10 @@ test("T3 reads only the exact CLI version, falling back to the fake desktop laun
   expect(calls).toEqual([["t3", "--version"], [join(home, ".t3/bin/t3"), "--version"]])
   await expect(hostVersion(async () => ok("version 1.2.3; injected"), home)).rejects.toThrow("No exact T3 version")
 })
-const access = { alias: "demo.paddock", user: "agent", home: "/home/agent", batchReady: true, loopbackForwarding: true }
+const access = { alias: "demo.asidee", user: "agent", home: "/home/agent", batchReady: true, loopbackForwarding: true }
 test("SSH access is read from the core and checked field by field", async () => {
   expect(await sshAccess(async () => ok(JSON.stringify({ ok: true, data: { ...access, extra: "dropped" } })), "demo")).toEqual(access)
-  for (const reply of [{ ok: false, error: { code: "not-found", message: "x" } }, { ok: true, data: { ...access, alias: "other.paddock" } }, { ok: true, data: { ...access, batchReady: "yes" } }, { ok: true, data: { ...access, home: 1 } }])
+  for (const reply of [{ ok: false, error: { code: "not-found", message: "x" } }, { ok: true, data: { ...access, alias: "other.asidee" } }, { ok: true, data: { ...access, batchReady: "yes" } }, { ok: true, data: { ...access, home: 1 } }])
     await expect(sshAccess(async () => ok(JSON.stringify(reply)), "demo")).rejects.toThrow("Invalid SSH access response")
   await expect(sshAccess(async () => ok("{}"), "../x")).rejects.toThrow("lowercase")
 })
@@ -29,8 +29,8 @@ test("T3 setup only execs its installer and provider sync after resolving the ho
     return ok(argv.at(-1) === "https://github.com/pingdotgg/t3code/releases/download" ? "installed\n" : '{"claude":0,"codex":0}')
   }, "demo", home)
   expect(ready).toEqual({ version, runtime: "installed", claude: 0, codex: 0, ssh: access })
-  expect(calls.slice(1, -1).every(argv => argv.slice(0, 3).join(" ") === "paddock exec demo")).toBe(true)
-  expect(calls.at(-1)).toEqual(["paddock", "ssh", "access", "demo", "--json"])
+  expect(calls.slice(1, -1).every(argv => argv.slice(0, 3).join(" ") === "asd exec demo")).toBe(true)
+  expect(calls.at(-1)).toEqual(["asd", "ssh", "access", "demo", "--json"])
   await expect(setup(async () => { throw new Error("token-secret") }, "demo", home)).rejects.not.toThrow("token-secret")
 })
 test("guest install verifies the matching release before execution and publishes the app marker", async () => {
@@ -73,11 +73,11 @@ test("provider sync discovers canonical/named logins and keeps custom providers 
   expect(await syncProviders(transport.runner, "demo")).toEqual({ claude: 1, codex: 2 })
   let settings = JSON.parse(await readFile(join(home, ".t3/userdata/settings.json"), "utf8"))
   expect(settings.providerInstances.codex).toEqual(custom); expect(settings.providerInstances.custom).toEqual(custom)
-  expect(settings.providerInstances["paddock-codex-canonical"].config.homePath).toBe(join(home, ".codex"))
+  expect(settings.providerInstances["asidee-codex-canonical"].config.homePath).toBe(join(home, ".codex"))
   expect(settings.providerInstances.claudeAgent.environment).toContainEqual({ name: "ANTHROPIC_API_KEY", value: "", sensitive: false })
   expect(settings.theme).toBe("light"); expect((await lstat(join(home, ".t3/userdata/settings.json"))).mode & 0o777).toBe(0o600)
-  expect(settings.paddockProviderInstances).toBeUndefined()
-  expect((await lstat(join(home, ".t3/userdata/paddock-providers.json"))).mode & 0o777).toBe(0o600)
+  expect(settings.asideeProviderInstances).toBeUndefined()
+  expect((await lstat(join(home, ".t3/userdata/asidee-providers.json"))).mode & 0o777).toBe(0o600)
   await rm(join(home, ".codex-personal/auth.json"))
   expect(await syncProviders(transport.runner, "demo")).toEqual({ claude: 1, codex: 1 })
   settings = JSON.parse(await readFile(join(home, ".t3/userdata/settings.json"), "utf8"))
@@ -105,7 +105,7 @@ test("provider publication refuses to overwrite a T3 settings edit made during s
   await put(home, ".t3/userdata/settings.json", '{"theme":"before"}')
   const prefix = `const f = require('fs'), originalWrite = f.writeFileSync; let edited = false;
     f.writeFileSync = (file, ...args) => {
-      if (!edited && String(file).includes('paddock-providers.json.')) {
+      if (!edited && String(file).includes('asidee-providers.json.')) {
         edited = true; originalWrite(require('path').join(require('os').homedir(), '.t3/userdata/settings.json'), '{"theme":"concurrent"}');
       }
       return originalWrite(file, ...args);

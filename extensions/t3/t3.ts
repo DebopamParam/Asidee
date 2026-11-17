@@ -23,12 +23,12 @@ export async function syncProviders(runner: Runner, name: string): Promise<{ cla
   return { claude: value.claude, codex: value.codex }
 }
 
-// The core owns SSH access: `paddock ssh setup NAME` prepares it, and this reads how the desktop app connects.
+// The core owns SSH access: `asd ssh setup NAME` prepares it, and this reads how the desktop app connects.
 export type SshAccess = { alias: string; user: string; home: string; batchReady: boolean; loopbackForwarding: boolean }
 export async function sshAccess(runner: Runner, name: string): Promise<SshAccess> {
-  const reply = json(await checked(runner, ["paddock", "ssh", "access", sandboxName(name), "--json"]))
+  const reply = json(await checked(runner, ["asd", "ssh", "access", sandboxName(name), "--json"]))
   const data = object(reply) && reply.ok === true && object(reply.data) ? reply.data : undefined
-  if (!data || data.alias !== `${name}.paddock` || typeof data.user !== "string" || typeof data.home !== "string" || typeof data.batchReady !== "boolean" || typeof data.loopbackForwarding !== "boolean") throw new Error("Invalid SSH access response; contents withheld.")
+  if (!data || data.alias !== `${name}.asidee` || typeof data.user !== "string" || typeof data.home !== "string" || typeof data.batchReady !== "boolean" || typeof data.loopbackForwarding !== "boolean") throw new Error("Invalid SSH access response; contents withheld.")
   return { alias: data.alias, user: data.user, home: data.home, batchReady: data.batchReady, loopbackForwarding: data.loopbackForwarding }
 }
 
@@ -41,8 +41,8 @@ export async function setup(runner: Runner, name: string, home: string): Promise
 }
 
 export async function main(argv: string[], env = process.env): Promise<void> {
-  const [action, direct] = argv, name = direct ?? env.PADDOCK_SANDBOX ?? ""
-  if (!action || action === "--help") { console.log("t3.ts setup|sync|ssh NAME. Requires an already running sandbox with Node and tar. `paddock ssh setup NAME` prepares the SSH access the app connects with."); return }
+  const [action, direct] = argv, name = direct ?? env.ASIDEE_SANDBOX ?? ""
+  if (!action || action === "--help") { console.log("t3.ts setup|sync|ssh NAME. Requires an already running sandbox with Node and tar. `asd ssh setup NAME` prepares the SSH access the app connects with."); return }
   if (argv.length > 2) throw new Error("Unexpected T3 arguments.")
   if (action === "setup") console.log(JSON.stringify(await setup(run, name, homedir())))
   else if (action === "sync") console.log(JSON.stringify(await syncProviders(run, name)))

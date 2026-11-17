@@ -4,10 +4,10 @@ Build both artifacts explicitly from the same source tree. Choose the Linux targ
 `host add` never builds an artifact. These examples use arm64; use `bun-linux-x64` for x86_64.
 
 ```sh
-bun build --compile --minify --outfile dist/paddock cli/cli.ts
-bun build --compile --minify --target=bun-linux-arm64 --outfile dist/paddock-linux cli/cli.ts
-shasum -a 256 dist/paddock-linux
-dist/paddock host add build --ssh alice@linux --artifact "$PWD/dist/paddock-linux" --sha256 HASH
+bun build --compile --minify --outfile dist/asd cli/cli.ts
+bun build --compile --minify --target=bun-linux-arm64 --outfile dist/asidee-linux cli/cli.ts
+shasum -a 256 dist/asidee-linux
+dist/asd host add build --ssh alice@linux --artifact "$PWD/dist/asidee-linux" --sha256 HASH
 ```
 
 Without a terminal, and with `--json`, that command prints the plan and installs nothing. The checksum is an explicit
@@ -15,7 +15,7 @@ trust decision about your artifact, not a signed release manifest. Keep the bina
 
 ## What the destination needs
 
-SSH must already trust the host. The plan names the host key SSH verified, which Paddock captures with OpenSSH's
+SSH must already trust the host. The plan names the host key SSH verified, which Asidee captures with OpenSSH's
 `KnownHostsCommand` (OpenSSH 8.5 or later on this machine) and never reads from ssh's output; when SSH does not report
 exactly one plain key, planning is refused. Every SSH command after consent, and every later connection to the
 registered host, is pinned to that key (see the architecture's host-key pin). The read-only probe requires
@@ -39,7 +39,7 @@ The plan is everything an installation would do, in the order it would do it:
 - Everything delivered to the destination and its checksum: your artifact, the gVisor archive and each file taken from
   it, and any Docker packages.
 - Whether Docker restarts, and every container running at that moment, because a restart may interrupt each one, even
-  with live restore. Whether the Paddock service restarts, and the running sandboxes that stops.
+  with live restore. Whether the Asidee service restarts, and the running sandboxes that stops.
 - The smoke sandbox that verifies the installation before the host is registered, the Dockerfile of the helper image
   that verification builds on the host, the notes, and the blockers. Nothing is installed while a blocker remains.
 - The plan hash, which covers all of the above, including the root copy/check scripts and their expected digests.
@@ -51,8 +51,8 @@ The existing registration is covered by the plan hash, so changing it also inval
 
 Only what is missing is planned. A host that already has the binary, the runtime or the service unit is not sent them
 again, and Docker restarts only when it has to load a runtime entry it does not have. Enrolling a host again with
-another artifact installs that binary and restarts the Paddock service without restarting Docker. That service restart
-stops the running sandboxes the plan names; start each again with `paddock start`.
+another artifact installs that binary and restarts the Asidee service without restarting Docker. That service restart
+stops the running sandboxes the plan names; start each again with `asd start`.
 
 Staging directories and interactive request files are created with destination `mkdtemp` and `mkstemp`.
 The plan shows placeholders; apply reports the staging path. Leftovers do not block a retry. Before a privileged
@@ -64,11 +64,11 @@ Duration is unknown. Disk limits are watched. No hard disk helper, disk tools or
 
 ### Docker inside sandboxes
 
-gVisor `20261026.0` is installed under `/opt/paddock/gvisor/20261026.0/` and registered with Docker as `paddock-runsc`,
-with `--allow-suid` and `--overlay2=none`. Paddock uses that runtime on an enrolled host even when another gVisor
+gVisor `20261026.0` is installed under `/opt/asidee/gvisor/20261026.0/` and registered with Docker as `asidee-runsc`,
+with `--allow-suid` and `--overlay2=none`. Asidee uses that runtime on an enrolled host even when another gVisor
 runtime is registered there, and other runtimes are left as they are.
 
-By default the host does not offer Docker inside its sandboxes, and `paddock create --docker` is refused there. Add
+By default the host does not offer Docker inside its sandboxes, and `asd create --docker` is refused there. Add
 `--docker` to `host add` to register the runtime with `--net-raw` as well, which gives sandboxes gVisor's raw sockets;
 inner Docker's NAT needs them. The option is part of the plan and its hash, and the smoke sandbox then starts Docker
 inside and has to pass that check. Enrolling such a host again without `--docker` plans the removal of `--net-raw`, and
@@ -83,7 +83,7 @@ so a slow prior step can prompt again instead of failing when the timestamp expi
 smoke cleanup and returns 130 with the terminal restored. Completed installation changes stay for inspection; no new registration is written. An update keeps its existing record. Automation uses the reviewed hash:
 
 ```sh
-dist/paddock host add build --ssh alice@linux --artifact "$PWD/dist/paddock-linux" --sha256 HASH --accept-plan PLAN_HASH
+dist/asd host add build --ssh alice@linux --artifact "$PWD/dist/asidee-linux" --sha256 HASH --accept-plan PLAN_HASH
 ```
 
 Automation needs noninteractive sudo for the declared operations. `--json` always prints a plan and applies nothing,
@@ -93,10 +93,10 @@ A changed file, artifact, machine identity, package recipe or container inventor
 consent. Apply probes again after delivery and terminal authentication, before the first installation step. Review the
 revised plan and use its new hash. A plan is held by the primary daemon; restarting that daemon expires its stored plans.
 
-Container inventory retains ownership labels. Service restart warnings identify Paddock sandboxes by both
-`dev.paddock.id` and `dev.paddock.name`, rather than a name prefix; unrelated containers and probe helpers are excluded.
+Container inventory retains ownership labels. Service restart warnings identify Asidee sandboxes by both
+`com.asidee.id` and `com.asidee.name`, rather than a name prefix; unrelated containers and probe helpers are excluded.
 The Docker restart warning still lists every running container. Invalid inventory JSON refuses the plan with a
-Paddock dependency error and asks for a new read-only probe.
+Asidee dependency error and asks for a new read-only probe.
 
 `--sudo never` reuses an installation that is already complete: the system service active and enabled at boot, running
 the supplied artifact from the reviewed unit, with the pinned runtime registered and loaded by Docker. It plans no
@@ -106,22 +106,22 @@ before registration.
 
 ## What an installation leaves
 
-- `/opt/paddock/releases/HASH/paddock`, root-owned, selected by `/usr/local/bin/paddock`.
-- `/opt/paddock/gvisor/20261026.0/`: `runsc`, `containerd-shim-runsc-v1` and the six files of `gvisor-bin/`, root-owned,
+- `/opt/asidee/releases/HASH/asd`, root-owned, selected by `/usr/local/bin/asd`.
+- `/opt/asidee/gvisor/20261026.0/`: `runsc`, `containerd-shim-runsc-v1` and the six files of `gvisor-bin/`, root-owned,
   mode 0755. The release archive is verified against a pinned SHA-512 and each file taken from it against a pinned
   SHA-256; an archive holding anything else is refused before any command runs.
-- One `runtimes.paddock-runsc` entry in `/etc/docker/daemon.json`. Other settings stay. A content-addressed backup
+- One `runtimes.asidee-runsc` entry in `/etc/docker/daemon.json`. Other settings stay. A content-addressed backup
   precedes replacement, and `dockerd --validate` precedes the write.
-- `/etc/systemd/system/paddock@UID.service`, running as the SSH user with `SupplementaryGroups=docker`, a fixed PATH,
+- `/etc/systemd/system/asidee@UID.service`, running as the SSH user with `SupplementaryGroups=docker`, a fixed PATH,
   socket-only access, `Restart=on-failure` and journal logging. Docker access is effectively host-root authority.
   Login group membership stays unchanged.
-- `/var/lib/paddock/UID`, owned by the SSH user, mode 0700, with configuration in `config/` and the installation journal
+- `/var/lib/asidee/UID`, owned by the SSH user, mode 0700, with configuration in `config/` and the installation journal
   in `enrollment.json`. The journal records the plan hash, file contents/hashes, completed steps and the step in progress.
-- From verification and from sandboxes: the helper image `paddock-helper:TAG`, the pulled sandbox images, and the
-  `inet` and `bridge` firewall tables named `paddock_guard`.
+- From verification and from sandboxes: the helper image `asidee-helper:TAG`, the pulled sandbox images, and the
+  `inet` and `bridge` firewall tables named `asidee_guard`.
 
 The primary registers the host only after inspecting the enabled service and matching the daemon's source, version,
-protocol, binary digest and listener, and after finding that the daemon would run sandboxes on `paddock-runsc`. Smoke
+protocol, binary digest and listener, and after finding that the daemon would run sandboxes on `asidee-runsc`. Smoke
 verification needs every applicable blocking check to pass at creation and again after a real disk write measured from
 the host, followed by successful sandbox removal. `net-private` may be `weak` instead: a stand-in range the host already
 uses cannot be probed there, and rests on the loaded rules alone, which the result names. The smoke sandbox has no links, so its `link-scope` result must be `info`;
@@ -158,34 +158,34 @@ a partially installed machine may need owner-provided Docker access before a com
 
 ## Remove the registration and uninstall manually
 
-`paddock host remove build --confirm build` forgets only primary resources. It leaves the remote installation, service,
+`asd host remove build --confirm build` forgets only primary resources. It leaves the remote installation, service,
 sandboxes, packages, runtime, images and logs. Uninstall is an explicit owner operation, separate from host removal.
 
-On the remote machine, first remove that daemon's sandboxes and templates through Paddock. `UID` is the SSH account's
-`id -u`, and `TAG` is the tag `docker images 'paddock-helper:*'` shows. Then, in this order:
+On the remote machine, first remove that daemon's sandboxes and templates through Asidee. `UID` is the SSH account's
+`id -u`, and `TAG` is the tag `docker images 'asidee-helper:*'` shows. Then, in this order:
 
-1. Stop and disable the service: `sudo systemctl disable --now paddock@UID.service`.
-2. Delete Paddock's firewall tables. They stay loaded after the service stops, until they are deleted or the machine
+1. Stop and disable the service: `sudo systemctl disable --now asidee@UID.service`.
+2. Delete Asidee's firewall tables. They stay loaded after the service stops, until they are deleted or the machine
    reboots, and the helper image carries the `nft` that removes them:
 
    ```sh
-   sudo docker run --rm --network host --cap-add NET_ADMIN --runtime runc paddock-helper:TAG nft delete table inet paddock_guard
-   sudo docker run --rm --network host --cap-add NET_ADMIN --runtime runc paddock-helper:TAG nft delete table bridge paddock_guard
+   sudo docker run --rm --network host --cap-add NET_ADMIN --runtime runc asidee-helper:TAG nft delete table inet asidee_guard
+   sudo docker run --rm --network host --cap-add NET_ADMIN --runtime runc asidee-helper:TAG nft delete table bridge asidee_guard
    ```
 
-3. Check that no container still uses `paddock-runsc`, and list every running container: the Docker restart in this
-   step may interrupt each one. Remove only `runtimes.paddock-runsc` from a copy of `/etc/docker/daemon.json`,
+3. Check that no container still uses `asidee-runsc`, and list every running container: the Docker restart in this
+   step may interrupt each one. Remove only `runtimes.asidee-runsc` from a copy of `/etc/docker/daemon.json`,
    preserving every other key. Validate the copy with `sudo dockerd --validate --config-file COPY`, install it with
    `sudo install -m 0644 COPY /etc/docker/daemon.json` and run `sudo systemctl restart docker`. Restore a whole backup
    file instead only if the current file still has the hash the installation wrote; a newer unrelated edit must not be
    overwritten.
-4. Remove the unit `/etc/systemd/system/paddock@UID.service`, the `/usr/local/bin/paddock` link and the backups
-   `/etc/systemd/system/paddock@UID.service.paddock-*` and `/etc/docker/daemon.json.paddock-*`, then run
+4. Remove the unit `/etc/systemd/system/asidee@UID.service`, the `/usr/local/bin/asd` link and the backups
+   `/etc/systemd/system/asidee@UID.service.asidee-*` and `/etc/docker/daemon.json.asidee-*`, then run
    `sudo systemctl daemon-reload`.
-5. Remove `/opt/paddock`, unless another account's Paddock service on this machine uses a release or the runtime in it.
-   Delete `/var/lib/paddock/UID` after deciding what configuration and journal to keep, and the then empty
-   `/var/lib/paddock`.
-6. Remove the helper image with `sudo docker rmi paddock-helper:TAG`.
+5. Remove `/opt/asidee`, unless another account's Asidee service on this machine uses a release or the runtime in it.
+   Delete `/var/lib/asidee/UID` after deciding what configuration and journal to keep, and the then empty
+   `/var/lib/asidee`.
+6. Remove the helper image with `sudo docker rmi asidee-helper:TAG`.
 
 The pulled sandbox images, the distro's Docker packages, ordinary SSH configuration, known-host trust and system journal
 logs are shared owner resources and stay unless the owner removes them.

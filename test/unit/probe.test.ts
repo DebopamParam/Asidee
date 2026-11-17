@@ -10,7 +10,7 @@ import type { Manifest, Runner } from "../../core/types"
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))) })
 async function fixture(ip: string, script: string) {
-  const root = await mkdtemp(join(tmpdir(), "pdk-probe-unit-")); roots.push(root)
+  const root = await mkdtemp(join(tmpdir(), "asd-probe-unit-")); roots.push(root)
   await mkdir(join(root, "bin")); await writeFile(join(root, "bin/ip"), `#!/bin/sh\n${ip}`); await chmod(join(root, "bin/ip"), 0o700)
   const child = Bun.spawn(["sh", "-c", script], { cwd: root, env: { ...process.env, PATH: `${root}/bin:${process.env.PATH}` }, stdout: "pipe", stderr: "pipe" })
   return { code: await child.exited, out: await new Response(child.stdout).text(), err: await new Response(child.stderr).text(), root }
@@ -48,21 +48,21 @@ for (const leftover of ["previous", "current"] as const) test(`a ${leftover} pro
   const runner: Runner = async (argv) => {
     let stdout = "", exitCode = 0, stderr = ""
     if (argv.includes("--network") && argv[argv.indexOf("--network") + 1] === "host" && argv.at(-2) === "-c" && argv.at(-1)!.includes("echo ready")) hostScript = argv.at(-1)!
-    if (argv[3] === "inspect" && argv[4] === "paddock-demo") stdout = JSON.stringify([{ State: { Running: true }, Config: { Labels: { [LABEL_ID]: "owned" } } }])
+    if (argv[3] === "inspect" && argv[4] === "asidee-demo") stdout = JSON.stringify([{ State: { Running: true }, Config: { Labels: { [LABEL_ID]: "owned" } } }])
     // Another daemon's probe is tearing down: the host listener waits, and gives up after more reads than the 16 s
     // the daemon used to allow.
     else if (argv[3] === "logs") stdout = leftover === "current" ? "ready\n" : ++reads > 50 ? "teardown-timeout 10.255.255.254\n" : ""
     else if (argv[3] === "inspect" || argv[3] === "network") stdout = "172.20.0.1"
-    else if (argv.some((part) => part.includes("Paddock probe teardown timed out:"))) {
-      if (leftover === "current") { exitCode = 1; stderr = "Paddock probe teardown timed out" }
+    else if (argv.some((part) => part.includes("Asidee probe teardown timed out:"))) {
+      if (leftover === "current") { exitCode = 1; stderr = "Asidee probe teardown timed out" }
     } else if (argv[3] === "exec" && argv.includes("nc")) {
-      if (argv[4]?.endsWith("-host")) stdout = "paddock-probe"; else exitCode = 1
+      if (argv[4]?.endsWith("-host")) stdout = "asidee-probe"; else exitCode = 1
     } else if (argv.includes("--entrypoint")) stdout = "intact"
     return { stdout, stderr, exitCode }
   }
   const checked = new GvisorProvider(runner).checks(manifest, "probe")
   if (leftover === "current") return void await expect(checked).rejects.toThrow(/teardown|tearing down/)
-  await expect(checked).rejects.toThrow(`Another Paddock probe was still tearing down its routes after ${PROBE_TEARDOWN_WAIT} seconds, so nothing was probed and no weaker evidence was substituted. Run verify again in a few seconds.`)
+  await expect(checked).rejects.toThrow(`Another Asidee probe was still tearing down its routes after ${PROBE_TEARDOWN_WAIT} seconds, so nothing was probed and no weaker evidence was substituted. Run verify again in a few seconds.`)
   expect(reads).toBeGreaterThan(50)
   expect(hostScript).toContain(`wait_probe_routes \${a}4 ${PROBE_TEARDOWN_WAIT * 10} ||`)
 }, 60_000)

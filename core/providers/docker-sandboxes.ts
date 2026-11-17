@@ -1,6 +1,6 @@
-import { PaddockError, type Engine, type Provider, type Runner } from "../types"
+import { AsideeError, type Engine, type Provider, type Runner } from "../types"
 
-// Docker Sandboxes (the `sbx` CLI): each sandbox is a microVM. Only detection exists so far, so `paddock doctor` can say
+// Docker Sandboxes (the `sbx` CLI): each sandbox is a microVM. Only detection exists so far, so `asd doctor` can say
 // that it is installed and not usable yet, instead of claiming support that has not been built and probed.
 export class DockerSandboxesProvider implements Provider {
   readonly id = "docker-sandboxes"
@@ -11,11 +11,11 @@ export class DockerSandboxesProvider implements Provider {
     if (version.exitCode !== 0) return []
     return [{
       id: "docker-sandboxes", provider: this.id, label: `Docker Sandboxes (${version.stdout.trim().split("\n")[0]})`, ready: false,
-      problems: ["Paddock does not support Docker Sandboxes yet."], data: {},
+      problems: ["Asidee does not support Docker Sandboxes yet."], data: {},
     }]
   }
 
-  private unsupported(): never { throw new PaddockError("dependency", "Paddock does not support Docker Sandboxes yet.") }
+  private unsupported(): never { throw new AsideeError("dependency", "Asidee does not support Docker Sandboxes yet.") }
   create() { return this.unsupported() }
   prepare() { return this.unsupported() }
   start() { return this.unsupported() }

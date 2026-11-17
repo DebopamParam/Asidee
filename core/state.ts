@@ -1,13 +1,13 @@
 import { chmod, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { PaddockError, type Manifest, type SandboxSpec } from "./types"
+import { AsideeError, type Manifest, type SandboxSpec } from "./types"
 
 export type Dirs = { state: string; config: string }
 export function defaultDirs(env: Record<string, string | undefined> = process.env): Dirs {
   return {
-    state: env.PADDOCK_STATE_DIR ?? join(env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "paddock"),
-    config: env.PADDOCK_CONFIG_DIR ?? join(env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "paddock"),
+    state: env.ASIDEE_STATE_DIR ?? join(env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "asidee"),
+    config: env.ASIDEE_CONFIG_DIR ?? join(env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "asidee"),
   }
 }
 export const socketPath = (dirs: Dirs) => join(dirs.state, "daemon.sock")
@@ -15,7 +15,7 @@ export const socketPath = (dirs: Dirs) => join(dirs.state, "daemon.sock")
 export const streamSocketPath = (dirs: Dirs) => join(dirs.state, "stream.sock")
 // The operating system limits a socket's path (104 bytes on macOS, 108 on Linux). Past it the daemon cannot listen.
 export function checkSocketPath(dirs: Dirs): void {
-  if (Buffer.byteLength(socketPath(dirs)) > 100) throw new PaddockError("usage", `The state folder's path is too long for the daemon's socket (${socketPath(dirs)}). Set PADDOCK_STATE_DIR to a shorter path.`)
+  if (Buffer.byteLength(socketPath(dirs)) > 100) throw new AsideeError("usage", `The state folder's path is too long for the daemon's socket (${socketPath(dirs)}). Set ASIDEE_STATE_DIR to a shorter path.`)
 }
 export const daemonFile = (dirs: Dirs) => join(dirs.state, "daemon.json")
 
@@ -23,19 +23,19 @@ export const DEFAULT_SPEC = { image: "docker/sandbox-templates:shell-docker", cp
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,30}$/
 export function validName(name: unknown): string {
-  if (typeof name !== "string" || !NAME.test(name)) throw new PaddockError("usage", "A sandbox name is 1 to 31 lowercase letters, digits or hyphens, and does not start with a hyphen.")
+  if (typeof name !== "string" || !NAME.test(name)) throw new AsideeError("usage", "A sandbox name is 1 to 31 lowercase letters, digits or hyphens, and does not start with a hyphen.")
   return name
 }
 // A template's name is also its tag on the engine, so it follows the same rule.
 export function validTemplateName(name: unknown): string {
-  if (typeof name !== "string" || !NAME.test(name)) throw new PaddockError("usage", "A template name is 1 to 31 lowercase letters, digits or hyphens, and does not start with a hyphen.")
+  if (typeof name !== "string" || !NAME.test(name)) throw new AsideeError("usage", "A template name is 1 to 31 lowercase letters, digits or hyphens, and does not start with a hyphen.")
   return name
 }
 
 function number(value: unknown, label: string, min: number, max: number, fallback: number): number {
   if (value === undefined || value === null || value === "") return fallback
   const parsed = typeof value === "number" || typeof value === "string" ? Number(value) : NaN
-  if (!Number.isFinite(parsed) || parsed < min || parsed > max) throw new PaddockError("usage", `${label} must be a number from ${min} to ${max}.`)
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) throw new AsideeError("usage", `${label} must be a number from ${min} to ${max}.`)
   return parsed
 }
 
@@ -53,13 +53,13 @@ export function validSizes(input: Record<string, unknown>, base: Sizes): Sizes {
 export function validSpec(input: Record<string, unknown>, defaults: Partial<typeof DEFAULT_SPEC> = {}): SandboxSpec {
   const base = { ...DEFAULT_SPEC, ...defaults }
   const template = input.template === undefined || input.template === "" ? undefined : validTemplateName(input.template)
-  if (template && input.image !== undefined && input.image !== "") throw new PaddockError("usage", "Give an image or a template, not both.")
+  if (template && input.image !== undefined && input.image !== "") throw new AsideeError("usage", "Give an image or a template, not both.")
   const image = input.image === undefined || input.image === "" ? base.image : input.image
-  if (typeof image !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$/.test(image)) throw new PaddockError("usage", "The image must be an image reference such as ubuntu:24.04.")
+  if (typeof image !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$/.test(image)) throw new AsideeError("usage", "The image must be an image reference such as ubuntu:24.04.")
   // A template is used by its name, so the sandbox records it and its checklist says so.
-  if (/^paddock-(template|snapshot)-/.test(image)) throw new PaddockError("usage", `${image} is one of Paddock's templates. Use --template with its name instead (see \`paddock template list\`).`)
+  if (/^asidee-(template|snapshot)-/.test(image)) throw new AsideeError("usage", `${image} is one of Asidee's templates. Use --template with its name instead (see \`asd template list\`).`)
   const docker = input.docker === undefined ? base.docker : input.docker
-  if (typeof docker !== "boolean") throw new PaddockError("usage", "docker must be a boolean (true or false).")
+  if (typeof docker !== "boolean") throw new AsideeError("usage", "docker must be a boolean (true or false).")
   return { name: validName(input.name), image, docker, ...validSizes(input, base), ...(template ? { template } : {}) }
 }
 
@@ -68,7 +68,7 @@ const manifestFile = (dirs: Dirs, name: string) => join(manifestDir(dirs), `${na
 
 export async function readManifest(dirs: Dirs, name: string): Promise<Manifest> {
   try { return JSON.parse(await readFile(manifestFile(dirs, validName(name)), "utf8")) as Manifest } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new PaddockError("not-found", `There is no sandbox named ${name}.`)
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new AsideeError("not-found", `There is no sandbox named ${name}.`)
     throw error
   }
 }
@@ -116,18 +116,18 @@ async function configFile(dirs: Dirs): Promise<Record<string, unknown>> {
     throw error
   }
   let data: unknown
-  try { data = JSON.parse(text) } catch { throw new PaddockError("usage", `${file} has a mistake: it is not valid JSON. Fix it or delete it.`) }
-  if (typeof data !== "object" || data === null || Array.isArray(data)) throw new PaddockError("usage", `${file} has a mistake: it must be a JSON object. Fix it or delete it.`)
+  try { data = JSON.parse(text) } catch { throw new AsideeError("usage", `${file} has a mistake: it is not valid JSON. Fix it or delete it.`) }
+  if (typeof data !== "object" || data === null || Array.isArray(data)) throw new AsideeError("usage", `${file} has a mistake: it must be a JSON object. Fix it or delete it.`)
   return data as Record<string, unknown>
 }
 
 function parseConfig(dirs: Dirs, data: Record<string, unknown>): Config {
   const file = join(dirs.config, "config.json")
-  const wrong = (problem: string): never => { throw new PaddockError("usage", `${file} has a mistake: ${problem}. Fix it or delete it.`) }
+  const wrong = (problem: string): never => { throw new AsideeError("usage", `${file} has a mistake: ${problem}. Fix it or delete it.`) }
   const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
   for (const key of Object.keys(SETTINGS) as Array<keyof typeof SETTINGS>) { const problem = data[key] === undefined ? undefined : settingProblem(key, data[key]); if (problem) wrong(problem) }
   if (data.defaults !== undefined && !isObject(data.defaults)) wrong("defaults must be an object")
-  if (data.engine !== undefined && typeof data.engine !== "string") wrong("engine must be an engine id, as `paddock doctor` prints it")
+  if (data.engine !== undefined && typeof data.engine !== "string") wrong("engine must be an engine id, as `asd doctor` prints it")
   const defaults = (data.defaults ?? {}) as Record<string, unknown>
   // The defaults pass the same validation as a request, so config cannot set what a request cannot.
   try { validSpec({ ...defaults, name: "x" }) } catch (error) { wrong(`in defaults, ${(error as Error).message.replace(/^./, (first) => first.toLowerCase()).replace(/\.$/, "")}`) }
@@ -141,8 +141,8 @@ export async function readConfig(dirs: Dirs): Promise<Config> { return parseConf
 // The daemon serializes settings writes. Preserve defaults, engine and fields owned by other config consumers.
 export async function writeConfig(dirs: Dirs, input: Record<string, unknown>): Promise<Config> {
   const keys = Object.keys(input)
-  if (!keys.length || keys.some((key) => !Object.hasOwn(SETTINGS, key))) throw new PaddockError("usage", "Set requireProbes, experimental or workspaceFreeSpaceGb.")
-  for (const key of keys as Array<keyof typeof SETTINGS>) { const problem = settingProblem(key, input[key]); if (problem) throw new PaddockError("usage", `${problem.replace(/^./, (first) => first.toUpperCase())}.`) }
+  if (!keys.length || keys.some((key) => !Object.hasOwn(SETTINGS, key))) throw new AsideeError("usage", "Set requireProbes, experimental or workspaceFreeSpaceGb.")
+  for (const key of keys as Array<keyof typeof SETTINGS>) { const problem = settingProblem(key, input[key]); if (problem) throw new AsideeError("usage", `${problem.replace(/^./, (first) => first.toUpperCase())}.`) }
   const data = { ...await configFile(dirs), ...input }
   const config = parseConfig(dirs, data)
   await mkdir(dirs.config, { recursive: true, mode: 0o700 })

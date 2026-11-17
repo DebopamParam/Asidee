@@ -1,12 +1,12 @@
-# Migration plan: everything `sandbox-manager` does, in Paddock
+# Migration plan: everything `sandbox-manager` does, in Asidee
 
-The owner runs a personal tool, `../sandbox-manager` (read-only reference; never edit it), and wants Paddock to replace
+The owner runs a personal tool, `../sandbox-manager` (read-only reference; never edit it), and wants Asidee to replace
 it entirely. This file is the shared brief for everyone working on that. Read `README.md` and `docs/architecture.md`
 first.
 
 ## What must not be lost
 
-Paddock's one promise: **it never claims a property it cannot show.** Concretely:
+Asidee's one promise: **it never claims a property it cannot show.** Concretely:
 
 - Only `core/` runs engine commands. The CLI, the dashboard and extensions are clients of the API in `core/daemon.ts`.
 - A spec can only express what the core can check. A new ability is a **named, typed option** with its own evidence in
@@ -25,8 +25,8 @@ Paddock's one promise: **it never claims a property it cannot show.** Concretely
 - One dashboard: the web one. No terminal dashboard.
 - Ports: a forwarded port appears only on the loopback of the machine the person sits at. No LAN publishing, and no
   engine-level port publishing (`-p`) ever.
-- Several machines: one Paddock daemon per machine that has an engine; the primary machine reaches the others over
-  SSH (their Unix sockets). `paddock host add` sets up a Linux machine and shows what it will do before doing it.
+- Several machines: one Asidee daemon per machine that has an engine; the primary machine reaches the others over
+  SSH (their Unix sockets). `asd host add` sets up a Linux machine and shows what it will do before doing it.
 - Existing sandboxes are not imported; they are recreated.
 - A sandbox-to-sandbox network comes later. Word the "cannot reach other sandboxes" evidence so it can later say
   "except the ones you linked".
@@ -41,8 +41,8 @@ Paddock's one promise: **it never claims a property it cannot show.** Concretely
 2. **Access**: SSH alias for editors and T3 Code, T3 Code setup, the account rotator.
 3. **Logins and setup**: Claude, Codex and gh login import, agent settings and skills, repository clone and save,
    environment docs.
-4. **Machines**: daemon per machine, `paddock host add` for Linux, the dashboard showing all of them.
-5. **Move over**: the owner's sandboxes recreated; the HQ shell and skill switched to `paddock`.
+4. **Machines**: daemon per machine, `asd host add` for Linux, the dashboard showing all of them.
+5. **Move over**: the owner's sandboxes recreated; the HQ shell and skill switched to `asd`.
 6. Afterwards: the macOS [workspace kind](workspaces.md), not a sandbox, is implemented with its own checklist and
    K evals. Claude Keychain import is measured through product-path login status; authenticated calls and token
    refresh remain unverified. The sandbox-to-sandbox network is still later.
@@ -57,9 +57,9 @@ Paddock's one promise: **it never claims a property it cannot show.** Concretely
   OrbStack, change the engine's `daemon.json`, or touch containers, networks or volumes whose names start with
   `sandbox-` (they are the owner's live sandboxes). Never use `sudo` on this Mac. Do not connect to other machines
   unless your task says so.
-- Clean up every container, network, volume and image you create. The evals refuse to run while other Paddock
-  sandboxes exist on the engine, so do not leave test sandboxes behind, and use a temporary `PADDOCK_STATE_DIR` and
-  `PADDOCK_CONFIG_DIR` for manual tests.
+- Clean up every container, network, volume and image you create. The evals refuse to run while other Asidee
+  sandboxes exist on the engine, so do not leave test sandboxes behind, and use a temporary `ASIDEE_STATE_DIR` and
+  `ASIDEE_CONFIG_DIR` for manual tests.
 - Stay inside the files your task names. If you need a change elsewhere, say so in your final report instead of
   making it.
 - Match the code that is there: dense, few dependencies (no new runtime dependency), comments that state a reason.

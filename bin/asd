@@ -1,3 +1,3 @@
 #!/bin/sh
-# Runs Paddock from source. Needs Bun on PATH.
+# Runs Asidee from source. Needs Bun on PATH.
 exec bun "$(cd "$(dirname "$0")/.." && pwd)/cli/cli.ts" "$@"

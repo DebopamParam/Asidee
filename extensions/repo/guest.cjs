@@ -23,7 +23,7 @@ async function main() {
     if (typeof input.repository !== "string" || !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/.test(input.repository) || input.repository.endsWith(".git")) fail()
     if (fs.existsSync(work)) fail()
     fs.mkdirSync(path.dirname(work), { recursive: true, mode: 0o700 })
-    const staging = fs.mkdtempSync(path.join(path.dirname(work), ".paddock-clone-"))
+    const staging = fs.mkdtempSync(path.join(path.dirname(work), ".asidee-clone-"))
     try {
       const url = "https://github.com/" + input.repository + ".git"
       const authenticated = cp.spawnSync("gh", ["auth", "status", "--hostname", "github.com"], { stdio: "ignore" }).status === 0
@@ -41,7 +41,7 @@ async function main() {
   if (typeof branch !== "string" || /[\0\r\n]/.test(branch)) fail()
   git(work, ["check-ref-format", "refs/heads/" + branch])
   const tip = git(work, ["rev-parse", "--verify", "refs/heads/" + branch + "^{commit}"])
-  const ref = "refs/paddock-export/" + crypto.randomUUID(), tmp = fs.mkdtempSync(path.join(os.tmpdir(), "paddock-bundle-")), file = path.join(tmp, "history.bundle")
+  const ref = "refs/asidee-export/" + crypto.randomUUID(), tmp = fs.mkdtempSync(path.join(os.tmpdir(), "asidee-bundle-")), file = path.join(tmp, "history.bundle")
   try {
     // Pin one commit while the source branch may move. Dirty files, index changes and other refs are excluded.
     git(work, ["update-ref", ref, tip])
@@ -50,7 +50,7 @@ async function main() {
     if (size > LIMIT) { process.exitCode = 73; return { tooLarge: true, limit: LIMIT } }
     const hash = crypto.createHash("sha256")
     for await (const chunk of fs.createReadStream(file)) hash.update(chunk)
-    // One header line, then the raw bundle: `paddock exec --stream` carries bytes unchanged.
+    // One header line, then the raw bundle: `asd exec --stream` carries bytes unchanged.
     process.stdout.write(JSON.stringify({ branch, tip, ref, size, sha256: hash.digest("hex") }) + "\n")
     for await (const chunk of fs.createReadStream(file)) if (!process.stdout.write(chunk)) await new Promise(done => process.stdout.once("drain", done))
     return undefined

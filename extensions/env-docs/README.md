@@ -1,20 +1,20 @@
 # Environment documentation
 
-Run `bun extensions/env-docs/env-docs.ts NAME [WORKSPACE]` with Bun and `paddock` on PATH. The guest must be running,
+Run `bun extensions/env-docs/env-docs.ts NAME [WORKSPACE]` with Bun and `asd` on PATH. The guest must be running,
 have Node and an existing workspace. Relative paths are resolved under the guest home; the default is `workspace`.
 Guest Git is optional and is used only to exclude `/env_docs/` locally when the workspace is a Git repository.
 
-Copy the whole folder to `$PADDOCK_CONFIG_DIR/extensions/env-docs` (normally `~/.config/paddock/extensions/env-docs`),
+Copy the whole folder to `$ASIDEE_CONFIG_DIR/extensions/env-docs` (normally `~/.config/asidee/extensions/env-docs`),
 preserving the executable bit on `env-docs.ts`. Use the dashboard action or
-`paddock ext run env-docs write NAME --set workspace=/workspace/repo`.
+`asd ext run env-docs write NAME --set workspace=/workspace/repo`.
 
-The client calls `paddock --json list`, then `paddock --json verify NAME`, validates the result, and sends a Markdown
+The client calls `asd --json list`, then `asd --json verify NAME`, validates the result, and sends a Markdown
 document on exec stdin for an atomic private write to `WORKSPACE/env_docs/SANDBOX.md`. A successful JSON envelope
 from verify is accepted even with exit 6, preserving its failing checks. If verification stopped the sandbox, the
 client refuses to write. It does not start it. Symlinked output paths are refused.
 
 The document includes the reported name, status, engine, image, requested sizes, verification result and every
-check's exact status, evidence kind and detail. Reachability entries repeat Paddock's reports for the host, peers,
+check's exact status, evidence kind and detail. Reachability entries repeat Asidee's reports for the host, peers,
 private networks, egress, inbound access, guard and mounts. Missing entries say `not reported`. No operating-system,
 root, sudo, Docker, SSH, resource-enforcement or network claim is inferred from the engine name or requested spec.
 Unknown and weak results remain unknown and weak. Verification is a snapshot and may become stale.
@@ -30,8 +30,8 @@ the need for the explicit workspace action field. It must identify a path, not i
 
 Unit tests execute the writer in a temporary home/repository and feed simulated checklist JSON.
 
-Checked live on 2026-11-11 in one sandbox on the default image, directly and through `paddock ext run`: the document was
+Checked live on 2026-11-11 in one sandbox on the default image, directly and through `asd ext run`: the document was
 written to `~/workspace/env_docs/SANDBOX.md` with mode 0600 in a 0700 folder; in a Git workspace `/env_docs/` was added
 to `.git/info/exclude` and `git status` stayed clean; a missing workspace and a symlinked `env_docs` were refused; a
 stopped sandbox was refused and left stopped. Not checked live: a verify that exits 6, a sandbox that verification
-stops, and a line-by-line comparison of the document with `paddock verify` output.
+stops, and a line-by-line comparison of the document with `asd verify` output.

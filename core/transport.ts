@@ -8,7 +8,7 @@ import { connect } from "node:net"
 import { Duplex } from "node:stream"
 import { EventEmitter } from "node:events"
 import { dataFrames, frame, FrameReader, MAX_MESSAGE, type Frame, type OpenRequest } from "./stream"
-import { PaddockError, type ErrorCode, type Session } from "./types"
+import { AsideeError, type ErrorCode, type Session } from "./types"
 
 export const PROTOCOL = 1
 export const MAX_REPLY = 8 * 1024 ** 2
@@ -29,12 +29,12 @@ export const shellQuote = (word: string) => `'${word.replaceAll("'", "'\\''")}'`
 
 export function sshDestination(value: unknown): string {
   if (typeof value !== "string" || !/^(?:[a-zA-Z0-9_][a-zA-Z0-9_.-]*@)?[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/.test(value))
-    throw new PaddockError("usage", "The SSH destination must be an alias or user@hostname, without options or configuration fragments.")
+    throw new AsideeError("usage", "The SSH destination must be an alias or user@hostname, without options or configuration fragments.")
   return value
 }
 
 export function absolutePath(value: unknown): string {
-  if (typeof value !== "string" || !value.startsWith("/") || /[\x00-\x1f\x7f]/.test(value)) throw new PaddockError("usage", "An absolute path without control characters is required.")
+  if (typeof value !== "string" || !value.startsWith("/") || /[\x00-\x1f\x7f]/.test(value)) throw new AsideeError("usage", "An absolute path without control characters is required.")
   return value
 }
 
@@ -46,11 +46,11 @@ export const sshArgv = (destination: string, command: readonly string[], options
 // is pinned to. A record from before the public key was kept has only the fingerprint and is refused.
 export type Endpoint = { ssh: string; binary: string; stateDir: string; hostKey?: string; hostPublicKey?: string }
 export function transportCommand(host: Endpoint, stream = false): string[] {
-  return ["/usr/bin/env", `PADDOCK_STATE_DIR=${absolutePath(host.stateDir)}`, absolutePath(host.binary), "transport", "stdio", "--protocol", String(PROTOCOL), ...(stream ? ["--stream"] : [])]
+  return ["/usr/bin/env", `ASIDEE_STATE_DIR=${absolutePath(host.stateDir)}`, absolutePath(host.binary), "transport", "stdio", "--protocol", String(PROTOCOL), ...(stream ? ["--stream"] : [])]
 }
 
 export function hostPublicKey(value: unknown): string {
-  if (typeof value !== "string" || !/^[a-z][a-z0-9@.-]{0,63} [A-Za-z0-9+/]{16,16384}={0,2}$/.test(value) || value.includes("-cert-")) throw new PaddockError("usage", "A host public key must be one known_hosts key: its type and base64, without a certificate.")
+  if (typeof value !== "string" || !/^[a-z][a-z0-9@.-]{0,63} [A-Za-z0-9+/]{16,16384}={0,2}$/.test(value) || value.includes("-cert-")) throw new AsideeError("usage", "A host public key must be one known_hosts key: its type and base64, without a certificate.")
   return value
 }
 // As `ssh-keygen -l` prints it.
@@ -59,9 +59,9 @@ export const keyFingerprint = (publicKey: string) => `SHA256:${createHash("sha25
 // ssh splits option values at whitespace and expands % and ~ in file names, so a private file's path must have none.
 function privateFolder(): string {
   const base = /^[A-Za-z0-9_./-]+$/.test(tmpdir()) ? tmpdir() : "/tmp"
-  return mkdtempSync(join(base, "paddock-ssh-"))
+  return mkdtempSync(join(base, "asidee-ssh-"))
 }
-const PIN_ALIAS = "paddock-enrolled-host"
+const PIN_ALIAS = "asidee-enrolled-host"
 // The destination is checked against this one key and nothing else: not the user's known_hosts or global file, DNS, or
 // a KnownHostsCommand. OpenSSH does that check itself, before authentication, so nothing the server sends (a banner
 // reaches the same stderr as -v's lines) can pass it, and no byte is sent or read before it. A ProxyJump hop runs its own
@@ -81,18 +81,18 @@ export function hostKeyCapture(destination: string): { options: string[]; read(e
   return {
     options: ["-o", `KnownHostsCommand=/bin/sh -c 'printf "%%s %%s %%s\\n" "$1" "$2" "$3" >> "$0"' ${file} %I %t %K`],
     read(exitCode) {
-      if (exitCode === 255 || exitCode === null) throw new PaddockError("dependency", `SSH could not connect to ${destination} with the user's own host trust, so no host key was recorded.`)
+      if (exitCode === 255 || exitCode === null) throw new AsideeError("dependency", `SSH could not connect to ${destination} with the user's own host trust, so no host key was recorded.`)
       let offered = ""; try { offered = readFileSync(file, "utf8") } catch {}
       const keys = new Set(offered.split("\n").filter((line) => line.startsWith("HOSTNAME ") && !line.includes("-cert-")).map((line) => line.slice("HOSTNAME ".length)))
-      if (keys.size !== 1) throw new PaddockError("dependency", `SSH did not report exactly one host key it verified for ${destination}, so no host key was recorded. Paddock needs OpenSSH 8.5 or later (KnownHostsCommand) first on PATH, and a plain host key rather than only a certificate.`)
+      if (keys.size !== 1) throw new AsideeError("dependency", `SSH did not report exactly one host key it verified for ${destination}, so no host key was recorded. Asidee needs OpenSSH 8.5 or later (KnownHostsCommand) first on PATH, and a plain host key rather than only a certificate.`)
       return hostPublicKey([...keys][0])
     },
     remove: () => rmSync(folder, { recursive: true, force: true }),
   }
 }
-export const enrolledKeyHelp = "Check the destination, remove its host record with `paddock host remove NAME --confirm NAME`, then re-enroll deliberately with `paddock host add` or `paddock host attach`."
-function pinRefusal(host: Endpoint): PaddockError | undefined {
-  if (host.hostKey && !host.hostPublicKey) return new PaddockError("identity-changed", `${host.ssh} was enrolled with only its host-key fingerprint, read from ssh's verbose output, where text the server sends before authentication can imitate it. Paddock now pins the whole public key and does not use this record. Nothing was sent. ${enrolledKeyHelp}`)
+export const enrolledKeyHelp = "Check the destination, remove its host record with `asd host remove NAME --confirm NAME`, then re-enroll deliberately with `asd host add` or `asd host attach`."
+function pinRefusal(host: Endpoint): AsideeError | undefined {
+  if (host.hostKey && !host.hostPublicKey) return new AsideeError("identity-changed", `${host.ssh} was enrolled with only its host-key fingerprint, read from ssh's verbose output, where text the server sends before authentication can imitate it. Asidee now pins the whole public key and does not use this record. Nothing was sent. ${enrolledKeyHelp}`)
 }
 
 // One isolated SSH process per connection. stderr is diagnostic only and never mixed with protocol bytes.
@@ -117,14 +117,14 @@ export function sshConnection(host: Endpoint, stream = false) {
     if (messages.length < 65536) messages += bytes.toString()
   })
   child.on("error", (error) => wire.destroy(error))
-  let done = false; let refused: PaddockError | undefined
+  let done = false; let refused: AsideeError | undefined
   // ssh can be gone while its last output still waits behind a slow reader: the wire closes once that is read.
   const exited = new Promise<void>((resolve) => child.once("close", (code) => {
     done = true; pin?.remove()
     // A ProxyJump hop's own refusal reaches the same stderr; only one that names the pin's alias is the destination's.
     if (pin && code === 255 && messages.includes("Host key verification failed.") && messages.includes(`for ${PIN_ALIAS} `)) {
       const offered = diagnostic.match(/key sent by the remote host is\s+(SHA256:[A-Za-z0-9+/]{43})/)?.[1]
-      refused = new PaddockError("identity-changed", `The SSH host key for ${host.ssh} is not the one recorded at enrollment (${host.hostKey ?? keyFingerprint(host.hostPublicKey!)})${offered ? `; it offered ${offered}` : ""}. OpenSSH refused it before anything was sent. ${enrolledKeyHelp}`)
+      refused = new AsideeError("identity-changed", `The SSH host key for ${host.ssh} is not the one recorded at enrollment (${host.hostKey ?? keyFingerprint(host.hostPublicKey!)})${offered ? `; it offered ${offered}` : ""}. OpenSSH refused it before anything was sent. ${enrolledKeyHelp}`)
     }
     if (wire.readableEnded) wire.destroy(); else wire.once("end", () => wire.destroy()); resolve()
   }))
@@ -138,14 +138,14 @@ export function sshConnection(host: Endpoint, stream = false) {
       if (!await settled(KILL_GRACE_MS)) { child.kill("SIGKILL"); await settled(KILL_GRACE_MS) }
     } }
 }
-export type Connection = Pick<ReturnType<typeof sshConnection>, "wire" | "diagnostic" | "close"> & { pid?: number; ready?: Promise<void>; refusal?: () => Promise<PaddockError | undefined> }
+export type Connection = Pick<ReturnType<typeof sshConnection>, "wire" | "diagnostic" | "close"> & { pid?: number; ready?: Promise<void>; refusal?: () => Promise<AsideeError | undefined> }
 
-class RemoteFailure extends PaddockError {}
+class RemoteFailure extends AsideeError {}
 export function parseReply(value: unknown): unknown {
-  if (!object(value) || typeof value.ok !== "boolean") throw new PaddockError("incompatible", "The remote daemon returned a malformed reply.")
-  if (value.ok) { if (!Object.hasOwn(value, "data")) throw new PaddockError("incompatible", "The remote daemon returned no data."); return value.data }
+  if (!object(value) || typeof value.ok !== "boolean") throw new AsideeError("incompatible", "The remote daemon returned a malformed reply.")
+  if (value.ok) { if (!Object.hasOwn(value, "data")) throw new AsideeError("incompatible", "The remote daemon returned no data."); return value.data }
   const error = value.error
-  if (!object(error) || typeof error.code !== "string" || !ERROR_CODES.some((code) => code === error.code) || typeof error.message !== "string") throw new PaddockError("incompatible", "The remote daemon returned a malformed error.")
+  if (!object(error) || typeof error.code !== "string" || !ERROR_CODES.some((code) => code === error.code) || typeof error.message !== "string") throw new AsideeError("incompatible", "The remote daemon returned a malformed error.")
   const code = ERROR_CODES.find((code) => code === error.code)!
   throw new RemoteFailure(code, error.message.slice(0, MAX_MESSAGE), error.details)
 }
@@ -169,12 +169,12 @@ export class HttpPeer {
       await this.connection.ready
       const value = await new Promise<unknown>((resolve, reject) => {
         const bytes = Buffer.from(JSON.stringify(body))
-        const req = request({ host: "paddock", path: `/api/${method}`, method: "POST", agent: this.agent, headers: { "content-type": "application/json", "content-length": bytes.length,
-          ...(options.machineId ? { "x-paddock-machine": options.machineId, "x-paddock-protocol": String(PROTOCOL), "x-paddock-version": options.version ?? "", "x-paddock-build": options.build ?? "" } : {}) } }, (res) => {
+        const req = request({ host: "asidee", path: `/api/${method}`, method: "POST", agent: this.agent, headers: { "content-type": "application/json", "content-length": bytes.length,
+          ...(options.machineId ? { "x-asidee-machine": options.machineId, "x-asidee-protocol": String(PROTOCOL), "x-asidee-version": options.version ?? "", "x-asidee-build": options.build ?? "" } : {}) } }, (res) => {
           let size = 0; const chunks: Buffer[] = []
-          res.on("data", (chunk: Buffer) => { size += chunk.length; if (size > MAX_REPLY) { req.destroy(new PaddockError("incompatible", "The remote JSON reply exceeded 8 MiB; use a stream for large output.")); return }; chunks.push(chunk) })
+          res.on("data", (chunk: Buffer) => { size += chunk.length; if (size > MAX_REPLY) { req.destroy(new AsideeError("incompatible", "The remote JSON reply exceeded 8 MiB; use a stream for large output.")); return }; chunks.push(chunk) })
           res.on("error", reject)
-          res.on("end", () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString())) } catch { reject(new PaddockError("incompatible", "The remote daemon returned invalid JSON.")) } })
+          res.on("end", () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString())) } catch { reject(new AsideeError("incompatible", "The remote daemon returned invalid JSON.")) } })
         })
         req.on("error", reject)
         req.once("finish", () => { dispatched = true })
@@ -191,10 +191,10 @@ export class HttpPeer {
       const refused = await this.connection.refusal?.()
       if (refused) throw refused
       // Said as it happened: a reply that was unusable is not a lost link, and a cancelled request is neither.
-      const cause = this.ended ?? (error instanceof PaddockError ? error.message : `The SSH link to ${this.endpoint.ssh} ended: ${this.connection.diagnostic() || (error as Error).message}`)
-      if (options.mutation && dispatched) throw new PaddockError("outcome-unknown", `${cause} ${method} had been sent to ${this.endpoint.ssh}, so its outcome is unknown. It was not retried. Reconcile with get before acting again.`)
-      if (error instanceof PaddockError) throw error
-      throw new PaddockError("offline", this.ended ?? `${this.endpoint.ssh} is unreachable: ${this.connection.diagnostic() || (error as Error).message}`)
+      const cause = this.ended ?? (error instanceof AsideeError ? error.message : `The SSH link to ${this.endpoint.ssh} ended: ${this.connection.diagnostic() || (error as Error).message}`)
+      if (options.mutation && dispatched) throw new AsideeError("outcome-unknown", `${cause} ${method} had been sent to ${this.endpoint.ssh}, so its outcome is unknown. It was not retried. Reconcile with get before acting again.`)
+      if (error instanceof AsideeError) throw error
+      throw new AsideeError("offline", this.ended ?? `${this.endpoint.ssh} is unreachable: ${this.connection.diagnostic() || (error as Error).message}`)
     }
   }
   async close(reason?: string): Promise<void> { this.ended ??= reason; this.agent.destroy(); await this.connection.close() }
@@ -207,7 +207,7 @@ export async function sshIdentity(endpoint: Endpoint): Promise<{ user: string; h
   const config = Bun.spawn(["ssh", "-G", sshDestination(endpoint.ssh)], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: process.env })
   const [resolved, settings] = await Promise.all([config.exited, new Response(config.stdout).text()])
   const user = settings.match(/^user ([A-Za-z0-9_][A-Za-z0-9_.-]{0,63})$/m)?.[1]
-  if (resolved !== 0 || !user) throw new PaddockError("dependency", `SSH did not report the user it uses for ${endpoint.ssh}, so nothing was registered.`)
+  if (resolved !== 0 || !user) throw new AsideeError("dependency", `SSH did not report the user it uses for ${endpoint.ssh}, so nothing was registered.`)
   // The fixed transport command again, with stdin closed: it reaches the daemon socket and ends at once.
   const capture = hostKeyCapture(endpoint.ssh)
   try {
@@ -241,7 +241,7 @@ export class RemoteSession extends EventEmitter implements Session {
   private done = false
   private ready = false
   private wireClosed = false
-  private opened: (error?: PaddockError) => void = () => {}
+  private opened: (error?: AsideeError) => void = () => {}
   readonly closed: Promise<void>
   private closedResolve: () => void = () => {}
   private readonly timer: ReturnType<typeof setTimeout>
@@ -261,13 +261,13 @@ export class RemoteSession extends EventEmitter implements Session {
           const first = frames.shift()
           if (!first) return
           if (first.kind === "error") { const error = this.error(first.payload); this.opened(error); return this.finish({ error: error.message }) }
-          if (first.kind !== "ready") throw new PaddockError("incompatible", "The remote stream did not send ready.")
+          if (first.kind !== "ready") throw new AsideeError("incompatible", "The remote stream did not send ready.")
           this.ready = true; clearTimeout(this.timer); wire.pause(); this.pending.push(...frames); this.opened(); return
         }
         this.pending.push(...frames); this.flush()
-      } catch (error) { const failure = error instanceof PaddockError ? error : new PaddockError("incompatible", "Malformed remote stream."); this.opened(failure); this.finish({ error: failure.message }) }
+      } catch (error) { const failure = error instanceof AsideeError ? error : new AsideeError("incompatible", "Malformed remote stream."); this.opened(failure); this.finish({ error: failure.message }) }
     })
-    this.timer = setTimeout(() => { this.opened(new PaddockError("offline", "The remote stream did not become ready in 10 seconds.")); this.finish({ error: "The remote stream timed out." }) }, 10_000)
+    this.timer = setTimeout(() => { this.opened(new AsideeError("offline", "The remote stream did not become ready in 10 seconds.")); this.finish({ error: "The remote stream timed out." }) }, 10_000)
     void Promise.resolve(this.connection.ready).then(() => { if (!this.done) wire.write(frame("open", request)) }, (error) => {
       this.opened(error); this.finish({ error: error.message })
     })
@@ -277,10 +277,10 @@ export class RemoteSession extends EventEmitter implements Session {
     await new Promise<void>((resolve, reject) => { session.opened = (error) => error ? reject(error) : resolve() })
     return session
   }
-  private error(payload: Buffer): PaddockError {
+  private error(payload: Buffer): AsideeError {
     const value: unknown = JSON.parse(payload.toString())
-    if (!object(value) || typeof value.message !== "string" || !ERROR_CODES.some((code) => code === value.code)) return new PaddockError("incompatible", "Malformed remote stream error.")
-    return new PaddockError(ERROR_CODES.find((code) => code === value.code)!, value.message.slice(0, MAX_MESSAGE))
+    if (!object(value) || typeof value.message !== "string" || !ERROR_CODES.some((code) => code === value.code)) return new AsideeError("incompatible", "Malformed remote stream error.")
+    return new AsideeError(ERROR_CODES.find((code) => code === value.code)!, value.message.slice(0, MAX_MESSAGE))
   }
   private flush(): void {
     try {
@@ -304,7 +304,7 @@ export class RemoteSession extends EventEmitter implements Session {
     // The SSH process is closed whatever a listener does with the end, so `closed` always settles.
     try {
       if (!this.ready) {
-        const offline = new PaddockError("offline", exit.error ?? "The remote stream ended before ready.")
+        const offline = new AsideeError("offline", exit.error ?? "The remote stream ended before ready.")
         void (this.connection.refusal?.() ?? Promise.resolve(undefined)).then((refused) => this.opened(refused ?? offline), () => this.opened(offline))
       }
       this.emit("end", exit)

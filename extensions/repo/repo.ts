@@ -46,7 +46,7 @@ export function parseBundle(output: Buffer): Bundle {
   const end = output.subarray(0, HEADER_BYTES).indexOf(10)
   let value: unknown
   try { value = JSON.parse(output.subarray(0, end).toString("utf8")) } catch { value = undefined }
-  if (end < 0 || !object(value) || typeof value.branch !== "string" || /[\0\r\n]/.test(value.branch) || typeof value.tip !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.tip) || typeof value.ref !== "string" || !/^refs\/paddock-export\/[a-f0-9-]{36}$/.test(value.ref) || typeof value.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.sha256) || typeof value.size !== "number" || !Number.isSafeInteger(value.size) || value.size < 1 || value.size > MAX_BUNDLE_BYTES) throw new Error("Invalid or oversized export; needs a bundle no larger than 128 MiB. Contents withheld.")
+  if (end < 0 || !object(value) || typeof value.branch !== "string" || /[\0\r\n]/.test(value.branch) || typeof value.tip !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.tip) || typeof value.ref !== "string" || !/^refs\/asidee-export\/[a-f0-9-]{36}$/.test(value.ref) || typeof value.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.sha256) || typeof value.size !== "number" || !Number.isSafeInteger(value.size) || value.size < 1 || value.size > MAX_BUNDLE_BYTES) throw new Error("Invalid or oversized export; needs a bundle no larger than 128 MiB. Contents withheld.")
   const data = output.subarray(end + 1)
   if (data.length !== value.size || createHash("sha256").update(data).digest("hex") !== value.sha256) throw new Error("Export checksum or size mismatch; contents withheld.")
   return { branch: value.branch, tip: value.tip, ref: value.ref, data }
@@ -65,14 +65,14 @@ export async function save(runner: Runner, options: { name: string; workspace: s
   if (!isAbsolute(options.target) || /[\0\r\n]/.test(options.target)) throw new Error("Give an absolute host export target.")
   if (options.branch !== undefined && (!options.branch || /[\0\r\n]/.test(options.branch))) throw new Error("Invalid source branch.")
   let output
-  try { output = await streamer(["paddock", "exec", sandboxName(options.name), "--stream", "--", "node", "-e", await source()], JSON.stringify({ action: "save", workspace: options.workspace, branch: options.branch }), HEADER_BYTES + MAX_BUNDLE_BYTES) }
+  try { output = await streamer(["asd", "exec", sandboxName(options.name), "--stream", "--", "node", "-e", await source()], JSON.stringify({ action: "save", workspace: options.workspace, branch: options.branch }), HEADER_BYTES + MAX_BUNDLE_BYTES) }
   catch { throw new Error("Client operation could not run or the export exceeded 128 MiB; subprocess details withheld.") }
   if (output.exitCode !== 0) throw new Error(`Client operation failed (exit ${output.exitCode}); subprocess output withheld.`)
   const bundle = parseBundle(output.stdout)
   const inspected = inspectBundle(bundle.data, bundle.tip, bundle.ref)
   const git = (args: string[]) => checked(runner, ["git", "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "transfer.fsckObjects=true", "-c", "fetch.fsckObjects=true", "-c", "fetch.recurseSubmodules=false", "-c", "maintenance.auto=false", "-c", "gc.auto=0", "-c", "pack.threads=1", ...args])
   await git(["check-ref-format", "refs/heads/" + bundle.branch])
-  const temporary = await mkdtemp(join(await realpath(tmpdir()), "paddock-save-")), file = join(temporary, "history.bundle")
+  const temporary = await mkdtemp(join(await realpath(tmpdir()), "asidee-save-")), file = join(temporary, "history.bundle")
   const targetBranch = "saved/" + options.name + "/" + randomUUID()
   try {
     await writeFile(file, bundle.data, { mode: 0o600, flag: "wx" })
@@ -105,11 +105,11 @@ export async function main(argv: string[], env = process.env): Promise<void> {
   const { values, positionals } = parsed, [action, direct, repo] = positionals
   if (!action || values.help) { console.log("repo.ts clone NAME OWNER/REPO [--workspace workspace]\nrepo.ts save NAME [--workspace workspace] [--target /host/bare.git] [--branch BRANCH]\nSave transfers one committed branch, at most 128 MiB as a checksummed binary bundle. Tokens belong only in the logins extension."); return }
   if (positionals.length > (action === "clone" ? 3 : 2)) throw new Error("Unexpected repository arguments.")
-  const name = sandboxName(direct ?? env.PADDOCK_SANDBOX ?? ""), work = values.workspace ?? env.PADDOCK_FIELD_WORKSPACE ?? "workspace"
-  if (action === "clone") { await clone(run, name, repo ?? env.PADDOCK_FIELD_REPOSITORY ?? "", work); console.log("Cloned repository inside the sandbox.") }
+  const name = sandboxName(direct ?? env.ASIDEE_SANDBOX ?? ""), work = values.workspace ?? env.ASIDEE_FIELD_WORKSPACE ?? "workspace"
+  if (action === "clone") { await clone(run, name, repo ?? env.ASIDEE_FIELD_REPOSITORY ?? "", work); console.log("Cloned repository inside the sandbox.") }
   else if (action === "save") {
-    const target = values.target ?? env.PADDOCK_FIELD_TARGET ?? join(env.XDG_STATE_HOME || join(homedir(), ".local/state"), "paddock-repo", name + ".git")
-    console.log(JSON.stringify(await save(run, { name, workspace: work, target, branch: (values.branch ?? env.PADDOCK_FIELD_BRANCH) || undefined })))
+    const target = values.target ?? env.ASIDEE_FIELD_TARGET ?? join(env.XDG_STATE_HOME || join(homedir(), ".local/state"), "asidee-repo", name + ".git")
+    console.log(JSON.stringify(await save(run, { name, workspace: work, target, branch: (values.branch ?? env.ASIDEE_FIELD_BRANCH) || undefined })))
   } else throw new Error("Use clone or save.")
 }
 if (import.meta.main) main(process.argv.slice(2)).catch(() => { console.error("Repository operation failed. Clone needs a new guest path; save needs a committed branch, host Git and an export of at most 128 MiB. Subprocess output withheld."); process.exitCode = 1 })

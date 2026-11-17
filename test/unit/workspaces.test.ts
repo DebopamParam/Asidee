@@ -7,7 +7,7 @@ import { blockers, complete, failures, WORKSPACE_CHECKLIST } from "../../core/ch
 import { belongs, controlledDecision, decision, profileEvidence, requireMac, signalWorkspacePid, workspacePids } from "../../core/workspace-processes"
 import { systemRunner } from "../../core/run"
 import { writeConfig } from "../../core/state"
-import { PaddockError, type RunResult, type Runner } from "../../core/types"
+import { AsideeError, type RunResult, type Runner } from "../../core/types"
 import controlProfile from "../../core/workspace-control.sb" with { type: "text" }
 import { WORKSPACE_DISCLOSURE, HOST_TEMP_DISCLOSURE, workspaceDisclosure, workspaceEnvironment, workspaceProfile } from "../../core/workspace-profile"
 import { acquire, canonical, validateRead, validWorkspaceSpec, Workspaces } from "../../core/workspaces"
@@ -19,7 +19,7 @@ const fixture = async () => {
   await mkdir(join(import.meta.dir, "../../dist"), { recursive: true })
   const root = await mkdtemp(join(import.meta.dir, "../../dist/workspace-test-"))
   const state = join(root, "state"); const config = join(root, "config")
-  const env = { ...process.env, PADDOCK_WORKSPACES_ROOT: join(root, "workspaces"), CLAUDE_CONFIG_DIR: join(root, "no-claude"), CODEX_HOME: join(root, "no-codex") }
+  const env = { ...process.env, ASIDEE_WORKSPACES_ROOT: join(root, "workspaces"), CLAUDE_CONFIG_DIR: join(root, "no-claude"), CODEX_HOME: join(root, "no-codex") }
   const commands: string[][] = []
   // du and free space as a test sets them; left unset, the real ones.
   const fake: { du?: () => Promise<RunResult>; free?: number } = {}
@@ -36,7 +36,7 @@ mac("K15 finder control: empty workspace matches zero, known processes match exa
     const home = await realpath(userInfo().homedir)
     const userVar = await realpath(dirname(Bun.spawnSync(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"]).stdout.toString().trim()))
     const make = async (name: string) => {
-      const folder = join(root, name); const tag = join(folder, ".paddock-tag")
+      const folder = join(root, name); const tag = join(folder, ".asidee-tag")
       await mkdir(folder); await writeFile(tag, "control")
       const profile = workspaceProfile({ folder, home, userVar, tag, reads: [] }); const file = join(root, `${name}.sb`)
       await writeFile(file, profile.text)
@@ -45,7 +45,7 @@ mac("K15 finder control: empty workspace matches zero, known processes match exa
     const a = await make("a"); const b = await make("b")
     expect(workspacePids(a.folder)).toEqual([]); expect(workspacePids(b.folder)).toEqual([])
     children.push(Bun.spawn(a.argv, { stdout: "pipe", stderr: "pipe" }), Bun.spawn(a.argv, { stdout: "pipe", stderr: "pipe" }),
-      Bun.spawn(b.argv, { stdout: "pipe", stderr: "pipe" }), Bun.spawn(["/bin/sleep", "60"], { env: { ...process.env, PADDOCK_WORKSPACE: "a" }, stdout: "pipe", stderr: "pipe" }))
+      Bun.spawn(b.argv, { stdout: "pipe", stderr: "pipe" }), Bun.spawn(["/bin/sleep", "60"], { env: { ...process.env, ASIDEE_WORKSPACE: "a" }, stdout: "pipe", stderr: "pipe" }))
     await Bun.sleep(150)
     expect(workspacePids(a.folder).sort()).toEqual(children.slice(0, 2).map((child) => child.pid).sort())
     expect(workspacePids(b.folder)).toEqual([children[2]!.pid])
@@ -79,8 +79,8 @@ test("workspace checks reuse blocker logic without weakening sandbox checks", ()
 })
 
 test("profile parameters contain paths and tag denies follow every read allowance", () => {
-  const folder = '/home/me/Paddock/a'; const attack = '/home/me/x") (allow file-write*)'
-  const profile = workspaceProfile({ folder, home: "/home/me", userVar: "/var/folders/user", tag: `${folder}/.paddock-tag`, reads: [{ given: attack, canonical: attack, resolvedAt: "now" }] })
+  const folder = '/home/me/Asidee/a'; const attack = '/home/me/x") (allow file-write*)'
+  const profile = workspaceProfile({ folder, home: "/home/me", userVar: "/var/folders/user", tag: `${folder}/.asidee-tag`, reads: [{ given: attack, canonical: attack, resolvedAt: "now" }] })
   expect(profile.text).not.toContain(attack); expect(profile.params).toContain(`READ_0=${attack}`)
   expect(profile.text.indexOf('(param "READ_0")')).toBeLessThan(profile.text.lastIndexOf('(deny file-read-data (literal (param "TAGFILE")))'))
   expect(profile.text.trim().endsWith('(deny file-write* (literal (param "TAGFILE")))')).toBe(true)
@@ -92,8 +92,8 @@ test("profile parameters contain paths and tag denies follow every read allowanc
 })
 
 test("read allowances cannot expose SSH, home, workspace ancestors or state", () => {
-  const protectedPaths = { home: "/Users/me", root: "/Users/me/Paddock", state: "/Users/me/.local/state/paddock", workspaces: ["/Users/me/elsewhere/a"], ssh: "/private/keys" }
-  for (const path of ["/", "/Users", "/Users/me", "/Users/me/Paddock", "/Users/me/elsewhere", "/Users/me/.local", "/Users/me/.local/state/paddock/ssh", "/Users/me/.ssh", "/Users/me/.ssh/id_ed25519", "/private/keys", "/private/tmp/sessions"])
+  const protectedPaths = { home: "/Users/me", root: "/Users/me/Asidee", state: "/Users/me/.local/state/asidee", workspaces: ["/Users/me/elsewhere/a"], ssh: "/private/keys" }
+  for (const path of ["/", "/Users", "/Users/me", "/Users/me/Asidee", "/Users/me/elsewhere", "/Users/me/.local", "/Users/me/.local/state/asidee/ssh", "/Users/me/.ssh", "/Users/me/.ssh/id_ed25519", "/private/keys", "/private/tmp/sessions"])
     expect(() => validateRead(path, protectedPaths)).toThrow()
   expect(() => validateRead("/Users/me/project", protectedPaths)).not.toThrow()
 })
@@ -109,7 +109,7 @@ mac("workspace copy, verify, pipes, stop and confirmed remove preserve the origi
     await writeFile(join(source, "shared"), "group"); await chmod(join(source, "shared"), 0o664)
     await writeFile(join(source, "outside"), "outside"); await symlink(join(source, "outside"), join(source, "link"))
     await writeFile(join(source, "quarantined"), "q")
-    for (const [name, value] of [["com.apple.quarantine", "0081;00000000;Test;"], ["org.paddock.test", "carried"]] as const)
+    for (const [name, value] of [["com.apple.quarantine", "0081;00000000;Test;"], ["com.asidee.test", "carried"]] as const)
       expect(Bun.spawnSync(["/usr/bin/xattr", "-w", name, value, join(source, "quarantined")]).exitCode).toBe(0)
     expect(Bun.spawnSync(["/bin/chmod", "+a", "everyone deny delete", join(source, "quarantined")]).exitCode).toBe(0)
     await chmod(join(source, "bin"), 0o555); await utimes(join(source, "bin"), older, older)
@@ -127,7 +127,7 @@ mac("workspace copy, verify, pipes, stop and confirmed remove preserve the origi
     // macOS marks the copy itself: provenance on every file this process writes, and a fresh quarantine on a copy of a
     // quarantined file. The source's own values are what must not arrive.
     const attributes = Bun.spawnSync(["/usr/bin/xattr", "-l", join(work, "quarantined")]).stdout.toString()
-    expect(attributes).not.toContain("org.paddock.test"); expect(attributes).not.toContain("0081;00000000;Test;")
+    expect(attributes).not.toContain("com.asidee.test"); expect(attributes).not.toContain("0081;00000000;Test;")
     expect(Bun.spawnSync(["/bin/ls", "-le", join(work, "quarantined")]).stdout.toString()).not.toContain("deny delete")
     expect(Bun.spawnSync(["/bin/ls", "-le", join(source, "quarantined")]).stdout.toString()).toContain("deny delete")
     expect(made.workspace.disclosure).toContain("not a sandbox")
@@ -200,7 +200,7 @@ mac("summary and get never repair identity or permissions; only an explicit size
   const { root, commands, workspaces, clean } = await fixture()
   try {
     const made = await workspaces.create({ name: "inventory", logins: { kind: "none" } })
-    await rm(join(made.workspace.folder, ".paddock-tag"))
+    await rm(join(made.workspace.folder, ".asidee-tag"))
     await chmod(made.workspace.folder, 0o555)
     const before = await stat(made.workspace.folder); commands.length = 0
     const rows = await workspaces.summary()
@@ -210,11 +210,11 @@ mac("summary and get never repair identity or permissions; only an explicit size
     expect(commands).toEqual([])
     expect((await stat(made.workspace.folder)).mode & 0o777).toBe(0o555)
     expect((await stat(made.workspace.folder)).ctimeMs).toBe(before.ctimeMs)
-    expect(await Bun.file(join(made.workspace.folder, ".paddock-tag")).exists()).toBe(false)
+    expect(await Bun.file(join(made.workspace.folder, ".asidee-tag")).exists()).toBe(false)
     await workspaces.get("inventory")
     expect(commands.map((argv) => argv[0])).toEqual(["/usr/bin/du"])
     expect((await stat(made.workspace.folder)).mode & 0o777).toBe(0o555)
-    expect(await Bun.file(join(made.workspace.folder, ".paddock-tag")).exists()).toBe(false)
+    expect(await Bun.file(join(made.workspace.folder, ".asidee-tag")).exists()).toBe(false)
   } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
 }, 15_000)
 
@@ -289,7 +289,7 @@ mac("a missing or misspelled decision control cannot establish denial", async ()
     child = Bun.spawn(["/usr/bin/sandbox-exec", "-f", file, "-D", `WS=${m.folder}`, "-D", `TAGFILE=${m.tag}`, "--", "/bin/sleep", "30"], { stdout: "pipe", stderr: "pipe" })
     await Bun.sleep(100)
     expect(controlledDecision(child.pid, child.pid, "file-read-data", 1, m.folder)).toBe("allowed")
-    expect(controlledDecision(child.pid, child.pid, "paddock-misspelled-operation")).toBe("unknown")
+    expect(controlledDecision(child.pid, child.pid, "asidee-misspelled-operation")).toBe("unknown")
     expect(controlledDecision(child.pid, process.pid, "file-read-data", 1, m.folder)).toBe("unknown")
     expect(ws.checks.find((check) => check.id === "daemons")?.detail).toContain("real Unix-socket listener")
     expect(ws.checks.find((check) => check.id === "daemons")?.status).toBe("pass")
@@ -301,7 +301,7 @@ test("host temp defaults closed, validates booleans and leaves the original prof
   expect(validWorkspaceSpec({ name: "temp" }).hostTemp).toBe(false)
   expect(validWorkspaceSpec({ name: "temp", hostTemp: true }).hostTemp).toBe(true)
   for (const hostTemp of ["on", 1, null, []]) expect(() => validWorkspaceSpec({ name: "temp", hostTemp })).toThrow("boolean")
-  const manifest = { folder: "/Users/me/Paddock/temp", home: "/Users/me", userVar: "/private/var/folders/xx/user", tag: "/Users/me/Paddock/temp/.paddock-tag", reads: [] }
+  const manifest = { folder: "/Users/me/Asidee/temp", home: "/Users/me", userVar: "/private/var/folders/xx/user", tag: "/Users/me/Asidee/temp/.asidee-tag", reads: [] }
   const original = workspaceProfile(manifest)
   // Captured from the original generator, before host-temp support.
   expect(original.hash).toBe("92f58a5a5c52b7a7a1b258243b4ce2aa602a4cccddc531c10f1f2c34a2a2d29c")
@@ -322,7 +322,7 @@ test("host temp defaults closed, validates booleans and leaves the original prof
 mac("host temp opens only T to files, refuses socket connections there, discloses weaker checks, refuses live changes and survives removal", async () => {
   const { root, workspaces, clean } = await fixture()
   const temp = await realpath(Bun.spawnSync(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"]).stdout.toString().trim())
-  const outside = await mkdtemp(join(temp, "paddock-host-temp-test-"))
+  const outside = await mkdtemp(join(temp, "asidee-host-temp-test-"))
   let session: Awaited<ReturnType<Workspaces["open"]>> | undefined
   const server = createServer((socket) => socket.end("shared-temp-socket"))
   try {
@@ -356,7 +356,7 @@ mac("host temp opens only T to files, refuses socket connections there, disclose
     const write = ["/bin/sh", "-c", 'printf live-temp > "$1" && cat "$1"', "probe", target]
     expect(await workspaces.exec("host-temp", write)).toMatchObject({ exitCode: 0, stdout: "live-temp" })
     for (const location of ["/private/tmp", "/private/var/tmp", join(m.userVar, "C"), join(m.userVar, "0"), m.home]) {
-      const denied = join(location, `paddock-denied-${m.id}`)
+      const denied = join(location, `asidee-denied-${m.id}`)
       try {
         expect((await workspaces.exec("host-temp", ["/bin/sh", "-c", 'printf escaped > "$1"', "probe", denied])).exitCode).not.toBe(0)
         expect(await Bun.file(denied).exists()).toBe(false)
@@ -426,8 +426,8 @@ mac("host temp opens the user-var folder's metadata only, and a stale saved prof
     const refused = await workspaces.exec("user-var", ["/usr/bin/true"]).then(() => undefined, (error) => error)
     // The message carries the command too, for stream sessions, which show only the message.
     expect(refused?.message).toStartWith("Workspace execution refused by its checklist: ")
-    expect(refused?.message).toContain("paddock workspace set user-var host-temp on")
-    expect(refused?.details.find((check: { id: string }) => check.id === "seatbelt")?.detail).toContain("paddock workspace set user-var host-temp on")
+    expect(refused?.message).toContain("asd workspace set user-var host-temp on")
+    expect(refused?.details.find((check: { id: string }) => check.id === "seatbelt")?.detail).toContain("asd workspace set user-var host-temp on")
     // Setting the same value again rewrites the profile from the saved settings.
     await workspaces.setHostTemp("user-var", true)
     expect(await stat(m.userVar)).toMatchObject({ exitCode: 0 })
@@ -450,7 +450,7 @@ int main(void) {
   char path[4096];
   if (!confstr(_CS_DARWIN_USER_TEMP_DIR, path, sizeof(path))) return 2;
   printf("host=%s\\nTMPDIR=%s\\n", path, getenv("TMPDIR"));
-  strncat(path, "paddock-confstr-XXXXXX", sizeof(path) - strlen(path) - 1);
+  strncat(path, "asidee-confstr-XXXXXX", sizeof(path) - strlen(path) - 1);
   int fd = mkstemp(path);
   if (fd < 0) { perror("mkstemp"); return 3; }
   char bytes[5] = {0};
@@ -481,7 +481,7 @@ mac("a starter that never carries its profile is refused with what was seen", as
       const refused = await acquire(running, folder, "The confined decision control").then(() => "", (error: Error) => error.message)
       expect(refused).toContain("it was still running; no stderr;")
       expect(refused).toContain(`executable "/bin/sleep"; parent ${process.pid};`)
-      expect(refused).toContain(`uid ${process.getuid!()} (Paddock's ${process.getuid!()}); sandboxed no;`)
+      expect(refused).toContain(`uid ${process.getuid!()} (Asidee's ${process.getuid!()}); sandboxed no;`)
       expect(Number(/after (\d+) ms/.exec(refused)?.[1])).toBeGreaterThanOrEqual(1000)
     } finally { process.kill(running.pid, "SIGKILL"); await running.finished }
   } finally { await rm(folder, { recursive: true, force: true }) }
@@ -492,8 +492,8 @@ mac("a --copy, --read or --path that does not exist is refused in plain words, w
   try {
     const missing = join(root, "nowhere")
     for (const [input, flag] of [[{ copy: missing }, "--copy"], [{ reads: [missing] }, "--read"], [{ path: [missing] }, "--path"]] as const) {
-      const refused = await workspaces.create({ name: "absent", ...input }).then(() => undefined, (error: PaddockError) => error)
-      expect(refused).toBeInstanceOf(PaddockError)
+      const refused = await workspaces.create({ name: "absent", ...input }).then(() => undefined, (error: AsideeError) => error)
+      expect(refused).toBeInstanceOf(AsideeError)
       expect([refused!.code, refused!.message]).toEqual(["runtime", `${flag} ${missing} does not exist on this Mac; nothing was created.`])
     }
     expect(await lstat(join(root, "workspaces", "absent")).catch(() => undefined)).toBeUndefined()
@@ -514,7 +514,7 @@ mac("over its disk limit a workspace is stopped by the watch with a reason, warn
     // A launch over the limit runs, and says so.
     const warned = await workspaces.exec("disk", ["/bin/echo", "ran"])
     expect(warned.stdout).toBe("ran\n")
-    expect(warned.diskWarning).toEqual({ usedBytes: 2 * 1024 ** 3, limitBytes: 1024 ** 3, message: `disk uses 2.00 GiB of its 1 GiB disk limit, so the daemon stops its processes again within about 30 seconds unless space is freed. Free space in ${made.workspace.folder}, or raise the limit: paddock workspace set disk disk N` })
+    expect(warned.diskWarning).toEqual({ usedBytes: 2 * 1024 ** 3, limitBytes: 1024 ** 3, message: `disk uses 2.00 GiB of its 1 GiB disk limit, so the daemon stops its processes again within about 30 seconds unless space is freed. Free space in ${made.workspace.folder}, or raise the limit: asd workspace set disk disk N` })
     const session = await workspaces.open("disk", ["/bin/sleep", "60"], { tty: false }); session.resume()
     expect(session.diskWarning?.usedBytes).toBe(2 * 1024 ** 3)
     await running(workspaces, "disk")
@@ -522,7 +522,7 @@ mac("over its disk limit a workspace is stopped by the watch with a reason, warn
     await session.finished
     const stopped = await workspaces.get("disk", false)
     expect(stopped.status).toBe("idle")
-    expect(stopped.stopReason).toMatch(new RegExp(`^Stopped by the daemon at \\S+: disk uses 2\\.00 GiB of its 1 GiB disk limit\\. Free space in ${made.workspace.folder}, or raise the limit: paddock workspace set disk disk N$`))
+    expect(stopped.stopReason).toMatch(new RegExp(`^Stopped by the daemon at \\S+: disk uses 2\\.00 GiB of its 1 GiB disk limit\\. Free space in ${made.workspace.folder}, or raise the limit: asd workspace set disk disk N$`))
     expect((await workspaces.list())[0]!.stopReason).toBe(stopped.stopReason)
     expect((await workspaces.verify("disk")).checks.find((check) => check.id === "disk")).toMatchObject({ status: "fail", detail: expect.stringContaining("It uses 2.00 GiB now.") })
     // Under the limit again: no warning, and a launch clears the old reason.
@@ -601,8 +601,8 @@ mac("below the free-space floor launches are refused with the setting's command 
     const session = await workspaces.open("floor", ["/bin/sleep", "60"], { tty: false }); session.resume()
     await running(workspaces, "floor")
     fake.free = 3 * 1024 ** 3
-    const sentence = "This Mac has 3.00 GiB free where workspaces live, below the 5 GiB floor. Free space on this Mac, or change the floor: paddock config set workspace-free-space GiB"
-    const refused = await workspaces.exec("floor", ["/usr/bin/true"]).then(() => undefined, (error: PaddockError) => error)
+    const sentence = "This Mac has 3.00 GiB free where workspaces live, below the 5 GiB floor. Free space on this Mac, or change the floor: asd config set workspace-free-space GiB"
+    const refused = await workspaces.exec("floor", ["/usr/bin/true"]).then(() => undefined, (error: AsideeError) => error)
     expect(refused?.code).toBe("check-failed"); expect(refused?.message).toContain(`(fail): ${sentence}`)
     await workspaces.watch(); await session.finished
     const view = await workspaces.get("floor", false)
@@ -640,14 +640,14 @@ mac("workspace stop, remove and disk watch deliver a reason before the command e
       else await workspaces.remove(action, action)
       const ended = await result
       expect(ended.exitCode).toBe(137)
-      expect(ended.stderr).toContain(action === "watch" ? "Stopped by the daemon" : `Stopped by paddock workspace ${action}`)
+      expect(ended.stderr).toContain(action === "watch" ? "Stopped by the daemon" : `Stopped by asd workspace ${action}`)
     }
   } finally { for (const ws of await workspaces.summary()) await workspaces.remove(ws.name, ws.name); await clean() }
 }, 30_000)
 
 mac("B27: the confined control pid is the sleep process carrying its expected decisions", async () => {
   const folder = await mkdtemp(join(import.meta.dir, "../../dist/workspace-control-identity-"))
-  const tag = join(folder, ".paddock-tag"); const profile = join(folder, "control.sb")
+  const tag = join(folder, ".asidee-tag"); const profile = join(folder, "control.sb")
   let session: WorkspaceSession | undefined
   try {
     await writeFile(tag, "identity"); await writeFile(profile, controlProfile)

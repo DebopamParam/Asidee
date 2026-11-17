@@ -173,7 +173,7 @@ function logout(login) {
 }
 function githubAccount(token) {
   return new Promise((resolve, reject) => {
-    const request = require("https").get("https://api.github.com/user", { headers: { Authorization: "Bearer " + token, "User-Agent": "paddock-login", Accept: "application/vnd.github+json" } }, (response) => {
+    const request = require("https").get("https://api.github.com/user", { headers: { Authorization: "Bearer " + token, "User-Agent": "asidee-login", Accept: "application/vnd.github+json" } }, (response) => {
       let data = ""
       response.on("error", reject)
       response.on("data", (chunk) => { data += chunk; if (data.length > 1024 * 1024) response.destroy(new Error()) })
@@ -239,7 +239,7 @@ async function main() {
   fail(64)
 }
 async function lockedMain() {
-  const lock = path.join(home, ".paddock-logins.lock")
+  const lock = path.join(home, ".asidee-logins.lock")
   if (mode === "list") return main()
   safe(lock, true)
   try { fs.mkdirSync(lock, { mode: 0o700 }) } catch (e) { if (e.code === "EEXIST") fail(75); throw e }

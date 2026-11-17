@@ -5,7 +5,7 @@ import { agentName, run } from "./client"
 import { discoverProfiles } from "./credentials"
 import { importGithub, importLogin, listLogins, logout, type Login } from "./logins"
 
-const HELP = `Paddock logins (requires Bun here and Node in the running sandbox)
+const HELP = `Asidee logins (requires Bun here and Node in the running sandbox)
   login.ts profiles claude|codex
   login.ts import NAME claude|codex [--profile default] [--target PROFILE] [--setup] [--replace]
   login.ts github NAME [--gh [--account ACCOUNT]] [--replace]
@@ -66,8 +66,8 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
   const { values, positionals } = parsed
   const [action, directName, directAgent] = positionals
   if (values.help || !action) { console.log(HELP); return }
-  const field = (key: string) => env[`PADDOCK_FIELD_${key.toUpperCase()}`]
-  const name = directName ?? env.PADDOCK_SANDBOX ?? ""
+  const field = (key: string) => env[`ASIDEE_FIELD_${key.toUpperCase()}`]
+  const name = directName ?? env.ASIDEE_SANDBOX ?? ""
   const profile = values.profile ?? field("profile") ?? "default"
   const replace = values.replace ?? field("replace") === "true"
   const host = { home: homedir(), platform: process.platform, runner: run }

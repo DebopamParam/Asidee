@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Paddock</title>
+<title>Asidee</title>
 <style>
   :root { --bg: #f6f5f1; --panel: #fff; --ink: #1c1b18; --muted: #6b6860; --line: #dedbd2; --accent: #2f5d50; --bad: #a3322a; --warn: #8a5a00; }
   @media (prefers-color-scheme: dark) { :root { --bg: #161614; --panel: #201f1c; --ink: #ecebe6; --muted: #9a978d; --line: #35332e; --accent: #7fc4ad; --bad: #ef8a80; --warn: #e0b060; } }
@@ -36,7 +36,7 @@
 </head>
 <body>
 <main>
-  <h1>Paddock</h1>
+  <h1>Asidee</h1>
   <p class="sub">Sandboxes for coding agents. Each line under a sandbox is a check the core ran, not a setting.</p>
   <div id="notice"></div>
   <nav class="row" aria-label="Sections">
@@ -76,10 +76,10 @@
 </main>
 <script>
 // A client of the daemon's API and nothing more. To change this dashboard, copy it to CONFIG/ui/index.html (see the
-// skill): the copy gets the same API and token, and cannot change what the checks report from `paddock verify`.
+// skill): the copy gets the same API and token, and cannot change what the checks report from `asd verify`.
 const hash = new URLSearchParams(location.hash.slice(1))
-if (hash.get("token")) { sessionStorage.setItem("paddock-token", hash.get("token")); history.replaceState(null, "", location.pathname) }
-const token = sessionStorage.getItem("paddock-token") ?? ""
+if (hash.get("token")) { sessionStorage.setItem("asidee-token", hash.get("token")); history.replaceState(null, "", location.pathname) }
+const token = sessionStorage.getItem("asidee-token") ?? ""
 const MARK = { pass: "✓", weak: "~", fail: "✗", unsupported: "–", unknown: "?", info: "i" }
 const WORD = { weak: "holds in a weaker form", fail: "does not hold", unsupported: "not available on this engine", unknown: "could not be checked" }
 let checklist = [], extensions = [], open = new Set(), busy = new Set(), output = {}
@@ -193,7 +193,7 @@ function render() {
     el("div", { class: "muted" }, workspace.folder), workspace.problem ? el("div", { class: "error" }, workspace.problem) : null,
     workspace.stopReason ? el("div", { class: "error" }, workspace.stopReason) : null,
     workspace.enforcementProblem ? el("div", { class: "error" }, `Disk watch unknown at ${workspace.enforcementProblem.at}: ${workspace.enforcementProblem.message}`) : null,
-    el("div", { class: "muted" }, workspace.disclosure), el("div", { class: "muted" }, "Use paddock workspace in the CLI to stop, verify or remove. Workspace methods are socket-only.")))
+    el("div", { class: "muted" }, workspace.disclosure), el("div", { class: "muted" }, "Use asd workspace in the CLI to stop, verify or remove. Workspace methods are socket-only.")))
   if (workspaceProblem) workspaceList.append(el("div", { class: "panel error" }, `Workspaces unknown: ${workspaceProblem}`))
   else if (!workspaces.length) workspaceList.append(el("div", { class: "panel muted" }, "No workspaces. A workspace is not a sandbox."))
   const enginesNode = document.getElementById("engines"); enginesNode.replaceChildren()
@@ -201,7 +201,7 @@ function render() {
     el("div", {}, el("span", { class: "name" }, engine.label), " ", el("span", { class: `badge ${engine.ready ? "running" : ""}` }, engine.ready ? "ready" : "not ready")),
     engine.capabilities ? el("div", { class: "muted" }, `Kernel isolation: ${engine.capabilities.kernelIsolation} · network guard: ${engine.capabilities.networkGuard ? "yes" : "no"} · disk limit: ${engine.capabilities.diskLimit}`) : null,
     ...engine.problems.map((problem) => el("div", { class: "muted" }, problem)), engine.fix ? el("div", { class: "muted" }, `Fix: ${engine.fix}`) : null))
-  if (!engines.length) enginesNode.append(el("div", { class: "panel muted" }, "No engine found. Paddock needs Docker with a gVisor runtime."))
+  if (!engines.length) enginesNode.append(el("div", { class: "panel muted" }, "No engine found. Asidee needs Docker with a gVisor runtime."))
   const select = document.getElementById("f-engine"); const chosen = select.value; const ready = engines.filter((engine) => engine.ready)
   select.replaceChildren(...ready.map((engine) => el("option", { value: engine.id }, engine.label)))
   if (!ready.length) select.append(el("option", { value: "" }, "No engine is ready"))
@@ -213,7 +213,7 @@ async function refresh() {
     sandboxes = await api("list"); document.getElementById("notice").replaceChildren()
     try { workspaces = (await api("summary")).workspaces ?? []; workspaceProblem = "" } catch (error) { workspaces = []; workspaceProblem = error.message }
   } catch (error) {
-    document.getElementById("notice").replaceChildren(el("div", { class: "panel error" }, token ? error.message : "Open this page with the link that `paddock ui` prints."))
+    document.getElementById("notice").replaceChildren(el("div", { class: "panel error" }, token ? error.message : "Open this page with the link that `asd ui` prints."))
   }
   await readSettings()
   render()
@@ -234,7 +234,7 @@ document.getElementById("create").addEventListener("submit", async (event) => {
 ;(async () => {
   try { [checklist, engines, { extensions }] = await Promise.all([api("checklist"), api("engines"), api("extensions")]) } catch {}
   await refresh(); setInterval(refresh, 3000)
-  window.paddockRefresh = refresh
+  window.asideeRefresh = refresh
 })()
 </script>
 </body>

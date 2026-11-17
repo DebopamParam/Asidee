@@ -41,7 +41,7 @@ test("the daemon takes buffered stdin as exact base64 bytes within the limit, an
 
 // A daemon that answers as this build, records buffered bodies, and echoes a stream's input back as its stdout.
 async function daemon() {
-  const state = await mkdtemp(join(tmpdir(), "pdk-bytes-")); const bodies: Record<string, Record<string, unknown>> = {}
+  const state = await mkdtemp(join(tmpdir(), "asd-bytes-")); const bodies: Record<string, Record<string, unknown>> = {}
   const build = `${VERSION}+${Math.round(statSync(CLI).mtimeMs)}`
   const server = Bun.serve({ unix: socketPath({ state, config: state }), fetch: async (request) => {
     const method = new URL(request.url).pathname.slice(5)
@@ -54,7 +54,7 @@ async function daemon() {
   await new Promise<void>((resolve) => stream.listen(streamSocketPath({ state, config: state }), resolve))
   cleanups.push(async () => { server.stop(true); stream.close(); await rm(state, { recursive: true, force: true }) })
   const run = async (args: string[], input: Uint8Array) => {
-    const child = Bun.spawn([process.execPath, CLI, ...args], { env: { ...process.env, PADDOCK_STATE_DIR: state, PADDOCK_CONFIG_DIR: state }, stdin: new Blob([input]), stdout: "pipe", stderr: "pipe" })
+    const child = Bun.spawn([process.execPath, CLI, ...args], { env: { ...process.env, ASIDEE_STATE_DIR: state, ASIDEE_CONFIG_DIR: state }, stdin: new Blob([input]), stdout: "pipe", stderr: "pipe" })
     const [out, err, code] = await Promise.all([new Response(child.stdout).bytes(), new Response(child.stderr).bytes(), child.exited])
     return { out: Buffer.from(out), err: Buffer.from(err), code }
   }
@@ -93,7 +93,7 @@ test("--stream is byte-exact in both directions for sandbox and workspace exec",
 }, 30_000)
 
 test("buffered sandbox exec delivers stdinBase64 to the engine's exec byte for byte, hashed by the command it runs", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pdk-exec-")); cleanups.push(() => rm(root, { recursive: true, force: true }))
+  const root = await mkdtemp(join(tmpdir(), "asd-exec-")); cleanups.push(() => rm(root, { recursive: true, force: true }))
   const dirs = { state: join(root, "state"), config: join(root, "config") }; await mkdir(dirs.state, { recursive: true })
   const manifest: Manifest = { version: 1, name: "demo", id: "owned", createdAt: "", spec: validSpec({ name: "demo" }),
     engine: { id: "fake", provider: "gvisor", label: "fake", ready: true, problems: [], data: { context: "fake", runtime: "runsc" } } }
@@ -102,7 +102,7 @@ test("buffered sandbox exec delivers stdinBase64 to the engine's exec byte for b
   const runner: Runner = async (argv, options) => {
     const args = argv.slice(3)
     if (args[0] === "inspect") return { exitCode: 0, stderr: "", stdout: JSON.stringify([{ State: { Running: true }, Config: { Labels: { [LABEL_ID]: manifest.id } }, HostConfig: { Runtime: "runsc" } }]) }
-    if (args[0] === "exec" && args.includes("-i")) return systemRunner(args.slice(args.indexOf("paddock-demo") + 1), { stdin: options?.stdin })
+    if (args[0] === "exec" && args.includes("-i")) return systemRunner(args.slice(args.indexOf("asidee-demo") + 1), { stdin: options?.stdin })
     return { exitCode: 1, stdout: "", stderr: "unexpected" }
   }
   const table = methods(new Core([new GvisorProvider(runner)], dirs, runner, "/nowhere"), () => {})
@@ -115,7 +115,7 @@ test("buffered sandbox exec delivers stdinBase64 to the engine's exec byte for b
   await mkdir(join(import.meta.dir, "../../dist"), { recursive: true })
   const root = await mkdtemp(join(import.meta.dir, "../../dist/workspace-bytes-"))
   const dirs = { state: join(root, "state"), config: join(root, "config") }
-  const env = { ...process.env, PADDOCK_WORKSPACES_ROOT: join(root, "workspaces"), CLAUDE_CONFIG_DIR: join(root, "no-claude"), CODEX_HOME: join(root, "no-codex") }
+  const env = { ...process.env, ASIDEE_WORKSPACES_ROOT: join(root, "workspaces"), CLAUDE_CONFIG_DIR: join(root, "no-claude"), CODEX_HOME: join(root, "no-codex") }
   const workspaces = new ExplainedWorkspaces(dirs, env, { home: root, platform: "linux", runner: async () => { throw new Error("No host command is needed.") } }, systemRunner)
   cleanups.push(async () => { for (const workspace of await workspaces.list()) await workspaces.remove(workspace.name, workspace.name); await rm(root, { recursive: true, force: true }) })
   expect((await workspaces.create({ name: "bytes" })).ok).toBe(true)
@@ -126,12 +126,12 @@ test("buffered sandbox exec delivers stdinBase64 to the engine's exec byte for b
 }, 30_000)
 
 test("a routed exec carries stdinBase64 to the remote daemon unchanged", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pdk-route-")); cleanups.push(() => rm(root, { recursive: true, force: true }))
+  const root = await mkdtemp(join(tmpdir(), "asd-route-")); cleanups.push(() => rm(root, { recursive: true, force: true }))
   const dirs = { state: join(root, "s"), config: join(root, "c") }; await mkdir(dirs.config)
   await writeFile(join(dirs.config, "config.json"), JSON.stringify({ experimental: true }))
   const local: Hello = { machineId: "a".repeat(32), bootId: "b".repeat(32), buildDigest: "c".repeat(64), sourceDigest: "9".repeat(64), version: "0.4.0", methods: Object.keys(CATALOG), protocols: [1], features: ["machines", "remote-streams", "remote-forwards", "lease-renewal"] }
   const remote: Hello = { ...local, machineId: "d".repeat(32), bootId: "e".repeat(32) }
-  const host: HostRecord = { name: "build", ssh: "home-linux", binary: "/opt/paddock/bin", stateDir: "/home/me/state", machineId: remote.machineId, addedAt: "2026-11-11T00:00:00Z", diskPolicy: "watched", service: "prepared" }
+  const host: HostRecord = { name: "build", ssh: "home-linux", binary: "/opt/asidee/bin", stateDir: "/home/me/state", machineId: remote.machineId, addedAt: "2026-11-11T00:00:00Z", diskPolicy: "watched", service: "prepared" }
   const sent: Array<Record<string, unknown>> = []
   const machines = new Machines(dirs, local, async () => ({ hello: local, sandboxes: [], checkedAt: "" }), {
     sshIdentity: async () => ({ user: "builder", hostKey: "SHA256:0X7US8OfQfzxyXkA9yUZy3JjznnQA/iqkCBdPkPPSEQ", hostPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEU61N7KJmkiTPSmrOfaemXZu/1hocrAC0WXPcRUyjQ8" }),

@@ -5,7 +5,7 @@ import { connect, createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { dataFrames, frame, FrameReader, MAX_PAYLOAD, parseOpen, parseSize, serveStream, type Frame, type OpenRequest } from "../../core/stream"
-import { PaddockError, type Session } from "../../core/types"
+import { AsideeError, type Session } from "../../core/types"
 
 test("frames survive being split at every byte and keep binary payloads exact", () => {
   const payload = Uint8Array.from({ length: 300 }, (_, index) => index % 256)
@@ -27,8 +27,8 @@ test("data larger than a frame is split, and frames over 64 KiB or of unknown ki
   expect(() => frame("stdout", new Uint8Array(MAX_PAYLOAD + 1))).toThrow(RangeError)
   // An oversized length is refused from its header, before its payload could be buffered.
   const header = Buffer.alloc(5); header[0] = 4; header.writeUInt32BE(MAX_PAYLOAD + 1, 1)
-  expect(() => new FrameReader().push(header)).toThrow(PaddockError)
-  for (const kind of [0, 10, 255]) expect(() => new FrameReader().push(Buffer.from([kind, 0, 0, 0, 0]))).toThrow("Not a paddock-stream/1 frame")
+  expect(() => new FrameReader().push(header)).toThrow(AsideeError)
+  for (const kind of [0, 10, 255]) expect(() => new FrameReader().push(Buffer.from([kind, 0, 0, 0, 0]))).toThrow("Not a asidee-stream/1 frame")
 })
 
 test("a session request keeps only known fields and refuses engine options, bad names and sizes", () => {
@@ -42,9 +42,9 @@ test("a session request keeps only known fields and refuses engine options, bad 
     { kind: "exec", name: "demo", argv: ["a\0b"] }, { kind: "exec", name: "demo", argv: ["sh"], user: "0 --privileged" }, { kind: "exec", name: "demo", argv: ["sh"], user: "-u" },
     { kind: "exec", name: "demo", argv: ["sh"], user: 0 }, { kind: "exec", name: "demo", argv: ["sh"], tty: "yes" },
     { kind: "exec", name: "demo", argv: ["sh"], tty: true, cols: 0 }, { kind: "exec", name: "demo", argv: ["sh"], tty: true, rows: 10_001 }, { kind: "exec", name: "demo", argv: ["sh"], tty: true, cols: 1.5 }])
-    expect(() => parseOpen(bad)).toThrow(PaddockError)
+    expect(() => parseOpen(bad)).toThrow(AsideeError)
   expect(parseSize(Buffer.from('{"cols":120,"rows":40}'))).toEqual({ cols: 120, rows: 40 })
-  for (const bad of ["", "{", "[]", '{"cols":120}', '{"cols":0,"rows":1}', '{"cols":"80","rows":24}']) expect(() => parseSize(Buffer.from(bad))).toThrow(PaddockError)
+  for (const bad of ["", "{", "[]", '{"cols":120}', '{"cols":0,"rows":1}', '{"cols":"80","rows":24}']) expect(() => parseSize(Buffer.from(bad))).toThrow(AsideeError)
 })
 
 test("workspace sessions are local, inherit this user and cannot request a sandbox user", () => {
@@ -66,7 +66,7 @@ class Echo extends EventEmitter implements Session {
 const roots: string[] = []
 afterAll(() => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))))
 async function served(open: (request: OpenRequest) => Promise<Session>) {
-  const root = await mkdtemp(join(tmpdir(), "pdk-stream-")); roots.push(root)
+  const root = await mkdtemp(join(tmpdir(), "asd-stream-")); roots.push(root)
   const path = join(root, "s.sock")
   const server = createServer({ allowHalfOpen: true }, (socket) => serveStream(socket, open))
   await new Promise<void>((resolve) => server.listen(path, resolve))
@@ -108,7 +108,7 @@ test("ready carries a session's disk warning, and nothing more when there is non
 })
 
 test("a connection that does not open a session first, sends before ready, or asks for a bad one, gets an error frame", async () => {
-  const { talk, close } = await served(async () => { throw new PaddockError("conflict", "demo is not running.") })
+  const { talk, close } = await served(async () => { throw new AsideeError("conflict", "demo is not running.") })
   const first = await talk([frame("stdin", "x")])
   const bad = await talk([frame("open", { kind: "exec", name: "../x", argv: ["sh"] })])
   const refused = await talk([frame("open", { kind: "exec", name: "demo", argv: ["sh"] })])
@@ -139,7 +139,7 @@ test("a client that goes away closes its session", async () => {
 
 test("a client FIN closes the session even while its read side remains open", async () => {
   const session = new Echo()
-  const root = await mkdtemp(join(tmpdir(), "pdk-stream-")); roots.push(root)
+  const root = await mkdtemp(join(tmpdir(), "asd-stream-")); roots.push(root)
   const path = join(root, "fin.sock")
   const server = createServer({ allowHalfOpen: true }, (socket) => serveStream(socket, async () => session))
   await new Promise<void>((resolve) => server.listen(path, resolve))

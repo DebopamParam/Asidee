@@ -10,7 +10,7 @@ const manifest = (name: string, id: string, ssh = true) => ({ version: 1, name, 
   ...(ssh ? { ssh: { user: "root", home: "/root", unlocked: false, sshd: "/usr/sbin/sshd", hostKey: KEY, editorKey: "SHA256:x", at: "" } } : {}) }) as Manifest
 const roots: string[] = []
 afterAll(() => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))))
-const dirsIn = async (name = "pdk ssh-") => { const root = await mkdtemp(join(tmpdir(), name)); roots.push(root); return { state: join(root, "s"), config: join(root, "c"), root } }
+const dirsIn = async (name = "asd ssh-") => { const root = await mkdtemp(join(tmpdir(), name)); roots.push(root); return { state: join(root, "s"), config: join(root, "c"), root } }
 
 test("a ProxyCommand word survives the shell and ssh's % tokens", async () => {
   expect(shellWord("/a b/it's 100%")).toBe(`'/a b/it'\\''s 100%%'`)
@@ -21,10 +21,10 @@ test("a ProxyCommand word survives the shell and ssh's % tokens", async () => {
 
 test("the host block pins the sandbox's id, its known hosts and the editor key, and forwards no agent", async () => {
   const dirs = await dirsIn()
-  const block = hostBlock(dirs, manifest("demo", "abc123"), manifest("demo", "abc123").ssh!, ["/opt/pad dock/paddock"])
-  expect(block).toContain("Host demo.paddock\n")
-  expect(block).toContain(`  ProxyCommand '/usr/bin/env' 'PADDOCK_STATE_DIR=${dirs.state}' 'PADDOCK_CONFIG_DIR=${dirs.config}' '/opt/pad dock/paddock' 'ssh' 'proxy' 'demo'\n`)
-  for (const line of ["HostKeyAlias paddock-abc123", "StrictHostKeyChecking yes", "GlobalKnownHostsFile /dev/null", "IdentitiesOnly yes", "IdentityAgent none", "ForwardAgent no", "GatewayPorts no",
+  const block = hostBlock(dirs, manifest("demo", "abc123"), manifest("demo", "abc123").ssh!, ["/opt/asi dee/asd"])
+  expect(block).toContain("Host demo.asidee\n")
+  expect(block).toContain(`  ProxyCommand '/usr/bin/env' 'ASIDEE_STATE_DIR=${dirs.state}' 'ASIDEE_CONFIG_DIR=${dirs.config}' '/opt/asi dee/asd' 'ssh' 'proxy' 'demo'\n`)
+  for (const line of ["HostKeyAlias asidee-abc123", "StrictHostKeyChecking yes", "GlobalKnownHostsFile /dev/null", "IdentitiesOnly yes", "IdentityAgent none", "ForwardAgent no", "GatewayPorts no",
     `UserKnownHostsFile "${join(dirs.state, "ssh", "known_hosts")}"`, `IdentityFile "${join(dirs.state, "ssh", "editor_ed25519")}"`, "User root"])
     expect(block).toContain(`  ${line}\n`)
   expect(() => hostBlock({ state: '/x"y', config: "/c" }, manifest("demo", "abc123"), manifest("demo", "abc123").ssh!)).toThrow("cannot write an SSH configuration")
@@ -34,8 +34,8 @@ test("the client files list only sandboxes that were set up, by id", async () =>
   const dirs = await dirsIn()
   await writeClientFiles(dirs, [manifest("one", "id1"), manifest("two", "id2", false)])
   const config = await readFile(join(dirs.state, "ssh", "config"), "utf8")
-  expect(config).toContain("Host one.paddock"); expect(config).not.toContain("two.paddock")
-  expect(await readFile(join(dirs.state, "ssh", "known_hosts"), "utf8")).toBe(`paddock-id1 ${KEY}\n`)
+  expect(config).toContain("Host one.asidee"); expect(config).not.toContain("two.asidee")
+  expect(await readFile(join(dirs.state, "ssh", "known_hosts"), "utf8")).toBe(`asidee-id1 ${KEY}\n`)
   expect((await lstat(join(dirs.state, "ssh", "config"))).mode & 0o777).toBe(0o600)
   await writeClientFiles(dirs, [])
   expect(await readFile(join(dirs.state, "ssh", "known_hosts"), "utf8")).toBe("")
@@ -65,7 +65,7 @@ test("the editor key is made once, here, and only its public half is read", asyn
 })
 
 test("the guest's report is read strictly", () => {
-  expect(parseGuestSetup(`installing…\nyes\n/root\n/usr/sbin/sshd\n${KEY} paddock-guest\n`)).toEqual({ unlocked: true, home: "/root", sshd: "/usr/sbin/sshd", hostKey: KEY })
+  expect(parseGuestSetup(`installing…\nyes\n/root\n/usr/sbin/sshd\n${KEY} asidee-guest\n`)).toEqual({ unlocked: true, home: "/root", sshd: "/usr/sbin/sshd", hostKey: KEY })
   for (const bad of ["", "no\n/root\n/usr/sbin/sshd\nssh-rsa AAAA", `no\nroot\n/usr/sbin/sshd\n${KEY}`, `no\n/root\nsshd\n${KEY}`, `no\n/root\n/usr/sbin/sshd\n${KEY} two words`, `/root\n/usr/sbin/sshd\n${KEY}`])
     expect(() => parseGuestSetup(bad)).toThrow("did not report")
   expect(validPublicKey(`${KEY}\nssh-ed25519 ${KEY.split(" ")[1]}`)).toBe(false)
@@ -80,8 +80,8 @@ test("remote aliases pin both identities, keep the private key here, coexist wit
   await Promise.all([updateRemoteAlias(dirs, "build", "demo", entry), updateRemoteAlias(dirs, "other", "demo", { ...entry, host: "other", machineId: "c".repeat(32) })])
   await writeClientFiles(dirs, [manifest("demo", "local-id")])
   const config = await readFile(join(dirs.state, "ssh", "config"), "utf8")
-  for (const name of ["demo.paddock", "demo.build.paddock", "demo.other.paddock"]) expect(config).toContain(`Host ${name}\n`)
-  expect(config).toContain(`HostKeyAlias paddock-${entry.machineId}-${entry.sandboxId}`)
+  for (const name of ["demo.asidee", "demo.build.asidee", "demo.other.asidee"]) expect(config).toContain(`Host ${name}\n`)
+  expect(config).toContain(`HostKeyAlias asidee-${entry.machineId}-${entry.sandboxId}`)
   expect(config).toContain(`'--host' 'build' 'ssh' 'proxy' 'demo' '--sandbox-id' '${entry.sandboxId}'`)
   expect(config).toContain(`IdentityFile "${key.path}"`)
   expect(JSON.stringify(await remoteAliases(dirs))).not.toContain("PRIVATE KEY")
@@ -91,6 +91,6 @@ test("remote aliases pin both identities, keep the private key here, coexist wit
   const padded = parseSshSetup({ ...setup, hostKey: `\n${KEY}\n` })
   expect(padded.hostKey).toBe(KEY)
   await updateRemoteAlias(dirs, "build", "demo", { ...entry, setup: padded })
-  expect((await readFile(join(dirs.state, "ssh", "known_hosts"), "utf8")).split("\n")).toContain(`paddock-${entry.machineId}-${entry.sandboxId} ${KEY}`)
+  expect((await readFile(join(dirs.state, "ssh", "known_hosts"), "utf8")).split("\n")).toContain(`asidee-${entry.machineId}-${entry.sandboxId} ${KEY}`)
   for (const bad of [{ ...setup, user: "root\nProxyCommand id" }, { ...setup, home: "/root\nBad" }, { ...setup, hostKey: "ssh-rsa AAAA" }]) expect(() => parseSshSetup(bad)).toThrow()
 })

@@ -15,7 +15,7 @@ const manifest: Manifest = { version: 1, name: "demo", id: "owned", createdAt: "
 // An engine whose every exec prints "hi" on stdout in the same write as the upgrade, ends at once and exits 0: a command
 // that is over before its caller listens.
 async function engine(): Promise<GvisorProvider> {
-  const dir = await mkdtemp(join(tmpdir(), "pdk-engine-"))
+  const dir = await mkdtemp(join(tmpdir(), "asd-engine-"))
   const path = join(dir, "engine.sock")
   const server: Server = createServer((socket) => {
     socket.once("data", (chunk) => {

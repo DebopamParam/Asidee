@@ -1,6 +1,6 @@
 # Evals
 
-The eval set is the list of things Paddock says about itself, each measured from outside it.
+The eval set is the list of things Asidee says about itself, each measured from outside it.
 
 ```sh
 bun evals/run.ts                 # every eval
@@ -9,8 +9,8 @@ bun evals/run.ts --write         # also rewrite SCORECARD.md
 bun evals/run.ts --write --label linux  # write SCORECARD.linux.md instead
 ```
 
-It builds `dist/paddock` and runs it with a state and config folder of its own, on the first engine `paddock doctor`
-calls ready. Sandboxes it makes are named `evXXXX-…` and removed at the end. It refuses to start while other Paddock
+It builds `dist/asd` and runs it with a state and config folder of its own, on the first engine `asd doctor`
+calls ready. Sandboxes it makes are named `evXXXX-…` and removed at the end. It refuses to start while other Asidee
 sandboxes run on the engine, because the tamper evals change the firewall guard they share. It needs Docker, Bun, and
 for a few evals `python3` and a Chromium-based browser; an eval that lacks what it needs is reported as not measured.
 
@@ -22,20 +22,20 @@ of an already running sandbox and require that it stays running with the require
 for this change. Existing scorecards do not establish the new create policy.
 
 Each scorecard records its engine, runtime, OS, architecture, and source revision. When running a source archive
-without Git metadata, set `PADDOCK_EVAL_REVISION` to its revision and archive checksum. Separate labels retain results
+without Git metadata, set `ASIDEE_EVAL_REVISION` to its revision and archive checksum. Separate labels retain results
 from multiple machines. A run establishes claims only on the engine and OS it names.
 
-Set `PADDOCK_EVAL_BROWSER` to a Chromium-based browser's executable path when discovery cannot find it. No browser
-is installed by the evals. Set `PADDOCK_EVAL_LAN_TARGET=IPv4:port` to opt into E04 for one real private or tailnet
+Set `ASIDEE_EVAL_BROWSER` to a Chromium-based browser's executable path when discovery cannot find it. No browser
+is installed by the evals. Set `ASIDEE_EVAL_LAN_TARGET=IPv4:port` to opt into E04 for one real private or tailnet
 device. E04 requires that this host can open that TCP target before trying it from both the sandbox and inner Docker,
 beside working internet controls. Without the input or host control it reports why it could not measure the target.
 No port scan is performed.
 
-Set `PADDOCK_EVAL_HOST=home-linux` (or another authorized SSH alias) to measure group M. Without it the whole group
+Set `ASIDEE_EVAL_HOST=home-linux` (or another authorized SSH alias) to measure group M. Without it the whole group
 is unmeasured. The fixture must have native Linux x86_64/arm64, a ready local Docker/gVisor engine, working BatchMode
-SSH and established host-key trust, and no running Paddock sandboxes. The evals build for its architecture here and
-copy a checksum-checked binary to `~/.pdk-machines-XXXXXX`, start a private socket-only daemon, and use `host attach`.
-They create disposable sandboxes, tamper only with those sandboxes/Paddock resources, stop the primary for the
+SSH and established host-key trust, and no running Asidee sandboxes. The evals build for its architecture here and
+copy a checksum-checked binary to `~/.asd-machines-XXXXXX`, start a private socket-only daemon, and use `host attach`.
+They create disposable sandboxes, tamper only with those sandboxes/Asidee resources, stop the primary for the
 independent-enforcement check, exercise hosted streams/forwards and an editor SSH alias, then remove the sandboxes,
 registration, daemon and directory. The inner editor SSH client reads only the run's temporary config (`-F`); the
 outer transport reads the user's existing SSH config with UpdateHostKeys disabled. No sudo, host package
@@ -49,21 +49,21 @@ when it is not. M03 builds two more gateways here: one with another version and 
 version. M08 stops this run's primary daemon with SIGSTOP for up to thirty seconds to measure the remote lease expiry,
 and M11 stops one of its SSH processes the same way before `daemon stop`; both resume or kill what they stopped.
 
-Group N covers host enrollment. N01 uses `PADDOCK_EVAL_HOST` only for a read-only probe and a plan, as JSON and as
+Group N covers host enrollment. N01 uses `ASIDEE_EVAL_HOST` only for a read-only probe and a plan, as JSON and as
 text. It starts nothing on that machine, and compares before and after: file hashes, ownership, modes, mtimes and
 links, Docker's own process and images, and the start time of every container that was running. The installer evals
-require `PADDOCK_EVAL_ENROLL_HOST=pdk-enroll-NAME@orb`, a disposable Ubuntu machine with Docker, readable Docker access,
-`alpine:latest`, systemd, Python 3, passwordless sudo and outbound HTTPS. Start with no Paddock files, no sandboxes and
+require `ASIDEE_EVAL_ENROLL_HOST=asd-enroll-NAME@orb`, a disposable Ubuntu machine with Docker, readable Docker access,
+`alpine:latest`, systemd, Python 3, passwordless sudo and outbound HTTPS. Start with no Asidee files, no sandboxes and
 a readable `/etc/docker/daemon.json` containing unrelated settings. These evals run in the order of the file, and each
 starts from the state the one before it left, so run the group whole.
 
 N02 through N04 measure the plan, stale inventory and configuration consent, and refusals; one of them is a private
-`ssh` wrapper that drops Paddock's `KnownHostsCommand`, so SSH reports no verified host key. N11 corrupts one uploaded binary byte through such a wrapper
+`ssh` wrapper that drops Asidee's `KnownHostsCommand`, so SSH reports no verified host key. N11 corrupts one uploaded binary byte through such a wrapper
 and N05 forces a failure halfway: each requires the report of what was and was not changed. N06 installs, with a real
 Docker-restart interruption, the installed digests, smoke isolation and disk checks. N07 removes the host and reuses
 its service with `--sudo never`.
 
-N08 additionally needs `PADDOCK_EVAL_ENROLL_PACKAGES_HOST=pdk-enroll-OTHER@orb`, another fresh Ubuntu machine without
+N08 additionally needs `ASIDEE_EVAL_ENROLL_PACKAGES_HOST=asd-enroll-OTHER@orb`, another fresh Ubuntu machine without
 Docker, with usable signed apt metadata already populated. It measures the complete pinned distro package transaction
 and confirms no login-group edit. N09 drives an actual terminal to decline. N10 requires OrbStack root control of the
 first fixture; it temporarily sets that disposable account's password and an isolated sudoers override to require a
@@ -80,12 +80,12 @@ images and unrelated Docker settings. N20 needs no fixture: it runs the installe
 archives it makes, with one unprivileged step, and writes only inside the run's temporary folder.
 
 Delete both machines after the run. These evals reject destinations outside the explicit disposable naming pattern and
-never install on `PADDOCK_EVAL_HOST` or change the Mac's Docker configuration. A missing fixture is not measured. Example:
+never install on `ASIDEE_EVAL_HOST` or change the Mac's Docker configuration. A missing fixture is not measured. Example:
 
 ```sh
-PADDOCK_EVAL_HOST=home-linux \
-PADDOCK_EVAL_ENROLL_HOST=pdk-enroll-test@orb \
-PADDOCK_EVAL_ENROLL_PACKAGES_HOST=pdk-enroll-packages@orb \
+ASIDEE_EVAL_HOST=home-linux \
+ASIDEE_EVAL_ENROLL_HOST=asd-enroll-test@orb \
+ASIDEE_EVAL_ENROLL_PACKAGES_HOST=asd-enroll-packages@orb \
 bun evals/run.ts --write
 ```
 
@@ -110,13 +110,13 @@ nix develop -c bun evals/run.ts --only K --write
 ```
 
 A K-only selection takes a separate path before engine discovery. It builds the CLI and starts a private local daemon
-with `PADDOCK_WORKSPACE_ONLY=1`; it never runs Docker commands, SSH, sandbox teardown or the other groups. K10 only
+with `ASIDEE_WORKSPACE_ONLY=1`; it never runs Docker commands, SSH, sandbox teardown or the other groups. K10 only
 connects to Docker/nix Unix sockets and closes them, without sending an API request. K15 always runs first, including
 when selecting individual IDs. Its empty/exact PID controls must pass before any lifecycle eval runs.
 
-Workspaces and their copied fixture projects are under the checkout's ignored `dist/paddock-workspace-evals-*`, which
-is still inside the account's real home as the profile requires. Their daemon uses `/private/tmp/pdk-k-*`; Nix's own
-TMPDIR can disappear when its command exits and is not used for that daemon. There is no fixture in `~/Paddock` and
+Workspaces and their copied fixture projects are under the checkout's ignored `dist/asidee-workspace-evals-*`, which
+is still inside the account's real home as the profile requires. Their daemon uses `/private/tmp/asd-k-*`; Nix's own
+TMPDIR can disappear when its command exits and is not used for that daemon. There is no fixture in `~/Asidee` and
 no loose test file in the home root. K01 briefly writes exclusive control files in the user's temp folder,
 `/Users/Shared` and `/opt/homebrew/Cellar`, then deletes them. K07 through K09 use only a fixture app/job and remove
 their registrations. K11 reads controls but neither changes preferences/clipboard nor logs their contents.
@@ -137,7 +137,7 @@ confined policy controls plus a real Unix-socket probe.
 `--write` for a K-only run writes only `SCORECARD.workspace.md`, with the selected IDs. Neither full sandbox scorecard
 is regenerated. The [workspace reference](../docs/workspaces.md) describes remaining removal and coverage limits.
 
-- **It does not ask Paddock.** "Cannot reach the host" is a listener on the engine's host and a connection attempt
+- **It does not ask Asidee.** "Cannot reach the host" is a listener on the engine's host and a connection attempt
   from inside the sandbox, made with the sandbox's own `nc`.
 - **A blocked attempt needs a control.** Each target is first reached from the engine's host. T01 removes the guard
   and repeats the attempts, which must then connect; otherwise the blocked results would prove nothing.
@@ -158,9 +158,9 @@ is regenerated. The [workspace reference](../docs/workspaces.md) describes remai
 | S | Do exec and shell sessions carry raw bytes both ways, bounded, only over this machine's socket? |
 | W | Does a forward reach the sandbox's loopback from this machine's loopback, and nothing else, for one run of it? |
 | J | Does a link between two sandboxes carry its one port, reach nothing else either way, come back after restarts, stay bounded, and end when either side goes? |
-| A | Does `ssh NAME.paddock` reach only that sandbox, with only this machine's editor key, through the daemon, without a port? |
+| A | Does `ssh NAME.asidee` reach only that sandbox, with only this machine's editor key, through the daemon, without a port? |
 | L | Do resized limits hold on the engine's host when resize says they do, and are unsafe resizes refused? |
-| C | Does a template carry the sandbox's files, leave out the login files, and stay Paddock's own? |
+| C | Does a template carry the sandbox's files, leave out the login files, and stay Asidee's own? |
 | M | Does one selected machine's own daemon perform operations and checks over SSH, preserving identity, availability and socket authority? |
 | N | Does reviewed Linux enrollment bind consent, verify provenance, install exactly the plan, refuse safely and leave a usable host? |
 | D | Does the daemon keep its promises through crashes, races and upgrades? |

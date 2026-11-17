@@ -3,7 +3,7 @@ export const HOST_ROOT_STEP = String.raw`
 import os, sys, json, tempfile, shutil, hashlib, subprocess
 
 checks = json.loads(sys.argv[1])
-root = tempfile.mkdtemp(prefix='paddock-root-')
+root = tempfile.mkdtemp(prefix='asidee-root-')
 try:
     copies = {}
     for source, checksum in checks.items():
@@ -65,12 +65,12 @@ def file(path):
 
 uid = os.getuid()
 account = pwd.getpwuid(uid)
-state = '/var/lib/paddock/' + str(uid)
-release = '/opt/paddock/releases/' + request['sha256'] + '/paddock'
+state = '/var/lib/asidee/' + str(uid)
+release = '/opt/asidee/releases/' + request['sha256'] + '/asd'
 paths = [
     '/etc/docker/daemon.json',
-    '/usr/local/bin/paddock',
-    '/etc/systemd/system/paddock@' + str(uid) + '.service',
+    '/usr/local/bin/asd',
+    '/etc/systemd/system/asidee@' + str(uid) + '.service',
     release,
     state + '/machine-id',
 ] + request['runtimeFiles']
@@ -141,13 +141,13 @@ for path in sorted(evidence):
         except OSError:
             pass
 
-unit = 'paddock@' + str(uid) + '.service'
+unit = 'asidee@' + str(uid) + '.service'
 files = {p: file(p) for p in paths}
 # The backup an installation would write is named after the bytes it backs up; say whether one is already there.
 for path in ['/etc/docker/daemon.json', '/etc/systemd/system/' + unit]:
     previous = files[path]
     if previous['kind'] == 'file':
-        backup = path + '.paddock-' + previous['sha256']
+        backup = path + '.asidee-' + previous['sha256']
         files[backup] = file(backup)
 
 print(json.dumps(dict(
@@ -180,7 +180,7 @@ started = None
 stage = None
 
 def report(value):
-    print(('PADDOCK-RESULT ' if p.get('interactive') else '') + json.dumps(dict(value, stageDir=stage)), flush=True)
+    print(('ASIDEE-RESULT ' if p.get('interactive') else '') + json.dumps(dict(value, stageDir=stage)), flush=True)
 
 journal = p['stateDir'] + '/enrollment.json'
 
@@ -201,7 +201,7 @@ def run(argv):
 
 try:
     os.umask(0o077)
-    stage = tempfile.mkdtemp(prefix='paddock-enroll-')
+    stage = tempfile.mkdtemp(prefix='asidee-enroll-')
     for item in p['uploads']:
         target = stage + '/' + item['name']
         if item['kind'] == 'artifact':
@@ -287,7 +287,7 @@ finally:
 export const HOST_REQUEST = String.raw`
 import os, sys, shutil, tempfile
 
-fd, path = tempfile.mkstemp(prefix='paddock-request-')
+fd, path = tempfile.mkstemp(prefix='asidee-request-')
 with os.fdopen(fd, 'wb') as f:
     shutil.copyfileobj(sys.stdin.buffer, f)
 print(path, flush=True)

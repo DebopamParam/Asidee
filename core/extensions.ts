@@ -1,11 +1,11 @@
 import { readdir, readFile } from "node:fs/promises"
 import { isAbsolute, join } from "node:path"
-import { PaddockError, type RunResult, type Runner } from "./types"
+import { AsideeError, type RunResult, type Runner } from "./types"
 import type { Dirs } from "./state"
 
 // Extensions are the flexible part: a folder with an extension.json that declares actions (a label, form fields, and a
 // command) and hooks. The core never loads their code. It runs their commands as separate processes on this machine,
-// which use the `paddock` CLI like any other client, so an extension cannot change what a sandbox is or skip a check.
+// which use the `asd` CLI like any other client, so an extension cannot change what a sandbox is or skip a check.
 // Each UI draws an action's form from the declaration, so an action is written once.
 // An extension's commands do run with the user's own rights on this machine, like any script the user installs.
 
@@ -17,7 +17,7 @@ const ID = /^[a-z0-9][a-z0-9-]{0,40}$/
 const isCommand = (value: unknown): value is string[] => Array.isArray(value) && value.length > 0 && value.every((part) => typeof part === "string")
 
 export function parseExtension(id: string, dir: string, raw: unknown): Extension {
-  const fail = (message: string): never => { throw new PaddockError("usage", `Extension ${id}: ${message}`) }
+  const fail = (message: string): never => { throw new AsideeError("usage", `Extension ${id}: ${message}`) }
   if (!ID.test(id)) fail("its folder name must be lowercase letters, digits and hyphens")
   const data = raw as { name?: unknown; description?: unknown; actions?: unknown; hooks?: { postCreate?: unknown } }
   if (typeof data !== "object" || data === null || typeof data.name !== "string") fail("extension.json needs a name")
@@ -44,7 +44,7 @@ export async function loadExtensions(dirs: Dirs): Promise<{ extensions: Extensio
     if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
     const dir = join(root, entry.name)
     try { extensions.push(parseExtension(entry.name, dir, JSON.parse(await readFile(join(dir, "extension.json"), "utf8")))) }
-    catch (error) { errors.push(error instanceof PaddockError ? error.message : `Extension ${entry.name}: ${(error as Error).message}`) }
+    catch (error) { errors.push(error instanceof AsideeError ? error.message : `Extension ${entry.name}: ${(error as Error).message}`) }
   }
   return { extensions, errors }
 }
@@ -54,22 +54,22 @@ export function fieldValues(action: Action, values: Record<string, unknown>): Re
   for (const field of action.fields) {
     const given = values[field.id] ?? field.default
     if (given === undefined || given === "") {
-      if (field.required) throw new PaddockError("usage", `${field.label} is required.`)
+      if (field.required) throw new AsideeError("usage", `${field.label} is required.`)
       continue
     }
     const text = String(given)
-    if (text.includes("\0")) throw new PaddockError("usage", `${field.label} is not valid.`)
-    if (field.type === "number" && !Number.isFinite(Number(text))) throw new PaddockError("usage", `${field.label} must be a number.`)
-    if (field.type === "checkbox" && text !== "true" && text !== "false") throw new PaddockError("usage", `${field.label} must be true or false.`)
-    if (field.type === "select" && !field.options!.includes(text)) throw new PaddockError("usage", `${field.label} must be one of: ${field.options!.join(", ")}.`)
-    env[`PADDOCK_FIELD_${field.id.toUpperCase()}`] = text
+    if (text.includes("\0")) throw new AsideeError("usage", `${field.label} is not valid.`)
+    if (field.type === "number" && !Number.isFinite(Number(text))) throw new AsideeError("usage", `${field.label} must be a number.`)
+    if (field.type === "checkbox" && text !== "true" && text !== "false") throw new AsideeError("usage", `${field.label} must be true or false.`)
+    if (field.type === "select" && !field.options!.includes(text)) throw new AsideeError("usage", `${field.label} must be one of: ${field.options!.join(", ")}.`)
+    env[`ASIDEE_FIELD_${field.id.toUpperCase()}`] = text
   }
   return env
 }
 
-// cliDir: where the `paddock` command lives, put first on PATH so the command can call back into the core.
+// cliDir: where the `asd` command lives, put first on PATH so the command can call back into the core.
 export function runCommand(run: Runner, extension: Extension, command: string[], env: Record<string, string>, cliDir: string): Promise<RunResult> {
   const [program, ...args] = command
   const resolved = program!.startsWith("./") || (!isAbsolute(program!) && program!.includes("/")) ? join(extension.dir, program!) : program!
-  return run([resolved, ...args], { cwd: extension.dir, timeoutMs: 1_800_000, env: { ...env, PADDOCK_EXTENSION_DIR: extension.dir, PATH: `${cliDir}:${process.env.PATH ?? ""}` } })
+  return run([resolved, ...args], { cwd: extension.dir, timeoutMs: 1_800_000, env: { ...env, ASIDEE_EXTENSION_DIR: extension.dir, PATH: `${cliDir}:${process.env.PATH ?? ""}` } })
 }

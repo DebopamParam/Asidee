@@ -10,7 +10,7 @@ export type SandboxSpec = {
   // The sandbox may use this much disk. How strictly that holds depends on the engine: see Capabilities.diskLimit.
   diskGb: number
   docker: boolean
-  // The name of a Paddock template (an image made from a sandbox) to start from instead of an image; the core resolves it
+  // The name of an Asidee template (an image made from a sandbox) to start from instead of an image; the core resolves it
   // to the template's image ID before anything is created.
   template?: string
 }
@@ -102,7 +102,7 @@ export type Manifest = {
   checksPending?: string
   stopReason?: string
   enforcementProblem?: { at: string; message: string }
-  // Set by `paddock ssh setup` for this sandbox; a sandbox recreated under the name starts without it.
+  // Set by `asd ssh setup` for this sandbox; a sandbox recreated under the name starts without it.
   ssh?: SshSetup
   // The template it was made from, as resolved at creation. spec.image is then imageId.
   template?: { name: string; imageId: string; source: string; createdAt: string }
@@ -151,7 +151,7 @@ export interface LinkSupport {
   // One accepted connection's two halves: fromClient's output is what the client sends, toClient's input goes to it.
   // Both come back paused, so nothing they print is lost before the daemon listens.
   attach(manifest: Manifest, dir: string, pid: number): Promise<{ fromClient: Session; toClient: Session }>
-  // Replaces Paddock's link lines in the sandbox's /etc/hosts with these, writing only when that changes it, and
+  // Replaces Asidee's link lines in the sandbox's /etc/hosts with these, writing only when that changes it, and
   // returns the file as read back.
   hosts(manifest: Manifest, lines: readonly string[]): Promise<string>
   // A test listener that answers each connection with reply: on the sandbox's loopback only, or on every address.
@@ -204,6 +204,6 @@ export interface Provider {
 }
 
 export type ErrorCode = "usage" | "not-found" | "conflict" | "dependency" | "check-failed" | "probes-required" | "runtime" | "offline" | "incompatible" | "identity-changed" | "outcome-unknown"
-export class PaddockError extends Error {
+export class AsideeError extends Error {
   constructor(readonly code: ErrorCode, message: string, readonly details?: unknown) { super(message) }
 }

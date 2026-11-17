@@ -9,7 +9,7 @@ import { HELPER_IMAGE, MANAGED_RUNTIME } from "./providers/gvisor"
 import HELPER_DOCKERFILE from "./providers/helper.Dockerfile" with { type: "text" }
 import { systemRunner, must } from "./run"
 import { hostKeyCapture, HttpPeer, keyFingerprint, object, pinnedKnownHosts, shellQuote, sshArgv, sshDestination, type Endpoint } from "./transport"
-import { PaddockError, type ErrorCode, type Session, type RunResult } from "./types"
+import { AsideeError, type ErrorCode, type Session, type RunResult } from "./types"
 
 // The one gVisor release enrollment installs. Its archive is checked against the SHA-512 the release publishes, and
 // every file taken from it against the SHA-256 recorded here. It is the release the Mac scorecard measures. The last
@@ -46,7 +46,7 @@ export const GVISOR = {
 } as const
 // Both architectures' archives hold the same file names, so the paths to read are known before the probe says which.
 export const GVISOR_FILES = Object.keys(GVISOR.aarch64.files) as Array<keyof typeof GVISOR.aarch64.files>
-const RUNTIME_DIR = `/opt/paddock/gvisor/${GVISOR_RELEASE}`
+const RUNTIME_DIR = `/opt/asidee/gvisor/${GVISOR_RELEASE}`
 const RUNTIME = `${RUNTIME_DIR}/runsc`
 // How Docker is told to start gVisor. --overlay2=none is what lets the disk watch see a sandbox's writes; --net-raw is
 // added only for a host enrolled with inner Docker, whose NAT needs gVisor's raw sockets.
@@ -69,12 +69,12 @@ export type EnrollmentOptions = {
 }
 
 export function enrollmentOptions(body: Record<string, unknown>): EnrollmentOptions {
-  if (body.sudo !== undefined && body.sudo !== "ask" && body.sudo !== "never") throw new PaddockError("usage", "--sudo must be ask or never.")
+  if (body.sudo !== undefined && body.sudo !== "ask" && body.sudo !== "never") throw new AsideeError("usage", "--sudo must be ask or never.")
   if (body.diskPolicy !== undefined && body.diskPolicy !== "watched")
-    throw new PaddockError("usage", "Enrollment supports --disk-policy watched only. Hard disks and disk tools are stage 1d and are not installed.")
-  if (body.docker !== undefined && typeof body.docker !== "boolean") throw new PaddockError("usage", "docker must be true or false.")
+    throw new AsideeError("usage", "Enrollment supports --disk-policy watched only. Hard disks and disk tools are stage 1d and are not installed.")
+  if (body.docker !== undefined && typeof body.docker !== "boolean") throw new AsideeError("usage", "docker must be true or false.")
   if (!object(body.artifact) || typeof body.artifact.path !== "string" || !digest(body.artifact.sha256))
-    throw new PaddockError("usage", "Give --artifact PATH and --sha256 HASH from an explicitly trusted local build. No release channel exists.")
+    throw new AsideeError("usage", "Give --artifact PATH and --sha256 HASH from an explicitly trusted local build. No release channel exists.")
   return {
     name: hostName(body.name), ssh: sshDestination(body.ssh), sudo: body.sudo ?? "ask", diskPolicy: "watched", docker: body.docker ?? false,
     artifact: { path: resolve(body.artifact.path), sha256: body.artifact.sha256 },
@@ -93,19 +93,19 @@ export const planHash = (value: unknown) => sha256(canonical(value))
 
 export async function verifyArtifact(artifact: EnrollmentOptions["artifact"], arch: string): Promise<Uint8Array> {
   const data = new Uint8Array(await Bun.file(artifact.path).arrayBuffer())
-  if (sha256(data) !== artifact.sha256) throw new PaddockError("usage", "The local Paddock artifact checksum does not match --sha256. Nothing was uploaded or installed.")
+  if (sha256(data) !== artifact.sha256) throw new AsideeError("usage", "The local Asidee artifact checksum does not match --sha256. Nothing was uploaded or installed.")
   // ELF header: magic, 64-bit, little-endian, and the machine field (183 is aarch64, 62 is x86_64).
   const machine = data[18]! | data[19]! << 8
   if (data.length < 64 || Buffer.from(data.slice(0, 4)).toString("hex") !== "7f454c46" || data[4] !== 2 || data[5] !== 1 || machine !== (arch === "aarch64" ? 183 : 62))
-    throw new PaddockError("usage", `The artifact must be a native Linux 64-bit ELF for ${arch}. Build it explicitly; host add never cross-compiles.`)
+    throw new AsideeError("usage", `The artifact must be a native Linux 64-bit ELF for ${arch}. Build it explicitly; host add never cross-compiles.`)
   return data
 }
 
-// daemon.json with Paddock's runtime added. Every other setting, and every other runtime, is kept, and so is the file's
+// daemon.json with Asidee's runtime added. Every other setting, and every other runtime, is kept, and so is the file's
 // own indentation, so that the diff shows the addition and not a reformatting.
 export function mergeRuntime(before: string | null, path: string, docker = false): string {
   const config: unknown = before === null ? {} : JSON.parse(before)
-  if (!object(config) || (config.runtimes !== undefined && !object(config.runtimes))) throw new PaddockError("usage", "Docker daemon.json and runtimes must be JSON objects.")
+  if (!object(config) || (config.runtimes !== undefined && !object(config.runtimes))) throw new AsideeError("usage", "Docker daemon.json and runtimes must be JSON objects.")
   const runtimes = { ...(object(config.runtimes) ? config.runtimes : {}), [MANAGED_RUNTIME]: { path, runtimeArgs: runtimeArgs(docker) } }
   const indent = before?.match(/^\s*\{\r?\n([ \t]+)"/)?.[1] ?? "  "
   return `${JSON.stringify({ ...config, runtimes }, null, indent)}\n`
@@ -135,9 +135,9 @@ export function lineDiff(path: string, before: string | null, after: string): st
 // The system unit enrollment installs. It runs the daemon as the SSH account, with Docker's group and no dashboard.
 export function serviceUnit(user: string, gid: number, stateDir: string, binary: string): string {
   return [
-    "# Paddock enrollment v1",
+    "# Asidee enrollment v1",
     "[Unit]",
-    `Description=Paddock checked sandboxes for ${user}`,
+    `Description=Asidee checked sandboxes for ${user}`,
     "Requires=docker.service",
     "After=docker.service",
     "",
@@ -147,9 +147,9 @@ export function serviceUnit(user: string, gid: number, stateDir: string, binary:
     `Group=${gid}`,
     "SupplementaryGroups=docker",
     "Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    `Environment=PADDOCK_STATE_DIR=${stateDir}`,
-    `Environment=PADDOCK_CONFIG_DIR=${stateDir}/config`,
-    "Environment=PADDOCK_SOCKET_ONLY=1",
+    `Environment=ASIDEE_STATE_DIR=${stateDir}`,
+    `Environment=ASIDEE_CONFIG_DIR=${stateDir}/config`,
+    "Environment=ASIDEE_SOCKET_ONLY=1",
     `WorkingDirectory=${stateDir}`,
     `ExecStart=${binary} daemon run`,
     "Restart=on-failure",
@@ -228,11 +228,11 @@ async function probe(options: EnrollmentOptions): Promise<HostProbe> {
     )
     let value: unknown
     try { value = JSON.parse(result.stdout) } catch {
-      throw new PaddockError("dependency", `The read-only probe did not print its evidence; it printed ${JSON.stringify(result.stdout.slice(0, 200))}. A login script on ${options.ssh} that prints to a non-interactive session causes this. Nothing was installed.`)
+      throw new AsideeError("dependency", `The read-only probe did not print its evidence; it printed ${JSON.stringify(result.stdout.slice(0, 200))}. A login script on ${options.ssh} that prints to a non-interactive session causes this. Nothing was installed.`)
     }
     const hostPublicKey = capture.read(result.exitCode)
     const bound = object(value) ? { ...value, hostKey: keyFingerprint(hostPublicKey), hostPublicKey } : undefined
-    if (!isProbe(bound)) throw new PaddockError("dependency", "The read-only probe returned incomplete evidence. Nothing was installed.")
+    if (!isProbe(bound)) throw new AsideeError("dependency", "The read-only probe returned incomplete evidence. Nothing was installed.")
     return bound
   } finally { capture.remove() }
 }
@@ -262,7 +262,7 @@ export type HostPlan = {
   runtime: { name: string; release: string; path: string; runtimeArgs: string[]; innerDocker: boolean }
   changes: Change[]; uploads: Upload[]; steps: Step[]
   authentication: string[]
-  // required: Docker restarts, which may interrupt every container listed. service: the Paddock service restarts, which
+  // required: Docker restarts, which may interrupt every container listed. service: the Asidee service restarts, which
   // stops the running sandboxes listed.
   restart: { required: boolean; containers: string[]; service: boolean; sandboxes: string[] }
   packageRecipe: { repositories: Record<string,string>; repositoryHashes: Record<string,string>; downloads: Download[] }
@@ -275,14 +275,14 @@ export type HostPlan = {
 }
 
 export function installationPlan(options: EnrollmentOptions, destination: HostProbe, client: Pick<Hello, "version" | "sourceDigest">, previousHost: HostRecord | null = null): HostPlan {
-  const stateDir = `/var/lib/paddock/${destination.uid}`
+  const stateDir = `/var/lib/asidee/${destination.uid}`
   if (previousHost && (previousHost.hostPublicKey !== destination.hostPublicKey
     || !previousHost.hostPublicKey || previousHost.stateDir !== stateDir
     || !identityRegistered(destination.files[`${stateDir}/machine-id`], [previousHost.machineId])))
-    throw new PaddockError("identity-changed", `${options.name} is registered to another machine, SSH host key or state directory. Nothing was installed. Inspect the destination; remove and enroll explicitly only if you intend to replace it.`)
-  const releaseDir = `/opt/paddock/releases/${options.artifact.sha256}`; const binary = `${releaseDir}/paddock`
-  const service = `paddock@${destination.uid}.service`
-  const stageDir = "@PADDOCK_STAGE@"
+    throw new AsideeError("identity-changed", `${options.name} is registered to another machine, SSH host key or state directory. Nothing was installed. Inspect the destination; remove and enroll explicitly only if you intend to replace it.`)
+  const releaseDir = `/opt/asidee/releases/${options.artifact.sha256}`; const binary = `${releaseDir}/asd`
+  const service = `asidee@${destination.uid}.service`
+  const stageDir = "@ASIDEE_STAGE@"
   const gvisor = GVISOR[destination.arch === "aarch64" ? "aarch64" : "x86_64"]
   const entry = { path: RUNTIME, runtimeArgs: runtimeArgs(options.docker) }
   const changes: Change[] = []; const steps: Step[] = []; const uploads: Upload[] = []
@@ -317,21 +317,21 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
     if (value && (value.link || (value.mode & 0o022) || value.uid !== (path === stateDir ? destination.uid : 0)))
       blockers.push(`Unsafe installation ancestor ${path}; requires owned directories without group/other write or symlinks.`)
   for (const [path, value] of Object.entries(destination.files)) {
-    const expected = path.match(/\.paddock-([a-f0-9]{64})$/)?.[1]
+    const expected = path.match(/\.asidee-([a-f0-9]{64})$/)?.[1]
     if (expected && value.kind !== "absent" && !(value.kind === "file" && value.uid === 0 && value.sha256 === expected))
       installing.push(`Backup ${path} already exists with unsafe ownership, type or other bytes.`)
   }
 
-  // What is already at each path an installation writes. Anything Paddock did not put there is refused, not replaced.
+  // What is already at each path an installation writes. Anything Asidee did not put there is refused, not replaced.
   const stateIdentity = destination.files[`${stateDir}/machine-id`]
   if (stateIdentity && stateIdentity.kind !== "absent" && !(stateIdentity.kind === "file" && /^[a-f0-9]{32}$/.test(stateIdentity.text?.trim() ?? "")))
-    blockers.push("The existing Paddock machine identity is damaged or indirect. Restore it before enrollment.")
-  const link = destination.files["/usr/local/bin/paddock"]
-  if (link?.kind !== "absent" && !(link?.kind === "link" && /^\/opt\/paddock\/releases\/[a-f0-9]{64}\/paddock$/.test(link.target) && link.uid === 0))
-    blockers.push("/usr/local/bin/paddock is unrelated or not root-owned; it will not be replaced.")
+    blockers.push("The existing Asidee machine identity is damaged or indirect. Restore it before enrollment.")
+  const link = destination.files["/usr/local/bin/asd"]
+  if (link?.kind !== "absent" && !(link?.kind === "link" && /^\/opt\/asidee\/releases\/[a-f0-9]{64}\/asd$/.test(link.target) && link.uid === 0))
+    blockers.push("/usr/local/bin/asd is unrelated or not root-owned; it will not be replaced.")
   const linked = link?.kind === "link" && link.target === binary
   const unitPath = `/etc/systemd/system/${service}`; const previousUnit = text(unitPath)
-  if (previousUnit !== null && !previousUnit.startsWith("# Paddock enrollment v1\n")) blockers.push(`${unitPath} is not a Paddock enrollment unit; refusing replacement.`)
+  if (previousUnit !== null && !previousUnit.startsWith("# Asidee enrollment v1\n")) blockers.push(`${unitPath} is not an Asidee enrollment unit; refusing replacement.`)
   const unit = serviceUnit(destination.user, destination.gid, stateDir, binary)
   const binaryInstalled = intact(binary, options.artifact.sha256)
   if (destination.files[binary]?.kind !== "absent" && !binaryInstalled) blockers.push("The immutable release path already contains other bytes or an unsafe file.")
@@ -365,17 +365,17 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
   const reuse = options.sudo === "never" || prepared
 
   // Every running container, because a Docker restart may interrupt each one. Ownership labels distinguish sandboxes
-  // from unrelated containers and Paddock's probe helpers, regardless of their names.
+  // from unrelated containers and Asidee's probe helpers, regardless of their names.
   const inventory: string[] = []; const sandboxes: string[] = []
   if (destination.docker.code === 0) {
     if (destination.containers.code !== 0) installing.push("Cannot read every running container; Docker restart impact is unknown.")
     else for (const line of destination.containers.out.split("\n").filter(Boolean)) {
       let v: unknown
-      try { v = JSON.parse(line) } catch { throw new PaddockError("dependency", "Invalid Docker container inventory. Nothing was installed; repeat the read-only plan probe.") }
-      if (!object(v) || typeof v.Names !== "string" || typeof v.ID !== "string") throw new PaddockError("dependency", "Invalid Docker container inventory.")
+      try { v = JSON.parse(line) } catch { throw new AsideeError("dependency", "Invalid Docker container inventory. Nothing was installed; repeat the read-only plan probe.") }
+      if (!object(v) || typeof v.Names !== "string" || typeof v.ID !== "string") throw new AsideeError("dependency", "Invalid Docker container inventory.")
       inventory.push(`${v.Names} (${v.ID})`)
       const labels = new Map(typeof v.Labels === "string" ? v.Labels.split(",").map((label) => [label.slice(0, label.indexOf("=")), label.slice(label.indexOf("=") + 1)]) : [])
-      if (/^[a-f0-9]{32}$/.test(labels.get("dev.paddock.id") ?? "") && /^[a-z0-9][a-z0-9-]{0,30}$/.test(labels.get("dev.paddock.name") ?? "")) sandboxes.push(`${v.Names} (${v.ID})`)
+      if (/^[a-f0-9]{32}$/.test(labels.get("com.asidee.id") ?? "") && /^[a-z0-9][a-z0-9-]{0,30}$/.test(labels.get("com.asidee.name") ?? "")) sandboxes.push(`${v.Names} (${v.ID})`)
     }
   } else if (!destination.downloads.length)
     installing.push("Docker is installed but its local socket is not readable, or the apt recipe is unavailable. Prepare Docker access first; the probe never uses sudo.")
@@ -387,16 +387,16 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
     sudo("Create boot-accessible state", [stateDir, `${stateDir}/config`], "install", "-d", "-m", "0700", "-o", String(destination.uid), "-g", String(destination.gid), stateDir, `${stateDir}/config`)
     if (destination.downloads.length) {
       for (const d of destination.downloads) {
-        if (!/^[a-zA-Z0-9_.%+~:-]+\.deb$/.test(d.file) || !/^https?:\/\//.test(d.url)) throw new PaddockError("dependency", "Invalid apt download metadata.")
+        if (!/^[a-zA-Z0-9_.%+~:-]+\.deb$/.test(d.file) || !/^https?:\/\//.test(d.url)) throw new AsideeError("dependency", "Invalid apt download metadata.")
         uploads.push({ kind: "download", name: d.file, algorithm: "sha256", checksum: d.sha256, url: d.url })
       }
       sudo("Install the exact checksum-verified distro Docker transaction", destination.downloads.map((d) => `package ${d.package} ${d.version}`),
         "env", "DEBIAN_FRONTEND=noninteractive", "dpkg", "--install", ...destination.downloads.map((d) => `${stageDir}/${d.file}`))
     }
     if (!binaryInstalled) {
-      uploads.push({ kind: "artifact", name: "paddock", algorithm: "sha256", checksum: options.artifact.sha256, source: options.artifact.path })
+      uploads.push({ kind: "artifact", name: "asd", algorithm: "sha256", checksum: options.artifact.sha256, source: options.artifact.path })
       sudo("Create immutable release directory", [releaseDir], "install", "-d", "-m", "0755", releaseDir)
-      sudo("Install verified Paddock binary", [binary], "install", "-m", "0755", `${stageDir}/paddock`, binary)
+      sudo("Install verified Asidee binary", [binary], "install", "-m", "0755", `${stageDir}/asd`, binary)
     }
     if (runtimeMissing.length) {
       uploads.push({
@@ -414,11 +414,11 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
           "install", "-m", "0755", "-t", target(directory), ...names.map((name) => `${stageDir}/gvisor/${name}`))
       }
     }
-    if (!linked) sudo("Select Paddock release", ["/usr/local/bin/paddock"], "ln", "-sfn", binary, "/usr/local/bin/paddock")
+    if (!linked) sudo("Select Asidee release", ["/usr/local/bin/asd"], "ln", "-sfn", binary, "/usr/local/bin/asd")
     if (!registered && config) {
       sudo("Create Docker config directory", ["/etc/docker"], "install", "-d", "-m", "0755", "/etc/docker")
       if (oldConfig !== null) {
-        const backup = `/etc/docker/daemon.json.paddock-${sha256(oldConfig)}`
+        const backup = `/etc/docker/daemon.json.asidee-${sha256(oldConfig)}`
         sudo("Back up Docker configuration", [backup], "cp", "--no-clobber", "--preserve=all", "/etc/docker/daemon.json", backup)
       }
       const source = change("/etc/docker/daemon.json", config)
@@ -428,7 +428,7 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
     if (restartDocker) sudo("Restart Docker; all listed containers may be interrupted", ["Docker restarted"], "systemctl", "restart", "docker")
     if (previousUnit !== unit) {
       if (previousUnit !== null) {
-        const backup = `${unitPath}.paddock-${sha256(previousUnit)}`
+        const backup = `${unitPath}.asidee-${sha256(previousUnit)}`
         sudo("Back up prior service unit", [backup], "cp", "--no-clobber", "--preserve=all", unitPath, backup)
       }
       sudo("Install system service as SSH user", [unitPath], "install", "-m", "0644", change(unitPath, unit), unitPath)
@@ -439,10 +439,10 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
     if (!unitLines.includes("ActiveState=active")) sudo("Start service", [`${service} running`], "systemctl", "start", service)
     else if (previousUnit !== unit || restartDocker || !serviceRuns(destination.unit.out, destination.user, binary)) {
       restartService = true
-      sudo("Restart the Paddock service", [`${service} restarted`], "systemctl", "restart", service)
+      sudo("Restart the Asidee service", [`${service} restarted`], "systemctl", "restart", service)
     }
   } else if (!prepared) {
-    blockers.push(`--sudo never requires an installation that is already complete: ${service} active and enabled at boot as ${destination.user}, running this verified artifact from the reviewed unit, with the pinned gVisor registered as ${MANAGED_RUNTIME} (${entry.runtimeArgs.join(" ")}) and loaded by Docker. Owner setup: run \`paddock host add\` once without --sudo never and approve its plan, or install exactly what that plan lists: the unit at ${unitPath}, state ${stateDir}, SupplementaryGroups=docker, then systemctl daemon-reload and systemctl enable --now ${service}. No user unit is installed; lingering boot behavior is not measured.`)
+    blockers.push(`--sudo never requires an installation that is already complete: ${service} active and enabled at boot as ${destination.user}, running this verified artifact from the reviewed unit, with the pinned gVisor registered as ${MANAGED_RUNTIME} (${entry.runtimeArgs.join(" ")}) and loaded by Docker. Owner setup: run \`asd host add\` once without --sudo never and approve its plan, or install exactly what that plan lists: the unit at ${unitPath}, state ${stateDir}, SupplementaryGroups=docker, then systemctl daemon-reload and systemctl enable --now ${service}. No user unit is installed; lingering boot behavior is not measured.`)
   }
 
   const verification = {
@@ -471,7 +471,7 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
     if (Object.keys(inputs).length) step.argv = ["sudo", "-n", "python3", "-c", HOST_ROOT_STEP, JSON.stringify(inputs), ...step.argv.slice(2)]
   }
   const plan = {
-    client, options, destination, stageDir, requestPath: "@PADDOCK_REQUEST@", stateDir, binary, service,
+    client, options, destination, stageDir, requestPath: "@ASIDEE_REQUEST@", stateDir, binary, service,
     mode: previousHost ? "update" as const : reuse ? "reuse" as const : "install" as const, previousHost,
     runtime: { name: MANAGED_RUNTIME, release: GVISOR_RELEASE, ...entry, innerDocker: options.docker },
     changes, uploads, steps,
@@ -491,14 +491,14 @@ export function installationPlan(options: EnrollmentOptions, destination: HostPr
         : inventory.length ? `The planned Docker restart may interrupt every running container, even with live restore: ${inventory.join(", ")}.`
         : "The planned Docker restart finds no running container to interrupt.",
       ...(restartService ? [sandboxes.length
-        ? `Restarting the Paddock service stops the running sandboxes it watches and does not start them again: ${sandboxes.join(", ")}. Start each again with \`paddock start\`.`
-        : "Restarting the Paddock service finds no running sandbox to stop."] : []),
+        ? `Restarting the Asidee service stops the running sandboxes it watches and does not start them again: ${sandboxes.join(", ")}. Start each again with \`asd start\`.`
+        : "Restarting the Asidee service finds no running sandbox to stop."] : []),
       options.docker
         ? `gVisor ${GVISOR_RELEASE} is registered as ${MANAGED_RUNTIME} with --net-raw (gVisor's raw sockets, which inner Docker's NAT needs), so sandboxes on this host can be created with --docker. The smoke sandbox starts inner Docker and has to pass its check.`
-        : `gVisor ${GVISOR_RELEASE} is registered as ${MANAGED_RUNTIME} without --net-raw, so this host does not offer inner Docker: \`paddock create --docker\` is refused there. Enroll with --docker to register it with --net-raw.`,
+        : `gVisor ${GVISOR_RELEASE} is registered as ${MANAGED_RUNTIME} without --net-raw, so this host does not offer inner Docker: \`asd create --docker\` is refused there. Enroll with --docker to register it with --net-raw.`,
       ...(!reuse && !registered && hadRawNetwork && !options.docker
         ? [`This plan removes --net-raw from the registered ${MANAGED_RUNTIME} runtime. Sandboxes created with --docker on this host then fail their kernel check.`] : []),
-      `Verification builds the helper image ${HELPER_IMAGE} from the Dockerfile shown (digest-pinned base), may pull the pinned sandbox image, and through that helper loads Paddock's firewall tables (inet and bridge paddock_guard) on the host, as every sandbox there does. The images and the tables stay afterwards. No credentials are copied. Duration unknown.`,
+      `Verification builds the helper image ${HELPER_IMAGE} from the Dockerfile shown (digest-pinned base), may pull the pinned sandbox image, and through that helper loads Asidee's firewall tables (inet and bridge asidee_guard) on the host, as every sandbox there does. The images and the tables stay afterwards. No credentials are copied. Duration unknown.`,
       "No rollback is automatic. Completed/possibly interrupted steps and what they left are reported; shared packages and data are retained.",
       "Reboot persistence is not measured. The service does not recover stopped sandboxes automatically.",
       "U6: explicit local ELF/checksum only; no signed release channel, implicit build or provenance beyond the supplied digest.",
@@ -531,24 +531,24 @@ export function installOutcome(result: RunResult): (Progress & { stale: boolean;
 
 // A refusal after the installer or verification began: what this run changed on the host, and what it may have left.
 // progress is undefined when this run installed nothing (a reused service).
-export function enrollmentFailure(plan: HostPlan, progress: Progress | undefined, verifying: boolean, error: unknown): PaddockError {
-  const code = error instanceof PaddockError ? error.code : "runtime"; const journal = `${plan.stateDir}/enrollment.json`
+export function enrollmentFailure(plan: HostPlan, progress: Progress | undefined, verifying: boolean, error: unknown): AsideeError {
+  const code = error instanceof AsideeError ? error.code : "runtime"; const journal = `${plan.stateDir}/enrollment.json`
   const registration = plan.previousHost
     ? `Existing registration retained. To review and retry the update: ${updateCommand(plan.options)}.`
     : "Host is unregistered."
-  const left = verifying ? ` Verification may have left the shared helper image ${HELPER_IMAGE}, the paddock_guard firewall tables or the diagnostic sandbox ${plan.verification.name}; inspect before removal.` : ""
+  const left = verifying ? ` Verification may have left the shared helper image ${HELPER_IMAGE}, the asidee_guard firewall tables or the diagnostic sandbox ${plan.verification.name}; inspect before removal.` : ""
   const leaves = (labels: string[]) => plan.steps.filter((step) => labels.includes(step.label)).flatMap((step) => step.leaves)
   const details = {
-    completed: progress?.completed ?? [], started: progress?.started ?? null, cause: error instanceof PaddockError ? error.details : undefined, journal,
-    residualObjects: verifying ? [HELPER_IMAGE, "inet/bridge paddock_guard", plan.verification.name] : [],
+    completed: progress?.completed ?? [], started: progress?.started ?? null, cause: error instanceof AsideeError ? error.details : undefined, journal,
+    residualObjects: verifying ? [HELPER_IMAGE, "inet/bridge asidee_guard", plan.verification.name] : [],
     residualPaths: leaves([...progress?.completed ?? [], ...(progress?.started ? [progress.started] : [])]),
   }
   // The cause can carry a command's whole output; its start and end are kept, so that what follows is not pushed out.
   const cause = (error as Error).message; const message = cause.length > 1500 ? `${cause.slice(0, 400)} … ${cause.slice(-1000)}` : cause
-  if (!progress) return new PaddockError(code, `${message} ${registration} This run installed nothing; the service it found was left as it is.${left}`, details)
-  if (!progress.completed.length && !progress.started) return new PaddockError(code, `${message} No installation step ran. ${registration}`, details)
+  if (!progress) return new AsideeError(code, `${message} ${registration} This run installed nothing; the service it found was left as it is.${left}`, details)
+  if (!progress.completed.length && !progress.started) return new AsideeError(code, `${message} No installation step ran. ${registration}`, details)
   const interrupted = progress.started ? `${progress.started}, which may also have left: ${leaves([progress.started]).join(", ") || "nothing"}` : "none"
-  return new PaddockError(code, `${message} ${registration} Completed steps: ${JSON.stringify(progress.completed)}. They left, and it is retained: ${leaves(progress.completed).join(", ") || "nothing"}. Interrupted step: ${interrupted}. Journal: ${journal}.${left} No automatic rollback.`, details)
+  return new AsideeError(code, `${message} ${registration} Completed steps: ${JSON.stringify(progress.completed)}. They left, and it is retained: ${leaves(progress.completed).join(", ") || "nothing"}. Interrupted step: ${interrupted}. Journal: ${journal}.${left} No automatic rollback.`, details)
 }
 
 // A daemon whose identity this primary already knows is not enrolled a second time under another name. The identity
@@ -563,12 +563,12 @@ export function identityRegistered(identity: FileState | undefined, known: strin
 // net-private may be weak: a stand-in range the engine's host already uses cannot be probed there, and rests on the
 // loaded rules, which the check has read.
 export function requireSmokeChecks(checks: unknown, docker: boolean): void {
-  if (!Array.isArray(checks)) throw new PaddockError("check-failed", "No smoke verification evidence.")
+  if (!Array.isArray(checks)) throw new AsideeError("check-failed", "No smoke verification evidence.")
   for (const item of CHECKLIST.filter((item) => item.blocking)) {
     const found: unknown = checks.find((check: unknown) => object(check) && check.id === item.id)
     const expected = item.id === "link-scope" || item.id === "docker" && !docker ? ["info"] : item.id === "net-private" ? ["pass", "weak"] : ["pass"]
     if (!object(found) || !expected.includes(found.status as string))
-      throw new PaddockError("check-failed", `Enrollment smoke check ${item.id} ${object(found) ? `was ${String(found.status).slice(0, 20)}` : "is missing"}; expected ${expected.join(" or ")}.`)
+      throw new AsideeError("check-failed", `Enrollment smoke check ${item.id} ${object(found) ? `was ${String(found.status).slice(0, 20)}` : "is missing"}; expected ${expected.join(" or ")}.`)
   }
 }
 
@@ -576,22 +576,22 @@ export function requireSmokeChecks(checks: unknown, docker: boolean): void {
 // inner Docker exactly when the plan said it would.
 export function requireSmokeEngine(engines: unknown, docker: boolean): void {
   const engine: unknown = Array.isArray(engines) ? engines.find((entry: unknown) => object(entry) && entry.id === "gvisor:default") : undefined
-  if (!object(engine) || engine.ready !== true) throw new PaddockError("dependency", "The installed service has no ready local Docker/gVisor engine.")
+  if (!object(engine) || engine.ready !== true) throw new AsideeError("dependency", "The installed service has no ready local Docker/gVisor engine.")
   if (!object(engine.data) || engine.data.runtime !== MANAGED_RUNTIME)
-    throw new PaddockError("dependency", `The installed service would run sandboxes on the runtime ${object(engine.data) ? String(engine.data.runtime).slice(0, 64) : "unknown"}, not the pinned ${MANAGED_RUNTIME}.`)
+    throw new AsideeError("dependency", `The installed service would run sandboxes on the runtime ${object(engine.data) ? String(engine.data.runtime).slice(0, 64) : "unknown"}, not the pinned ${MANAGED_RUNTIME}.`)
   if (!object(engine.capabilities) || engine.capabilities.diskLimit !== "watched")
-    throw new PaddockError("dependency", "The installed service's engine cannot measure a sandbox's disk use, so the watched disk limit would not hold.")
+    throw new AsideeError("dependency", "The installed service's engine cannot measure a sandbox's disk use, so the watched disk limit would not hold.")
   if (engine.capabilities.docker !== docker)
-    throw new PaddockError("dependency", `The installed service's engine ${engine.capabilities.docker === true ? "offers" : "does not offer"} inner Docker, which is not what the plan registered.`)
+    throw new AsideeError("dependency", `The installed service's engine ${engine.capabilities.docker === true ? "offers" : "does not offer"} inner Docker, which is not what the plan registered.`)
 }
 
 // The verify after the disk write: creation having passed is not evidence about the sandbox now.
 export function requireSmokeVerified(verified: unknown, docker: boolean): void {
-  if (!object(verified) || verified.ok !== true) throw new PaddockError("check-failed", "The final smoke verification did not hold.")
+  if (!object(verified) || verified.ok !== true) throw new AsideeError("check-failed", "The final smoke verification did not hold.")
   requireSmokeChecks(verified.checks, docker)
   if (typeof verified.diskUsedBytes !== "number" || verified.diskUsedBytes < 1048576
     || !(verified.checks as unknown[]).some((check) => object(check) && check.id === "disk" && check.status === "weak"))
-    throw new PaddockError("check-failed", "Smoke disk use was not measured as watched.")
+    throw new AsideeError("check-failed", "Smoke disk use was not measured as watched.")
 }
 
 // Failure details for the enrollment terminal. A revised plan is named by its hash; running the command again shows it.
@@ -611,12 +611,12 @@ export class Hosts {
     const options = enrollmentOptions(body)
     // Hash-check before SSH, and architecture-check again using the actual probe.
     const bytes = new Uint8Array(await Bun.file(options.artifact.path).arrayBuffer())
-    if (sha256(bytes) !== options.artifact.sha256) throw new PaddockError("usage", "The local artifact checksum does not match --sha256. Nothing was uploaded or installed.")
+    if (sha256(bytes) !== options.artifact.sha256) throw new AsideeError("usage", "The local artifact checksum does not match --sha256. Nothing was uploaded or installed.")
     const destination = await (this.io.probe ?? probe)(options)
     await (this.io.artifact ?? verifyArtifact)(options.artifact, destination.arch)
     const registry = await readHosts(this.machines.dirs)
     if (registry.unknown.some((host) => host.name === options.name))
-      throw new PaddockError("conflict", `${options.name} has an unreadable registration. Restore it or remove it explicitly; nothing was installed.`)
+      throw new AsideeError("conflict", `${options.name} has an unreadable registration. Restore it or remove it explicitly; nothing was installed.`)
     const previous = registry.hosts.find((host) => host.name === options.name) ?? null
     const plan = installationPlan(options, destination, { version: this.machines.hello.version, sourceDigest: this.machines.hello.sourceDigest }, previous)
     if (this.plans.size >= 32) this.plans.delete(this.plans.keys().next().value!)
@@ -626,10 +626,10 @@ export class Hosts {
 
   async apply(body: Record<string, unknown>, terminal?: Terminal): Promise<HostRecord> {
     await this.machines.experimental()
-    if (body.accepted !== true || !digest(body.hash)) throw new PaddockError("usage", "Apply needs accepted:true and the exact reviewed plan hash.")
+    if (body.accepted !== true || !digest(body.hash)) throw new AsideeError("usage", "Apply needs accepted:true and the exact reviewed plan hash.")
     const old = this.plans.get(body.hash)
-    if (!old) throw new PaddockError("conflict", "Unknown or expired plan. Request and review a new host plan; nothing was changed.")
-    if (this.applying) throw new PaddockError("conflict", "Another enrollment is applying. Retry after it completes.")
+    if (!old) throw new AsideeError("conflict", "Unknown or expired plan. Request and review a new host plan; nothing was changed.")
+    if (this.applying) throw new AsideeError("conflict", "Another enrollment is applying. Retry after it completes.")
     this.applying = true
     // progress: what the installer reported, once it has. verifying: the service is being used, so it may hold a smoke
     // sandbox. A failure before either changed nothing on the host and is thrown as it is.
@@ -638,54 +638,54 @@ export class Hosts {
       // Consent covers the plan that was shown. Probe again, and go on only if this is still that plan.
       const current = await this.plan(old.options)
       if (current.hash !== old.hash)
-        throw new PaddockError("conflict", "Enrollment inputs changed. Consent is stale; review the revised plan and accept its hash. Nothing was installed.", { plan: current })
-      if (current.blockers.length) throw new PaddockError("dependency", `Enrollment refused before installation: ${current.blockers.join(" ")}`, { plan: current, completed: [] })
+        throw new AsideeError("conflict", "Enrollment inputs changed. Consent is stale; review the revised plan and accept its hash. Nothing was installed.", { plan: current })
+      if (current.blockers.length) throw new AsideeError("dependency", `Enrollment refused before installation: ${current.blockers.join(" ")}`, { plan: current, completed: [] })
       // Check the alias before touching the remote. attach checks it again when committing the registration.
       const registry = await readHosts(this.machines.dirs)
-      if (!current.previousHost && [...registry.hosts, ...registry.unknown].some((host) => host.name === current.options.name)) throw new PaddockError("conflict", "The host alias is already registered. Nothing was installed.")
+      if (!current.previousHost && [...registry.hosts, ...registry.unknown].some((host) => host.name === current.options.name)) throw new AsideeError("conflict", "The host alias is already registered. Nothing was installed.")
       if (identityRegistered(current.destination.files[`${current.stateDir}/machine-id`], [this.machines.hello, ...registry.hosts.filter((host) => host.name !== current.previousHost?.name)].map((host) => host.machineId)))
-        throw new PaddockError("conflict", "This daemon identity is already registered. Nothing was installed.")
+        throw new AsideeError("conflict", "This daemon identity is already registered. Nothing was installed.")
 
       if (current.steps.length) {
         const bytes = await (this.io.artifact ?? verifyArtifact)(current.options.artifact, current.destination.arch)
         const outcome = installOutcome(await (this.io.install ?? this.install.bind(this))(current, bytes, terminal))
         if (!outcome)
-          throw new PaddockError(
+          throw new AsideeError(
             "outcome-unknown",
             "Installation SSH ended without a journal response. Some reviewed changes may have happened; inspect the destination enrollment.json and planned files before retrying.",
             { journal: `${current.stateDir}/enrollment.json`, plan: current },
           )
         if (outcome.stale) {
           const revised = await this.plan(current.options)
-          throw new PaddockError("conflict", "Inputs changed during artifact delivery. Nothing installed; review the revised plan.", { plan: revised })
+          throw new AsideeError("conflict", "Inputs changed during artifact delivery. Nothing installed; review the revised plan.", { plan: revised })
         }
         progress = { completed: outcome.completed, started: outcome.started }
-        if (outcome.failure) throw new PaddockError(outcome.failure.code, outcome.failure.message)
+        if (outcome.failure) throw new AsideeError(outcome.failure.code, outcome.failure.message)
       }
 
-      if (terminal?.closed) throw new PaddockError("outcome-unknown", "Enrollment terminal disconnected. Nothing was registered. Inspect the journal before retrying.")
+      if (terminal?.closed) throw new AsideeError("outcome-unknown", "Enrollment terminal disconnected. Nothing was registered. Inspect the journal before retrying.")
       const endpoint: Endpoint = { ssh: current.options.ssh, binary: current.binary, stateDir: current.stateDir, hostKey: current.destination.hostKey, hostPublicKey: current.destination.hostPublicKey }
       terminal?.output(Buffer.from("\r\nVerifying the installed service and smoke sandbox.\r\n"))
       verifying = true
       await (this.io.verify ?? this.verify.bind(this))(endpoint, current, () => terminal?.closed ?? false)
-      if (terminal?.closed) throw new PaddockError("outcome-unknown", "Enrollment terminal disconnected during verification. Nothing was registered.")
+      if (terminal?.closed) throw new AsideeError("outcome-unknown", "Enrollment terminal disconnected during verification. Nothing was registered.")
       try {
         return await this.machines.attach({ name: current.options.name, ...endpoint, service: "systemd" }, () => {
-          if (terminal?.closed) throw new PaddockError("outcome-unknown", "The terminal disconnected before registration. Nothing was registered.")
+          if (terminal?.closed) throw new AsideeError("outcome-unknown", "The terminal disconnected before registration. Nothing was registered.")
         }, current.previousHost ?? undefined)
       } catch (error) {
-        throw new PaddockError(error instanceof PaddockError ? error.code : "runtime", `Enrollment registration (SSH identity / hello / registry write) failed: ${(error as Error).message}`)
+        throw new AsideeError(error instanceof AsideeError ? error.code : "runtime", `Enrollment registration (SSH identity / hello / registry write) failed: ${(error as Error).message}`)
       }
     } catch (error) {
       if (progress || verifying) throw enrollmentFailure(old, progress, verifying, error)
-      if (old.previousHost) throw new PaddockError(error instanceof PaddockError ? error.code : "runtime", `${(error as Error).message} Existing registration retained. To review and retry the update: ${updateCommand(old.options)}.`, error instanceof PaddockError ? error.details : undefined)
+      if (old.previousHost) throw new AsideeError(error instanceof AsideeError ? error.code : "runtime", `${(error as Error).message} Existing registration retained. To review and retry the update: ${updateCommand(old.options)}.`, error instanceof AsideeError ? error.details : undefined)
       throw error
     } finally { this.applying = false }
   }
 
   // The interactive path: one terminal carries sudo's prompt, the installation's output and the final result.
   async session(hash: string): Promise<Session> {
-    if (!this.plans.has(hash)) throw new PaddockError("conflict", "Unknown or expired enrollment plan. Request and review a new one.")
+    if (!this.plans.has(hash)) throw new AsideeError("conflict", "Unknown or expired enrollment plan. Request and review a new one.")
     const events = new EventEmitter(); let cancelled = false
     const terminal: Terminal = { closed: false, paused: false, output: (bytes) => events.emit("output", "stdout", bytes), drain: () => events.emit("drain") }
     const close = () => {
@@ -720,11 +720,11 @@ export class Hosts {
         }
       }, (error) => {
         if (cancelled) {
-          if (error instanceof PaddockError && error.details !== undefined) terminal.output(Buffer.from(terminalDetails(error.details)))
+          if (error instanceof AsideeError && error.details !== undefined) terminal.output(Buffer.from(terminalDetails(error.details)))
           terminal.output(Buffer.from(this.plans.get(hash)?.previousHost ? "Update cancelled; existing registration retained.\r\n" : "Enrollment cancelled; no host was registered.\r\n"))
           events.emit("end", { code: 130 })
         } else if (!terminal.closed) {
-          if (error instanceof PaddockError && error.details !== undefined) terminal.output(Buffer.from(terminalDetails(error.details)))
+          if (error instanceof AsideeError && error.details !== undefined) terminal.output(Buffer.from(terminalDetails(error.details)))
           events.emit("end", { error: (error as Error).message })
         }
       }).finally(() => this.terminals.delete(session))
@@ -745,12 +745,12 @@ export class Hosts {
     const artifact = plan.uploads.some((upload) => upload.kind === "artifact") ? { artifactBytes: Buffer.from(bytes).toString("base64") } : {}
     const input = JSON.stringify({ ...plan, interactive: Boolean(terminal), probeScript: HOST_PROBE, probeRequest: probeRequest(plan.options), ...artifact })
     if (!terminal) return systemRunner(sshArgv(plan.options.ssh, ["python3", "-c", HOST_APPLY], pin), { stdin: input, timeoutMs: 20 * 60_000 })
-    if (terminal.closed) throw new PaddockError("conflict", "Enrollment terminal closed before installation.")
+    if (terminal.closed) throw new AsideeError("conflict", "Enrollment terminal closed before installation.")
     const staged = await systemRunner(sshArgv(plan.options.ssh, ["python3", "-c", HOST_REQUEST], pin), { stdin: input, timeoutMs: 120_000 })
     must(staged, "Staging the private enrollment request")
     const requestPath = staged.stdout.trim()
-    if (!requestPath.startsWith("/") || /[\x00-\x1f]/.test(requestPath) || !/^paddock-request-[a-zA-Z0-9_-]+$/.test(basename(requestPath))) throw new PaddockError("runtime", "The host did not report a private request path.")
-    if (terminal.closed) throw new PaddockError("outcome-unknown", `Terminal closed after staging ${requestPath}. No installation was started; remove that staging file before retrying.`)
+    if (!requestPath.startsWith("/") || /[\x00-\x1f]/.test(requestPath) || !/^asidee-request-[a-zA-Z0-9_-]+$/.test(basename(requestPath))) throw new AsideeError("runtime", "The host did not report a private request path.")
+    if (terminal.closed) throw new AsideeError("outcome-unknown", `Terminal closed after staging ${requestPath}. No installation was started; remove that staging file before retrying.`)
     const argv = sshArgv(plan.options.ssh, ["python3", "-c", HOST_APPLY, requestPath, sha256(input)], pin); argv[1] = "-tt"
     const child = spawn(argv[0]!, argv.slice(1), { stdio: ["pipe", "pipe", "pipe"] }); terminal.child = child
     child.stdin.on("error", () => {}); child.stdin.on("drain", terminal.drain)
@@ -768,7 +768,7 @@ export class Hosts {
       code = await new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("close", resolve) })
     } finally { clearTimeout(timeout); terminal.child = undefined }
     // The report is the line after the last marker; everything before it is terminal output.
-    const marker = output.lastIndexOf("PADDOCK-RESULT ")
+    const marker = output.lastIndexOf("ASIDEE-RESULT ")
     return { exitCode: code ?? 1, stdout: marker < 0 ? "" : output.slice(marker + 15).split(/\r?\n/)[0]!, stderr: "" }
   }
 
@@ -777,30 +777,30 @@ export class Hosts {
     const { peer, hello } = await readyEnrollmentPeer(endpoint, cancelled, this.io.connect, this.io.pause)
     const spec = plan.verification; let created = false
     const call = async (method: string, body: object = {}) => {
-      if (cancelled() && method !== "remove") throw new PaddockError("conflict", "Enrollment verification was cancelled.")
+      if (cancelled() && method !== "remove") throw new AsideeError("conflict", "Enrollment verification was cancelled.")
       return verificationCall(peer, method, body)
     }
     try {
       const identity = plan.destination.files[`${plan.stateDir}/machine-id`]
       compatible(hello, this.machines.hello, identity?.kind === "file" ? identity.text?.trim() : undefined)
       if (hello.buildDigest !== plan.options.artifact.sha256 || hello.service !== "systemd" || hello.listener !== "socket-only")
-        throw new PaddockError("incompatible", "Service artifact digest, supervisor or socket-only listener does not match the approved installation.")
+        throw new AsideeError("incompatible", "Service artifact digest, supervisor or socket-only listener does not match the approved installation.")
 
       const unit = this.io.inspectService ? await this.io.inspectService(plan) : must(await pinned(plan, (pin) => systemRunner(sshArgv(endpoint.ssh, ["systemctl", "show", plan.service, "--property=ActiveState,UnitFileState,User,SupplementaryGroups,ExecStart"], pin))), "Inspecting the boot service")
       if (!serviceMatches(unit.stdout, plan.destination.user, plan.binary))
-        throw new PaddockError("dependency", `Boot-service inspection did not show ${plan.service} active, permanently enabled, and running ${plan.binary} daemon run as ${plan.destination.user} with SupplementaryGroups=docker.`)
+        throw new AsideeError("dependency", `Boot-service inspection did not show ${plan.service} active, permanently enabled, and running ${plan.binary} daemon run as ${plan.destination.user} with SupplementaryGroups=docker.`)
       requireSmokeEngine(await call("engines"), spec.docker)
 
       // A sandbox of this name is the diagnostic an earlier attempt kept, or someone's own. Either way it is not removed here.
       const existing = await call("list")
       if (!Array.isArray(existing) || existing.some((s) => object(s) && s.name === spec.name))
-        throw new PaddockError("conflict", `A sandbox named ${spec.name} already exists on the host: the diagnostic an earlier enrollment attempt kept, or the owner's. It was not touched. Inspect it there, then remove it and enroll again: \`ssh ${endpoint.ssh} env PADDOCK_STATE_DIR=${plan.stateDir} PADDOCK_CONFIG_DIR=${plan.stateDir}/config ${plan.binary} remove ${spec.name} --confirm ${spec.name}\``)
+        throw new AsideeError("conflict", `A sandbox named ${spec.name} already exists on the host: the diagnostic an earlier enrollment attempt kept, or the owner's. It was not touched. Inspect it there, then remove it and enroll again: \`ssh ${endpoint.ssh} env ASIDEE_STATE_DIR=${plan.stateDir} ASIDEE_CONFIG_DIR=${plan.stateDir}/config ${plan.binary} remove ${spec.name} --confirm ${spec.name}\``)
       const { duration: _duration, operations: _operations, helperImage: _helper, helperDockerfile: _dockerfile, ...input } = spec
       const made = await call("create", { ...input, engine: "gvisor:default" })
       created = true
       requireSmokeChecks(object(made) ? made.checks : undefined, spec.docker)
-      const write = await call("exec", { name: spec.name, argv: ["dd", "if=/dev/zero", "of=/paddock-disk-probe", "bs=1048576", "count=1"] })
-      if (!object(write) || write.exitCode !== 0) throw new PaddockError("check-failed", "Smoke disk write failed.")
+      const write = await call("exec", { name: spec.name, argv: ["dd", "if=/dev/zero", "of=/asidee-disk-probe", "bs=1048576", "count=1"] })
+      if (!object(write) || write.exitCode !== 0) throw new AsideeError("check-failed", "Smoke disk write failed.")
       requireSmokeVerified(await call("verify", { name: spec.name }), spec.docker)
     } finally {
       try { if (created) await call("remove", { name: spec.name, confirm: spec.name }) } finally { await peer.close() }
@@ -808,7 +808,7 @@ export class Hosts {
   }
 }
 
-export const updateCommand = (options: EnrollmentOptions) => `paddock host add ${options.name} --ssh ${options.ssh} --artifact ${shellQuote(options.artifact.path)} --sha256 ${options.artifact.sha256}${options.docker ? " --docker" : ""} --disk-policy watched${options.sudo === "never" ? " --sudo never" : ""}`
+export const updateCommand = (options: EnrollmentOptions) => `asd host add ${options.name} --ssh ${options.ssh} --artifact ${shellQuote(options.artifact.path)} --sha256 ${options.artifact.sha256}${options.docker ? " --docker" : ""} --disk-policy watched${options.sudo === "never" ? " --sudo never" : ""}`
 
 type EnrollmentPeer = Pick<HttpPeer, "call" | "close">
 type EnrollmentIo = {
@@ -824,7 +824,7 @@ type EnrollmentIo = {
 export async function verificationCall(peer: EnrollmentPeer, method: string, body: object = {}): Promise<unknown> {
   try { return await peer.call(method, body, { mutation: ["create", "remove", "exec", "verify"].includes(method), timeoutMs: 300_000 }) }
   catch (error) {
-    throw new PaddockError(error instanceof PaddockError ? error.code : "runtime", `Enrollment verification call ${method} failed: ${(error as Error).message}`, { method, cause: error instanceof PaddockError ? error.details : undefined })
+    throw new AsideeError(error instanceof AsideeError ? error.code : "runtime", `Enrollment verification call ${method} failed: ${(error as Error).message}`, { method, cause: error instanceof AsideeError ? error.details : undefined })
   }
 }
 
@@ -834,15 +834,15 @@ export async function readyEnrollmentPeer(endpoint: Endpoint, cancelled: () => b
 ): Promise<{ peer: EnrollmentPeer; hello: Hello }> {
   let last: unknown
   for (let at = 0; at < 30; at++) {
-    if (cancelled()) throw new PaddockError("conflict", "Enrollment verification was cancelled before hello.")
+    if (cancelled()) throw new AsideeError("conflict", "Enrollment verification was cancelled before hello.")
     const peer = connect(endpoint)
     try { return { peer, hello: parseHello(await peer.call("hello", {}, { timeoutMs: 5000 })) } }
     catch (error) {
       last = error
       await peer.close()
-      if (!(error instanceof PaddockError) || error.code !== "offline") break
+      if (!(error instanceof AsideeError) || error.code !== "offline") break
       if (at < 29) await pause()
     }
   }
-  throw new PaddockError(last instanceof PaddockError ? last.code : "runtime", `Enrollment verification startup call hello failed: ${(last as Error).message}`, { method: "hello" })
+  throw new AsideeError(last instanceof AsideeError ? last.code : "runtime", `Enrollment verification startup call hello failed: ${(last as Error).message}`, { method: "hello" })
 }

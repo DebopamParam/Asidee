@@ -20,7 +20,7 @@ export async function rotator(runner: Runner, name: string, choice?: Mode): Prom
 export async function main(argv: string[], env = process.env): Promise<void> {
   if (argv.includes("--help")) { console.log("rotator.ts NAME [claude|codex|claude,codex|off]. With no mode, show state and the last 20 sanitized log lines."); return }
   if (argv.length > 2) throw new Error("Unexpected rotator arguments.")
-  const name = argv[0] ?? env.PADDOCK_SANDBOX ?? "", choice = argv[1] ?? env.PADDOCK_FIELD_MODE
+  const name = argv[0] ?? env.ASIDEE_SANDBOX ?? "", choice = argv[1] ?? env.ASIDEE_FIELD_MODE
   console.log(JSON.stringify(await rotator(run, name, choice && choice !== "status" ? mode(choice) : undefined)))
 }
 if (import.meta.main) main(process.argv.slice(2)).catch(() => { console.error("Rotator operation failed. Check the running guest, Python, ps, T3 setup and rotator lock. Subprocess output withheld."); process.exitCode = 1 })

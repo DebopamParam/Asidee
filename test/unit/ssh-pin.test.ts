@@ -20,7 +20,7 @@ async function keyPair(root: string, name: string): Promise<string> {
 const freePort = () => new Promise<number>((resolve) => { const server = createServer(); server.listen(0, "127.0.0.1", () => { const port = (server.address() as { port: number }).port; server.close(() => resolve(port)) }) })
 
 test.skipIf(!available)("a server's banner can imitate ssh -v's host-key line, and the private known_hosts pin is not fooled by it", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pdk-sshd-")); const path = process.env.PATH
+  const root = await mkdtemp(join(tmpdir(), "asd-sshd-")); const path = process.env.PATH
   const real = await keyPair(root, "host"); const other = await keyPair(root, "other"); const client = await keyPair(root, "client")
   const port = await freePort(); const user = (await Bun.$`id -un`.text()).trim()
   // The banner names the other key's fingerprint as a verbose client would print a verified key.

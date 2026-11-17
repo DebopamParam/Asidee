@@ -1,9 +1,9 @@
 import type { Socket } from "node:net"
 import { validPort } from "./forwards"
 import { validName } from "./state"
-import { PaddockError, type ErrorCode, type Session } from "./types"
+import { AsideeError, type ErrorCode, type Session } from "./types"
 
-// paddock-stream/1, spoken only on the daemon's second Unix socket (stream.sock). Each frame is one kind byte, a
+// asidee-stream/1, spoken only on the daemon's second Unix socket (stream.sock). Each frame is one kind byte, a
 // four-byte big-endian length and at most 64 KiB of payload, so stdout and stderr stay apart and nothing is decoded.
 // The client sends `open` and waits for `ready` (or `error`); then stdin, eof and resize go one way, and stdout, stderr
 // and a last exit or error the other.
@@ -38,9 +38,9 @@ export class FrameReader {
     const frames: Frame[] = []
     while (this.pending.length >= HEADER) {
       const kind = KINDS[this.pending[0]! - 1]
-      if (!kind) throw new PaddockError("usage", "Not a paddock-stream/1 frame.")
+      if (!kind) throw new AsideeError("usage", "Not a asidee-stream/1 frame.")
       const size = this.pending.readUInt32BE(1)
-      if (size > MAX_PAYLOAD) throw new PaddockError("usage", `A frame carries at most ${MAX_PAYLOAD} bytes.`)
+      if (size > MAX_PAYLOAD) throw new AsideeError("usage", `A frame carries at most ${MAX_PAYLOAD} bytes.`)
       if (this.pending.length < HEADER + size) break
       frames.push({ kind, payload: this.pending.subarray(HEADER, HEADER + size) })
       this.pending = this.pending.subarray(HEADER + size)
@@ -62,17 +62,17 @@ export type EnrollmentRequest = { kind: "enroll"; hash: string; accepted: true; 
 export function enrollmentHash(value: unknown): string | undefined {
   if (typeof value !== "object" || value === null || !("kind" in value) || value.kind !== "enroll") return undefined
   if (!("hash" in value) || typeof value.hash !== "string" || !/^[a-f0-9]{64}$/.test(value.hash) || !("accepted" in value) || value.accepted !== true || "host" in value && value.host !== undefined && value.host !== "local")
-    throw new PaddockError("usage", "Enrollment needs accepted:true and a reviewed plan hash on the primary socket.")
+    throw new AsideeError("usage", "Enrollment needs accepted:true and a reviewed plan hash on the primary socket.")
   return value.hash
 }
 
 const USER = /^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}$/
 const size = (value: unknown, what: string) => {
-  if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > 10_000) throw new PaddockError("usage", `${what} must be a whole number from 1 to 10000.`)
+  if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > 10_000) throw new AsideeError("usage", `${what} must be a whole number from 1 to 10000.`)
   return value as number
 }
 const record = (value: unknown): Record<string, unknown> => {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new PaddockError("usage", "A session request is a JSON object.")
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new AsideeError("usage", "A session request is a JSON object.")
   return value as Record<string, unknown>
 }
 
@@ -83,27 +83,27 @@ export function parseOpen(value: unknown): OpenRequest {
   const route: Pick<OpenRequest, "host" | "machineId" | "bootId" | "protocol" | "version" | "build" | "sandboxId" | "generation"> = {}
   if (body.host !== undefined) route.host = validName(body.host)
   for (const key of ["machineId", "bootId", "sandboxId"] as const) if (body[key] !== undefined) {
-    if (typeof body[key] !== "string" || !/^[a-f0-9]{32}$/.test(body[key])) throw new PaddockError("usage", `${key} must be an identity.`)
+    if (typeof body[key] !== "string" || !/^[a-f0-9]{32}$/.test(body[key])) throw new AsideeError("usage", `${key} must be an identity.`)
     route[key] = body[key]
   }
-  if (body.protocol !== undefined) { if (!Number.isSafeInteger(body.protocol)) throw new PaddockError("usage", "protocol must be an integer."); route.protocol = body.protocol as number }
+  if (body.protocol !== undefined) { if (!Number.isSafeInteger(body.protocol)) throw new AsideeError("usage", "protocol must be an integer."); route.protocol = body.protocol as number }
   for (const key of ["version", "build", "generation"] as const) if (body[key] !== undefined) {
-    if (typeof body[key] !== "string" || body[key].length > 128 || /[\x00-\x1f]/.test(body[key])) throw new PaddockError("usage", `${key} must be bounded text.`)
+    if (typeof body[key] !== "string" || body[key].length > 128 || /[\x00-\x1f]/.test(body[key])) throw new AsideeError("usage", `${key} must be bounded text.`)
     route[key] = body[key]
   }
   if (body.kind === "ssh") return { ...route, kind: "ssh", name }
   if (body.kind === "lease" || body.kind === "dial") {
-    if (!route.sandboxId || !route.generation || typeof body.leaseId !== "string" || !/^[a-f0-9]{32}$/.test(body.leaseId)) throw new PaddockError("usage", "A relay needs sandbox identity, run generation and lease identity.")
+    if (!route.sandboxId || !route.generation || typeof body.leaseId !== "string" || !/^[a-f0-9]{32}$/.test(body.leaseId)) throw new AsideeError("usage", "A relay needs sandbox identity, run generation and lease identity.")
     return { ...route, kind: body.kind, name, sandboxId: route.sandboxId, generation: route.generation, port: validPort(body.port, "The relay port"), leaseId: body.leaseId }
   }
-  if (body.kind !== "exec" && body.kind !== "workspace") throw new PaddockError("usage", "A session is an exec, workspace or ssh session.")
+  if (body.kind !== "exec" && body.kind !== "workspace") throw new AsideeError("usage", "A session is an exec, workspace or ssh session.")
   const argv = body.argv
-  if (!Array.isArray(argv) || argv.length === 0 || !argv.every((part) => typeof part === "string" && !part.includes("\0"))) throw new PaddockError("usage", "exec needs a command.")
-  if (body.user !== undefined && (typeof body.user !== "string" || !USER.test(body.user))) throw new PaddockError("usage", "The user must be a user name or id.")
-  if (body.tty !== undefined && typeof body.tty !== "boolean") throw new PaddockError("usage", "tty must be true or false.")
+  if (!Array.isArray(argv) || argv.length === 0 || !argv.every((part) => typeof part === "string" && !part.includes("\0"))) throw new AsideeError("usage", "exec needs a command.")
+  if (body.user !== undefined && (typeof body.user !== "string" || !USER.test(body.user))) throw new AsideeError("usage", "The user must be a user name or id.")
+  if (body.tty !== undefined && typeof body.tty !== "boolean") throw new AsideeError("usage", "tty must be true or false.")
   const tty = body.tty === true
   if (body.kind === "workspace") {
-    if (route.host && route.host !== "local" || body.user !== undefined) throw new PaddockError("usage", "Workspace sessions run locally as this user.")
+    if (route.host && route.host !== "local" || body.user !== undefined) throw new AsideeError("usage", "Workspace sessions run locally as this user.")
     return { ...route, kind: "workspace", name, argv: argv as string[], tty,
       ...(tty && body.cols !== undefined ? { cols: size(body.cols, "cols") } : {}), ...(tty && body.rows !== undefined ? { rows: size(body.rows, "rows") } : {}) }
   }
@@ -113,7 +113,7 @@ export function parseOpen(value: unknown): OpenRequest {
 
 export function parseSize(payload: Uint8Array): { cols: number; rows: number } {
   let body: Record<string, unknown>
-  try { body = record(JSON.parse(Buffer.from(payload).toString("utf8"))) } catch { throw new PaddockError("usage", "A resize is {cols, rows}.") }
+  try { body = record(JSON.parse(Buffer.from(payload).toString("utf8"))) } catch { throw new AsideeError("usage", "A resize is {cols, rows}.") }
   return { cols: size(body.cols, "cols"), rows: size(body.rows, "rows") }
 }
 
@@ -143,7 +143,7 @@ export function serveStream(socket: Socket, open: (request: OpenRequest) => Prom
         let requested: Promise<Session>
         try {
           const input: unknown = JSON.parse(payload.toString("utf8")); const hash = enrollmentHash(input)
-          if (hash && !enroll) throw new PaddockError("usage", "Enrollment is unavailable on this stream endpoint.")
+          if (hash && !enroll) throw new AsideeError("usage", "Enrollment is unavailable on this stream endpoint.")
           requested = hash ? enroll!(hash) : open(parseOpen(input))
         } catch (error) { return fail(error instanceof SyntaxError ? "The session request is not JSON." : (error as Error).message, "usage") }
         requested.then((opened) => {
@@ -158,7 +158,7 @@ export function serveStream(socket: Socket, open: (request: OpenRequest) => Prom
           socket.write(frame("ready", { tty: opened.tty, ...(opened.diskWarning ? { diskWarning: opened.diskWarning } : {}) }))
           opened.resume()
           socket.resume()
-        }, (error) => fail((error as Error).message, error instanceof PaddockError ? error.code : "runtime"))
+        }, (error) => fail((error as Error).message, error instanceof AsideeError ? error.code : "runtime"))
         continue
       }
       try {

@@ -36,7 +36,7 @@ test("environment docs consume JSON list/verify including exit 6 and write only 
     return transport.runner(argv, stdin)
   }
   await writeDocs(runner, "demo", "workspace"); await writeDocs(runner, "demo", "workspace")
-  expect(calls.slice(0, 2)).toEqual([["paddock", "--json", "list"], ["paddock", "--json", "verify", "demo"]])
+  expect(calls.slice(0, 2)).toEqual([["asd", "--json", "list"], ["asd", "--json", "verify", "demo"]])
   expect(await readFile(join(work, "env_docs/SANDBOX.md"), "utf8")).toBe(render(report))
   expect(transport.calls[0]?.stdin).toBe(render(report))
   expect((await readFile(join(work, ".git/info/exclude"), "utf8")).match(/\/env_docs\//g)).toHaveLength(1)

@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { connect, type Socket } from "node:net"
 import { must } from "../run"
-import { PaddockError, type CheckResult, type Engine, type Limits, type LinkSupport, type Manifest, type Provider, type RunOptions, type RunResult, type Runner, type Session, type Stage, type Template } from "../types"
+import { AsideeError, type CheckResult, type Engine, type Limits, type LinkSupport, type Manifest, type Provider, type RunOptions, type RunResult, type Runner, type Session, type Stage, type Template } from "../types"
 import { probeCleanupScript, WAIT_FOR_PROBE_ROUTES } from "./probe"
 import GUARD_RULES from "./guard.nft" with { type: "text" }
 import HELPER_DOCKERFILE from "./helper.Dockerfile" with { type: "text" }
@@ -13,13 +13,13 @@ import HELPER_DOCKERFILE from "./helper.Dockerfile" with { type: "text" }
 // containers, to private ranges (the LAN), the tailnet, link-local (cloud metadata) and all IPv6. The design and the
 // measurements behind it come from sandbox-manager, where it was checked on OrbStack and on Linux Mint.
 
-export const LABEL_NAME = "dev.paddock.name"
-export const LABEL_ID = "dev.paddock.id"
+export const LABEL_NAME = "com.asidee.name"
+export const LABEL_ID = "com.asidee.id"
 // Where the loopback relay is copied in each sandbox.
-export const RELAY = "/.paddock/busybox"
-export const container = (name: string) => `paddock-${name}`
-export const network = (name: string) => `paddock-net-${name}`
-export const dockerVolume = (manifest: Manifest) => `paddock-docker-${manifest.id}`
+export const RELAY = "/.asidee/busybox"
+export const container = (name: string) => `asidee-${name}`
+export const network = (name: string) => `asidee-net-${name}`
+export const dockerVolume = (manifest: Manifest) => `asidee-docker-${manifest.id}`
 // Inclusion-minimal additions to Docker's default capabilities, measured by I01 (each removal breaks the workload).
 export const DOCKER_CAPABILITIES = ["NET_ADMIN", "SYS_ADMIN"] as const
 // gVisor cannot use the engine's resolver on a user-defined network (127.0.0.11 is refused), and the engine's upstream is in
@@ -31,11 +31,11 @@ export const DOCKER_DRIVER = "overlayfs"
 export const DOCKER_START = `set -e
 rm -f /var/run/docker.pid /var/run/docker/containerd/containerd.pid
 printf '${SANDBOX_DNS}' > /etc/resolv.conf
-printf '{"features":{"containerd-snapshotter":true}}' > /run/paddock-docker.json
-mkdir -p /run/paddock-bin
-ln -sf "$(command -v iptables-legacy)" /run/paddock-bin/iptables
-ln -sf "$(command -v ip6tables-legacy)" /run/paddock-bin/ip6tables
-PATH=/run/paddock-bin:$PATH exec dockerd --config-file=/run/paddock-docker.json --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --storage-driver=${DOCKER_DRIVER} --iptables=false --ip6tables=false`
+printf '{"features":{"containerd-snapshotter":true}}' > /run/asidee-docker.json
+mkdir -p /run/asidee-bin
+ln -sf "$(command -v iptables-legacy)" /run/asidee-bin/iptables
+ln -sf "$(command -v ip6tables-legacy)" /run/asidee-bin/ip6tables
+PATH=/run/asidee-bin:$PATH exec dockerd --config-file=/run/asidee-docker.json --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --storage-driver=${DOCKER_DRIVER} --iptables=false --ip6tables=false`
 // Busybox's wait also reaps adopted orphans. Forward a stop to dockerd and leave with its exit status; never restart it.
 export const DOCKER_REAPER = `docker_main() {
 ${DOCKER_START}
@@ -48,7 +48,7 @@ while :; do
   code=$?
   kill -0 "$daemon" 2>/dev/null || exit "$code"
 done`
-// The main process of a sandbox without Docker: Paddock's busybox shell, waiting on a sleep. The kernel hands every
+// The main process of a sandbox without Docker: Asidee's busybox shell, waiting on a sleep. The kernel hands every
 // orphan to PID 1, and the shell's wait reaps any child that ends, so a finished process leaves no zombie holding a
 // task slot (U13; with `sleep infinity` as PID 1 every one stayed). The relay is copied in before every start.
 export const REAPER = `while :; do ${RELAY} sleep 2147483647 & wait; done`
@@ -57,20 +57,20 @@ export const REAPER = `while :; do ${RELAY} sleep 2147483647 & wait; done`
 export const LOG_LIMIT = { "max-size": "10m", "max-file": "2" } as const
 const INNER_NAT = "iptables-legacy -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || iptables-legacy -t nat -A POSTROUTING -o eth0 -j MASQUERADE"
 // Linux limits interface names to 15 characters. The guard matches on this prefix.
-export const BRIDGE_PREFIX = "pdk"
+export const BRIDGE_PREFIX = "asd"
 export const bridge = (name: string) => `${BRIDGE_PREFIX}${createHash("sha256").update(name).digest("hex").slice(0, 10)}`
 // The privileged steps (loading the guard) and the probes run from this image, never from a sandbox's image, which an
 // agent or a tampered template could have changed. Its tag is a hash of its Dockerfile, so it is built once per engine.
-export const HELPER_IMAGE = `paddock-helper:${createHash("sha256").update(HELPER_DOCKERFILE).digest("hex").slice(0, 12)}`
+export const HELPER_IMAGE = `asidee-helper:${createHash("sha256").update(HELPER_DOCKERFILE).digest("hex").slice(0, 12)}`
 // Loads the guard into a scratch network namespace and compares how nft prints it there with how it prints the tables
 // on the engine's host: any added, removed or reordered rule shows. Printing both with the same nft avoids depending on
 // one version's wording. Prints intact, changed or missing.
 const GUARD_COMPARE = `set -e
 cat > /tmp/rules
-show() { nft list table inet paddock_guard && nft list table bridge paddock_guard; }
+show() { nft list table inet asidee_guard && nft list table bridge asidee_guard; }
 ip netns add reference
 ip netns exec reference nft -f /tmp/rules
-ip netns exec reference sh -c 'nft list table inet paddock_guard && nft list table bridge paddock_guard' > /tmp/want
+ip netns exec reference sh -c 'nft list table inet asidee_guard && nft list table bridge asidee_guard' > /tmp/want
 show > /tmp/have 2>/dev/null || { echo missing; exit 0; }
 cmp -s /tmp/want /tmp/have && echo intact || echo changed`
 // gVisor flags that open a path to the host or switch a limit off. A runtime registered with one is not used. GPU and
@@ -88,9 +88,9 @@ export function unsafeRuntimeArgs(args: readonly string[] = []): string[] {
 // overlay, which Docker does not measure; only with --overlay2=none do they reach the layer (measured on OrbStack).
 const seesWrites = (args: readonly string[] = []) => args.includes("--overlay2=none")
 const hasRawNetwork = (args: readonly string[] = []) => args.filter((arg) => /^--?net-raw(?:=(?:true|false))?$/.test(arg)).at(-1)?.endsWith("false") === false
-// The runtime `paddock host add` registers: a pinned, checksum-verified gVisor that enrollment's smoke sandbox ran on.
-export const MANAGED_RUNTIME = "paddock-runsc"
-const PROBE_REPLY = "paddock-probe"
+// The runtime `asd host add` registers: a pinned, checksum-verified gVisor that enrollment's smoke sandbox ran on.
+export const MANAGED_RUNTIME = "asidee-runsc"
+const PROBE_REPLY = "asidee-probe"
 const PROBE_PORT = "7777"
 // One unused address in each private range and in the tailnet range. For a probe, the helper gives each to a listener in
 // a scratch network namespace that the engine's host routes to, where a device on the LAN or the tailnet would sit.
@@ -116,11 +116,11 @@ nc -lk -p ${port} -s ${gateway} -e echo ${PROBE_REPLY} &
   done
   ip netns exec far nc -lk -p ${PROBE_PORT} -e echo ${PROBE_REPLY} & ) || true
 echo ready; wait`
-// Ends every process carrying PADDOCK_EXEC=$1, a few passes in case one forks meanwhile; fails if any is left.
-const END_EXEC = `marked() { for p in /proc/[0-9]*; do tr '\\0' '\\n' < "$p/environ" 2>/dev/null | grep -qx "PADDOCK_EXEC=$1" && echo "\${p#/proc/}"; done; true; }
+// Ends every process carrying ASIDEE_EXEC=$1, a few passes in case one forks meanwhile; fails if any is left.
+const END_EXEC = `marked() { for p in /proc/[0-9]*; do tr '\\0' '\\n' < "$p/environ" 2>/dev/null | grep -qx "ASIDEE_EXEC=$1" && echo "\${p#/proc/}"; done; true; }
 for pass in 1 2 3; do pids=$(marked "$1"); [ -z "$pids" ] && exit 0; kill -9 $pids 2>/dev/null; sleep 0.2; done
 [ -z "$(marked "$1")" ]`
-// A link's listener inside `from` (core/links.ts), run as root with Paddock's busybox: $1 address, $2 port, $3 its folder.
+// A link's listener inside `from` (core/links.ts), run as root with Asidee's busybox: $1 address, $2 port, $3 its folder.
 // busybox nc accepts each connection and runs the part in quotes in a session of its own, which makes two named pipes
 // in the folder (root only), says "o PID" on the listener's output and waits for the daemon to attach to them; "x PID"
 // ends that session, its background copy of the client's input included. The input is passed as fd 3 because a
@@ -128,13 +128,13 @@ for pass in 1 2 3; do pids=$(marked "$1"); [ -z "$pids" ] && exit 0; kill -9 $pi
 // listener an earlier daemon left is ended first, by the tag it wrote; this one ends its own processes when its input
 // ends or is silent for 15 seconds (the daemon sends a line every 5).
 export const LINK_LISTEN = `B=$0 d=$3
-marked() { for p in /proc/[0-9]*; do $B tr '\\0' '\\n' < "$p/environ" 2>/dev/null | $B grep -qx "PADDOCK_EXEC=$1" && echo "\${p#/proc/}"; done; true; }
+marked() { for p in /proc/[0-9]*; do $B tr '\\0' '\\n' < "$p/environ" 2>/dev/null | $B grep -qx "ASIDEE_EXEC=$1" && echo "\${p#/proc/}"; done; true; }
 stop() { for p in $(marked "$1"); do [ "$p" = "$$" ] || kill -9 "$p" 2>/dev/null; done; }
-$B mkdir -p -m 700 /.paddock/links || { echo "e mkdir"; exit 3; }
+$B mkdir -p -m 700 /.asidee/links || { echo "e mkdir"; exit 3; }
 old=$($B head -c 32 "$d/tag" 2>/dev/null)
 case $old in ''|*[!0-9a-f]*) ;; *) stop "$old";; esac
 $B rm -rf "$d"; $B mkdir -m 700 "$d" || { echo "e mkdir"; exit 3; }
-echo "$PADDOCK_EXEC" > "$d/tag"
+echo "$ASIDEE_EXEC" > "$d/tag"
 exec 4>&1
 $B nc -lk -s "$1" -p "$2" -e $B setsid $B sh -c 'exec 2>/dev/null 3<&0; B=${RELAY} c=$$
 $B mkfifo -m 600 "$1/$c.i" "$1/$c.o" || exit 1
@@ -153,18 +153,18 @@ echo r
 while read -t 15 -r k p; do
   [ "$k" = x ] || continue
   case $p in ''|*[!0-9]*) continue;; esac
-  $B tr '\\0' '\\n' < "/proc/$p/environ" 2>/dev/null | $B grep -qx "PADDOCK_EXEC=$PADDOCK_EXEC" && $B pkill -9 -s "$p"
+  $B tr '\\0' '\\n' < "/proc/$p/environ" 2>/dev/null | $B grep -qx "ASIDEE_EXEC=$ASIDEE_EXEC" && $B pkill -9 -s "$p"
   $B rm -f "$d/$p.i" "$d/$p.o"
 done
-kill -9 $n 2>/dev/null; stop "$PADDOCK_EXEC"; $B rm -rf "$d"`
+kill -9 $n 2>/dev/null; stop "$ASIDEE_EXEC"; $B rm -rf "$d"`
 // Replaces the lines ending in the link mark in /etc/hosts with $1, writing only when that changes the file, in place
 // (the engine mounts it), and prints the file as it is afterwards.
 const LINK_HOSTS = `B=$0 f=/etc/hosts
 old=$($B cat "$f") || exit 3
-want=$(printf '%s\\n' "$old" | $B grep -v '# paddock-link$'; [ -z "$1" ] || printf '%s\\n' "$1")
+want=$(printf '%s\\n' "$old" | $B grep -v '# asidee-link$'; [ -z "$1" ] || printf '%s\\n' "$1")
 [ "$want" = "$old" ] || printf '%s\\n' "$want" > "$f" || exit 4
 $B cat "$f"`
-const LINK_DIR = /^\/\.paddock\/links\/[0-9a-f]{8}\.\d{1,5}$/
+const LINK_DIR = /^\/\.asidee\/links\/[0-9a-f]{8}\.\d{1,5}$/
 const IPV4 = /^(\d{1,3}\.){3}\d{1,3}$/
 // Shell globs under each home. Profile directories (~/.claude-NAME, ~/.codex-NAME) are where the bundled logins
 // extension puts imported logins.
@@ -172,21 +172,21 @@ export const CREDENTIAL_FILES = [".claude*/.credentials.json", ".codex*/auth.jso
 // Templates are images under a repository of this daemon's own (owner), labelled with what they were made from. Only an
 // image with both is one of its templates. A snapshot's intermediate image and its clean-up container use the snapshot
 // names, which the sweep removes.
-export const LABEL_TEMPLATE = "dev.paddock.template"
-export const LABEL_TEMPLATE_OWNER = "dev.paddock.template.owner"
-const LABEL_TEMPLATE_SOURCE = "dev.paddock.template.source"
-const LABEL_TEMPLATE_SOURCE_IMAGE = "dev.paddock.template.source-image"
-const LABEL_TEMPLATE_LOGINS = "dev.paddock.template.logins-removed"
-export const templateRepository = (owner: string) => `paddock-template-${owner}`
-export const snapshotRepository = (owner: string) => `paddock-snapshot-${owner}`
-// Runs under gVisor, as root, in a container of the committed image with no network, with Paddock's own busybox ($1)
-// and shell builtins only: nothing from the sandbox's image runs. Removes the login files, Paddock's own files (the
-// relay and the SSH host key in /.paddock) and the busybox's directory, and prints each login file it removed.
+export const LABEL_TEMPLATE = "com.asidee.template"
+export const LABEL_TEMPLATE_OWNER = "com.asidee.template.owner"
+const LABEL_TEMPLATE_SOURCE = "com.asidee.template.source"
+const LABEL_TEMPLATE_SOURCE_IMAGE = "com.asidee.template.source-image"
+const LABEL_TEMPLATE_LOGINS = "com.asidee.template.logins-removed"
+export const templateRepository = (owner: string) => `asidee-template-${owner}`
+export const snapshotRepository = (owner: string) => `asidee-snapshot-${owner}`
+// Runs under gVisor, as root, in a container of the committed image with no network, with Asidee's own busybox ($1)
+// and shell builtins only: nothing from the sandbox's image runs. Removes the login files, Asidee's own files (the
+// relay and the SSH host key in /.asidee) and the busybox's directory, and prints each login file it removed.
 const SNAPSHOT_CLEAN = `B=$1
 for home in /root /home/*; do for file in ${CREDENTIAL_FILES.map((file) => `"$home"/${file}`).join(" ")}; do
   if [ -e "$file" ] || [ -L "$file" ]; then $B rm -f "$file" || exit 1; echo "removed $file"; fi
 done; done
-$B rm -rf /.paddock "\${B%/*}" || exit 1
+$B rm -rf /.asidee "\${B%/*}" || exit 1
 echo done`
 // Reads the limits a running container has on the engine's host from its cgroup (v2): memory.max, pids.max, cpu.max.
 const LIVE_LIMITS = `d=$(find /sys/fs/cgroup -maxdepth 4 -type d -name "*$1*" | head -n 1); [ -n "$d" ] || exit 3
@@ -260,11 +260,11 @@ export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardS
     host.NetworkMode !== own && `its network mode is ${host.NetworkMode}`,
     !(networkBridge ?? "").startsWith(BRIDGE_PREFIX) && "its network's bridge is not one the guard covers",
     guard === "missing" && "the guard rules are not loaded on the engine's host",
-    guard === "changed" && "the guard rules on the engine's host differ from the ones Paddock loads",
+    guard === "changed" && "the guard rules on the engine's host differ from the ones Asidee loads",
   ].filter(Boolean)
   out.push(networkProblems.length ? result("network-guard", "fail", "inspected", `Not guarded: ${networkProblems.join("; ")}.`)
     : guard === "unknown" ? result("network-guard", "unknown", "none", "The guard rules on the engine's host could not be read.")
-    : result("network-guard", "pass", "inspected", `Only on ${own}; the loaded guard rules match Paddock's, rule for rule.`))
+    : result("network-guard", "pass", "inspected", `Only on ${own}; the loaded guard rules match Asidee's, rule for rule.`))
 
   const published = Object.keys(host.PortBindings ?? {})
   out.push(published.length || host.PublishAllPorts ? result("inbound", "fail", "inspected", `Published ports: ${published.join(", ") || "all"}.`) : result("inbound", "pass", "inspected", "No published ports."))
@@ -274,7 +274,7 @@ export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardS
     !((host.PidsLimit ?? 0) > 0) && "processes", !(host.NanoCpus > 0) && "CPU",
     !(host.LogConfig?.Type === "json-file" && Object.entries(LOG_LIMIT).every(([key, value]) => host.LogConfig?.Config?.[key] === value)) && "host logs (json-file with max-size=10m and max-file=2)",
   ].filter(Boolean)
-  // The limits must be the ones Paddock set (at creation or by resize), so one changed behind its back shows.
+  // The limits must be the ones Asidee set (at creation or by resize), so one changed behind its back shows.
   const wanted = engineLimits(manifest.spec)
   const differ = [
     host.Memory > 0 && host.Memory !== wanted.memory && `memory is ${host.Memory / 1024 ** 3} GB instead of ${manifest.spec.memoryGb} GB`,
@@ -282,13 +282,13 @@ export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardS
     host.NanoCpus > 0 && host.NanoCpus !== wanted.nanoCpus && `CPUs are ${host.NanoCpus / 1e9} instead of ${manifest.spec.cpus}`,
   ].filter(Boolean)
   out.push(unlimited.length ? result("limits", "fail", "inspected", `No limit on ${unlimited.join(", ")}.`)
-    : differ.length ? result("limits", "fail", "inspected", `The engine's limits are not the ones Paddock set: ${differ.join("; ")}.`)
+    : differ.length ? result("limits", "fail", "inspected", `The engine's limits are not the ones Asidee set: ${differ.join("; ")}.`)
     : result("limits", "pass", "inspected", `${host.Memory / 1024 ** 3} GB memory, ${host.PidsLimit} tasks (gVisor's own threads count, so fewer processes than that fit), ${host.NanoCpus / 1e9} ${host.NanoCpus === 1e9 ? "CPU" : "CPUs"}. A sandbox that passes its memory or task limit is killed. What its main process prints${manifest.spec.docker ? " (dockerd's log)" : ""} is kept on the engine's host, outside the watched disk limit, in two files of at most 10 MiB.`))
 
   const disk = manifest.engine.capabilities?.diskLimit
   out.push(disk === "hard" ? result("disk", "pass", "inspected", `${manifest.spec.diskGb} GB; writes fail at the limit.`)
     : disk === "watched" ? result("disk", "weak", "inspected", `Watched, not capped: the daemon stops the sandbox within about 30 seconds of it passing ${manifest.spec.diskGb} GB, so it can overshoot. Stopping the daemon stops the sandbox; if the daemon crashes, nothing watches until it runs again.`)
-    : result("disk", "unsupported", "none", "Nothing limits this sandbox's disk use: the engine has no cap, and its gVisor runtime lacks --overlay2=none, without which Paddock cannot measure what the sandbox writes."))
+    : result("disk", "unsupported", "none", "Nothing limits this sandbox's disk use: the engine has no cap, and its gVisor runtime lacks --overlay2=none, without which Asidee cannot measure what the sandbox writes."))
 
   const recorded = manifest.template; const labels = image?.Config?.Labels ?? {}
   const short = (id = "") => id.replace(/^sha256:/, "").slice(0, 12)
@@ -296,7 +296,7 @@ export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardS
   out.push(recorded && inspect.Image !== recorded.imageId ? result("template", "fail", "inspected", `The container runs the image ${short(inspect.Image) || "(unknown)"}, not template ${recorded.name}'s image ${short(recorded.imageId)}.`)
     : recorded && !image ? result("template", "unknown", "none", `Recorded as made from template ${recorded.name} (image ${short(recorded.imageId)}), but the engine could not describe that image.`)
     : recorded ? result("template", "info", "inspected", `Template ${recorded.name}, saved from the sandbox ${recorded.source} on ${recorded.createdAt.slice(0, 10)}; the container runs its image ${short(recorded.imageId)}.${tagged ? "" : " The template has been removed since; its image stays on the engine until the last sandbox made from it is removed."} It holds the files of the sandbox it was saved from, except the usual login files. The credentials check looks only for those login files; other secrets saved in it (.env files, shell history, tokens) are not looked for.`)
-    : labels[LABEL_TEMPLATE] && labels[LABEL_TEMPLATE_OWNER] === owner ? result("template", "info", "inspected", `None recorded, but its image ${short(inspect.Image)} is Paddock template ${labels[LABEL_TEMPLATE]}'s, given as a plain image.`)
+    : labels[LABEL_TEMPLATE] && labels[LABEL_TEMPLATE_OWNER] === owner ? result("template", "info", "inspected", `None recorded, but its image ${short(inspect.Image)} is Asidee template ${labels[LABEL_TEMPLATE]}'s, given as a plain image.`)
     : result("template", "info", "inspected", `None: made from the image ${manifest.spec.image}.`))
   return out
 }
@@ -311,18 +311,18 @@ export class GvisorProvider implements Provider {
   private readonly guardReads = new Map<string, Promise<GuardState>>()
   // One probe per engine at a time: they share the stand-in addresses on the engine's host.
   private readonly probing = new Map<string, Promise<unknown>>()
-  // owner: marks this daemon's probe helpers, so a second Paddock on the same engine does not sweep them away.
+  // owner: marks this daemon's probe helpers, so a second Asidee on the same engine does not sweep them away.
   constructor(private readonly run: Runner, private readonly owner = "1") {}
 
-  // Links (core/links.ts). Every process they start inside a sandbox runs Paddock's busybox, with arguments that come
+  // Links (core/links.ts). Every process they start inside a sandbox runs Asidee's busybox, with arguments that come
   // from the daemon.
   readonly links: LinkSupport = {
     listen: (manifest, dir, address, port) => {
-      if (!LINK_DIR.test(dir) || !IPV4.test(address) || !Number.isInteger(port)) throw new PaddockError("usage", "A link listener needs a link folder, an address and a port.")
+      if (!LINK_DIR.test(dir) || !IPV4.test(address) || !Number.isInteger(port)) throw new AsideeError("usage", "A link listener needs a link folder, an address and a port.")
       return this.openExec(manifest, [RELAY, "sh", "-c", LINK_LISTEN, RELAY, address, String(port), dir], { user: "0", tty: false })
     },
     attach: async (manifest, dir, pid) => {
-      if (!LINK_DIR.test(dir) || !Number.isInteger(pid) || pid < 1) throw new PaddockError("usage", "A link connection needs its folder and process.")
+      if (!LINK_DIR.test(dir) || !Number.isInteger(pid) || pid < 1) throw new AsideeError("usage", "A link connection needs its folder and process.")
       // Held: a client that sent FIN at once ends its half before the daemon has dialled `to` and listens.
       const fromClient = await this.openExec(manifest, [RELAY, "cat", `${dir}/${pid}.o`], { user: "0", tty: false, held: true })
       try {
@@ -332,18 +332,18 @@ export class GvisorProvider implements Provider {
     },
     hosts: async (manifest, lines) => {
       const written = await this.exec(manifest, [RELAY, "sh", "-c", LINK_HOSTS, RELAY, lines.join("\n")], { user: "0" })
-      if (written.exitCode !== 0) throw new PaddockError("runtime", `Could not write the link names into /etc/hosts in ${manifest.name}: ${written.stderr.trim() || `exit ${written.exitCode}`}`)
+      if (written.exitCode !== 0) throw new AsideeError("runtime", `Could not write the link names into /etc/hosts in ${manifest.name}: ${written.stderr.trim() || `exit ${written.exitCode}`}`)
       return written.stdout
     },
     canary: async (manifest, port, reply, everywhere) => {
-      if (!/^[0-9a-f]{1,32}$/.test(reply)) throw new PaddockError("usage", "A test reply is hexadecimal.")
-      const script = 'read -r PADDOCK_LINK_REPLY || exit 1; export PADDOCK_LINK_REPLY; exec "$0" nc -lk "$@" -e "$0" sh -c \'printf "%s\\n" "$PADDOCK_LINK_REPLY"\''
+      if (!/^[0-9a-f]{1,32}$/.test(reply)) throw new AsideeError("usage", "A test reply is hexadecimal.")
+      const script = 'read -r ASIDEE_LINK_REPLY || exit 1; export ASIDEE_LINK_REPLY; exec "$0" nc -lk "$@" -e "$0" sh -c \'printf "%s\\n" "$ASIDEE_LINK_REPLY"\''
       const listener = await this.openExec(manifest, [RELAY, "sh", "-c", script, RELAY, ...(everywhere ? [] : ["-s", "127.0.0.1"]), "-p", String(port)], { tty: false })
       listener.write(Buffer.from(`${reply}\n`))
       return listener
     },
     dial: async (manifest, host, port) => {
-      if (!/^[a-z0-9][a-z0-9.-]{0,62}$/.test(host)) throw new PaddockError("usage", "A test connection needs a host name or address.")
+      if (!/^[a-z0-9][a-z0-9.-]{0,62}$/.test(host)) throw new AsideeError("usage", "A test connection needs a host name or address.")
       const tried = await this.exec(manifest, [RELAY, "nc", "-w", "3", host, String(port)])
       return { connected: tried.exitCode === 0, received: tried.stdout }
     },
@@ -353,9 +353,9 @@ export class GvisorProvider implements Provider {
       return read.exitCode === 0 && IPV4.test(ip) ? ip : undefined
     },
     hostDial: async (manifest, ip, port) => {
-      if (!IPV4.test(ip)) throw new PaddockError("usage", "A test connection from the engine's host needs an address.")
+      if (!IPV4.test(ip)) throw new AsideeError("usage", "A test connection from the engine's host needs an address.")
       await this.ensureHelper(manifest.engine)
-      return (await this.docker(manifest.engine, ["run", "--rm", "--label", `dev.paddock.probe=${this.owner}`, "--runtime", "runc", "--network", "host", "--memory", "64m", "--pids-limit", "64", HELPER_IMAGE, "nc", "-w", "2", ip, String(port)], { timeoutMs: 30_000 })).stdout
+      return (await this.docker(manifest.engine, ["run", "--rm", "--label", `com.asidee.probe=${this.owner}`, "--runtime", "runc", "--network", "host", "--memory", "64m", "--pids-limit", "64", HELPER_IMAGE, "nc", "-w", "2", ip, String(port)], { timeoutMs: 30_000 })).stdout
     },
   }
 
@@ -387,20 +387,20 @@ export class GvisorProvider implements Provider {
       const label = `${parsed.OperatingSystem ?? "Docker"} ${parsed.ServerVersion} (context ${context.Name})`
       const gvisor = Object.entries(parsed.Runtimes ?? {}).filter(([, entry]) => isGvisor(entry.path)).sort(([a], [b]) => a.localeCompare(b))
       const usable = gvisor.filter(([, entry]) => unsafeRuntimeArgs(entry.runtimeArgs).length === 0)
-      // Prefer a runtime whose writes Paddock can measure, and among those the one enrollment installed and verified:
+      // Prefer a runtime whose writes Asidee can measure, and among those the one enrollment installed and verified:
       // an unrelated entry whose name sorts first must not take an enrolled host's sandboxes to an unverified runtime.
       const measured = usable.filter(([, entry]) => seesWrites(entry.runtimeArgs))
       const chosen = measured.find(([name]) => name === MANAGED_RUNTIME) ?? measured[0] ?? usable[0]
       if (!chosen) {
         const problems = gvisor.length
           ? gvisor.map(([name, entry]) => `The gVisor runtime ${name} is registered with ${unsafeRuntimeArgs(entry.runtimeArgs).join(", ")}, which opens a path to the host or switches a limit off.`)
-          : ["The engine has no gVisor runtime, and Paddock does not run sandboxes on the host's kernel."]
+          : ["The engine has no gVisor runtime, and Asidee does not run sandboxes on the host's kernel."]
         engines.push({ ...base, label, ready: false, problems, fix: gvisorSetup(parsed.OperatingSystem, parsed.Architecture) })
         continue
       }
       const measurable = seesWrites(chosen[1].runtimeArgs)
       engines.push({ ...base, label, ready: true, data: { context: context.Name, runtime: chosen[0] },
-        problems: measurable ? [] : [`Sandboxes here have no disk limit: the runtime ${chosen[0]} lacks --overlay2=none, without which Paddock cannot measure what a sandbox writes.`],
+        problems: measurable ? [] : [`Sandboxes here have no disk limit: the runtime ${chosen[0]} lacks --overlay2=none, without which Asidee cannot measure what a sandbox writes.`],
         capabilities: { kernelIsolation: "gvisor", diskLimit: measurable ? "watched" : "none", networkGuard: true, docker: measurable && hasRawNetwork(chosen[1].runtimeArgs), execStream: true, loopbackRelay: true,
           // docker update changes a running gVisor sandbox's cgroup at once (measured on OrbStack), and resize reads it
           // back. A commit sees a sandbox's files only when they reach the engine's layer, which needs --overlay2=none.
@@ -460,7 +460,7 @@ export class GvisorProvider implements Provider {
     ], { timeoutMs: 1_800_000 })
     if (made.exitCode !== 0 && /Unable to find image|No such image|pull access denied|manifest unknown|image.*not found|failed to resolve|failed to pull|pulling.*failed/i.test(made.stderr)) {
       const reason = made.stderr.trim().split("\n").find((line) => /Error response from daemon:/.test(line)) ?? made.stderr.trim().split("\n").at(-1) ?? "image unavailable"
-      throw new PaddockError("dependency", `Cannot download image ${spec.image}: ${reason.replace(/^Error response from daemon:\s*/, "").replace(/[.\s]+$/, "")}.`)
+      throw new AsideeError("dependency", `Cannot download image ${spec.image}: ${reason.replace(/^Error response from daemon:\s*/, "").replace(/[.\s]+$/, "")}.`)
     }
     must(made, `Creating ${name}`)
   }
@@ -469,12 +469,12 @@ export class GvisorProvider implements Provider {
     const output = await this.docker(manifest.engine, ["inspect", container(manifest.name)])
     if (output.exitCode !== 0) {
       if (/No such (?:container|object):/i.test(output.stderr)) return undefined
-      throw new PaddockError("runtime", `Could not inspect ${manifest.name}: ${output.stderr.trim() || "the engine returned no evidence"}`)
+      throw new AsideeError("runtime", `Could not inspect ${manifest.name}: ${output.stderr.trim() || "the engine returned no evidence"}`)
     }
     const inspect = (JSON.parse(output.stdout) as Inspect[])[0]!
     // A container under this name that the core did not create (or a recreated one) is never operated on.
     if (inspect.Config.Labels?.[LABEL_ID] !== manifest.id)
-      throw new PaddockError("conflict", `The container ${container(manifest.name)} was not created by this Paddock sandbox (its id label differs). Nothing was done to it.`)
+      throw new AsideeError("conflict", `The container ${container(manifest.name)} was not created by this Asidee sandbox (its id label differs). Nothing was done to it.`)
     return inspect
   }
 
@@ -483,7 +483,7 @@ export class GvisorProvider implements Provider {
     return inspect === undefined ? "missing" as const : inspect.State.Running ? "running" as const : "stopped" as const
   }
 
-  // Why the engine says a sandbox that Paddock did not stop is not running.
+  // Why the engine says a sandbox that Asidee did not stop is not running.
   async stoppedWhy(manifest: Manifest): Promise<string | undefined> {
     const state = (await this.inspect(manifest))?.State
     if (!state || state.Running || !state.FinishedAt || state.FinishedAt.startsWith("0001")) return undefined
@@ -503,7 +503,7 @@ export class GvisorProvider implements Provider {
       must(await this.docker(engine, ["start", container(name)]), `Starting ${name}`)
     }
     const dns = await this.dnsCheck(manifest)
-    if (dns.status !== "pass") throw new PaddockError("runtime", `${name} started, but its DNS could not be set and read back: ${dns.detail}`)
+    if (dns.status !== "pass") throw new AsideeError("runtime", `${name} started, but its DNS could not be set and read back: ${dns.detail}`)
     if (manifest.spec.docker) {
       must(await this.docker(engine, ["exec", "-u", "0", container(name), "sh", "-c", INNER_NAT]), "Setting Docker's inner NAT (needs iptables-legacy and gVisor --net-raw)")
       // Merged packets accepted by gVisor's own sockets can be dropped when forwarded to inner containers.
@@ -515,7 +515,7 @@ export class GvisorProvider implements Provider {
         await Bun.sleep(500)
       }
       const logs = await this.docker(engine, ["logs", "--tail", "20", container(name)])
-      throw new PaddockError("runtime", `${name}: inner Docker did not become ready. The image needs dockerd, docker and iptables-legacy. ${logs.stdout}${logs.stderr}`)
+      throw new AsideeError("runtime", `${name}: inner Docker did not become ready. The image needs dockerd, docker and iptables-legacy. ${logs.stdout}${logs.stderr}`)
     }
   }
 
@@ -541,7 +541,7 @@ export class GvisorProvider implements Provider {
         if (!absent(after)) left.push(`${kind} ${name}${after.exitCode === 0 ? " remains" : ": removal could not be verified"} (${removed.stderr.trim() || after.stderr.trim() || "engine still reports it"})`)
       } catch (error) { left.push(`${kind} ${name}: cleanup could not be verified (${error instanceof Error ? error.message : String(error)})`) }
     }
-    if (left.length) throw new PaddockError("runtime", left.join("; "))
+    if (left.length) throw new AsideeError("runtime", left.join("; "))
   }
 
   async remove(manifest: Manifest, createdOnly = false): Promise<void> {
@@ -551,14 +551,14 @@ export class GvisorProvider implements Provider {
     if (manifest.spec.docker) {
       const volume = await this.docker(engine, ["volume", "inspect", "--format", `{{index .Labels "${LABEL_ID}"}}`, dockerVolume(manifest)])
       if (volume.exitCode === 0) {
-        if (volume.stdout.trim() !== manifest.id) throw new PaddockError("conflict", `The volume ${dockerVolume(manifest)} does not belong to ${name}; it was not removed.`)
+        if (volume.stdout.trim() !== manifest.id) throw new AsideeError("conflict", `The volume ${dockerVolume(manifest)} does not belong to ${name}; it was not removed.`)
         must(await this.docker(engine, ["volume", "rm", dockerVolume(manifest)]), "Removing Docker's private data volume")
-      } else if (!/No such volume/i.test(volume.stderr)) throw new PaddockError("runtime", `Could not check Docker's private volume ${dockerVolume(manifest)}: ${volume.stderr.trim()}`)
+      } else if (!/No such volume/i.test(volume.stderr)) throw new AsideeError("runtime", `Could not check Docker's private volume ${dockerVolume(manifest)}: ${volume.stderr.trim()}`)
     }
     const removed = await this.docker(engine, ["network", "rm", network(name)])
     const remaining = await this.docker(engine, ["network", "inspect", network(name)])
     if (remaining.exitCode === 0 || !/(?:No such network|network .+ not found)/i.test(remaining.stderr))
-      throw new PaddockError("runtime", `Network ${network(name)} remains or its removal could not be verified: ${removed.stderr.trim() || remaining.stderr.trim()}`)
+      throw new AsideeError("runtime", `Network ${network(name)} remains or its removal could not be verified: ${removed.stderr.trim() || remaining.stderr.trim()}`)
     await this.dropUnusedTemplates(engine)
   }
 
@@ -572,7 +572,7 @@ export class GvisorProvider implements Provider {
   async resize(manifest: Manifest, limits: Limits): Promise<Limits | undefined> {
     const { engine, name } = manifest
     const inspect = await this.inspect(manifest)
-    if (!inspect) throw new PaddockError("not-found", `${name} has no container on ${engine.label}.`)
+    if (!inspect) throw new AsideeError("not-found", `${name} has no container on ${engine.label}.`)
     const memory = `${Math.round(limits.memoryGb * 1024)}m`
     must(await this.docker(engine, ["update", "--cpus", String(limits.cpus), "--memory", memory, "--memory-swap", memory, "--pids-limit", String(limits.pids), container(name)], { timeoutMs: 60_000 }), `Resizing ${name}`)
     if (!inspect.State.Running || !inspect.Id) return undefined
@@ -591,7 +591,7 @@ export class GvisorProvider implements Provider {
     if (!inspect?.State.Running || !inspect.Id) return undefined
     const reply = await engineApi(await this.endpoint(manifest.engine), "GET", `/containers/${inspect.Id}/stats?stream=false&one-shot=true`)
     const memory = reply.body?.memory_stats; const tasks = reply.body?.pids_stats?.current
-    if (reply.status !== 200 || typeof memory?.usage !== "number" || typeof tasks !== "number") throw new PaddockError("runtime", `The engine did not report what ${manifest.name} uses: ${reply.body?.message ?? `HTTP ${reply.status}`}`)
+    if (reply.status !== 200 || typeof memory?.usage !== "number" || typeof tasks !== "number") throw new AsideeError("runtime", `The engine did not report what ${manifest.name} uses: ${reply.body?.message ?? `HTTP ${reply.status}`}`)
     // As docker stats counts it: the page cache the kernel can drop is not in use.
     return { memoryBytes: memory.usage - (memory.stats?.inactive_file ?? 0), tasks }
   }
@@ -602,30 +602,30 @@ export class GvisorProvider implements Provider {
   }
 
   // Two commits. The first saves the sandbox's files, pausing it if it runs. A container of that image then runs, under
-  // gVisor with no network and only Paddock's busybox, to delete the login files and Paddock's own files, and the second
+  // gVisor with no network and only Asidee's busybox, to delete the login files and Asidee's own files, and the second
   // commit saves the result under the template's name. Volumes (Docker's /var/lib/docker, any the image declares) are
   // not in a commit; neither are gVisor's in-memory folders (/dev/shm, and /tmp when the image's /tmp is empty), nor
   // the engine's /etc/hosts, hostname and resolv.conf.
   async snapshot(manifest: Manifest, name: string): Promise<Template> {
     const { engine } = manifest
     const inspect = await this.inspect(manifest)
-    if (!inspect?.Id || !inspect.Image) throw new PaddockError("not-found", `${manifest.name} has no container on ${engine.label}.`)
+    if (!inspect?.Id || !inspect.Image) throw new AsideeError("not-found", `${manifest.name} has no container on ${engine.label}.`)
     if (!seesWrites((await this.runtimeEntry(engine, inspect.HostConfig.Runtime))?.runtimeArgs))
-      throw new PaddockError("dependency", `The gVisor runtime ${inspect.HostConfig.Runtime} lacks --overlay2=none, so the engine cannot see the files written in ${manifest.name} and a template would miss them.`)
+      throw new AsideeError("dependency", `The gVisor runtime ${inspect.HostConfig.Runtime} lacks --overlay2=none, so the engine cannot see the files written in ${manifest.name} and a template would miss them.`)
     const ref = `${templateRepository(this.owner)}:${name}`
-    if ((await this.docker(engine, ["image", "inspect", ref])).exitCode === 0) throw new PaddockError("conflict", `A template named ${name} already exists. Remove it first, or choose another name.`)
+    if ((await this.docker(engine, ["image", "inspect", ref])).exitCode === 0) throw new AsideeError("conflict", `A template named ${name} already exists. Remove it first, or choose another name.`)
     const base = await this.docker(engine, ["image", "inspect", inspect.Image])
     let config: NonNullable<ImageInspect["Config"]> = {}
     try { config = (JSON.parse(base.stdout) as ImageInspect[])[0]?.Config ?? {} } catch {}
-    if (base.exitCode !== 0) throw new PaddockError("runtime", `The image ${manifest.name} was made from could not be read: ${base.stderr.trim()}`)
+    if (base.exitCode !== 0) throw new AsideeError("runtime", `The image ${manifest.name} was made from could not be read: ${base.stderr.trim()}`)
     const socket = await this.endpoint(engine)
     const tag = randomBytes(6).toString("hex"); const stage = snapshotRepository(this.owner)
     // The busybox goes in a directory the sandbox could not know of, so nothing it left can redirect the copy.
-    const cleaner = `${stage}-${tag}`; const toolDir = `.paddock-snapshot-${tag}/`; const tool = `/${toolDir}busybox`
+    const cleaner = `${stage}-${tag}`; const toolDir = `.asidee-snapshot-${tag}/`; const tool = `/${toolDir}busybox`
     try {
-      // The image's own settings, not the container's: its entrypoint and command are Paddock's.
+      // The image's own settings, not the container's: its entrypoint and command are Asidee's.
       const first = await engineApi(socket, "POST", `/commit?container=${inspect.Id}&repo=${stage}&tag=${tag}&pause=true`, config)
-      if (first.status !== 201) throw new PaddockError("runtime", `The engine did not save ${manifest.name}'s files: ${first.body?.message ?? `HTTP ${first.status}`}`)
+      if (first.status !== 201) throw new AsideeError("runtime", `The engine did not save ${manifest.name}'s files: ${first.body?.message ?? `HTTP ${first.status}`}`)
       // Found again by its name, not a label: a commit copies the container's labels into the image, and from there into
       // every sandbox made from it.
       must(await this.docker(engine, ["create", "--name", cleaner, "--runtime", engine.data.runtime!, "--network", "none",
@@ -634,7 +634,7 @@ export class GvisorProvider implements Provider {
       await this.copyIn(engine, cleaner, [{ path: toolDir, mode: 0o755 }, { path: tool.slice(1), mode: 0o755, data: await this.busybox(engine) }], "busybox into the template's clean-up")
       const cleaned = await this.docker(engine, ["start", "-a", cleaner], { timeoutMs: 600_000 })
       const lines = cleaned.stdout.split("\n").filter(Boolean)
-      if (cleaned.exitCode !== 0 || lines.at(-1) !== "done") throw new PaddockError("runtime", `The template's clean-up did not finish (exit ${cleaned.exitCode}): ${cleaned.stderr.trim().slice(0, 300)}`)
+      if (cleaned.exitCode !== 0 || lines.at(-1) !== "done") throw new AsideeError("runtime", `The template's clean-up did not finish (exit ${cleaned.exitCode}): ${cleaned.stderr.trim().slice(0, 300)}`)
       const removed = lines.filter((line) => line.startsWith("removed ")).map((line) => line.slice("removed ".length))
       const labels = { ...(config.Labels ?? {}),
         // A commit keeps the source container's labels; these mark sandboxes, and a template is not one.
@@ -642,26 +642,26 @@ export class GvisorProvider implements Provider {
         [LABEL_TEMPLATE]: name, [LABEL_TEMPLATE_OWNER]: this.owner, [LABEL_TEMPLATE_SOURCE]: manifest.name, [LABEL_TEMPLATE_SOURCE_IMAGE]: manifest.template?.name ? `template ${manifest.template.name}` : manifest.spec.image,
         [LABEL_TEMPLATE_LOGINS]: JSON.stringify(removed) }
       const second = await engineApi(socket, "POST", `/commit?container=${cleaner}&repo=${templateRepository(this.owner)}&tag=${name}&pause=false`, { ...config, Labels: labels })
-      if (second.status !== 201) throw new PaddockError("runtime", `The engine did not save the template: ${second.body?.message ?? `HTTP ${second.status}`}`)
+      if (second.status !== 201) throw new AsideeError("runtime", `The engine did not save the template: ${second.body?.message ?? `HTTP ${second.status}`}`)
     } finally {
       await this.docker(engine, ["rm", "-f", "-v", cleaner])
       await this.docker(engine, ["rmi", `${stage}:${tag}`])
     }
     const made = (await this.templates(engine)).find((template) => template.name === name)
-    if (!made) throw new PaddockError("runtime", `The template ${name} was saved but the engine does not list it.`)
+    if (!made) throw new AsideeError("runtime", `The template ${name} was saved but the engine does not list it.`)
     return made
   }
 
   async templates(engine: Engine): Promise<Template[]> {
     const repository = templateRepository(this.owner)
     const listed = await this.docker(engine, ["image", "ls", "--no-trunc", "--format", "{{.ID}}", repository])
-    if (listed.exitCode !== 0) throw new PaddockError("runtime", `The engine did not list images: ${listed.stderr.trim()}`)
+    if (listed.exitCode !== 0) throw new AsideeError("runtime", `The engine did not list images: ${listed.stderr.trim()}`)
     const ids = [...new Set(listed.stdout.split("\n").filter(Boolean))]
     if (!ids.length) return []
     const described = await this.docker(engine, ["image", "inspect", ...ids])
-    if (described.exitCode !== 0) throw new PaddockError("runtime", `The engine did not describe its templates: ${described.stderr.trim()}`)
+    if (described.exitCode !== 0) throw new AsideeError("runtime", `The engine did not describe its templates: ${described.stderr.trim()}`)
     const containers = await engineApi(await this.endpoint(engine), "GET", "/containers/json?all=true")
-    if (containers.status !== 200) throw new PaddockError("runtime", `The engine did not list containers: HTTP ${containers.status}`)
+    if (containers.status !== 200) throw new AsideeError("runtime", `The engine did not list containers: HTTP ${containers.status}`)
     const users = (containers.body as unknown as Array<{ ImageID: string; Names: string[]; Labels: Record<string, string> | null }>)
     return (JSON.parse(described.stdout) as ImageInspect[]).flatMap((image) => {
       const labels = image.Config?.Labels ?? {}; const name = labels[LABEL_TEMPLATE]
@@ -679,15 +679,15 @@ export class GvisorProvider implements Provider {
   // the image, and the image goes with the last of them (dropUnusedTemplates).
   async removeTemplate(engine: Engine, name: string): Promise<{ imageId: string; dependants: string[] }> {
     const template = (await this.templates(engine)).find((entry) => entry.name === name)
-    if (!template) throw new PaddockError("not-found", `There is no template named ${name} on ${engine.label}.`)
+    if (!template) throw new AsideeError("not-found", `There is no template named ${name} on ${engine.label}.`)
     must(await this.docker(engine, ["rmi", ...(template.dependants.length ? ["--force"] : []), `${templateRepository(this.owner)}:${name}`]), `Removing the template ${name}`)
     return { imageId: template.imageId, dependants: template.dependants }
   }
 
   async exec(manifest: Manifest, argv: readonly string[], options: { user?: string; stdin?: string | Uint8Array; signal?: AbortSignal } = {}): Promise<RunResult> {
-    if ((await this.status(manifest)) !== "running") throw new PaddockError("conflict", `${manifest.name} is not running. Start it with \`paddock start ${manifest.name}\`.`)
+    if ((await this.status(manifest)) !== "running") throw new AsideeError("conflict", `${manifest.name} is not running. Start it with \`asd start ${manifest.name}\`.`)
     const tag = randomBytes(8).toString("hex")
-    const ran = await this.docker(manifest.engine, ["exec", ...(options.stdin === undefined ? [] : ["-i"]), ...(options.user ? ["-u", options.user] : []), "-e", `PADDOCK_EXEC=${tag}`, container(manifest.name), ...argv], { stdin: options.stdin, signal: options.signal })
+    const ran = await this.docker(manifest.engine, ["exec", ...(options.stdin === undefined ? [] : ["-i"]), ...(options.user ? ["-u", options.user] : []), "-e", `ASIDEE_EXEC=${tag}`, container(manifest.name), ...argv], { stdin: options.stdin, signal: options.signal })
     if (!ran.overflow && !options.signal?.aborted) return ran
     // The engine leaves an exec's processes running when its client is killed (measured: one kept a CPU busy), so they
     // are found by the variable they inherited and ended, as the same user: even root cannot read another user's
@@ -704,7 +704,7 @@ export class GvisorProvider implements Provider {
     if (known) return known
     const found = (async () => {
       const host = (await this.docker(engine, ["context", "inspect", "--format", "{{.Endpoints.docker.Host}}", engine.data.context!])).stdout.trim()
-      if (!host.startsWith("unix://")) throw new PaddockError("dependency", `Sessions need an engine on a Unix socket; ${engine.label} is at ${host || "an unknown address"}.`)
+      if (!host.startsWith("unix://")) throw new AsideeError("dependency", `Sessions need an engine on a Unix socket; ${engine.label} is at ${host || "an unknown address"}.`)
       return host.slice("unix://".length)
     })()
     found.catch(() => this.endpoints.delete(engine.id))
@@ -714,15 +714,15 @@ export class GvisorProvider implements Provider {
 
   async openExec(manifest: Manifest, argv: readonly string[], options: { user?: string; tty: boolean; cols?: number; rows?: number; held?: boolean }): Promise<Session> {
     const inspect = await this.inspect(manifest)
-    if (!inspect?.State.Running || !inspect.Id) throw new PaddockError("conflict", `${manifest.name} is not running. Start it with \`paddock start ${manifest.name}\`.`)
+    if (!inspect?.State.Running || !inspect.Id) throw new AsideeError("conflict", `${manifest.name} is not running. Start it with \`asd start ${manifest.name}\`.`)
     const socket = await this.endpoint(manifest.engine)
     const tag = randomBytes(8).toString("hex")
     // By the container's id, which inspect has just tied to this sandbox's label.
     const created = await engineApi(socket, "POST", `/containers/${inspect.Id}/exec`, {
-      AttachStdin: true, AttachStdout: true, AttachStderr: true, Tty: options.tty, Cmd: argv, Env: [`PADDOCK_EXEC=${tag}`],
+      AttachStdin: true, AttachStdout: true, AttachStderr: true, Tty: options.tty, Cmd: argv, Env: [`ASIDEE_EXEC=${tag}`],
       ...(options.user ? { User: options.user } : {}), ...(options.tty && options.cols && options.rows ? { ConsoleSize: [options.rows, options.cols] } : {}),
     })
-    if (created.status !== 201 || typeof created.body?.Id !== "string") throw new PaddockError("runtime", `The engine did not start the command: ${created.body?.message ?? `HTTP ${created.status}`}`)
+    if (created.status !== 201 || typeof created.body?.Id !== "string") throw new AsideeError("runtime", `The engine did not start the command: ${created.body?.message ?? `HTTP ${created.status}`}`)
     const session = new EngineSession(socket, created.body.Id as string, options.tty, options.held === true, () => {
       void this.docker(manifest.engine, ["exec", ...(options.user ? ["-u", options.user] : []), container(manifest.name), "sh", "-c", END_EXEC, "end", tag], { timeoutMs: 30_000 })
     })
@@ -736,12 +736,12 @@ export class GvisorProvider implements Provider {
     const reply = await engineApi(await this.endpoint(manifest.engine), "GET", `/containers/${container(manifest.name)}/json`)
     if (reply.status === 404) return undefined
     const body = reply.body as Inspect | undefined
-    if (reply.status !== 200 || !body) throw new PaddockError("runtime", `The engine did not describe ${manifest.name}: HTTP ${reply.status}`)
-    if (body.Config.Labels?.[LABEL_ID] !== manifest.id) throw new PaddockError("conflict", `The container ${container(manifest.name)} was not created by this Paddock sandbox (its id label differs). Nothing was done to it.`)
+    if (reply.status !== 200 || !body) throw new AsideeError("runtime", `The engine did not describe ${manifest.name}: HTTP ${reply.status}`)
+    if (body.Config.Labels?.[LABEL_ID] !== manifest.id) throw new AsideeError("conflict", `The container ${container(manifest.name)} was not created by this Asidee sandbox (its id label differs). Nothing was done to it.`)
     return body.State.Running && body.Id ? `${body.Id.slice(0, 12)}@${body.State.StartedAt}` : undefined
   }
 
-  // The relay is the static busybox from Paddock's helper image (one file, no libraries), copied into the sandbox through
+  // The relay is the static busybox from Asidee's helper image (one file, no libraries), copied into the sandbox through
   // the engine's archive API, so it needs no tool from the sandbox's image and works with any of them. It is given only a
   // number: `busybox nc 127.0.0.1 PORT`. The guest can replace the file, which changes nothing it could not already do
   // with its own loopback.
@@ -752,7 +752,7 @@ export class GvisorProvider implements Provider {
     const read = (async () => {
       await this.ensureHelper(engine)
       const output = await this.docker(engine, ["run", "--rm", "--network", "none", "--runtime", "runc", "--entrypoint", "cat", HELPER_IMAGE, "/bin/busybox.static"], { binary: true, timeoutMs: 60_000 })
-      if (output.exitCode !== 0 || !output.raw?.length) throw new PaddockError("runtime", `Could not read busybox from the helper image: ${output.stderr.trim()}`)
+      if (output.exitCode !== 0 || !output.raw?.length) throw new AsideeError("runtime", `Could not read busybox from the helper image: ${output.stderr.trim()}`)
       return output.raw
     })()
     read.catch(() => this.busyboxes.delete(engine.id))
@@ -763,27 +763,27 @@ export class GvisorProvider implements Provider {
   // Copies files into a container (created or running) through the engine's archive API.
   private async copyIn(engine: Engine, id: string, entries: Parameters<typeof tar>[0], what: string): Promise<void> {
     const response = await fetch(`http://engine/containers/${id}/archive?path=/`, { unix: await this.endpoint(engine), method: "PUT", headers: { "content-type": "application/x-tar" }, body: tar(entries) } as RequestInit)
-    if (response.status !== 200) throw new PaddockError("runtime", `The engine did not copy ${what}: ${(await response.text()).trim().slice(0, 300) || `HTTP ${response.status}`}`)
+    if (response.status !== 200) throw new AsideeError("runtime", `The engine did not copy ${what}: ${(await response.text()).trim().slice(0, 300) || `HTTP ${response.status}`}`)
   }
 
   // gVisor does not show a file the engine adds behind a running guest once the guest has looked in its folder (W10: one
-  // `ls /.paddock`, or even a listing of `/` for a new top-level folder), until the sandbox restarts. So the relay is
+  // `ls /.asidee`, or even a listing of `/` for a new top-level folder), until the sandbox restarts. So the relay is
   // copied in before every start, and again for each forward, which replaces a file the guest can still see.
   private async copyRelay(manifest: Manifest, id: string): Promise<void> {
-    await this.copyIn(manifest.engine, id, [{ path: ".paddock/", mode: 0o755 }, { path: RELAY.slice(1), mode: 0o755, data: await this.busybox(manifest.engine) }], `the relay into ${manifest.name}`)
+    await this.copyIn(manifest.engine, id, [{ path: ".asidee/", mode: 0o755 }, { path: RELAY.slice(1), mode: 0o755, data: await this.busybox(manifest.engine) }], `the relay into ${manifest.name}`)
   }
 
   async prepareLoopback(manifest: Manifest): Promise<void> {
     const inspect = await this.inspect(manifest)
-    if (!inspect?.State.Running || !inspect.Id) throw new PaddockError("conflict", `${manifest.name} is not running. Start it with \`paddock start ${manifest.name}\`.`)
+    if (!inspect?.State.Running || !inspect.Id) throw new AsideeError("conflict", `${manifest.name} is not running. Start it with \`asd start ${manifest.name}\`.`)
     await this.copyRelay(manifest, inspect.Id)
     // A guest that removed the relay while running cannot see the new copy; say so rather than relay the engine's error.
     const tried = await this.exec(manifest, [RELAY, "true"])
-    if (tried.exitCode !== 0) throw new PaddockError("runtime", `The relay at ${RELAY} does not run inside ${manifest.name}: something inside removed or replaced it while the sandbox ran, and a new copy is not visible until it restarts. Stop and start ${manifest.name}, then add the forward again. ${tried.stderr.trim().slice(0, 300)}`)
+    if (tried.exitCode !== 0) throw new AsideeError("runtime", `The relay at ${RELAY} does not run inside ${manifest.name}: something inside removed or replaced it while the sandbox ran, and a new copy is not visible until it restarts. Stop and start ${manifest.name}, then add the forward again. ${tried.stderr.trim().slice(0, 300)}`)
   }
 
   dialLoopback(manifest: Manifest, port: number, held = false): Promise<Session> {
-    if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new PaddockError("usage", "A port is a whole number from 1 to 65535.")
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new AsideeError("usage", "A port is a whole number from 1 to 65535.")
     return this.openExec(manifest, [RELAY, "nc", "127.0.0.1", String(port)], { tty: false, held })
   }
 
@@ -799,8 +799,8 @@ export class GvisorProvider implements Provider {
     const files = [inspect?.HostsPath, inspect?.HostnamePath, inspect?.ResolvConfPath].filter((path): path is string => Boolean(path))
     if (!volumes.length && !files.length) return layer
     const du = await this.docker(manifest.engine, ["run", "--rm", "--runtime", "runc", "--network", "none", ...(volumes.length ? ["--volumes-from", `${container(manifest.name)}:ro`] : []),
-      ...files.flatMap((path, index) => ["--mount", `type=bind,src=${path},dst=/paddock-engine-files/${index},readonly`]),
-      "--entrypoint", "du", HELPER_IMAGE, "-sk", ...volumes, ...files.map((_, index) => `/paddock-engine-files/${index}`)], { timeoutMs: 300_000 })
+      ...files.flatMap((path, index) => ["--mount", `type=bind,src=${path},dst=/asidee-engine-files/${index},readonly`]),
+      "--entrypoint", "du", HELPER_IMAGE, "-sk", ...volumes, ...files.map((_, index) => `/asidee-engine-files/${index}`)], { timeoutMs: 300_000 })
     const sizes = du.stdout.split("\n").filter(Boolean).map((line) => Number(line.split("\t")[0]) * 1024)
     if (du.exitCode !== 0 || sizes.length !== volumes.length + files.length || !sizes.every(Number.isFinite)) return undefined
     return layer + sizes.reduce((sum, size) => sum + size, 0)
@@ -808,9 +808,9 @@ export class GvisorProvider implements Provider {
 
   // Probe helpers left behind by a daemon that died mid-probe.
   async sweep(engine: Engine): Promise<void> {
-    const stale = (await this.docker(engine, ["ps", "-aq", "--filter", `label=dev.paddock.probe=${this.owner}`])).stdout.split("\n").filter(Boolean)
+    const stale = (await this.docker(engine, ["ps", "-aq", "--filter", `label=com.asidee.probe=${this.owner}`])).stdout.split("\n").filter(Boolean)
     if (stale.length) await this.docker(engine, ["rm", "-f", ...stale])
-    const networks = (await this.docker(engine, ["network", "ls", "--format", "{{.Name}}", "--filter", `label=dev.paddock.probe=${this.owner}`])).stdout.split("\n").filter(Boolean)
+    const networks = (await this.docker(engine, ["network", "ls", "--format", "{{.Name}}", "--filter", `label=com.asidee.probe=${this.owner}`])).stdout.split("\n").filter(Boolean)
     if (networks.length) await this.docker(engine, ["network", "rm", ...networks])
     const cleaners = (await this.docker(engine, ["ps", "-aq", "--filter", `name=^${snapshotRepository(this.owner)}-[0-9a-f]+$`])).stdout.split("\n").filter(Boolean)
     if (cleaners.length) await this.docker(engine, ["rm", "-f", "-v", ...cleaners])
@@ -821,7 +821,7 @@ export class GvisorProvider implements Provider {
 
   async checks(manifest: Manifest, stage: Stage): Promise<CheckResult[]> {
     const inspect = await this.inspect(manifest)
-    if (!inspect) throw new PaddockError("not-found", `${manifest.name} has no container on ${manifest.engine.label}.`)
+    if (!inspect) throw new AsideeError("not-found", `${manifest.name} has no container on ${manifest.engine.label}.`)
     if (stage === "config") {
       const { engine, name } = manifest
       const bridgeName = await this.docker(engine, ["network", "inspect", "--format", '{{index .Options "com.docker.network.bridge.name"}}', network(name)])
@@ -862,12 +862,12 @@ export class GvisorProvider implements Provider {
     try {
       const found = await this.docker(manifest.engine, ["exec", "-u", "0", container(manifest.name), "cat", "/etc/resolv.conf"])
       if (found.exitCode === 0 && found.stdout === SANDBOX_DNS)
-        return result("dns", "pass", "inspected", `Read /etc/resolv.conf with ${OWN}: Paddock's public fallback resolvers 1.1.1.1 and 8.8.8.8, bypassing the engine's per-network resolver; nothing was written. ${scope}`)
+        return result("dns", "pass", "inspected", `Read /etc/resolv.conf with ${OWN}: Asidee's public fallback resolvers 1.1.1.1 and 8.8.8.8, bypassing the engine's per-network resolver; nothing was written. ${scope}`)
       const before = found.exitCode === 0 ? "had been reset to other content" : `could not be read (${found.stderr.trim()})`
       const dns = await this.docker(manifest.engine, ["exec", "-i", "-u", "0", container(manifest.name), "sh", "-c", "cat > /etc/resolv.conf && cat /etc/resolv.conf"], { stdin: SANDBOX_DNS })
       if (dns.exitCode !== 0) return result("dns", "unknown", "none", `/etc/resolv.conf ${before}, and the DNS fallback could not be set and read back: ${dns.stderr.trim()}`)
-      return dns.stdout === SANDBOX_DNS ? result("dns", "pass", "inspected", `/etc/resolv.conf ${before}; Paddock restored its public fallback resolvers 1.1.1.1 and 8.8.8.8 and read them back, with ${OWN}. ${scope}`)
-        : result("dns", "fail", "inspected", `/etc/resolv.conf ${before}, and the file read back after restoring it differs from Paddock's public DNS fallback.`)
+      return dns.stdout === SANDBOX_DNS ? result("dns", "pass", "inspected", `/etc/resolv.conf ${before}; Asidee restored its public fallback resolvers 1.1.1.1 and 8.8.8.8 and read them back, with ${OWN}. ${scope}`)
+        : result("dns", "fail", "inspected", `/etc/resolv.conf ${before}, and the file read back after restoring it differs from Asidee's public DNS fallback.`)
     } catch (error) { return result("dns", "unknown", "none", `The DNS fallback could not be read, set and read back: ${(error as Error).message}`) }
   }
 
@@ -893,11 +893,11 @@ export class GvisorProvider implements Provider {
     const { engine, name } = manifest
     if (!inspect.State.Running) return []
     const tag = randomBytes(4).toString("hex")
-    const hostC = `paddock-probe-${tag}-host`; const peerC = `paddock-probe-${tag}-peer`; const probeC = `paddock-probe-${tag}-probe`
-    const peerNet = `paddock-net-probe-${tag}`
+    const hostC = `asidee-probe-${tag}-host`; const peerC = `asidee-probe-${tag}-peer`; const probeC = `asidee-probe-${tag}-probe`
+    const peerNet = `asidee-net-probe-${tag}`
     const listen = (port: string, address?: string) => ["nc", "-lk", "-p", port, ...(address ? ["-s", address] : []), "-e", "echo", PROBE_REPLY]
     const runHelper = (cname: string, runtime: string, net: string, command: string[], privileged = false) =>
-      this.docker(engine, ["run", "-d", "--rm", "--name", cname, "--label", `dev.paddock.probe=${this.owner}`, "--runtime", runtime, "--network", net, "--memory", "64m", "--pids-limit", "64", ...(privileged ? ["--privileged", "-u", "0"] : []), HELPER_IMAGE, ...command], { timeoutMs: 60_000 })
+      this.docker(engine, ["run", "-d", "--rm", "--name", cname, "--label", `com.asidee.probe=${this.owner}`, "--runtime", runtime, "--network", net, "--memory", "64m", "--pids-limit", "64", ...(privileged ? ["--privileged", "-u", "0"] : []), HELPER_IMAGE, ...command], { timeoutMs: 60_000 })
     const address = async (cname: string) => (await this.docker(engine, ["inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", cname])).stdout.trim()
     // True when the listener's reply comes back.
     const reaches = async (from: string, ip: string, port: string) =>
@@ -936,7 +936,7 @@ export class GvisorProvider implements Provider {
           return present.exitCode === 0 ? present.stdout.trim() : undefined
         }
         const before = await innerId()
-        if (before !== undefined && before !== want) throw new Error(`The image ${HELPER_IMAGE} inside the sandbox is not Paddock's helper (its ID differs), so it cannot be used as the probe. Remove it inside the sandbox and verify again.`)
+        if (before !== undefined && before !== want) throw new Error(`The image ${HELPER_IMAGE} inside the sandbox is not Asidee's helper (its ID differs), so it cannot be used as the probe. Remove it inside the sandbox and verify again.`)
         if (before === undefined) {
           removeProbeImage = true
           const saved = await this.docker(engine, ["save", HELPER_IMAGE], { binary: true, timeoutMs: 120_000 })
@@ -949,7 +949,7 @@ export class GvisorProvider implements Provider {
       }
       const gateway = (await this.docker(engine, ["network", "inspect", "--format", "{{(index .IPAM.Config 0).Gateway}}", network(name)])).stdout.trim()
       const hostPort = String(20_000 + Math.floor(Math.random() * 40_000))
-      must(await this.docker(engine, ["network", "create", "--label", `dev.paddock.probe=${this.owner}`, "-o", `com.docker.network.bridge.name=${BRIDGE_PREFIX}x${tag}`, peerNet]), "Creating the probe network")
+      must(await this.docker(engine, ["network", "create", "--label", `com.asidee.probe=${this.owner}`, "-o", `com.docker.network.bridge.name=${BRIDGE_PREFIX}x${tag}`, peerNet]), "Creating the probe network")
       must(await runHelper(hostC, "runc", "host", ["sh", "-c", hostProbeScript(tag, gateway, hostPort)], true), "Starting the host listener")
       must(await runHelper(peerC, "runc", peerNet, listen(PROBE_PORT)), "Starting the peer listener")
       must(await runHelper(probeC, engine.data.runtime!, network(name), listen(PROBE_PORT)), "Starting the probe")
@@ -959,7 +959,7 @@ export class GvisorProvider implements Provider {
       if (!await retry(async () => /^(ready|teardown-timeout)/m.test(await hostLog()), Math.ceil((PROBE_TEARDOWN_WAIT + 15) / 0.4))) throw new Error("The host listener did not get ready.")
       const log = await hostLog()
       if (log.includes("teardown-timeout")) {
-        teardownFailure = `Another Paddock probe was still tearing down its routes after ${PROBE_TEARDOWN_WAIT} seconds, so nothing was probed and no weaker evidence was substituted. Run verify again in a few seconds.`
+        teardownFailure = `Another Asidee probe was still tearing down its routes after ${PROBE_TEARDOWN_WAIT} seconds, so nothing was probed and no weaker evidence was substituted. Run verify again in a few seconds.`
         throw new Error(teardownFailure)
       }
       const far = log.split("\n").filter((line) => line.startsWith("far ")).map((line) => line.slice(4).trim())
@@ -970,7 +970,7 @@ export class GvisorProvider implements Provider {
       const peerListening = probeAlive && innerOnline && await retry(() => reaches(hostC, peerIp, PROBE_PORT))
       const anyReaches = async (ip: string, port: string) => await reaches(probeC, ip, port) || Boolean(manifest.spec.docker && (await inner(ip, port)).stdout.includes(PROBE_REPLY))
       // The attempt from the sandbox's network is the helper's own; the inner container is started by the sandbox's Docker.
-      const where = manifest.spec.docker ? `the sandbox's network (by Paddock's helper) and an inner Docker container (started through the sandbox's own Docker, which its root could replace)` : "the sandbox's network"
+      const where = manifest.spec.docker ? `the sandbox's network (by Asidee's helper) and an inner Docker container (started through the sandbox's own Docker, which its root could replace)` : "the sandbox's network"
       const noControl = (what: string) => `Not checked: ${!innerOnline ? "the inner container did not reach the internet control" : `${what} did not answer a control connection`}, so a blocked attempt would prove nothing.`
 
       out.push(!hostListening ? result("net-host", "unknown", "none", noControl(probeAlive ? "the listener on the host" : "the probe"))
@@ -1016,7 +1016,7 @@ export class GvisorProvider implements Provider {
       }
     }
 
-    if (teardownFailure) throw new PaddockError("runtime", teardownFailure)
+    if (teardownFailure) throw new AsideeError("runtime", teardownFailure)
 
     const script = `for home in /root /home/*; do for file in ${CREDENTIAL_FILES.map((file) => `"$home"/${file}`).join(" ")}; do [ -e "$file" ] && echo "$file"; done; done; true`
     const found = await this.docker(engine, ["exec", "-u", "0", container(name), "sh", "-c", script])
@@ -1028,7 +1028,7 @@ export class GvisorProvider implements Provider {
   }
 }
 
-// A tar archive of directories and files, for the engine's archive API. Only what Paddock writes, so only ustar basics.
+// A tar archive of directories and files, for the engine's archive API. Only what Asidee writes, so only ustar basics.
 export function tar(entries: ReadonlyArray<{ path: string; mode: number; data?: Uint8Array }>): Uint8Array {
   const blocks: Uint8Array[] = []
   for (const entry of entries) {
@@ -1088,7 +1088,7 @@ class EngineSession extends EventEmitter implements Session {
         const rest = head.subarray(end + 4)
         if (rest.length) this.take(rest)
       }
-      const fail = (error: Error) => { this.connection.destroy(); reject(new PaddockError("runtime", error.message)) }
+      const fail = (error: Error) => { this.connection.destroy(); reject(new AsideeError("runtime", error.message)) }
       this.connection.on("data", onData); this.connection.on("error", fail)
       this.connection.write(`POST /exec/${id}/start HTTP/1.1\r\nHost: engine\r\nContent-Type: application/json\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`)
     })
@@ -1139,7 +1139,7 @@ class EngineSession extends EventEmitter implements Session {
   }
   async resize(cols: number, rows: number): Promise<void> {
     const reply = await engineApi(this.socket, "POST", `/exec/${this.id}/resize?h=${rows}&w=${cols}`)
-    if (reply.status !== 200 && reply.status !== 201) throw new PaddockError("runtime", `The engine did not resize the terminal: HTTP ${reply.status}`)
+    if (reply.status !== 200 && reply.status !== 201) throw new AsideeError("runtime", `The engine did not resize the terminal: HTTP ${reply.status}`)
   }
   close(reason = "The session was closed."): void {
     if (this.ended) { this.connection.destroy(); return }
@@ -1167,8 +1167,8 @@ export function netPrivate(seen: { guard: GuardState; reached: string[]; metadat
     : !innerOnline ? result("net-private", "unknown", "none", "The inner container did not reach the internet control, so its blocked attempts would prove nothing.")
     : !probeAlive || (far.length > 0 && !tried.length) ? result("net-private", "unknown", "none", noControl("the stand-in listeners") + rest)
     : tried.length && !someUnprobed ? result("net-private", "pass", "probed", `${probed}${rest}`)
-    : tried.length ? result("net-private", "weak", "probed", `${probed} The ranges not probed rest on the loaded rules alone, which match Paddock's.${rest}`)
-    : result("net-private", "weak", "inspected", `No range was probed: no stand-in listener could be set up on the engine's host. Every range rests on the loaded rules alone, which match Paddock's and drop private, tailnet, link-local and IPv6 destinations.`)
+    : tried.length ? result("net-private", "weak", "probed", `${probed} The ranges not probed rest on the loaded rules alone, which match Asidee's.${rest}`)
+    : result("net-private", "weak", "inspected", `No range was probed: no stand-in listener could be set up on the engine's host. Every range rests on the loaded rules alone, which match Asidee's and drop private, tailnet, link-local and IPv6 destinations.`)
 }
 
 // What to do on an engine without a usable gVisor runtime. The OrbStack steps are the ones this was developed on.
@@ -1176,6 +1176,6 @@ export function gvisorSetup(os = "", architecture = ""): string {
   const arch = /arm64|aarch64/.test(architecture) ? "aarch64" : "x86_64"
   const runtime = (path: string) => `"runtimes": { "runsc": { "path": "${path}", "runtimeArgs": ["--allow-suid", "--overlay2=none", "--net-raw"] } }`
   const download = `https://storage.googleapis.com/gvisor/releases/release/latest/${arch}/runsc (check it against runsc.sha512 beside it)`
-  if (os === "OrbStack") return `1. Download ${download} into a folder under your home, such as ~/.local/share/paddock/gvisor, and make it executable. 2. Add to ~/.orbstack/config/docker.json: ${runtime("/Users/YOU/.local/share/paddock/gvisor/runsc")}. 3. Run \`orb restart docker\` (it stops running containers).`
+  if (os === "OrbStack") return `1. Download ${download} into a folder under your home, such as ~/.local/share/asidee/gvisor, and make it executable. 2. Add to ~/.orbstack/config/docker.json: ${runtime("/Users/YOU/.local/share/asidee/gvisor/runsc")}. 3. Run \`orb restart docker\` (it stops running containers).`
   return `1. Install gVisor: download ${download} to /usr/local/bin/runsc and make it executable, or follow https://gvisor.dev/docs/user_guide/install/. 2. Add to /etc/docker/daemon.json: ${runtime("/usr/local/bin/runsc")}. 3. Restart the engine, for example \`sudo systemctl restart docker\` (it stops running containers).`
 }

@@ -20,80 +20,80 @@ import { bounded, PROTOCOL, transportStdio } from "../core/transport"
 import { included, userConfig, type SshAccess } from "../core/ssh"
 import { checkSocketPath, defaultDirs, socketPath, streamSocketPath, type Config } from "../core/state"
 import { dataFrames, frame, FrameReader, type OpenRequest, type EnrollmentRequest } from "../core/stream"
-import { PaddockError, type CheckResult, type DiskWarning, type Engine, type ErrorCode, type RunResult, type Template } from "../core/types"
+import { AsideeError, type CheckResult, type DiskWarning, type Engine, type ErrorCode, type RunResult, type Template } from "../core/types"
 
 // A thin client: every command is one call to the daemon, which is started on first use.
 
-// The help, grouped by task. `paddock COMMAND --help` prints the lines for that command.
+// The help, grouped by task. `asd COMMAND --help` prints the lines for that command.
 const GROUPS: Array<[string, string[]]> = [
   ["Start here", [
-    "paddock doctor                         engines on this machine and what each one needs",
-    "paddock create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]",
-    "paddock shell NAME [-- COMMAND…]       a shell, or one command on a terminal, inside the sandbox",
-    "paddock list                           your sandboxes",
-    "paddock list --all                     machines, including unavailable ones and unknown cached sandboxes (experimental)",
+    "asd doctor                         engines on this machine and what each one needs",
+    "asd create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]",
+    "asd shell NAME [-- COMMAND…]       a shell, or one command on a terminal, inside the sandbox",
+    "asd list                           your sandboxes",
+    "asd list --all                     machines, including unavailable ones and unknown cached sandboxes (experimental)",
   ]],
   ["Use a sandbox", [
-    "paddock exec NAME [--user USER] [--stdin] -- COMMAND…   --stdin sends this command's input, bytes exact, up to 16 MiB;",
+    "asd exec NAME [--user USER] [--stdin] -- COMMAND…   --stdin sends this command's input, bytes exact, up to 16 MiB;",
     "                                                        output comes back as text (invalid UTF-8 replaced). Piped input is sent only with --stdin or --stream.",
-    "paddock exec NAME --stream [--user USER] -- COMMAND…    bytes in and out as they come, any size",
-    "paddock verify NAME                    run every check against the sandbox and list each result",
-    "paddock start NAME",
-    "paddock stop NAME",
-    "paddock remove NAME --confirm NAME     deletes the sandbox and everything in it",
+    "asd exec NAME --stream [--user USER] -- COMMAND…    bytes in and out as they come, any size",
+    "asd verify NAME                    run every check against the sandbox and list each result",
+    "asd start NAME",
+    "asd stop NAME",
+    "asd remove NAME --confirm NAME     deletes the sandbox and everything in it",
   ]],
   ["Reach in", [
-    "paddock forward add NAME --port PORT [--local-port PORT]   127.0.0.1 here to PORT on the sandbox's loopback",
-    "paddock forward list [NAME] | forward remove ID            a forward ends when its sandbox stops",
-    "paddock link add FROM TO --port PORT   programs in FROM connect to TO:PORT and reach PORT on TO's loopback, nothing else",
-    "paddock link list [NAME] | link remove FROM TO --port PORT   on this machine only; a link comes back after restarts",
-    "paddock ssh setup NAME [--write-config]   sshd inside, reached as NAME.paddock through the daemon, no port",
-    "paddock ssh access NAME                   the alias, user and home an editor uses, and whether it is ready",
+    "asd forward add NAME --port PORT [--local-port PORT]   127.0.0.1 here to PORT on the sandbox's loopback",
+    "asd forward list [NAME] | forward remove ID            a forward ends when its sandbox stops",
+    "asd link add FROM TO --port PORT   programs in FROM connect to TO:PORT and reach PORT on TO's loopback, nothing else",
+    "asd link list [NAME] | link remove FROM TO --port PORT   on this machine only; a link comes back after restarts",
+    "asd ssh setup NAME [--write-config]   sshd inside, reached as NAME.asidee through the daemon, no port",
+    "asd ssh access NAME                   the alias, user and home an editor uses, and whether it is ready",
   ]],
   ["Change a sandbox", [
-    "paddock resize NAME [--cpus N] [--memory GB] [--pids N] [--disk GB]   says which limits apply now and which at the next start",
-    "paddock snapshot NAME --as TEMPLATE    save the sandbox's files, minus the usual logins, as a template",
-    "paddock template list | template remove TEMPLATE [--engine ID]   sandboxes made from it keep working",
+    "asd resize NAME [--cpus N] [--memory GB] [--pids N] [--disk GB]   says which limits apply now and which at the next start",
+    "asd snapshot NAME --as TEMPLATE    save the sandbox's files, minus the usual logins, as a template",
+    "asd template list | template remove TEMPLATE [--engine ID]   sandboxes made from it keep working",
   ]],
   ["Settings", [
-    "paddock config get                     settings on the selected machine",
-    "paddock config set require-probes on|off   require blocking isolation probes at create (default on)",
-    "paddock config set experimental on|off     features not yet proven on enough machines: other machines (default off)",
-    "paddock config set workspace-free-space GiB below this much free space, workspace launches are refused and running",
+    "asd config get                     settings on the selected machine",
+    "asd config set require-probes on|off   require blocking isolation probes at create (default on)",
+    "asd config set experimental on|off     features not yet proven on enough machines: other machines (default off)",
+    "asd config set workspace-free-space GiB below this much free space, workspace launches are refused and running",
     "                                           workspaces are stopped (default 5; 0 turns it off; purgeable space not counted)",
   ]],
   ["Workspaces: on this Mac's own kernel, not a sandbox (macOS only)", [
-    "paddock workspace create NAME [--host-temp] [--disk GiB] [--copy PATH] [--read PATH]… [--path DIR]… [--no-logins | --claude-profile NAME --codex-profile NAME]",
+    "asd workspace create NAME [--host-temp] [--disk GiB] [--copy PATH] [--read PATH]… [--path DIR]… [--no-logins | --claude-profile NAME --codex-profile NAME]",
     "                                       --host-temp opens shared per-user temp (default off); TMPDIR stays private",
     "                                       --disk is watched, not capped (default 20): past it the daemon stops its processes",
-    "paddock workspace shell NAME [-- COMMAND…]",
-    "paddock workspace exec NAME [--stdin | --stream] -- COMMAND…",
+    "asd workspace shell NAME [-- COMMAND…]",
+    "asd workspace exec NAME [--stdin | --stream] -- COMMAND…",
     "                                       Piped input is sent only with --stdin or --stream.",
-    "paddock workspace list | get NAME | stop NAME | verify NAME",
-    "paddock workspace set NAME host-temp on|off   stop first; applies to later processes; shared host temp weakens confinement",
-    "paddock workspace set NAME disk GiB            the watched disk limit; applies now, also while running",
-    "paddock workspace remove NAME --confirm NAME",
+    "asd workspace list | get NAME | stop NAME | verify NAME",
+    "asd workspace set NAME host-temp on|off   stop first; applies to later processes; shared host temp weakens confinement",
+    "asd workspace set NAME disk GiB            the watched disk limit; applies now, also while running",
+    "asd workspace remove NAME --confirm NAME",
   ]],
-  ["Other machines (experimental, off unless turned on: paddock config set experimental on)", [
-    "paddock host list                       registered SSH daemons and their connection state",
-    "paddock host add NAME --ssh DEST --artifact PATH --sha256 HASH [--docker] [--sudo ask|never] [--disk-policy watched] [--accept-plan HASH]",
+  ["Other machines (experimental, off unless turned on: asd config set experimental on)", [
+    "asd host list                       registered SSH daemons and their connection state",
+    "asd host add NAME --ssh DEST --artifact PATH --sha256 HASH [--docker] [--sudo ask|never] [--disk-policy watched] [--accept-plan HASH]",
     "                                        installs or updates the same registered machine only after plan acceptance; --docker lets its sandboxes run Docker inside",
-    "paddock host attach NAME --ssh DEST --binary PATH --state-dir PATH   attach an already prepared daemon",
-    "paddock host remove NAME --confirm NAME  forget a prepared host; remote files and service stay",
+    "asd host attach NAME --ssh DEST --binary PATH --state-dir PATH   attach an already prepared daemon",
+    "asd host remove NAME --confirm NAME  forget a prepared host; remote files and service stay",
   ]],
   ["Extensions, dashboard and daemon", [
-    "paddock ext list",
-    "paddock ext run EXTENSION ACTION [SANDBOX] [--set FIELD=VALUE]…",
-    "paddock ui [--open]                    the dashboard's address",
-    "paddock daemon status | stop | run",
-    "paddock transport stdio --protocol 1 [--stream]   internal SSH socket relay; starts nothing",
+    "asd ext list",
+    "asd ext run EXTENSION ACTION [SANDBOX] [--set FIELD=VALUE]…",
+    "asd ui [--open]                    the dashboard's address",
+    "asd daemon status | stop | run",
+    "asd transport stdio --protocol 1 [--stream]   internal SSH socket relay; starts nothing",
   ]],
 ]
 const OPTIONS = `  --host NAME   select a registered machine (experimental); unqualified names always mean local
   --json   print {"ok":true,"data":…} or {"ok":false,"error":{code,message}}
   --help   after any command, that command's usage`
 const EXITS = "Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed or required probes could not run, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown."
-const HELP = `paddock ${VERSION}: sandboxes for coding agents that are checked, not assumed
+const HELP = `asd ${VERSION}: sandboxes for coding agents that are checked, not assumed
 
 ${GROUPS.map(([group, lines]) => `${group}\n${lines.map((line) => `  ${line}`).join("\n")}`).join("\n")}
 
@@ -108,7 +108,7 @@ function commandHelp(words: string[]): string | undefined {
   const pick = (match: (usage: string) => boolean) => {
     const picked: string[] = []; let taking = false
     for (const line of GROUPS.flatMap(([, lines]) => lines)) {
-      if (line.startsWith("paddock ")) taking = match(`${line.slice(8).split("   ")[0]} `)
+      if (line.startsWith("asd ")) taking = match(`${line.slice(4).split("   ")[0]} `)
       if (taking) picked.push(line)
     }
     return picked
@@ -119,12 +119,12 @@ function commandHelp(words: string[]): string | undefined {
   return lines.length ? `${lines.map((line) => `  ${line}`).join("\n")}\n\n${OPTIONS}` : undefined
 }
 // parseArgs explains its own syntax; a person needs the option it stopped at and where the usage is.
-function argumentError(error: unknown, words: string): PaddockError {
+function argumentError(error: unknown, words: string): AsideeError {
   const message = (error as Error).message
   const option = /'(-[^' ]+)/.exec(message)?.[1]
   const code = (error as NodeJS.ErrnoException).code
-  const see = `See \`paddock ${words} --help\`.`
-  return new PaddockError("usage", !option ? `${message} ${see}` : code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" ? `paddock ${words} has no option ${option}. ${see}`
+  const see = `See \`asd ${words} --help\`.`
+  return new AsideeError("usage", !option ? `${message} ${see}` : code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" ? `asd ${words} has no option ${option}. ${see}`
     : /does not take an argument/.test(message) ? `${option} takes no value. ${see}` : `${option} needs a value. ${see}`)
 }
 // Text from a daemon, which may be another machine's, on its way to a terminal: without control characters (an escape
@@ -143,7 +143,7 @@ function planLines(plan: HostPlan): string[] {
     `Enrollment plan for ${shown(plan.options.name)} (${shown(plan.options.ssh)})`,
     `  Machine: ${shown(destination.os.PRETTY_NAME ?? destination.os.ID)} on ${shown(destination.arch)}, account ${shown(destination.user)} (uid ${shown(destination.uid)}), machine id ${shown(destination.machine)}, host key ${shown(destination.hostKey)}`,
     `  Mode: ${plan.mode !== "reuse" ? plan.mode : "reuse. Nothing is installed; what is already there is verified and registered"}`,
-    `  Paddock: ${shown(plan.options.artifact.path)} (sha256 ${shown(plan.options.artifact.sha256)}) as ${shown(plan.binary)}; service ${shown(plan.service)}; state in ${shown(plan.stateDir)}`,
+    `  Asidee: ${shown(plan.options.artifact.path)} (sha256 ${shown(plan.options.artifact.sha256)}) as ${shown(plan.binary)}; service ${shown(plan.service)}; state in ${shown(plan.stateDir)}`,
     `  Runtime: gVisor ${shown(runtime.release)} registered with Docker as ${shown(runtime.name)}: ${shown([runtime.path, ...runtime.runtimeArgs].map(word).join(" "))}`,
     `  Docker inside sandboxes: ${runtime.innerDocker ? "offered (--docker)" : "not offered (enroll with --docker to offer it)"}`,
     `  Disk limit: ${shown(plan.options.diskPolicy)}`,
@@ -169,7 +169,7 @@ function planLines(plan: HostPlan): string[] {
   lines.push(
     "",
     restart.required ? `Docker restart: planned. It may interrupt every running container (${restart.containers.length}): ${list(restart.containers) || "none is running"}` : "Docker restart: none planned.",
-    restart.service ? `Paddock service restart: planned. It stops these running sandboxes (${restart.sandboxes.length}): ${list(restart.sandboxes) || "none is running"}` : "Paddock service restart: none planned.",
+    restart.service ? `Asidee service restart: planned. It stops these running sandboxes (${restart.sandboxes.length}): ${list(restart.sandboxes) || "none is running"}` : "Asidee service restart: none planned.",
     "",
     `Verification before the host is registered: sandbox ${shown(smoke.name)} from ${shown(smoke.image)} (${smoke.cpus} CPU, ${smoke.memoryGb} GB memory, ${smoke.diskGb} GB disk, ${smoke.pids} processes), ${smoke.docker ? "with Docker inside" : "without Docker inside"}`,
     ...smoke.operations.map((operation) => `  - ${shown(operation)}`),
@@ -202,9 +202,9 @@ const cliDir = compiled ? dirname(process.execPath) : join(dirname(Bun.main), ".
 // Bun's fetch gives up after 360 seconds by default, and an exec runs as long as its command does: the daemon's own
 // deadlines (none locally, 45 minutes for a remote mutation) are the ones that apply.
 async function request<T>(method: string, body: object = {}): Promise<T> {
-  const response = await fetch(`http://paddock/api/${method}`, { unix: socketPath(dirs), method: "POST", body: JSON.stringify(body), timeout: false } as RequestInit)
+  const response = await fetch(`http://asidee/api/${method}`, { unix: socketPath(dirs), method: "POST", body: JSON.stringify(body), timeout: false } as RequestInit)
   const reply = await response.json() as { ok: true; data: T } | { ok: false; error: { code: ErrorCode; message: string; details?: unknown } }
-  if (!reply.ok) throw new PaddockError(reply.error.code, reply.error.message, reply.error.details)
+  if (!reply.ok) throw new AsideeError(reply.error.code, reply.error.message, reply.error.details)
   return reply.data
 }
 
@@ -215,7 +215,7 @@ async function daemonGone(): Promise<boolean> {
   return false
 }
 
-// Starts the daemon when none runs, and replaces one left over from another version of Paddock (its sandboxes keep
+// Starts the daemon when none runs, and replaces one left over from another version of Asidee (its sandboxes keep
 // running through the switch).
 let daemonReady = false
 async function ensureDaemon(): Promise<void> {
@@ -234,7 +234,7 @@ async function ensureDaemon(): Promise<void> {
     const log = openSync(join(dirs.state, "daemon.log"), "a", 0o600)
     spawn(self[0]!, [...self.slice(1), "daemon", "run"], { detached: true, stdio: ["ignore", log, log] }).unref()
     for (let attempt = 0; attempt < 100 && await build() !== BUILD; attempt++) await Bun.sleep(100)
-    if (await build() !== BUILD) throw new PaddockError("runtime", `The daemon did not start. See ${join(dirs.state, "daemon.log")}.`)
+    if (await build() !== BUILD) throw new AsideeError("runtime", `The daemon did not start. See ${join(dirs.state, "daemon.log")}.`)
   }
   daemonReady = true
 }
@@ -276,7 +276,7 @@ async function session(request: OpenRequest | EnrollmentRequest): Promise<never>
   const leave = async (code: number, message?: string): Promise<never> => {
     await wrote
     restore()
-    if (message) process.stderr.write(`${raw ? "\r\n" : ""}paddock: ${message}\n`)
+    if (message) process.stderr.write(`${raw ? "\r\n" : ""}asd: ${message}\n`)
     process.exit(code)
   }
   // ssh ends its ProxyCommand with a hangup once it is done, which is not worth a word.
@@ -352,7 +352,7 @@ function printSandbox(view: SandboxView): void {
 }
 const displayName = (name: string) => shown(selectedHost && selectedHost !== "local" ? `${selectedHost}/${name}` : name)
 // A command to run next, on the machine this one addressed.
-const next = (...words: string[]) => `paddock${selectedHost && selectedHost !== "local" ? ` --host ${selectedHost}` : ""} ${words.map((word) => shown(word)).join(" ")}`
+const next = (...words: string[]) => `asd${selectedHost && selectedHost !== "local" ? ` --host ${selectedHost}` : ""} ${words.map((word) => shown(word)).join(" ")}`
 // Engines report times with their own offset; shown in UTC, as labelled.
 const utc = (at: string) => { const date = new Date(at); return Number.isNaN(date.getTime()) ? shown(at) : `${date.toISOString().slice(0, 16).replace("T", " ")} UTC` }
 
@@ -371,7 +371,7 @@ async function main(argv: string[]): Promise<void> {
   try { const parsed = hostOption(argv); selectedHost = parsed.host; argv = parsed.argv } catch (error) {
     const message = (error as Error).message
     if (argv.slice(0, argv.indexOf("--") < 0 ? undefined : argv.indexOf("--")).includes("--json")) console.log(JSON.stringify({ ok: false, error: { code: "usage", message } }))
-    else console.error(`paddock: ${message}`)
+    else console.error(`asd: ${message}`)
     process.exit(2)
   }
   const split = argv.indexOf("--")
@@ -388,13 +388,13 @@ async function main(argv: string[]): Promise<void> {
   // The sandbox a create was making, for the next steps of a refusal.
   let creating: string | undefined
   const helpWords = [command, ...(["workspace", "host", "forward", "link", "template", "config", "ssh", "ext", "daemon"].includes(command ?? "") ? [rest[0]] : [])].filter(Boolean).join(" ")
-  const need = (value: string | boolean | undefined, what: string) => { if (typeof value !== "string" || !value) throw new PaddockError("usage", `Missing ${what}. See \`paddock ${helpWords} --help\`.`); return value }
+  const need = (value: string | boolean | undefined, what: string) => { if (typeof value !== "string" || !value) throw new AsideeError("usage", `Missing ${what}. See \`asd ${helpWords} --help\`.`); return value }
 
   try {
     const asked = command === "help" || command === "--help" || command === "-h" ? rest : rest.includes("--help") || rest.includes("-h") ? [command!, ...rest.filter((arg) => arg !== "--help" && arg !== "-h")] : []
     if (asked.length) {
       const text = commandHelp(asked)
-      if (!text) throw new PaddockError("usage", `Unknown command ${asked[0]}. See \`paddock help\`.`)
+      if (!text) throw new AsideeError("usage", `Unknown command ${asked[0]}. See \`asd help\`.`)
       return out({ help: text }, () => console.log(text))
     }
     switch (command) {
@@ -404,14 +404,14 @@ async function main(argv: string[]): Promise<void> {
         const settings: Record<string, keyof Config> = { "require-probes": "requireProbes", experimental: "experimental" }
         const gb = key === "workspace-free-space" && /^\d+(\.\d+)?$/.test(value ?? "")
         if (!((action === "get" && positionals.length === 1) || (action === "set" && positionals.length === 3 && (gb || (Object.hasOwn(settings, key!) && (value === "on" || value === "off"))))))
-          throw new PaddockError("usage", "Use paddock config get, paddock config set require-probes|experimental on|off, or paddock config set workspace-free-space GiB.")
+          throw new AsideeError("usage", "Use asd config get, asd config set require-probes|experimental on|off, or asd config set workspace-free-space GiB.")
         const config = await call<Config>(action === "get" ? "configGet" : "configSet", action === "get" ? {} : gb ? { workspaceFreeSpaceGb: Number(value) } : { [settings[key!]!]: value === "on" })
         const lines = { "require-probes": config.requireProbes ? "on" : "off", experimental: config.experimental ? "on" : "off", "workspace-free-space": `${config.workspaceFreeSpaceGb} GiB` }
         return out(config, () => { for (const [name, text] of Object.entries(lines)) if (action === "get" || name === key) console.log(`${name} ${text}`) })
       }
       case "workspace": {
-        if (selectedHost && selectedHost !== "local") throw new PaddockError("usage", "Workspaces run on this Mac; --host is not available.")
-        if (process.platform !== "darwin") throw new PaddockError("dependency", "Workspaces are available only on macOS. A workspace is not a sandbox.")
+        if (selectedHost && selectedHost !== "local") throw new AsideeError("usage", "Workspaces run on this Mac; --host is not available.")
+        if (process.platform !== "darwin") throw new AsideeError("dependency", "Workspaces are available only on macOS. A workspace is not a sandbox.")
         const action = rest[0]
         const { values, positionals } = (() => {
           try { return parseArgs({ args: rest.slice(1), allowPositionals: true, options: {
@@ -419,10 +419,10 @@ async function main(argv: string[]): Promise<void> {
             "host-temp": { type: "boolean" }, disk: { type: "string" }, "no-logins": { type: "boolean" }, "claude-profile": { type: "string" }, "codex-profile": { type: "string" },
           } }) } catch (error) { throw argumentError(error, `workspace ${action}`) }
         })()
-        if (values["host-temp"] !== undefined && action !== "create") throw new PaddockError("usage", "--host-temp is a create option. Use workspace set NAME host-temp on|off to change it.")
-        if (values.disk !== undefined && action !== "create") throw new PaddockError("usage", "--disk is a create option. Use workspace set NAME disk GiB to change it.")
+        if (values["host-temp"] !== undefined && action !== "create") throw new AsideeError("usage", "--host-temp is a create option. Use workspace set NAME host-temp on|off to change it.")
+        if (values.disk !== undefined && action !== "create") throw new AsideeError("usage", "--disk is a create option. Use workspace set NAME disk GiB to change it.")
         const localPath = (path: string) => path === "~" || path.startsWith("~/") ? path : resolve(path)
-        if (values["no-logins"] && (values["claude-profile"] !== undefined || values["codex-profile"] !== undefined)) throw new PaddockError("usage", "Choose --no-logins or named login profiles, not both.")
+        if (values["no-logins"] && (values["claude-profile"] !== undefined || values["codex-profile"] !== undefined)) throw new AsideeError("usage", "Choose --no-logins or named login profiles, not both.")
         // Only list and get measure size; elsewhere the field is left out rather than shown as unknown.
         const show = (view: WorkspaceView, measured = false) => console.log(`${shown(view.name)}: workspace, not a sandbox; ${shown(view.status)}, host-temp ${view.spec ? view.spec.hostTemp ? "on (shared, weaker)" : "off" : "unknown"}, ${view.processes ?? "unknown"} processes${view.sizeBytes !== undefined ? `, ${(view.sizeBytes / 1024 ** 3).toFixed(2)} GiB` : measured ? ", size unknown" : ""}${view.spec?.diskGb !== undefined ? `, disk limit ${view.spec.diskGb} GiB (watched)` : ""}${view.folder ? `\n  ${shown(view.folder)}` : ""}${view.problem ? `\n  ${shown(view.problem)}` : ""}${view.stopReason ? `\n  ${shown(view.stopReason)}` : ""}${view.enforcementProblem ? `\n  Disk watch unknown at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}` : ""}`)
         const disclose = (disclosure = WORKSPACE_DISCLOSURE) => console.log(`\n${shown(disclosure)}`)
@@ -435,17 +435,17 @@ async function main(argv: string[]): Promise<void> {
           const report = await call<WorkspaceReport>(action === "create" ? "workspaceCreate" : "workspaceVerify", { name,
             ...(action === "create" ? { hostTemp: values["host-temp"] ?? false, ...(values.disk !== undefined ? { diskGb: values.disk } : {}), reads: values.read?.map(localPath), path: values.path?.map(localPath), copy: values.copy ? localPath(values.copy) : undefined, loopback: values.loopback,
               logins: values["no-logins"] ? { kind: "none" } : { kind: "profiles", claude: values["claude-profile"] ?? "default", codex: values["codex-profile"] ?? "default" } } : {}) })
-          out(report, () => { show(report.workspace); printChecks(report.checks, WORKSPACE_CHECKLIST, action === "create" ? `paddock workspace verify ${shown(name)}` : true); for (const path of report.pathSuggestions ?? []) console.log(`Tool folder under home, closed unless declared with --read: ${shown(path)}`)
+          out(report, () => { show(report.workspace); printChecks(report.checks, WORKSPACE_CHECKLIST, action === "create" ? `asd workspace verify ${shown(name)}` : true); for (const path of report.pathSuggestions ?? []) console.log(`Tool folder under home, closed unless declared with --read: ${shown(path)}`)
             // The not-covered check already carries the disclosure when verification reached it.
             if (!report.checks.some((check) => check.detail.includes(WORKSPACE_DISCLOSURE))) disclose(report.workspace.disclosure)
-            if (report.ok && action === "create") console.log(`\nNext: paddock workspace shell ${shown(name)}`) })
+            if (report.ok && action === "create") console.log(`\nNext: asd workspace shell ${shown(name)}`) })
           if (!report.ok) process.exit(EXIT["check-failed"])
           return
         }
         if (action === "set") {
           const [, key, value] = positionals
           const disk = key === "disk" && /^\d+(\.\d+)?$/.test(value ?? "")
-          if (positionals.length !== 3 || !(disk || (key === "host-temp" && ["on", "off"].includes(value!)))) throw new PaddockError("usage", "Use paddock workspace set NAME host-temp on|off (stop the workspace first), or paddock workspace set NAME disk GiB.")
+          if (positionals.length !== 3 || !(disk || (key === "host-temp" && ["on", "off"].includes(value!)))) throw new AsideeError("usage", "Use asd workspace set NAME host-temp on|off (stop the workspace first), or asd workspace set NAME disk GiB.")
           const view = await call<WorkspaceView>("workspaceSet", disk ? { name, diskGb: Number(value) } : { name, hostTemp: value === "on" })
           return out(view, () => { show(view); disclose(view.disclosure) })
         }
@@ -455,8 +455,8 @@ async function main(argv: string[]): Promise<void> {
           return out(removed, () => { console.log(`Removed workspace ${shown(removed.removed)}, not a sandbox.`); for (const path of removed.hardLinks) console.log(`Multiple hard links: ${shown(path)}`); for (const issue of [...removed.launchServices, ...removed.launchd]) console.log(shown(issue)); console.log(`Not removed or not covered: ${removed.notRemoved.map((item) => shown(item)).join("; ")}.`); disclose(removed.disclosure) })
         }
         if (action === "exec") {
-          if (!tail.length) throw new PaddockError("usage", "Give the workspace command after --.")
-          if (values.stream && (asJson || values.stdin)) throw new PaddockError("usage", "--stream takes neither --json nor --stdin.")
+          if (!tail.length) throw new AsideeError("usage", "Give the workspace command after --.")
+          if (values.stream && (asJson || values.stdin)) throw new AsideeError("usage", "--stream takes neither --json nor --stdin.")
           if (!asJson) {
             const view = await call<WorkspaceView>("workspaceGet", { name, withSize: false })
             console.error(`Workspace, not a sandbox. Network and loopback open; disk watched, no other resource limits.${view.spec?.hostTemp ? ` ${HOST_TEMP_DISCLOSURE}` : ""}`)
@@ -465,21 +465,21 @@ async function main(argv: string[]): Promise<void> {
           return printRun(await call<RunResult>("workspaceExec", { name, argv: tail, ...(values.stdin ? await stdinBytes() : {}) }), asJson)
         }
         if (action === "shell") {
-          if (asJson) throw new PaddockError("usage", "An interactive workspace shell does not support --json.")
+          if (asJson) throw new AsideeError("usage", "An interactive workspace shell does not support --json.")
           const prepared = await call<{ argv: string[]; workspace: WorkspaceView }>("workspaceShell", { name })
           console.error(shown(prepared.workspace.disclosure))
           const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY)
           return await session({ kind: "workspace", name, argv: tail.length ? tail : prepared.argv, tty,
             ...(tty && process.stdout.columns > 0 && process.stdout.rows > 0 ? { cols: process.stdout.columns, rows: process.stdout.rows } : {}) })
         }
-        throw new PaddockError("usage", "Use paddock workspace create|set|shell|exec|list|get|stop|remove|verify.")
+        throw new AsideeError("usage", "Use asd workspace create|set|shell|exec|list|get|stop|remove|verify.")
       }
       case undefined: case "help": case "--help": case "-h": return out({ help: HELP }, () => console.log(HELP))
       case "version": case "--version": return out({ version: VERSION }, () => console.log(VERSION))
       case "doctor": case "init": {
         const engines = await call<Engine[]>("engines")
         out(engines, () => {
-          if (!engines.length) console.log("No engine found. Paddock needs Docker (OrbStack, a Linux host, Colima, …) with a gVisor runtime.")
+          if (!engines.length) console.log("No engine found. Asidee needs Docker (OrbStack, a Linux host, Colima, …) with a gVisor runtime.")
           for (const engine of engines) {
             console.log(`${engine.ready ? "✓" : "✗"} ${shown(engine.label)}  [${shown(engine.id)}]`)
             if (engine.capabilities) console.log(`    kernel isolation: ${shown(engine.capabilities.kernelIsolation)}; network guard: ${engine.capabilities.networkGuard ? "yes" : "no"}; disk limit: ${shown(engine.capabilities.diskLimit)}; inner Docker: ${engine.capabilities.docker ? "yes" : "no"}`)
@@ -505,7 +505,7 @@ async function main(argv: string[]): Promise<void> {
       case "list": case "ls": {
         const { values } = parse({ all: { type: "boolean" } })
         if (values.all) {
-          if (selectedHost && selectedHost !== "local") throw new PaddockError("usage", "Use --all or --host, not both.")
+          if (selectedHost && selectedHost !== "local") throw new AsideeError("usage", "Use --all or --host, not both.")
           const fleet = await call<FleetView>("fleet")
           return out(fleet, () => {
             for (const row of fleet.machines) {
@@ -516,7 +516,7 @@ async function main(argv: string[]): Promise<void> {
         }
         const list = await call<SandboxView[]>("list")
         return out(list, () => {
-          if (!list.length) console.log("No sandboxes. Create one with `paddock create NAME`.")
+          if (!list.length) console.log("No sandboxes. Create one with `asd create NAME`.")
           for (const view of list) {
             const minutes = view.lastVerify ? Math.max(0, Math.floor((Date.now() - Date.parse(view.lastVerify.at)) / 60000)) : 0
             const verified = view.lastVerify ? `verified ${minutes < 120 ? `${minutes} min` : minutes < 2880 ? `${Math.floor(minutes / 60)} h` : `${Math.floor(minutes / 1440)} d`} ago` : "never verified"
@@ -555,7 +555,7 @@ async function main(argv: string[]): Promise<void> {
         const name = need(positionals[0], "a name")
         const saved = await call<{ template: Template; contents: string }>("snapshot", { name, as: need(values.as, "--as TEMPLATE") }, watching(name))
         return out(saved, () => {
-          console.log(`Saved ${name} as template ${shown(saved.template.name)} (${(saved.template.sizeBytes / 1024 ** 2).toFixed(0)} MB). Use it with \`paddock create NAME --template ${shown(saved.template.name)}\`.`)
+          console.log(`Saved ${name} as template ${shown(saved.template.name)} (${(saved.template.sizeBytes / 1024 ** 2).toFixed(0)} MB). Use it with \`asd create NAME --template ${shown(saved.template.name)}\`.`)
           console.log(`  Login files left out: ${shown(saved.template.loginsRemoved.join(", ")) || "none were present"}.`)
           console.log(`  ${shown(saved.contents)}`)
         })
@@ -565,7 +565,7 @@ async function main(argv: string[]): Promise<void> {
         if (rest[0] === "list" || rest[0] === undefined) {
           const list = await call<Template[]>("templateList")
           return out(list, () => {
-            if (!list.length) console.log("No templates. Save one with `paddock snapshot NAME --as TEMPLATE`.")
+            if (!list.length) console.log("No templates. Save one with `asd snapshot NAME --as TEMPLATE`.")
             for (const template of list) console.log(`${shown(template.name).padEnd(24)} from ${shown(template.source)} (${shown(template.sourceImage)}), ${utc(template.createdAt)}, ${(template.sizeBytes / 1024 ** 2).toFixed(0)} MB, ${shown(template.engine)}${template.dependants.length ? `\n    used by ${shown(template.dependants.join(", "))}` : ""}`)
           })
         }
@@ -573,17 +573,17 @@ async function main(argv: string[]): Promise<void> {
           const removed = await call<{ removed: string; note: string }>("templateRemove", { name: need(positionals[0], "a template name"), engine: values.engine })
           return out(removed, () => console.log(`Removed template ${shown(removed.removed)}. ${shown(removed.note)}`))
         }
-        throw new PaddockError("usage", "Use `paddock template list` or `paddock template remove TEMPLATE`.")
+        throw new AsideeError("usage", "Use `asd template list` or `asd template remove TEMPLATE`.")
       }
       case "remove": case "rm": {
         const { values, positionals } = parse({ confirm: { type: "string" } })
         const removed = await call<{ removed: string; warning?: string }>("remove", { name: need(positionals[0], "a name"), confirm: values.confirm })
-        return out(removed, () => { console.log(`Removed ${shown(removed.removed)}.`); if (removed.warning) console.error(`paddock: ${shown(removed.warning)}`) })
+        return out(removed, () => { console.log(`Removed ${shown(removed.removed)}.`); if (removed.warning) console.error(`asd: ${shown(removed.warning)}`) })
       }
       case "exec": {
         const { values, positionals } = parse({ user: { type: "string" }, stdin: { type: "boolean" }, stream: { type: "boolean" } })
-        if (!tail.length) throw new PaddockError("usage", "Give the command after --, as in `paddock exec NAME -- ls -la`.")
-        if (values.stream && (asJson || values.stdin)) throw new PaddockError("usage", "--stream passes bytes through as they come, so it takes neither --json nor --stdin (its input is always this command's).")
+        if (!tail.length) throw new AsideeError("usage", "Give the command after --, as in `asd exec NAME -- ls -la`.")
+        if (values.stream && (asJson || values.stdin)) throw new AsideeError("usage", "--stream passes bytes through as they come, so it takes neither --json nor --stdin (its input is always this command's).")
         if (values.stream) return await session({ kind: "exec", name: need(positionals[0], "a name"), argv: tail, tty: false, ...(typeof values.user === "string" ? { user: values.user } : {}) })
         const output = await call<RunResult>("exec", { name: need(positionals[0], "a name"), argv: tail, user: values.user, ...(values.stdin ? await stdinBytes() : {}) })
         return printRun(output, asJson)
@@ -611,7 +611,7 @@ async function main(argv: string[]): Promise<void> {
         if (rest[0] === "list" || rest[0] === undefined) {
           const list = await call<ForwardView[]>("forwardList", { name: positionals[0] })
           return out(list, () => {
-            if (!list.length) console.log("No forwards. Add one with `paddock forward add NAME --port PORT`.")
+            if (!list.length) console.log("No forwards. Add one with `asd forward add NAME --port PORT`.")
             for (const forward of list) console.log(`${shown(forward.id)}  127.0.0.1:${forward.localPort} -> ${shown(forward.name)}:${forward.port}  ${forward.connections} open, since ${utc(forward.createdAt)}`)
           })
         }
@@ -619,7 +619,7 @@ async function main(argv: string[]): Promise<void> {
           const closed = await call<{ closed: string }>("forwardRemove", { id: need(positionals[0], "a forward id") })
           return out(closed, () => console.log(`Closed forward ${closed.closed}.`))
         }
-        throw new PaddockError("usage", "Use `paddock forward add NAME --port PORT`, `paddock forward list [NAME]` or `paddock forward remove ID`.")
+        throw new AsideeError("usage", "Use `asd forward add NAME --port PORT`, `asd forward list [NAME]` or `asd forward remove ID`.")
       }
       case "link": {
         const { values, positionals } = parse({ port: { type: "string" } }, rest.slice(1))
@@ -637,7 +637,7 @@ async function main(argv: string[]): Promise<void> {
         if (rest[0] === "list" || rest[0] === undefined) {
           const list = await call<LinkView[]>("linkList", { name: positionals[0] })
           return out(list, () => {
-            if (!list.length) console.log("No links. Add one with `paddock link add FROM TO --port PORT`.")
+            if (!list.length) console.log("No links. Add one with `asd link add FROM TO --port PORT`.")
             for (const link of list) console.log(`${shown(link.from)} -> ${shown(link.to)}:${link.port}  ${state(link)}${link.measured ? `; measured ${utc(link.measured.at)}: ${shown(link.measured.status)}` : ""}`)
           })
         }
@@ -645,7 +645,7 @@ async function main(argv: string[]): Promise<void> {
           const removed = await call<{ removed: { from: string; to: string; port: number }; measured: string }>("linkRemove", { from: need(positionals[0], "FROM"), to: need(positionals[1], "TO"), port: need(values.port, "--port") })
           return out(removed, () => console.log(`Removed the link from ${shown(removed.removed.from)} to ${shown(removed.removed.to)}:${removed.removed.port}. ${shown(removed.measured)}`))
         }
-        throw new PaddockError("usage", "Use `paddock link add FROM TO --port PORT`, `paddock link list [NAME]` or `paddock link remove FROM TO --port PORT`.")
+        throw new AsideeError("usage", "Use `asd link add FROM TO --port PORT`, `asd link list [NAME]` or `asd link remove FROM TO --port PORT`.")
       }
       case "ssh": {
         const { values, positionals } = parse({ "write-config": { type: "boolean" }, "sandbox-id": { type: "string" } }, rest.slice(1))
@@ -665,13 +665,13 @@ async function main(argv: string[]): Promise<void> {
             if (!access.user) return `: run \`${next("ssh", "setup", name)}\``
             const view = await call<SandboxView>("get", { name }).catch(() => undefined)
             if (view && view.status !== "running") return `: ${shown(name)} is ${shown(view.status)}. Start it with \`${next("start", name)}\``
-            if (!await included(dirs)) return `: ${userConfig()} does not include Paddock's file. Run \`${next("ssh", "setup", name, "--write-config")}\`, or add the line it prints`
+            if (!await included(dirs)) return `: ${userConfig()} does not include Asidee's file. Run \`${next("ssh", "setup", name, "--write-config")}\`, or add the line it prints`
             return ""
           }
           const reason = asJson || access.batchReady ? "" : await why()
           return out(access, () => console.log(`${shown(access.alias)}: ${access.user ? `${shown(access.user)}, home ${shown(access.home)}` : "not set up"}; ${access.batchReady ? "ready" : `not ready${reason}`}`))
         }
-        throw new PaddockError("usage", "Use `paddock ssh setup NAME [--write-config]` or `paddock ssh access NAME`.")
+        throw new AsideeError("usage", "Use `asd ssh setup NAME [--write-config]` or `asd ssh access NAME`.")
       }
       case "ext": {
         if (rest[0] === "list" || rest[0] === undefined) {
@@ -685,7 +685,7 @@ async function main(argv: string[]): Promise<void> {
             for (const error of loaded.errors) console.log(`! ${shown(error)}`)
           })
         }
-        if (rest[0] !== "run") throw new PaddockError("usage", "Use `paddock ext list` or `paddock ext run EXTENSION ACTION [SANDBOX]`.")
+        if (rest[0] !== "run") throw new AsideeError("usage", "Use `asd ext list` or `asd ext run EXTENSION ACTION [SANDBOX]`.")
         let parsed
         try { parsed = parseArgs({ args: rest.slice(1), options: { set: { type: "string", multiple: true } }, allowPositionals: true }) } catch (error) { throw argumentError(error, "ext run") }
         const { values, positionals } = parsed
@@ -694,25 +694,25 @@ async function main(argv: string[]): Promise<void> {
         return printRun(output, asJson)
       }
       case "ui": {
-        if (selectedHost && selectedHost !== "local") throw new PaddockError("usage", "The dashboard is on the primary machine.")
+        if (selectedHost && selectedHost !== "local") throw new AsideeError("usage", "The dashboard is on the primary machine.")
         await ensureDaemon()
         const daemon = await readDaemonFile(dirs)
-        if (!daemon) throw new PaddockError("runtime", "The daemon is not running.")
+        if (!daemon) throw new AsideeError("runtime", "The daemon is not running.")
         const url = `http://127.0.0.1:${daemon.port}/#token=${daemon.token}`
-        if (!daemon.port) return out({ url }, () => console.log("No dashboard: this daemon was started with PADDOCK_SOCKET_ONLY=1, so it answers on its socket only."))
+        if (!daemon.port) return out({ url }, () => console.log("No dashboard: this daemon was started with ASIDEE_SOCKET_ONLY=1, so it answers on its socket only."))
         // On Windows `start` is part of cmd, not a program; its first quoted argument is a window title.
         if (rest.includes("--open")) Bun.spawn(process.platform === "darwin" ? ["open", url] : process.platform === "win32" ? ["cmd", "/c", "start", "", url] : ["xdg-open", url])
         return out({ url }, () => console.log(url))
       }
       case "daemon": {
         if (selectedHost && selectedHost !== "local") {
-          if (rest[0] === "run") throw new PaddockError("usage", "Start a remote daemon through its service; routing never installs or starts one.")
+          if (rest[0] === "run") throw new AsideeError("usage", "Start a remote daemon through its service; routing never installs or starts one.")
           const result = await call(rest[0] === "stop" ? "shutdown" : "version")
           return out(result, () => console.log(JSON.stringify(result)))
         }
         if (rest[0] === "run") return await runDaemon(dirs, cliDir)
         if (rest[0] === "stop") {
-          const asked = await request("shutdown").then(() => true, (error) => error instanceof PaddockError && error.code === "conflict")
+          const asked = await request("shutdown").then(() => true, (error) => error instanceof AsideeError && error.code === "conflict")
           const stopped = asked && await daemonGone()
           return out({ stopped }, () => console.log(stopped ? "The daemon stopped, and with it every sandbox whose disk limit only the daemon enforces."
             : asked ? "The daemon is still stopping its sandboxes." : "The daemon was not running."))
@@ -722,22 +722,22 @@ async function main(argv: string[]): Promise<void> {
         return out({ running: Boolean(version), ...daemon, token: undefined }, () => console.log(version ? `Running: version ${version.version}, pid ${daemon?.pid}, ${daemon?.port ? `dashboard on port ${daemon.port}` : "no dashboard (socket only)"}.` : "Not running. It starts with the first command."))
       }
       case "host": {
-        if (selectedHost && selectedHost !== "local") throw new PaddockError("usage", "The host registry belongs to the primary machine.")
+        if (selectedHost && selectedHost !== "local") throw new AsideeError("usage", "The host registry belongs to the primary machine.")
         const { values, positionals } = parse({ ssh: { type: "string" }, binary: { type: "string" }, "state-dir": { type: "string" }, confirm: { type: "string" }, artifact: { type: "string" }, sha256: { type: "string" }, sudo: { type: "string" }, "disk-policy": { type: "string" }, "accept-plan": { type: "string" }, docker: { type: "boolean" } }, rest.slice(1))
         if (rest[0] === "add") {
           const plan = await call<HostPlan>("hostPlan", { name: need(positionals[0], "a host name"), ssh: need(values.ssh, "--ssh DEST"), artifact: { path: resolve(need(values.artifact, "--artifact PATH")), sha256: need(values.sha256, "--sha256 HASH") }, sudo: values.sudo, diskPolicy: values["disk-policy"], docker: values.docker })
           if (asJson) return out(plan, () => {})
           console.log(planLines(plan).join("\n"))
           if (values["accept-plan"] !== undefined) {
-            if (values["accept-plan"] !== plan.hash) throw new PaddockError("conflict", "Consent is stale. Review the revised plan above and accept its hash. Nothing was installed.", { plan })
+            if (values["accept-plan"] !== plan.hash) throw new AsideeError("conflict", "Consent is stale. Review the revised plan above and accept its hash. Nothing was installed.", { plan })
           }
-          if (plan.blockers.length) throw new PaddockError("dependency", `Enrollment refused before installation: ${plan.blockers.join(" ")}`)
+          if (plan.blockers.length) throw new AsideeError("dependency", `Enrollment refused before installation: ${plan.blockers.join(" ")}`)
           if (values["accept-plan"] === undefined) {
-            if (!process.stdin.isTTY) throw new PaddockError("usage", "Review --json and use --accept-plan HASH, or run from a terminal and enter yes. Nothing was installed.")
+            if (!process.stdin.isTTY) throw new AsideeError("usage", "Review --json and use --accept-plan HASH, or run from a terminal and enter yes. Nothing was installed.")
             const terminal = createInterface({ input: process.stdin, output: process.stdout })
             let answer: string
             try { answer = await terminal.question("Apply this exact plan? Enter yes: ") } finally { terminal.close() }
-            if (answer !== "yes") throw new PaddockError("conflict", "Enrollment declined. Nothing was installed or registered.")
+            if (answer !== "yes") throw new AsideeError("conflict", "Enrollment declined. Nothing was installed or registered.")
             return await session({ kind: "enroll", hash: plan.hash, accepted: true })
           }
           const host = await call("hostApply", { hash: plan.hash, accepted: true })
@@ -746,7 +746,7 @@ async function main(argv: string[]): Promise<void> {
         if (rest[0] === "list" || rest[0] === undefined) {
           const hosts = await call<HostView[]>("hostList")
           return out(hosts, () => {
-            if (!hosts.length) console.log("No registered hosts. Attach an already prepared daemon with `paddock host attach`.")
+            if (!hosts.length) console.log("No registered hosts. Attach an already prepared daemon with `asd host attach`.")
             for (const view of hosts) {
               if (view.state === "unknown-record") { console.log(`${shown(view.host.name)}: unknown record${view.host.ssh ? ` (${shown(view.host.ssh)})` : ""}\n  ${shown(view.error)}`); continue }
               const { host, state, receivedAt, hello, error } = view
@@ -763,11 +763,11 @@ async function main(argv: string[]): Promise<void> {
           const removed = await call<{ removed: string }>("hostRemove", { name: need(positionals[0], "a host name"), confirm: values.confirm })
           return out(removed, () => console.log(`Forgot ${removed.removed}. Its prepared remote daemon, service, sandboxes, images, runtime, packages and logs were retained.`))
         }
-        throw new PaddockError("usage", "Use `paddock host add`, `paddock host list`, `paddock host attach` or `paddock host remove NAME --confirm NAME`.")
+        throw new AsideeError("usage", "Use `asd host add`, `asd host list`, `asd host attach` or `asd host remove NAME --confirm NAME`.")
       }
       case "transport": {
         const { values } = parse({ protocol: { type: "string" }, stream: { type: "boolean" } }, rest.slice(1))
-        if (selectedHost || asJson || rest[0] !== "stdio" || values.protocol !== String(PROTOCOL)) throw new PaddockError("incompatible", "Use `paddock transport stdio --protocol 1` on the target machine.")
+        if (selectedHost || asJson || rest[0] !== "stdio" || values.protocol !== String(PROTOCOL)) throw new AsideeError("incompatible", "Use `asd transport stdio --protocol 1` on the target machine.")
         await transportStdio(values.stream ? streamSocketPath(dirs) : socketPath(dirs))
         // Exits as soon as the daemon's side is closed (a lease ended, say), rather than waiting for SSH to close stdin,
         // which a partitioned link may never do. Ending stdout first flushes Bun's own pipe buffer, which a pending write
@@ -775,28 +775,28 @@ async function main(argv: string[]): Promise<void> {
         await bounded(new Promise<void>((resolve) => process.stdout.end(() => resolve())), 5000)
         process.exit(0)
       }
-      default: throw new PaddockError("usage", `Unknown command ${command}. See \`paddock help\`.`)
+      default: throw new AsideeError("usage", `Unknown command ${command}. See \`asd help\`.`)
     }
   } catch (error) {
-    const code: ErrorCode = error instanceof PaddockError ? error.code : "runtime"
+    const code: ErrorCode = error instanceof AsideeError ? error.code : "runtime"
     const raw = (error as Error).message
-    const message = code === "usage" && !raw.includes("See `paddock") ? `${raw} See \`paddock ${helpWords} --help\`.` : raw
-    if (asJson) console.log(JSON.stringify({ ok: false, error: { code, message, details: error instanceof PaddockError ? error.details : undefined } }))
+    const message = code === "usage" && !raw.includes("See `asd") ? `${raw} See \`asd ${helpWords} --help\`.` : raw
+    if (asJson) console.log(JSON.stringify({ ok: false, error: { code, message, details: error instanceof AsideeError ? error.details : undefined } }))
     else if (command === "host" && rest[0] === "add") {
-      console.error(`paddock: ${refusal(message)}`)
-      if (error instanceof PaddockError && error.details !== undefined) for (const line of detailLines(error.details)) console.error(line)
+      console.error(`asd: ${refusal(message)}`)
+      if (error instanceof AsideeError && error.details !== undefined) for (const line of detailLines(error.details)) console.error(line)
     }
     else if (code === "probes-required") {
-      console.error(`paddock: ${refusal(message)}`)
-      console.error(`To turn off the probe requirement on the selected machine: paddock${selectedHost && selectedHost !== "local" ? ` --host ${selectedHost}` : ""} config set require-probes off`)
+      console.error(`asd: ${refusal(message)}`)
+      console.error(`To turn off the probe requirement on the selected machine: asd${selectedHost && selectedHost !== "local" ? ` --host ${selectedHost}` : ""} config set require-probes off`)
     }
-    else if (code === "check-failed" && error instanceof PaddockError && Array.isArray(error.details)) {
+    else if (code === "check-failed" && error instanceof AsideeError && Array.isArray(error.details)) {
       // Workspaces have their own checklist; some ids (credentials) are in both with different titles.
       const checklist = command === "workspace" ? WORKSPACE_CHECKLIST : CHECKLIST
-      console.error(`paddock: ${shown(message.split(": ")[0]!.replace(/\.$/, ""))}. These checks did not hold:`)
+      console.error(`asd: ${shown(message.split(": ")[0]!.replace(/\.$/, ""))}. These checks did not hold:`)
       for (const check of error.details as CheckResult[]) console.error(`  ${MARK[check.status] ?? "?"} ${checklist.find((entry) => entry.id === check.id)?.title ?? shown(check.id)}\n      ${shown(check.detail)}`)
       if (creating) console.error(`Remove it: ${next("remove", creating, "--confirm", creating)}`)
-    } else console.error(`paddock: ${shown(message)}`)
+    } else console.error(`asd: ${shown(message)}`)
     process.exit(EXIT[code])
   }
 }

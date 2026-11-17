@@ -15,7 +15,7 @@ import { OUTPUT_LIMIT, systemRunner } from "./run"
 import { checkSocketPath, daemonFile, socketPath, streamSocketPath, type Dirs } from "./state"
 import { sourceDigest } from "./source" with { type: "macro" }
 import { serveStream } from "./stream"
-import { PaddockError, type ErrorCode } from "./types"
+import { AsideeError, type ErrorCode } from "./types"
 import builtInUi from "../ui/index.html" with { type: "text" }
 import pkg from "../package.json"
 import { WORKSPACE_WATCH_MS, Workspaces } from "./workspaces"
@@ -39,17 +39,17 @@ type Body = Record<string, unknown>
 export function execStdin(body: Body): string | Uint8Array | undefined {
   const limit = `Buffered exec input is limited to ${OUTPUT_LIMIT / 1024 ** 2} MiB; use --stream for more.`
   if (body.stdinBase64 !== undefined) {
-    if (body.stdin !== undefined) throw new PaddockError("usage", "Send stdin or stdinBase64, not both.")
+    if (body.stdin !== undefined) throw new AsideeError("usage", "Send stdin or stdinBase64, not both.")
     const encoded = body.stdinBase64
-    if (typeof encoded !== "string" || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new PaddockError("usage", "stdinBase64 must be standard padded base64.")
-    if (encoded.length / 4 * 3 > OUTPUT_LIMIT + 2) throw new PaddockError("usage", limit)
+    if (typeof encoded !== "string" || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new AsideeError("usage", "stdinBase64 must be standard padded base64.")
+    if (encoded.length / 4 * 3 > OUTPUT_LIMIT + 2) throw new AsideeError("usage", limit)
     const bytes = Buffer.from(encoded, "base64")
-    if (bytes.length > OUTPUT_LIMIT) throw new PaddockError("usage", limit)
+    if (bytes.length > OUTPUT_LIMIT) throw new AsideeError("usage", limit)
     return new Uint8Array(bytes)
   }
   if (body.stdin === undefined) return undefined
-  if (typeof body.stdin !== "string") throw new PaddockError("usage", "stdin must be a string; send bytes as stdinBase64.")
-  if (Buffer.byteLength(body.stdin) > OUTPUT_LIMIT) throw new PaddockError("usage", limit)
+  if (typeof body.stdin !== "string") throw new AsideeError("usage", "stdin must be a string; send bytes as stdinBase64.")
+  if (Buffer.byteLength(body.stdin) > OUTPUT_LIMIT) throw new AsideeError("usage", limit)
   return body.stdin
 }
 type Method = { run: (body: Body, signal?: AbortSignal) => Promise<unknown>; socketOnly?: boolean }
@@ -130,7 +130,7 @@ export function createHandler(table: Record<string, Method>, token: string, conf
       if (request.method !== "POST" || !method) return json(404, { ok: false, error: { code: "not-found", message: "No such method." } })
       if (!viaSocket) {
         const given = Buffer.from(request.headers.get("authorization")?.replace(/^Bearer /, "") ?? ""); const expected = Buffer.from(token)
-        if (given.length !== expected.length || !timingSafeEqual(given, expected)) return refuse(401, "Open the dashboard with the link from `paddock ui`.")
+        if (given.length !== expected.length || !timingSafeEqual(given, expected)) return refuse(401, "Open the dashboard with the link from `asd ui`.")
         if (method.socketOnly) return refuse(403, "This method is only available to the CLI.")
       }
       try {
@@ -138,25 +138,25 @@ export function createHandler(table: Record<string, Method>, token: string, conf
         const body = text ? JSON.parse(text) as unknown : {}
         if (typeof body !== "object" || body === null || Array.isArray(body)) return refuse(400, "The request body must be a JSON object.")
         const payload = body as Body
-        if (payload.host !== undefined && (typeof payload.host !== "string" || !payload.host)) throw new PaddockError("usage", "host must be a registered host name or local.")
+        if (payload.host !== undefined && (typeof payload.host !== "string" || !payload.host)) throw new AsideeError("usage", "host must be a registered host name or local.")
         if (machines) {
-          const expected = request.headers.get("x-paddock-machine")
-          if (expected && expected !== machines.hello.machineId) throw new PaddockError("identity-changed", "The daemon's machine identity differs from the selected machine.")
-          if (expected && (request.headers.get("x-paddock-protocol") !== String(PROTOCOL) || request.headers.get("x-paddock-version") !== VERSION || request.headers.get("x-paddock-build") !== machines.hello.sourceDigest))
-            throw new PaddockError("incompatible", `This daemon is Paddock ${VERSION}, protocol ${PROTOCOL}, built from source ${machines.hello.sourceDigest.slice(0, 12)}; the gateway's request differs. Nothing was done.`)
+          const expected = request.headers.get("x-asidee-machine")
+          if (expected && expected !== machines.hello.machineId) throw new AsideeError("identity-changed", "The daemon's machine identity differs from the selected machine.")
+          if (expected && (request.headers.get("x-asidee-protocol") !== String(PROTOCOL) || request.headers.get("x-asidee-version") !== VERSION || request.headers.get("x-asidee-build") !== machines.hello.sourceDigest))
+            throw new AsideeError("incompatible", `This daemon is Asidee ${VERSION}, protocol ${PROTOCOL}, built from source ${machines.hello.sourceDigest.slice(0, 12)}; the gateway's request differs. Nothing was done.`)
           const name = url.pathname.slice(5)
           if (isMethod(name) && !viaSocket && CATALOG[name][0] !== "dashboard") return refuse(403, "This method is only available to the CLI.")
           if (payload.host !== undefined && payload.host !== "local") {
-            if (!isMethod(name)) throw new PaddockError("usage", "This method cannot be routed.")
+            if (!isMethod(name)) throw new AsideeError("usage", "This method cannot be routed.")
             return json(200, { ok: true, data: await machines.route(name, payload, request.signal) })
           }
-          if (payload.machineId !== undefined && payload.machineId !== machines.hello.machineId) throw new PaddockError("identity-changed", "The request names another machine identity.")
-        } else if (payload.host !== undefined && payload.host !== "local") throw new PaddockError("dependency", "Machine routing is unavailable.")
+          if (payload.machineId !== undefined && payload.machineId !== machines.hello.machineId) throw new AsideeError("identity-changed", "The request names another machine identity.")
+        } else if (payload.host !== undefined && payload.host !== "local") throw new AsideeError("dependency", "Machine routing is unavailable.")
         const { host: _host, machineId: _identity, ...local } = payload
         return json(200, { ok: true, data: await method.run(local, request.signal) })
       } catch (error) {
-        const code: ErrorCode = error instanceof PaddockError ? error.code : error instanceof SyntaxError ? "usage" : "runtime"
-        return json(STATUS[code], { ok: false, error: { code, message: (error as Error).message, details: error instanceof PaddockError ? error.details : undefined } })
+        const code: ErrorCode = error instanceof AsideeError ? error.code : error instanceof SyntaxError ? "usage" : "runtime"
+        return json(STATUS[code], { ok: false, error: { code, message: (error as Error).message, details: error instanceof AsideeError ? error.details : undefined } })
       }
     }
     if (viaSocket || request.method !== "GET") return json(404, { ok: false, error: { code: "not-found", message: "Not found." } })
@@ -172,19 +172,19 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   checkSocketPath(dirs)
   await mkdir(dirs.state, { recursive: true, mode: 0o700 })
   const socket = socketPath(dirs)
-  const alive = await fetch("http://paddock/api/version", { unix: socket, method: "POST", body: "{}" } as RequestInit).then(() => true, () => false)
-  if (alive) throw new PaddockError("conflict", "A Paddock daemon is already running.")
+  const alive = await fetch("http://asidee/api/version", { unix: socket, method: "POST", body: "{}" } as RequestInit).then(() => true, () => false)
+  if (alive) throw new AsideeError("conflict", "An Asidee daemon is already running.")
   await rm(socket, { force: true }); await rm(streamSocketPath(dirs), { force: true })
 
   const identity = await machineIdentity(dirs)
   const digest = new Bun.CryptoHasher("sha256")
   for await (const bytes of Bun.file(Bun.main.startsWith("/$bunfs/") ? process.execPath : Bun.main).stream()) digest.update(bytes)
-  const providers = process.env.PADDOCK_WORKSPACE_ONLY === "1" ? [] : [new GvisorProvider(systemRunner, createHash("sha256").update(`${hostname()}\0${dirs.state}`).digest("hex").slice(0, 10)), new DockerSandboxesProvider(systemRunner)]
+  const providers = process.env.ASIDEE_WORKSPACE_ONLY === "1" ? [] : [new GvisorProvider(systemRunner, createHash("sha256").update(`${hostname()}\0${dirs.state}`).digest("hex").slice(0, 10)), new DockerSandboxesProvider(systemRunner)]
   const core = new Core(providers, dirs, systemRunner, cliDir, identity)
   const workspaces = new Workspaces(dirs)
   // service: systemd sets INVOCATION_ID for each unit it starts; a daemon started by hand or by the CLI has none.
   const hello: Hello = { machineId: identity, bootId: randomBytes(16).toString("hex"), version: VERSION, buildDigest: digest.digest("hex"), sourceDigest: SOURCE, protocols: [PROTOCOL], methods: Object.keys(CATALOG),
-    features: ["machines", "remote-streams", "remote-forwards", "ssh", "lease-renewal"], listener: process.env.PADDOCK_SOCKET_ONLY === "1" ? "socket-only" : "dashboard", service: process.env.INVOCATION_ID ? "systemd" : "none" }
+    features: ["machines", "remote-streams", "remote-forwards", "ssh", "lease-renewal"], listener: process.env.ASIDEE_SOCKET_ONLY === "1" ? "socket-only" : "dashboard", service: process.env.INVOCATION_ID ? "systemd" : "none" }
   const machines = new Machines(dirs, hello, async () => ({ hello, sandboxes: await core.list(), checkedAt: new Date().toISOString() }))
   const hosts = new Hosts(machines)
   const token = randomBytes(24).toString("hex")
@@ -213,11 +213,11 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   })
   await new Promise<void>((resolve, reject) => { streams.once("error", reject); streams.listen(streamSocketPath(dirs), () => resolve()) })
   await chmod(streamSocketPath(dirs), 0o600)
-  const wanted = Number(process.env.PADDOCK_PORT ?? DEFAULT_PORT)
+  const wanted = Number(process.env.ASIDEE_PORT ?? DEFAULT_PORT)
   let tcpPort = 0
   const serveTcp = (port: number) => Bun.serve({ hostname: "127.0.0.1", port, idleTimeout: 0, fetch: (request: Request): Promise<Response> => handle(request, false, tcpPort) })
   let tcp: ReturnType<typeof serveTcp> | undefined
-  if (process.env.PADDOCK_SOCKET_ONLY !== "1") {
+  if (process.env.ASIDEE_SOCKET_ONLY !== "1") {
     try { tcp = serveTcp(wanted) } catch { tcp = serveTcp(0) }
     tcpPort = tcp.port!
   }

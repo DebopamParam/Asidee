@@ -1,11 +1,11 @@
 # T3 Code setup
 
-Run `bun extensions/t3/t3.ts setup NAME` with `paddock` on PATH. The sandbox must already be running and have Node and
+Run `bun extensions/t3/t3.ts setup NAME` with `asd` on PATH. The sandbox must already be running and have Node and
 tar. This machine needs Bun and either `t3` on PATH or the desktop launcher at `~/.t3/bin/t3`. No host settings or
 credentials are read. The launcher is run only with `--version`.
 
-Copy this entire folder to `$PADDOCK_CONFIG_DIR/extensions/t3` (normally `~/.config/paddock/extensions/t3`), preserving
-the executable bit on `t3.ts`, to expose the setup and sync actions in the dashboard and `paddock ext run t3 setup NAME`.
+Copy this entire folder to `$ASIDEE_CONFIG_DIR/extensions/t3` (normally `~/.config/asidee/extensions/t3`), preserving
+the executable bit on `t3.ts`, to expose the setup and sync actions in the dashboard and `asd ext run t3 setup NAME`.
 It is independent of the other bundled extensions and adds no runtime dependency.
 
 Setup installs the exact reported version, including a nightly suffix, from the matching GitHub release. The guest
@@ -24,12 +24,12 @@ The current managed primary is retained, otherwise `-default`, the canonical dir
 is selected. The built-in IDs are `claudeAgent` and `codex`; other IDs are `claude-PROFILE` and `codex-PROFILE`.
 There is no last-imported ordering available from the login extension.
 
-Only instances recorded with their driver and home in the private `~/.t3/userdata/paddock-providers.json` sidecar are
+Only instances recorded with their driver and home in the private `~/.t3/userdata/asidee-providers.json` sidecar are
 updated or removed. Other instances and top-level settings are
-preserved, including user-configured built-ins. An unowned ID collision uses `paddock-AGENT-PROFILE`; a second collision
+preserved, including user-configured built-ins. An unowned ID collision uses `asidee-AGENT-PROFILE`; a second collision
 fails without replacing the settings file. Claude providers override `ANTHROPIC_API_KEY` with an empty value to select
 the imported subscription login. Settings are written atomically with mode 0600 under the logins extension's
-`~/.paddock-logins.lock`. Invalid settings are refused. Changes made concurrently by T3 itself are not serialized by
+`~/.asidee-logins.lock`. Invalid settings are refused. Changes made concurrently by T3 itself are not serialized by
 that lock. Before renaming, sync compares the current settings bytes with the original and aborts if they changed.
 There is still a race between that check and rename; eliminating it requires coordination with T3's own settings writer.
 No credentials or subprocess diagnostics are printed. The sidecar records both generations before settings
@@ -37,7 +37,7 @@ publication so retries recover ownership after an interrupted update. No extensi
 
 ## SSH access
 
-The core owns it: `paddock ssh setup NAME` prepares it, `--write-config` adds its `Include` line to `~/.ssh/config`,
+The core owns it: `asd ssh setup NAME` prepares it, `--write-config` adds its `Include` line to `~/.ssh/config`,
 and the checklist discloses it. Setup's result carries the core's `sshAccess`, and `bun extensions/t3/t3.ts ssh NAME`
 (or the dashboard's "Show SSH access for T3") prints it alone: `{alias, user, home, batchReady, loopbackForwarding}`,
 each field checked. Connect the desktop app to `alias` once `batchReady` is true. The alias logs in without a prompt
@@ -53,7 +53,7 @@ not a sandbox guarantee.
 
 Unit tests use fake transport, temporary homes and a loopback fake release server.
 
-Checked live on 2026-11-11 in one arm64 sandbox on the default image, directly and through `paddock ext run`: setup
+Checked live on 2026-11-11 in one arm64 sandbox on the default image, directly and through `asd ext run`: setup
 installed this machine's version (`0.1.9-nightly.20261110.4478`) from its release in about 15 s, published
 `~/.t3/runtime/versions/VERSION/t3`, which reports that version, and `.install-complete` containing the version and a
 newline; a second setup reused it in under 2 s. `settings.json` and the sidecar were mode 0600. With placeholder

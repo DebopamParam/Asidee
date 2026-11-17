@@ -33,8 +33,8 @@ test("failed-create cleanup verifies removal, keeps pre-existing objects and rep
     } else {
       let message = ""
       try { await cleanup } catch (error) { message = (error as Error).message }
-      expect(message).toContain("network paddock-net-demo")
-      expect(message).toContain("volume paddock-docker-attempt")
+      expect(message).toContain("network asidee-net-demo")
+      expect(message).toContain("volume asidee-docker-attempt")
       expect(message).toContain(mode === "refused" ? "remains" : "presence could not be checked")
     }
   }
@@ -43,14 +43,14 @@ test("failed-create cleanup verifies removal, keeps pre-existing objects and rep
 test("the recovery remove command reports a network that the engine leaves behind", async () => {
   const run: Runner = async (argv) => {
     const [kind, operation] = argv.slice(3)
-    if (kind === "inspect") return { exitCode: 1, stdout: "", stderr: "No such container: paddock-demo" }
+    if (kind === "inspect") return { exitCode: 1, stdout: "", stderr: "No such container: asidee-demo" }
     if (kind === "volume") return { exitCode: 1, stdout: "", stderr: "No such volume" }
     if (kind === "network" && operation === "rm") return { exitCode: 1, stdout: "", stderr: "network has active endpoints" }
     if (kind === "network" && operation === "inspect") return { exitCode: 0, stdout: "[{}]", stderr: "" }
     if (kind === "image") return { exitCode: 0, stdout: "", stderr: "" }
     throw new Error(`unexpected ${argv}`)
   }
-  await expect(new GvisorProvider(run).remove(manifest)).rejects.toThrow("paddock-net-demo")
+  await expect(new GvisorProvider(run).remove(manifest)).rejects.toThrow("asidee-net-demo")
 })
 
 test("a missing image names the image and engine reason as a dependency problem", async () => {

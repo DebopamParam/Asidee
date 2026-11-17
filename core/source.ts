@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from "node:fs"
 import { join, relative } from "node:path"
 
 // Imported as a macro (core/daemon.ts), so it runs when the program is bundled or loaded, never in a compiled binary:
-// the digest of every source file that goes into Paddock, the same for each platform's build of one source tree.
+// the digest of every source file that goes into Asidee, the same for each platform's build of one source tree.
 export function sourceDigest(): string {
   const root = join(import.meta.dir, "..")
   const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? walk(join(dir, entry.name)) : [join(dir, entry.name)])

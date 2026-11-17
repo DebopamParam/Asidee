@@ -2,11 +2,11 @@ import { expect, test } from "bun:test"
 import { EventEmitter } from "node:events"
 import { connect } from "node:net"
 import { boundPort, FORWARD_CONNECTIONS, listenLoopback, relay, validPort } from "../../core/forwards"
-import { PaddockError, type Session } from "../../core/types"
+import { AsideeError, type Session } from "../../core/types"
 
 test("ports are whole numbers from 1 to 65535, as numbers or digits", () => {
   expect(validPort(3000, "port")).toBe(3000); expect(validPort("65535", "port")).toBe(65_535)
-  for (const bad of [0, 65_536, -1, 1.5, "80x", " 80", "", null, undefined, "0x50", [80]]) expect(() => validPort(bad, "port")).toThrow(PaddockError)
+  for (const bad of [0, 65_536, -1, 1.5, "80x", " 80", "", null, undefined, "0x50", [80]]) expect(() => validPort(bad, "port")).toThrow(AsideeError)
 })
 
 test("a listener binds 127.0.0.1 once, picks a free port when none is given, and refuses an occupied one", async () => {

@@ -27,7 +27,7 @@ test("the bounded transport withholds spawn failures and oversized output", asyn
   await expect(run([join(home, "does-not-exist")])).rejects.not.toThrow(home)
   await expect(run(["env", "HOME=" + home, "XDG_CONFIG_HOME=" + join(home, ".config"), process.execPath, "-e", "process.stdout.write('private-output'.repeat(1300000))"])).rejects.toThrow("16 MiB")
 })
-test("each direct client provides help without invoking paddock or reading the real home", async () => {
+test("each direct client provides help without invoking asd or reading the real home", async () => {
   const home = await fixture(), execute = local(home)
   await put(home, "placeholder", "")
   for (const [id, entry] of [["t3", "t3.ts"], ["rotator", "rotator.ts"], ["env-docs", "env-docs.ts"], ["repo", "repo.ts"]]) {

@@ -115,13 +115,13 @@ function world() {
   return { provider, boxes, listeners, attached, dialed, state, listen }
 }
 
-async function paddock(fake = world(), dirs?: Core["dirs"]) {
-  const root = dirs ? undefined : await mkdtemp(join(tmpdir(), "paddock-links-"))
+async function asidee(fake = world(), dirs?: Core["dirs"]) {
+  const root = dirs ? undefined : await mkdtemp(join(tmpdir(), "asidee-links-"))
   return new Core([fake.provider], dirs ?? { state: join(root!, "state"), config: join(root!, "config") }, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere")
 }
 
 test("names, ports and the two ends are validated in the daemon before anything is recorded", async () => {
-  const core = await paddock()
+  const core = await asidee()
   await core.create({ name: "app" }); await core.create({ name: "db" })
   for (const [from, to, port] of [["App", "db", 5432], ["app", "db;rm", 5432], ["app", "db", 0], ["app", "db", 70_000], ["app", "db", "54x"], ["app", "app", 5432], ["app", "localhost", 5432]] as const)
     await expect(core.links.add(from, to, port)).rejects.toMatchObject({ code: "usage" })
@@ -131,7 +131,7 @@ test("names, ports and the two ends are validated in the daemon before anything 
 })
 
 test("a link opens measured, carries a connection to its port only, and says what it trusts on both ends", async () => {
-  const fake = world(); const core = await paddock(fake)
+  const fake = world(); const core = await asidee(fake)
   await core.create({ name: "app" }); await core.create({ name: "db" })
   fake.boxes.get("db")!.services.add(5432)
   const made = await core.links.add("app", "db", "5432")
@@ -139,7 +139,7 @@ test("a link opens measured, carries a connection to its port only, and says wha
   // What app reported about itself is said to be so, beside what holds independently of it.
   expect(made.measured!.detail).toContain("The attempts from app used programs inside it, which its root could replace. Independently, the daemon dials only the link's own port")
   expect(made.trust).toBe("db sees these connections as local (from 127.0.0.1 inside db), so a service in db that trusts local connections trusts app.")
-  expect(fake.boxes.get("app")!.hosts).toEqual(["127.77.0.2\tdb\t# paddock-link"])
+  expect(fake.boxes.get("app")!.hosts).toEqual(["127.77.0.2\tdb\t# asidee-link"])
   // The test ran on two other ports and left nothing listening in app but the link's port.
   expect([...fake.listeners.keys()]).toEqual(["app 127.77.0.2:5432"])
   const listener = fake.listen("app", "127.77.0.2", 5432)!
@@ -157,7 +157,7 @@ test("a link opens measured, carries a connection to its port only, and says wha
 })
 
 test("a link whose test reaches what it does not name is refused at add, and cut with only the verified sandbox stopped", async () => {
-  const fake = world(); const core = await paddock(fake)
+  const fake = world(); const core = await asidee(fake)
   await core.create({ name: "app" }); await core.create({ name: "db" })
   fake.state.leak = true
   await expect(core.links.add("app", "db", 5432)).rejects.toMatchObject({ code: "check-failed", message: expect.stringContaining("app reached db at its network address 10.9.0.2") })
@@ -182,7 +182,7 @@ test("a link whose test reaches what it does not name is refused at add, and cut
 })
 
 test("a link that does not carry what it names is cut and reported, and stops neither sandbox, whichever is verified", async () => {
-  const fake = world(); const core = await paddock(fake)
+  const fake = world(); const core = await asidee(fake)
   await core.create({ name: "app" }); await core.create({ name: "db" })
   await core.links.add("app", "db", 5432)
   // From app's side: something in app names db first in /etc/hosts, so by name the test reaches nothing.
@@ -201,7 +201,7 @@ test("a link that does not carry what it names is cut and reported, and stops ne
     fake.provider.links!.hosts = async (manifest, lines) => { await hosts(manifest, lines); fake.boxes.get(manifest.name)!.hosts.unshift("127.0.0.9\tdb"); return `127.0.0.9\tdb\n${lines.join("\n")}\n` }
   }
   fake.provider.links!.hosts = hosts
-  // From db's side: its relay answers the test's own control and nothing after it, as a replaced /.paddock/busybox could.
+  // From db's side: its relay answers the test's own control and nothing after it, as a replaced /.asidee/busybox could.
   const dialLoopback = fake.provider.dialLoopback
   const seen = new Set<number>()
   fake.provider.dialLoopback = async (manifest, port) => {
@@ -216,7 +216,7 @@ test("a link that does not carry what it names is cut and reported, and stops ne
 }, 30_000)
 
 test("a link that reaches what it does not name fails the check; one seen only inside the linking sandbox does not stop the sandbox it links to", async () => {
-  const fake = world(); const core = await paddock(fake)
+  const fake = world(); const core = await asidee(fake)
   await core.create({ name: "app" }); await core.create({ name: "db" })
   await core.links.add("app", "db", 5432)
   // app's relay replays what its first dial of a port received, so the closed test route seems to answer still.
@@ -247,7 +247,7 @@ test("a link that reaches what it does not name fails the check; one seen only i
 })
 
 test("the test never uses a port another link of the pair names, so that link's answer is not taken for a leak", async () => {
-  const fake = world(); const core = await paddock(fake)
+  const fake = world(); const core = await asidee(fake)
   await core.create({ name: "app" }); await core.create({ name: "db" })
   const ports = Array.from({ length: 15 }, (_, at) => 20_000 + at)
   for (const port of ports) await core.links.add("app", "db", port)
@@ -263,7 +263,7 @@ test("the test never uses a port another link of the pair names, so that link's 
 })
 
 test("links are recorded: they wait while a side is stopped and open again after a start and a daemon restart", async () => {
-  const fake = world(); const core = await paddock(fake)
+  const fake = world(); const core = await asidee(fake)
   await core.create({ name: "app" }); await core.create({ name: "db" })
   await core.stop("db")
   expect(await core.links.add("app", "db", 5432)).toMatchObject({ state: "waiting", reason: "db is stopped" })
@@ -278,7 +278,7 @@ test("links are recorded: they wait while a side is stopped and open again after
   // A new daemon on the same state: the link is listed, and its first pass opens it.
   core.closeSessions()
   expect(fake.listeners.size).toBe(0)
-  const again = await paddock(fake, core.dirs)
+  const again = await asidee(fake, core.dirs)
   expect((await again.links.list())[0]).toMatchObject({ from: "app", to: "db", port: 5432, state: "closed" })
   await again.enforce()
   expect((await again.links.list())[0]).toMatchObject({ state: "open" })
@@ -286,12 +286,12 @@ test("links are recorded: they wait while a side is stopped and open again after
 })
 
 test("removing either sandbox removes its links, and a sandbox made again under the name inherits none", async () => {
-  const fake = world(); const core = await paddock(fake)
+  const fake = world(); const core = await asidee(fake)
   for (const name of ["app", "db", "cache"]) await core.create({ name })
   await core.links.add("app", "db", 5432); await core.links.add("cache", "app", 80); await core.links.add("app", "cache", 6379)
   await core.remove("db", "db")
   expect((await core.links.list()).map((link) => `${link.from}>${link.to}`)).toEqual(["cache>app", "app>cache"])
-  expect(fake.boxes.get("app")!.hosts).toEqual(["127.77.0.3\tcache\t# paddock-link"])
+  expect(fake.boxes.get("app")!.hosts).toEqual(["127.77.0.3\tcache\t# asidee-link"])
   await core.remove("app", "app")
   expect(await core.links.list()).toEqual([])
   expect(fake.listeners.size).toBe(0)
@@ -301,12 +301,12 @@ test("removing either sandbox removes its links, and a sandbox made again under 
   const file = join(core.dirs.state, "links.json"); const saved = await readFile(file, "utf8")
   await core.remove("db", "db"); await core.create({ name: "db" })
   await writeFile(file, saved)
-  const fresh = await paddock(fake, core.dirs)
+  const fresh = await asidee(fake, core.dirs)
   expect(await fresh.links.list()).toEqual([])
 })
 
-test("a link closes when either sandbox restarts behind Paddock's back, and its connections check the run they were opened for", async () => {
-  const fake = world(); const core = await paddock(fake)
+test("a link closes when either sandbox restarts behind Asidee's back, and its connections check the run they were opened for", async () => {
+  const fake = world(); const core = await asidee(fake)
   await core.create({ name: "app" }); await core.create({ name: "db" })
   fake.boxes.get("db")!.services.add(5432)
   await core.links.add("app", "db", 5432)
@@ -327,7 +327,7 @@ test("a link closes when either sandbox restarts behind Paddock's back, and its 
 }, 10_000)
 
 test("a link whose listener keeps stopping is tried again less and less often, and a start or a steady run starts over", async () => {
-  const fake = world(); const core = await paddock(fake)
+  const fake = world(); const core = await asidee(fake)
   let clock = 1_000_000; core.links.now = () => clock
   await core.create({ name: "app" }); await core.create({ name: "db" })
   fake.boxes.get("db")!.services.add(5432)
@@ -344,7 +344,7 @@ test("a link whose listener keeps stopping is tried again less and less often, a
   }
   expect(waits).toEqual([RETRY_MS, 2 * RETRY_MS, 4 * RETRY_MS, 8 * RETRY_MS, 16 * RETRY_MS, 32 * RETRY_MS, RETRY_MAX_MS, RETRY_MAX_MS])
   expect((await core.links.list())[0]).toMatchObject({ state: "closed", reason: "its listener stopped soon after it opened; it is tried again in 30 minutes (9 failures in a row)" })
-  // A start through Paddock tries it now.
+  // A start through Asidee tries it now.
   const before = opens()
   await core.start("app")
   expect(opens()).toBeGreaterThan(before)
@@ -358,7 +358,7 @@ test("a link whose listener keeps stopping is tried again less and less often, a
 }, 20_000)
 
 test(`connections, links and the listener's output are bounded: ${LINK_CONNECTIONS} connections per link, ${LINKS_PER_SANDBOX} links per sandbox`, async () => {
-  const fake = world(); const core = await paddock(fake)
+  const fake = world(); const core = await asidee(fake)
   core.links.opensPerSecond = 1000
   const names = Array.from({ length: LINKS_PER_SANDBOX + 1 }, (_, at) => `peer${at}`)
   for (const name of ["app", "db", ...names]) await core.create({ name })
@@ -388,7 +388,7 @@ test(`connections, links and the listener's output are bounded: ${LINK_CONNECTIO
 }, 20_000)
 
 test("new connections past the rate are refused inside the sandbox, not relayed", async () => {
-  const fake = world(); const core = await paddock(fake)
+  const fake = world(); const core = await asidee(fake)
   await core.create({ name: "app" }); await core.create({ name: "db" })
   fake.boxes.get("db")!.services.add(5432)
   await core.links.add("app", "db", 5432)
@@ -425,7 +425,7 @@ test("a link connection whose client has ended goes once TO is silent for the al
 })
 
 test("links are refused for another machine in one sentence, before any machine is contacted", async () => {
-  const root = await mkdtemp(join(tmpdir(), "paddock-links-"))
+  const root = await mkdtemp(join(tmpdir(), "asidee-links-"))
   const hello: Hello = { machineId: "a".repeat(32), bootId: "b".repeat(32), buildDigest: "c".repeat(64), sourceDigest: "9".repeat(64), version: "0.4.0", methods: Object.keys(CATALOG), protocols: [1], features: [] }
   let contacted = 0
   const machines = new Machines({ state: join(root, "state"), config: join(root, "config") }, hello, async () => ({ hello, sandboxes: [], checkedAt: "" }), { connectPeer: () => { contacted++; throw new Error("should not connect") } } as never)

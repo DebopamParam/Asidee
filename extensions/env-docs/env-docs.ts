@@ -33,16 +33,16 @@ export function render(report: Report): string {
     const check = checks.find(item => item.id === id)
     return check ? `- ${id}: ${check.status} (${check.evidence}). ${cell(check.detail)}` : `- ${id}: not reported.`
   })
-  return `# Sandbox environment\n\nGenerated from paddock --json list and paddock --json verify. This is a snapshot of what Paddock reported, not a new measurement or a promise about untested destinations.\n\n| Item | Reported value |\n| --- | --- |\n${rows.map(([key, value]) => `| ${key} | ${cell(value)} |`).join("\n")}\n\nRequested sizes above are the sandbox spec. The checklist below describes the evidence for their enforcement.\n\n## Reachability and host access reported by Paddock\n\n${network.join("\n")}\n\n## Checklist\n\n| Check | Result | Evidence | Reported detail |\n| --- | --- | --- | --- |\n${checks.map(check => `| ${cell(check.id)} | ${check.status} | ${check.evidence} | ${cell(check.detail)} |`).join("\n")}\n\nA pass records the reported observation. Weak, unknown, unsupported and info retain their original meanings; they are not upgraded to a pass. Missing checks are not evidence.\n`
+  return `# Sandbox environment\n\nGenerated from asd --json list and asd --json verify. This is a snapshot of what Asidee reported, not a new measurement or a promise about untested destinations.\n\n| Item | Reported value |\n| --- | --- |\n${rows.map(([key, value]) => `| ${key} | ${cell(value)} |`).join("\n")}\n\nRequested sizes above are the sandbox spec. The checklist below describes the evidence for their enforcement.\n\n## Reachability and host access reported by Asidee\n\n${network.join("\n")}\n\n## Checklist\n\n| Check | Result | Evidence | Reported detail |\n| --- | --- | --- | --- |\n${checks.map(check => `| ${cell(check.id)} | ${check.status} | ${check.evidence} | ${cell(check.detail)} |`).join("\n")}\n\nA pass records the reported observation. Weak, unknown, unsupported and info retain their original meanings; they are not upgraded to a pass. Missing checks are not evidence.\n`
 }
 
 export async function writeDocs(runner: Runner, name: string, workspace: string): Promise<void> {
   sandboxName(name)
   if (!workspace || /[\0\r\n]/.test(workspace)) throw new Error("Give a guest workspace path.")
-  const list = await runner(["paddock", "--json", "list"])
+  const list = await runner(["asd", "--json", "list"])
   const listed = json(list.stdout)
-  if (list.exitCode !== 0 || !object(listed) || listed.ok !== true || !Array.isArray(listed.data) || !listed.data.some((item: unknown) => object(item) && item.name === name)) throw new Error("Sandbox was not reported by paddock list.")
-  const result = await runner(["paddock", "--json", "verify", name]), reply = json(result.stdout)
+  if (list.exitCode !== 0 || !object(listed) || listed.ok !== true || !Array.isArray(listed.data) || !listed.data.some((item: unknown) => object(item) && item.name === name)) throw new Error("Sandbox was not reported by asd list.")
+  const result = await runner(["asd", "--json", "verify", name]), reply = json(result.stdout)
   if (![0, 6].includes(result.exitCode) || !object(reply) || reply.ok !== true) throw new Error("Verification did not return a checklist; output withheld.")
   const report = parseReport(reply.data)
   if (report.sandbox.name !== name) throw new Error("Verification named a different sandbox.")
@@ -50,9 +50,9 @@ export async function writeDocs(runner: Runner, name: string, workspace: string)
   await exec(runner, name, ["node", "-e", await Bun.file(join(import.meta.dir, "write.cjs")).text(), workspace], render(report))
 }
 export async function main(argv: string[], env = process.env): Promise<void> {
-  if (argv.includes("--help")) { console.log("env-docs.ts NAME [WORKSPACE]. WORKSPACE defaults to the guest's ~/workspace. Runs paddock verify before writing env_docs/SANDBOX.md."); return }
+  if (argv.includes("--help")) { console.log("env-docs.ts NAME [WORKSPACE]. WORKSPACE defaults to the guest's ~/workspace. Runs asd verify before writing env_docs/SANDBOX.md."); return }
   if (argv.length > 2) throw new Error("Unexpected environment docs arguments.")
-  await writeDocs(run, argv[0] ?? env.PADDOCK_SANDBOX ?? "", argv[1] ?? env.PADDOCK_FIELD_WORKSPACE ?? "workspace")
+  await writeDocs(run, argv[0] ?? env.ASIDEE_SANDBOX ?? "", argv[1] ?? env.ASIDEE_FIELD_WORKSPACE ?? "workspace")
   console.log("Wrote env_docs/SANDBOX.md from the reported checklist.")
 }
 if (import.meta.main) main(process.argv.slice(2)).catch(() => { console.error("Environment docs failed. Check list/verify, the running sandbox, Node and workspace. Subprocess output withheld."); process.exitCode = 1 })

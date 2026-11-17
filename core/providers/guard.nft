@@ -1,9 +1,9 @@
-table inet paddock_guard
-delete table inet paddock_guard
-table inet paddock_guard {
+table inet asidee_guard
+delete table inet asidee_guard
+table inet asidee_guard {
   chain prerouting {
     type filter hook prerouting priority mangle - 10; policy accept;
-    iifname != "pdk*" accept
+    iifname != "asd*" accept
     ct state established,related accept
     meta nfproto ipv6 drop
     meta pkttype { broadcast, multicast } drop
@@ -13,14 +13,14 @@ table inet paddock_guard {
   }
   chain forward {
     type filter hook forward priority filter - 10; policy accept;
-    iifname "pdk*" oifname "pdk*" drop
+    iifname "asd*" oifname "asd*" drop
   }
 }
-table bridge paddock_guard
-delete table bridge paddock_guard
-table bridge paddock_guard {
+table bridge asidee_guard
+delete table bridge asidee_guard
+table bridge asidee_guard {
   chain forward {
     type filter hook forward priority filter - 10; policy accept;
-    meta ibrname "pdk*" drop
+    meta ibrname "asd*" drop
   }
 }

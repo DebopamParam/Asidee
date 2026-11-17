@@ -15,7 +15,7 @@ import manifest from "../../extensions/logins/extension.json"
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true }))) })
-async function home() { const path = await mkdtemp(join(tmpdir(), "paddock-login-unit-")); roots.push(path); return path }
+async function home() { const path = await mkdtemp(join(tmpdir(), "asidee-login-unit-")); roots.push(path); return path }
 async function put(root: string, name: string, text: string, mode = 0o600) {
   const path = join(root, name); await mkdir(join(path, ".."), { recursive: true }); await writeFile(path, text, { mode })
 }
@@ -28,7 +28,7 @@ function guestRunner(guestHome: string, prefix = "") {
   const calls: Array<{ argv: string[]; stdin?: string }> = []
   const runner: Runner = async (argv, stdin) => {
     calls.push({ argv: [...argv], stdin })
-    expect(argv[0]).toBe("paddock"); expect(argv[1]).toBe("exec"); expect(argv[2]).toBe("demo")
+    expect(argv[0]).toBe("asd"); expect(argv[1]).toBe("exec"); expect(argv[2]).toBe("demo")
     expect(argv.join(" ")).not.toContain(secret)
     const at = argv.indexOf("--")
     expect(argv.slice(at + 1, at + 3)).toEqual(["node", "-e"])
@@ -125,7 +125,7 @@ test("guest validates JSON itself, rejects credential symlinks and unsafe setup 
 test("copies only allowlisted symlinked Claude setup, scripts and state, rewrites paths, and reports missing commands", async () => {
   const h = await home(), g = await home(), transport = guestRunner(g)
   await put(h, ".claude-work/.credentials.json", credential)
-  await put(h, ".claude/settings.json", JSON.stringify({ model: "opus", mcpServers: { private: { token: secret } }, enabledPlugins: { private: true }, hooks: { PreToolUse: [{ hooks: [{ command: "paddock-missing-unit-hook --argument secret" }, { command: `${h}/.claude-work/hooks/ok.sh` }] }] }, statusLine: { command: "sh ~/.config/ai/status.sh" } }))
+  await put(h, ".claude/settings.json", JSON.stringify({ model: "opus", mcpServers: { private: { token: secret } }, enabledPlugins: { private: true }, hooks: { PreToolUse: [{ hooks: [{ command: "asidee-missing-unit-hook --argument secret" }, { command: `${h}/.claude-work/hooks/ok.sh` }] }] }, statusLine: { command: "sh ~/.config/ai/status.sh" } }))
   await symlink(join(h, ".claude/settings.json"), join(h, ".claude-work/settings.json"))
   await put(h, ".claude/skills/demo/SKILL.md", `read ${h}/project`)
   await put(h, ".claude/skills/demo/node_modules/skip.js", "skip")
@@ -144,7 +144,7 @@ test("copies only allowlisted symlinked Claude setup, scripts and state, rewrite
   expect(JSON.stringify(bundle)).not.toContain(secret)
   const result = await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "work", replace: false, setup: true })
   expect(result.files).toBe(7); expect(result.missingCommands).toBe(1)
-  expect(result.missingCommandNames).toEqual(["paddock-missing-unit-hook"])
+  expect(result.missingCommandNames).toEqual(["asidee-missing-unit-hook"])
   expect(await readFile(join(g, ".config/ai/status.sh"), "utf8")).toContain(`${g}/project`)
   expect(await readFile(join(g, ".claude-work/skills/demo/SKILL.md"), "utf8")).toBe(`read ${g}/project`)
   expect((await stat(join(g, ".claude-work/hooks/ok.sh"))).mode & 0o777).toBe(0o700)
@@ -237,9 +237,9 @@ test("failed runner output, spawn errors, invalid JSON and CLI parsing never bec
   await expect(execute(async () => ({ exitCode: 0, stdout: secret, stderr: "" }), "demo", GUEST, ["list"])).rejects.toThrow("contents withheld")
 })
 
-test("terminal stdin and manifest fields work through a fake paddock command without putting secrets in argv", async () => {
+test("terminal stdin and manifest fields work through a fake asd command without putting secrets in argv", async () => {
   const h = await home(), g = await home(), bin = join(h, "bin")
-  await put(h, "bin/paddock", `#!${process.execPath}\nconst fs = require("fs");\nfs.appendFileSync(process.env.CALLS, JSON.stringify(process.argv.slice(2)) + "\\n");\nconst args = process.argv.slice(2), at = args.indexOf("--");\nconst child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(githubFixture)} + args[at + 3], ...args.slice(at + 4)], { env: { ...process.env, HOME: process.env.GUEST_HOME }, stdin: args.includes("--stdin") ? new Blob([await Bun.stdin.text()]) : "ignore", stdout: "inherit", stderr: "inherit" });\nprocess.exitCode = await child.exited;\n`, 0o700)
+  await put(h, "bin/asd", `#!${process.execPath}\nconst fs = require("fs");\nfs.appendFileSync(process.env.CALLS, JSON.stringify(process.argv.slice(2)) + "\\n");\nconst args = process.argv.slice(2), at = args.indexOf("--");\nconst child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(githubFixture)} + args[at + 3], ...args.slice(at + 4)], { env: { ...process.env, HOME: process.env.GUEST_HOME }, stdin: args.includes("--stdin") ? new Blob([await Bun.stdin.text()]) : "ignore", stdout: "inherit", stderr: "inherit" });\nprocess.exitCode = await child.exited;\n`, 0o700)
   const env = { ...process.env, HOME: h, GH_CONFIG_DIR: join(g, ".config/gh"), XDG_CONFIG_HOME: join(g, ".config"), PATH: `${bin}:${process.env.PATH}`, GUEST_HOME: g, CALLS: join(h, "calls.jsonl") }
   const cli = join(import.meta.dir, "../../extensions/logins/login.ts")
   const invoke = async (args: string[], input?: string, fields: Record<string, string> = {}) => {
@@ -251,17 +251,17 @@ test("terminal stdin and manifest fields work through a fake paddock command wit
   const github = await invoke(["github", "demo"], `${secret}\n`)
   expect(github.exitCode).toBe(0); expect(github.stdout).toContain("There is no secret proxy")
   await put(h, ".codex-work/auth.json", credential)
-  const imported = await invoke(["import"], undefined, { PADDOCK_SANDBOX: "demo", PADDOCK_FIELD_AGENT: "codex", PADDOCK_FIELD_PROFILE: "work", PADDOCK_FIELD_SETUP: "false", PADDOCK_FIELD_REPLACE: "false" })
+  const imported = await invoke(["import"], undefined, { ASIDEE_SANDBOX: "demo", ASIDEE_FIELD_AGENT: "codex", ASIDEE_FIELD_PROFILE: "work", ASIDEE_FIELD_SETUP: "false", ASIDEE_FIELD_REPLACE: "false" })
   expect(imported.exitCode).toBe(0); expect(imported.stdout).toContain('CODEX_HOME="$HOME/.codex-work" codex')
   expect((await invoke(["list", "demo"])).stdout).toContain("octocat")
   expect((await invoke(["logout", "demo", "all"])).exitCode).toBe(0)
   expect(await readFile(env.CALLS, "utf8")).not.toContain(secret)
-  expect(await readdir(g)).not.toContain(".paddock-logins.lock")
+  expect(await readdir(g)).not.toContain(".asidee-logins.lock")
 })
 
 test("guest mutations refuse a concurrent writer and never advise replacing to bypass its lock", async () => {
   const g = await home(), transport = guestRunner(g)
-  await mkdir(join(g, ".paddock-logins.lock"))
+  await mkdir(join(g, ".asidee-logins.lock"))
   await expect(importGithub(transport.runner, "demo", { kind: "token", value: secret }, true)).rejects.toThrow("Another login operation")
   expect(existsSync(join(g, ".config/gh/hosts.yml"))).toBe(false)
 })
@@ -305,7 +305,7 @@ test("GitHub rejects an invalid account token without storing it or returning re
   const transport = guestRunner(g, prefix)
   await expect(importGithub(transport.runner, "demo", { kind: "token", value: secret }, false)).rejects.toThrow("GitHub did not accept that token")
   expect(existsSync(join(g, ".config/gh/hosts.yml"))).toBe(false)
-  expect(existsSync(join(g, ".paddock-logins.lock"))).toBe(false)
+  expect(existsSync(join(g, ".asidee-logins.lock"))).toBe(false)
 })
 
 test("successful guest login responses cannot return arbitrary account text or missing-command secrets", async () => {
@@ -401,6 +401,6 @@ test("GitHub import with missing gh or git fails before storing a token or makin
     await expect(importGithub(guestRunner(g, prefix).runner, "demo", { kind: "token", value: secret }, false)).rejects.toThrow("exit 69")
     expect(existsSync(join(g, ".config/gh/hosts.yml"))).toBe(false)
     expect(existsSync(join(g, "network-called"))).toBe(false)
-    expect(existsSync(join(g, ".paddock-logins.lock"))).toBe(false)
+    expect(existsSync(join(g, ".asidee-logins.lock"))).toBe(false)
   }
 })

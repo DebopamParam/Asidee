@@ -11,7 +11,7 @@
 - **The core is rigid.** It is the only code that runs engine commands. It holds the sandbox spec, the checklist, the
   providers and the rule that a sandbox with a failed blocking check does not run.
 - **Everything else is a client.** The CLI, the dashboard and extensions can only call the methods in `core/daemon.ts`.
-- **The API cannot express an unsafe sandbox.** A spec is a name, an image or one of Paddock's templates, four sizes
+- **The API cannot express an unsafe sandbox.** A spec is a name, an image or one of Asidee's templates, four sizes
   and a boolean `docker` option (`validSpec` in `core/state.ts`); unknown fields are dropped. There is no field for a
   mount, a capability, a runtime or a port. Each engine reports whether it supports `docker`; create refuses an
   unsupported request.
@@ -20,7 +20,7 @@ A create failure before a container exists rolls back that attempt's labeled net
 verifies their removal and the absent container, then removes the record. Its error says nothing was kept for that
 name. Cached helper images and the shared guard remain engine setup. An image download failure names the image in
 plain words before the engine's error. If cleanup cannot be verified, the record stays and the error lists the
-remaining or uncertain objects with `paddock remove NAME --confirm NAME`. Objects labeled for another attempt are
+remaining or uncertain objects with `asd remove NAME --confirm NAME`. Objects labeled for another attempt are
 left alone. A container that was created and then failed a required check stays stopped for inspection. So does one whose first
 checks could not finish (a probe that threw, for example): create reports it stopped and kept for diagnosis, whatever
 `requireProbes` says, since turning that off accepts an unknown probe, not a run with no checks at all. Every start is
@@ -41,9 +41,9 @@ check results. Nonblocking unknown or unsupported checks remain disclosures.
 
 `config.json` has a boolean `requireProbes`, default `true`, a boolean `experimental`, default `false` (see
 [Machines](#machines)), and a number `workspaceFreeSpaceGb`, default 5, from 0 to 100000 (see
-[macOS workspaces](workspaces.md#disk-use-and-free-space)). `paddock config get` reads the effective configuration;
-`paddock config set require-probes on|off`, `paddock config set experimental on|off` and
-`paddock config set workspace-free-space GiB` change one setting each. Both support `--json` and `--host NAME`.
+[macOS workspaces](workspaces.md#disk-use-and-free-space)). `asd config get` reads the effective configuration;
+`asd config set require-probes on|off`, `asd config set experimental on|off` and
+`asd config set workspace-free-space GiB` change one setting each. Both support `--json` and `--host NAME`.
 With `requireProbes: false`, create accepts unknown blocking probes and reports them as unknown, never as passes.
 Failed and unsupported blocking probes still refuse create. The dashboard's **Settings** section has the same toggle.
 A create refused for unknown probes offers **Open settings**, which navigates and focuses the toggle without changing it.
@@ -56,7 +56,7 @@ Writes are serialized within the daemon, and each create reads the current file 
 Both methods are available over the user socket and on loopback with the dashboard token and accepted Host header.
 They use the same handler checks as create; a cross-site page without that token, or using another Host, cannot change them.
 Each daemon uses its own machine's configuration. A routed create uses the remote setting, and routing preserves its
-error text, code and details. For example, `paddock --host build config set require-probes off` changes only build.
+error text, code and details. For example, `asd --host build config set require-probes off` changes only build.
 This setting affects future create requests. It does not rerun probes or alter running sandboxes.
 
 Explicit verify on a running sandbox still reports an unknown probe without stopping the sandbox, in either mode.
@@ -77,7 +77,7 @@ is waived for it. A future microVM provider needs reviewed evidence or an explic
 | Own network, guard loaded | yes | before start | Engine configuration, and the loaded firewall rules compared rule for rule with the shipped ones. |
 | No engine-published ports; requested forwards are loopback-only | yes | before start | Engine configuration. Forwards are the daemon's, not the engine's. |
 | Forwards to this machine's loopback | no | before start | Checked by the core: each active forward's address, its port inside, and its id; a disclosure. |
-| SSH access for editors | no | before start | Checked by the core: whether `paddock ssh setup` was run for this sandbox, its user, and the editor key's fingerprint; a disclosure. |
+| SSH access for editors | no | before start | Checked by the core: whether `asd ssh setup` was run for this sandbox, its user, and the editor key's fingerprint; a disclosure. |
 | Links to other sandboxes | no | before start | Checked by the core: each link from or to this sandbox, its state and last measurement, and what the other side trusts; a disclosure. |
 | Memory, process, CPU limits | yes | before start | Engine configuration: the values must be the spec's (as created or resized), with json-file host log rotation (10 MiB, two files) for every sandbox. |
 | Disk limit | no | before start | The engine's capability: hard, watched or none. Watched needs a runtime with `--overlay2=none`. |
@@ -89,7 +89,7 @@ is waived for it. A future microVM provider needs reviewed evidence or an explic
 | Internet access | no | verify | Live attempt; a disclosure. |
 | Logins inside | no | verify | Looks for the usual credential files with programs inside the sandbox, which its root could replace; a disclosure, not a guarantee. |
 
-"Verify" runs after every create and on `paddock verify`. A start runs the configuration and runtime checks. On a stopped sandbox, verify
+"Verify" runs after every create and on `asd verify`. A start runs the configuration and runtime checks. On a stopped sandbox, verify
 reports the configuration checks only and marks the rest as not checked.
 
 Verification results are measurements at the recorded `at` time, not continuing guarantees. Create and verify return
@@ -103,13 +103,13 @@ live restore, engine replacement/reconfiguration and a daemon restart without pr
 alone proves continuity. Use verify for a new measurement; even a recent historical pass is not a claim about now.
 
 The isolated-kernel check also refuses a gVisor runtime registered with a flag that opens a path to the host or
-switches a limit off (`unsafeRuntimeArgs` in `core/providers/gvisor.ts`), and `paddock doctor` does not offer one.
+switches a limit off (`unsafeRuntimeArgs` in `core/providers/gvisor.ts`), and `asd doctor` does not offer one.
 
 ### Staying true after the start
 
 Every 30 seconds the daemon repeats the configuration and runtime checks and the disk measurement on each running sandbox, and stops
 one that fails, recording the reason. A check that could not be made in one pass does not stop a running sandbox: that
-is usually an engine that was busy. Four such passes in a row do, because by then nobody is checking it. The probes are not repeated on the timer: they start containers, and `paddock verify` runs them.
+is usually an engine that was busy. Four such passes in a row do, because by then nobody is checking it. The probes are not repeated on the timer: they start containers, and `asd verify` runs them.
 
 Each unsuccessful enforcement pass records a timestamp and warning on that sandbox, shown by CLI list/get output
 and the collapsed dashboard as "Enforcement problem at …". This includes thrown status/check/disk errors, unknown
@@ -124,8 +124,8 @@ enforcement-error event. Unit fixtures cover these failures; no live engine fail
 
 A successful `start` clears the old stop reason and measures disk use when the engine's limit is watched. Measured
 use above the limit adds `diskWarning` to the start result, with `usedBytes`, `limitBytes` and a message. CLI text
-prints that message too: the sandbox runs so space can be freed with `paddock exec NAME -- …`, but will be stopped
-again within about 30 seconds unless space is freed or its limit is raised with `paddock resize NAME --disk N`.
+prints that message too: the sandbox runs so space can be freed with `asd exec NAME -- …`, but will be stopped
+again within about 30 seconds unless space is freed or its limit is raised with `asd resize NAME --disk N`.
 The warning describes that start's measurement and is not stored as a stop reason. An under-limit start omits it.
 
 ### How the guard is compared
@@ -146,12 +146,12 @@ tailnet range (100.64/10) to a listener inside it, and removes it all afterwards
 where a device on your LAN would: beyond the host, at a private address. A range whose stand-in address the host
 already routes somewhere is skipped and named in the result. The check is `pass` only when every range was probed; with
 any range skipped, or none set up, it is `weak` and says which ranges were probed and which rest on the loaded rules
-alone. `weak` does not stop the sandbox. Routes through a previous Paddock probe are awaited
+alone. `weak` does not stop the sandbox. Routes through a previous Asidee probe are awaited
 with a bounded deadline instead of being counted as occupied addresses. A probe returns only after its own veth,
 bridge and routes disappear. A teardown timeout fails the request instead of returning weaker evidence. A listener that was created but whose
 host control failed is reported separately from an occupied address. One probe runs per engine at a time. A probe
 that meets another one's routes waits up to 45 seconds for them to go, then fails without probing and says to run
-verify again in a few seconds. Two Paddock daemons on one engine are not supported: each runs only its own probes one
+verify again in a few seconds. Two Asidee daemons on one engine are not supported: each runs only its own probes one
 at a time, so one's probe can meet the other's teardown, and each takes the engine's guard rules for its own, so two
 versions whose rules differ would each find the other's changed.
 
@@ -183,7 +183,7 @@ creation is denied. With only `NET_ADMIN`, overlayfs image extraction cannot mou
 pass the entire workload; no further capabilities were needed. This is an inclusion-minimal set for the measured
 image and engine relative to Docker's unchanged defaults, not a minimum for every Docker implementation.
 
-The provider starts Paddock's BusyBox shell as PID 1, with dockerd as its root child, on each start. The shell reaps
+The provider starts Asidee's BusyBox shell as PID 1, with dockerd as its root child, on each start. The shell reaps
 orphaned processes, forwards TERM and INT to dockerd, and exits with dockerd's status. It never restarts dockerd. Its fixed configuration enables the
 containerd snapshotter and names `--storage-driver=overlayfs`, so dockerd fails to start rather than fall back to a
 driver that copies layers; it adds `--iptables=false` and `--ip6tables=false`. The runtime check rejects any driver but
@@ -194,7 +194,7 @@ running containers from it added 94 KB. Layers are shared, not copied.
 It clears stale PID files and sets the sandbox's DNS before starting dockerd, so inner containers inherit the same
 resolvers rather than having a separate daemon DNS override. On this engine a user-defined network supplies
 `127.0.0.11`: a runc control resolves through it, but gVisor refuses the connection. The engine's upstream,
-`0.250.250.200`, is in the guard's blocked 0/8 range. Paddock therefore writes a **public DNS fallback, 1.1.1.1 and
+`0.250.250.200`, is in the guard's blocked 0/8 range. Asidee therefore writes a **public DNS fallback, 1.1.1.1 and
 8.8.8.8**, for the sandbox, which the inner daemon inherits. This is a product choice of where DNS queries go; the
 `docker` check discloses it. Private DNS and split DNS were not measured.
 
@@ -218,7 +218,7 @@ legacy ones. I18 resolves on such a network and I17 runs `docker compose up` of 
 Start waits for Docker's socket and sets `iptables-legacy` masquerading out of `eth0`. The runtime needs `--net-raw`
 and `--overlay2=none`. The host helper sets `gso_max_segs 1` on this sandbox's veth so forwarded traffic receives
 separate packets. The NAT step checks for the rule before adding it, and the segmentation step sets the same value
-without cycling the link. An exited dockerd stops the sandbox; there is no automatic restart. `paddock start` starts
+without cycling the link. An exited dockerd stops the sandbox; there is no automatic restart. `asd start` starts
 it again after the guard and configuration checks. The runtime check repeats the socket and driver probe on every
 enforce pass.
 
@@ -239,11 +239,11 @@ Dockerd's output is the container's, which the engine stores on its host, outsid
 container whose cap is 1 GB, grew its host log from 38 MB to 75 MB with two 8 MiB writes while its own layer stayed the
 same (the engine stores each short line as a JSON record several times its size). A sandbox without Docker can do the
 same: anything running as its main process's user (root in Alpine) can write to `/proc/1/fd/1` (a user other than
-PID 1's was refused; measured when that process was `sleep`, and I23 holds with the reaper below). Before the cap, two 8 MiB writes through `paddock exec` grew
+PID 1's was refused; measured when that process was `sleep`, and I23 holds with the reaper below). Before the cap, two 8 MiB writes through `asd exec` grew
 such a sandbox's host log to 75 MB and a third to 93 MB, where the engine's default rotation took over. Every sandbox therefore sets `json-file` logging with `max-size=10m` and `max-file=2`, and the limits check
 fails on any other setting. After two 16 MiB writes the host log was 15 MB, then 11 MB, both for a Docker sandbox
 (I22) and for one without Docker (I23); a replacement with a 1 GB cap is refused at start in both. This engine's own
-default is already bounded (20 MB, five files); Paddock sets its own cap so the bound does not depend on the engine.
+default is already bounded (20 MB, five files); Asidee sets its own cap so the bound does not depend on the engine.
 
 ### Exec output
 
@@ -251,16 +251,16 @@ What `exec` returns is held in the daemon's memory, so each stream is limited to
 `core/run.ts`; the same limit applies to every command the core runs, including the sandbox's own tools during
 checks and extension commands). A command that passes it is not returned cut off: the core stops reading, kills the engine client, and
 returns an error that names the limit and the stream. The engine leaves an exec's processes running when its client
-is killed (measured: a `yes` kept a CPU busy), so each exec carries a random `PADDOCK_EXEC` variable and the core ends
+is killed (measured: a `yes` kept a CPU busy), so each exec carries a random `ASIDEE_EXEC` variable and the core ends
 every process that has it, as the same user (root inside gVisor cannot read another user's environment). A process
 that cleared its environment or changed its user is not found. A zombie holds a slot against the task limit, so
-the main process of a sandbox without Docker reaps: it is Paddock's static busybox (the relay, copied in before every
+the main process of a sandbox without Docker reaps: it is Asidee's static busybox (the relay, copied in before every
 start) running `sh -c 'while :; do busybox sleep … & wait; done'` as the image's user. The kernel hands every orphan to
 PID 1, and the shell's `wait` collects any child that ends. U13: twenty orphans left by five exec sessions ran as PID
 1's children and ended, and no zombie was left; with `sleep infinity` as PID 1 all twenty stayed. The engine's own
 `--init` also reaped them, but it mounts the engine host's `docker-init` read-only into the sandbox, a host file that
-the engine's mount list does not show, so Paddock does not use it. Sandboxes created before this change keep `sleep`
-until they are recreated. A sandbox with Docker also uses Paddock's BusyBox shell as PID 1, waiting for its dockerd
+the engine's mount list does not show, so Asidee does not use it. Sandboxes created before this change keep `sleep`
+until they are recreated. A sandbox with Docker also uses Asidee's BusyBox shell as PID 1, waiting for its dockerd
 child instead of a sleep. U13 requires zero zombies in both kinds of sandbox, including after inner Docker work.
 I07 measures a stop under ten seconds, retained inner container state across stop and start, and a stopped sandbox
 when dockerd is killed. Dockerd's output still reaches the container log, with I22's rotation cap.
@@ -273,7 +273,7 @@ ended such a request after 360 seconds with "The operation timed out."; a local 
 has the 45-minute mutation deadline below.
 
 A local buffered exec also receives the HTTP request's abort signal. A disconnected client kills its engine client
-and runs the same `PADDOCK_EXEC` cleanup as an output-limit failure. U16 kills the CLI after its sleeping command is
+and runs the same `ASIDEE_EXEC` cleanup as an output-limit failure. U16 kills the CLI after its sleeping command is
 confirmed alive inside, requires that command to end within ten seconds, and checks that a connected client receives
 its output and exit code. Commands that clear their environment or change user retain the cleanup limits above.
 A buffered workspace exec closes its existing workspace session on disconnect, ending the command's starter. As
@@ -295,13 +295,13 @@ and a live `--host` exec were not run for this.
 
 ### Sessions
 
-`paddock exec --stream` and `paddock shell` are sessions. The daemon relays them on a second Unix socket in the state
+`asd exec --stream` and `asd shell` are sessions. The daemon relays them on a second Unix socket in the state
 folder, `stream.sock` (mode 0600), and on nothing else: the dashboard's port cannot open one, with or without its
-token (S05). The protocol, paddock-stream/1 in `core/stream.ts`, is frames of a kind byte, a four-byte length and at
+token (S05). The protocol, asidee-stream/1 in `core/stream.ts`, is frames of a kind byte, a four-byte length and at
 most 64 KiB of payload. The client sends `open` and waits for `ready`; then it sends input, end of input and terminal
 sizes, and the daemon sends stdout and stderr apart and last the exit code or an error. The provider runs the command
 through the engine's API (an exec whose start is upgraded to a raw stream on the engine's Unix socket), not through the
-engine's CLI, and a closed session's processes are ended by their `PADDOCK_EXEC` tag as above. A transport FIN cancels a stream
+engine's CLI, and a closed session's processes are ended by their `ASIDEE_EXEC` tag as above. A transport FIN cancels a stream
 session, including a terminal or SSH proxy. Input EOF is a protocol frame and does not disconnect the client. Each direction waits
 for the other side to take what it was given, so nothing is buffered beyond a socket buffer and a frame. A session
 ends with an error when its sandbox is stopped or removed or the daemon stops, and a stopped sandbox is refused, never
@@ -310,7 +310,7 @@ hash on both sides, the daemon grew by at most 5 MiB. The CLI's side of a stream
 for `exec` and `workspace exec` (`test/unit/exec-bytes.test.ts`: every byte value, invalid UTF-8 and 3 MiB of random
 bytes in, the same hash out, and stderr kept apart, against a stub session server). S02: stderr stayed apart, exit 5 and end of input came through.
 S03: a shell saw this terminal's size and a resize, Ctrl-C ended a `sleep` inside, and the terminal was restored. S04:
-a session ended within a second of `paddock stop`. S06: a reader asleep for longer than the whole transfer takes held
+a session ended within a second of `asd stop`. S06: a reader asleep for longer than the whole transfer takes held
 the command in the sandbox back.
 
 Buffered exec and extension output use process stream writes and wait for completion before exiting, preserving an
@@ -321,13 +321,13 @@ tests passed before this defensive change too. The tester's runtime-specific cau
 
 ### Forwards
 
-`paddock forward add NAME --port P` makes the daemon listen on 127.0.0.1, once, at `--local-port` or a port the
+`asd forward add NAME --port P` makes the daemon listen on 127.0.0.1, once, at `--local-port` or a port the
 system picks (no port is probed and assumed free; one in use is refused). Each connection it accepts opens a session
 that runs a relay on the sandbox's own loopback: `nc 127.0.0.1 P` from a static BusyBox the core copies into the
-sandbox at `/.paddock/busybox` through the engine's archive API, because the image may have no `nc`, `socat` or
+sandbox at `/.asidee/busybox` through the engine's archive API, because the image may have no `nc`, `socat` or
 interpreter of its own. It is copied before every start and again by each `forward add`. gVisor does not show a file
 the engine adds behind a running guest once the guest has looked in that folder, until the sandbox restarts: measured
-with one `ls /.paddock` before the first forward, and also for a new top-level folder after a listing of `/`. A copy
+with one `ls /.asidee` before the first forward, and also for a new top-level folder after a listing of `/`. A copy
 made before the start exists before any guest process can look, and replacing a file the guest can see works. A guest
 that removes the relay while running hides any new copy, so `forward add` runs the relay once and refuses with the
 restart to make, instead of listening and relaying the engine's error. The relay gets the port as a number and nothing else. A forward holds 64
@@ -340,7 +340,7 @@ starts more than a minute after the client's FIN is cut. Before this was ten min
 connections held five of a link's 64 slots, five relay processes in TO and their engine sessions for that long. W09 keeps a control connected
 while dropping another connection and checks that its `nc` process ends within five seconds. A forward
 belongs to one run of one sandbox (its id and the engine's start time): it ends on `forward remove`, when the sandbox
-stops or is removed through Paddock, within two seconds when the engine restarts or stops it behind Paddock's back
+stops or is removed through Asidee, within two seconds when the engine restarts or stops it behind Asidee's back
 (and any connection after that is refused), and when the daemon stops. A sandbox recreated under the same name starts
 with none. The core, not the provider, reports the forwards disclosure. W01: a nonce on the sandbox's loopback came back
 on 127.0.0.1 at the reported port, the daemon's only socket for it; the engine reported no port bindings and its host
@@ -349,22 +349,22 @@ other addresses or the engine host's, where control listeners did. W04: the list
 ending condition, an engine restart included. W05: a recreated name had no forward. W06: an occupied explicit port
 was refused with exit 4 and nothing recorded. W07: 64 MiB of random bytes each way came back with the same hash. W08:
 50 connections at once each got their own 256 KiB back, and no relay process was left. W10: after the guest listed
-`/.paddock` before the first forward, the forward carried a nonce, as did a control where nothing looked (before this
-change the first failed with `failed to load /.paddock/busybox`); after the guest removed the relay, `forward add` was
+`/.asidee` before the first forward, the forward carried a nonce, as did a control where nothing looked (before this
+change the first failed with `failed to load /.asidee/busybox`); after the guest removed the relay, `forward add` was
 refused with the restart named and nothing recorded, and after a stop and start the forward worked.
 
 ### Links
 
-`paddock link add FROM TO --port P` lets programs in FROM connect to `TO:P` and reach port P on TO's loopback. It is
+`asd link add FROM TO --port P` lets programs in FROM connect to `TO:P` and reach port P on TO's loopback. It is
 one-way and TCP only, between two sandboxes of this machine: `route()` in `core/machines.ts` refuses `--host` before
 anything else. Nothing is shared at the network level. The guard is not changed, no engine network joins the two, and
 nothing new listens on this machine, so "Cannot reach other sandboxes" keeps its meaning for a linked pair.
 
 Inside FROM, the daemon runs a listener as root through the engine's exec API: BusyBox `nc -lk` on a loopback address
 of the link's own (`127.77.0.2` and up, one per linked TO; gVisor answers on all of 127.0.0.0/8) at port P. A line
-ending in `# paddock-link` in FROM's `/etc/hosts` names that address TO; Paddock rewrites only its own lines and says
+ending in `# asidee-link` in FROM's `/etc/hosts` names that address TO; Asidee rewrites only its own lines and says
 when another line names TO first. Each accepted connection runs a small shell that makes two FIFOs in
-`/.paddock/links/ID.P` (mode 0700) and reports its process id on the listener's output. The daemon then opens two exec
+`/.asidee/links/ID.P` (mode 0700) and reports its process id on the listener's output. The daemon then opens two exec
 sessions in FROM that read and write those FIFOs, and dials TO the way a forward does (`nc 127.0.0.1 P` from the
 relay), joining the three. A connection costs FROM five processes (the accepting shell, its two `cat`s and the two
 sessions' `cat`s), TO one relay process, and the daemon three engine sessions. FROM pays most, and not only while
@@ -384,11 +384,11 @@ paused while the daemon cannot write those refusals. The listener ends after 15 
 heartbeat, or when its input closes.
 
 A link is bound to both sandboxes' ids, and while open to both runs (the engine id and start time, as a forward is).
-Within two seconds of either side restarting behind Paddock's back, and at once when either stops through Paddock,
-its connections end; it opens again, with a new measurement, when both run: after `paddock start` and at each
+Within two seconds of either side restarting behind Asidee's back, and at once when either stops through Asidee,
+its connections end; it opens again, with a new measurement, when both run: after `asd start` and at each
 30-second enforcement pass. A link that fails to open, or whose listener stops within ten minutes of opening, is tried
 again after 30 seconds, then after twice as long each time in a row, up to 30 minutes, because every try runs its test
-on the engine; `paddock start` of either sandbox, or `link add` again, tries it at once. Links are recorded in `links.json` in the state folder, so they come back after a daemon
+on the engine; `asd start` of either sandbox, or `link add` again, tries it at once. Links are recorded in `links.json` in the state folder, so they come back after a daemon
 restart. While the daemon is down they are down. Removing either sandbox removes its links, and a sandbox made again
 under the name inherits none. `link remove` closes the listener and then measures that its address and port refuse a
 connection inside FROM.
@@ -406,7 +406,7 @@ On verify, the two kinds of failure count differently, in both directions:
 
 - **The link does not carry what it names** (the value did not come through). The link is cut and the check reports
   it, and neither sandbox is stopped, whichever one is verified. Either end can cause this: FROM through its
-  `/etc/hosts` or its relay, TO through its relay (`/.paddock/busybox`, which root in TO can replace) or its service.
+  `/etc/hosts` or its relay, TO through its relay (`/.asidee/busybox`, which root in TO can replace) or its service.
   Counting it would let one sandbox have the other stopped (J10, J11).
 - **The link reaches what it does not name** (the closed test route, the second port or TO's network address answered).
   The "Links reach only…" check fails, which stops the sandbox being verified, not the other one (J08). One exception:
@@ -421,23 +421,23 @@ TO sees FROM's connections as local.
 
 ### SSH for editors
 
-`paddock ssh setup NAME` runs a script as root inside the running sandbox (`GUEST_SETUP` in `core/ssh.ts`). It
+`asd ssh setup NAME` runs a script as root inside the running sandbox (`GUEST_SETUP` in `core/ssh.ts`). It
 installs OpenSSH's server with apk, apt-get or dnf when the image has none, makes a new Ed25519 host key in
-`/.paddock/ssh`, and writes a configuration there that accepts only this machine's editor key, for exec's user
+`/.asidee/ssh`, and writes a configuration there that accepts only this machine's editor key, for exec's user
 only, with no password, keyboard-interactive, agent, X11, tunnel, remote or Unix-socket forwarding, and local
 forwarding only to the sandbox's own `127.0.0.1` and `localhost`. The user's own `~/.ssh` inside is not read. sshd
 refuses an account whose password is locked, so a leading `!` is replaced by `*` (still no password), and the
 checklist says so. The editor key pair is made once with `ssh-keygen` in the state folder's `ssh/` (mode 0700) and
 only its public half leaves it. The core then writes `ssh/config`, an alias per set-up sandbox, and `ssh/known_hosts`,
-its host key under `HostKeyAlias paddock-ID`, where ID is the sandbox's own id. The alias has
+its host key under `HostKeyAlias asidee-ID`, where ID is the sandbox's own id. The alias has
 `StrictHostKeyChecking yes`, `IdentitiesOnly yes`, `IdentityAgent none`, `ForwardAgent no` and `GatewayPorts no`
 (an `ssh -L` listens on this machine's loopback only), and its ProxyCommand
 is this executable by absolute path, `ssh proxy NAME`, with the state and config folders set. That command opens an
 `ssh` session on `stream.sock`, and the daemon runs `sshd -i` as root in the sandbox for that one connection; a
 stopped sandbox is refused and not started. `--write-config` puts `Include` and the file's path first in
-`~/.ssh/config` (`PADDOCK_SSH_CONFIG` names another file), once; without it the line is printed. A link there is
+`~/.ssh/config` (`ASIDEE_SSH_CONFIG` names another file), once; without it the line is printed. A link there is
 refused rather than replaced. Removing a sandbox removes its alias and host key. `sshAccess` reports the alias, the
-user and home, and `batchReady` (set up, running, and included). A01: `ssh NAME.paddock` logged in as exec's user
+user and home, and `batchReady` (set up, running, and included). A01: `ssh NAME.asidee` logged in as exec's user
 and home, without a prompt; while a session was open the engine's host, the daemon, ssh and its ProxyCommand had no
 new listener. A02: 4 MiB went in and out by scp and by SFTP with the same hash. A03: `ssh -L` reached a service on
 the sandbox's loopback; a tunnel to the sandbox's own network address, where the sandbox reached the same kind of
@@ -447,13 +447,13 @@ key verification after it; the new files logged in. A06: SSH to a stopped sandbo
 
 ### Resize
 
-`paddock resize NAME` changes the memory, task limit, CPUs and disk limit of a running or stopped sandbox, and says for
+`asd resize NAME` changes the memory, task limit, CPUs and disk limit of a running or stopped sandbox, and says for
 each whether it applies now or at the next start. The provider sets memory, tasks and CPUs with the engine's update
 and, for a running sandbox, reads them back from the sandbox's cgroup on the engine's host; "now" is said only when
 what it read is the new value, and otherwise the change is reported for the next start with the reason. A stopped
 sandbox's change is "next start". The disk limit is the daemon's watch, so a new one applies at its next pass, within
 30 seconds. The manifest records the new values and the limits check then fails on any other value, so a limit
-changed behind Paddock's back stops the sandbox.
+changed behind Asidee's back stops the sandbox.
 
 Inside, gVisor does not show the new limits: L01's `/proc/meminfo` kept the 512 MiB it started with after a resize to
 1 GB, and L03's `nproc` said 2 under one CPU and under two. The engine's host enforces the new ones. L01: 700 MB in
@@ -468,18 +468,18 @@ and a lowering whose use cannot be read is refused rather than guessed. Memory i
 counts it. Sizes outside the ranges of create are a usage error (exit 2), an unknown sandbox exit 3, and a refused
 resize changes nothing. L04: 300 MB written to `/dev/shm`, which gVisor keeps in memory, was counted as in use and
 refused a 0.25 GB limit, and 300 sleeping processes refused a task limit of 256; once the memory was freed, 0.5 GB
-was allowed. L05: `docker update --memory 2g` behind Paddock's
+was allowed. L05: `docker update --memory 2g` behind Asidee's
 back failed verify with exit 6 and stopped the sandbox. L06: 1.3 GB on disk refused a 1 GB disk limit; once freed, the
 limit was set, and the same write was stopped by the disk watch.
 
 ### Templates
 
-`paddock snapshot NAME --as TEMPLATE` saves a sandbox's files as a template, and `paddock create NEW --template
+`asd snapshot NAME --as TEMPLATE` saves a sandbox's files as a template, and `asd create NEW --template
 TEMPLATE` (or `"template"` in a spec) makes a sandbox from it. A template is an image under a repository named for
-this daemon (`paddock-template-<owner>`, where the owner is a hash of this machine's name and the state folder), with
-labels for its name, its owner, the sandbox it came from and the login files left out. `paddock template list` shows
+this daemon (`asidee-template-<owner>`, where the owner is a hash of this machine's name and the state folder), with
+labels for its name, its owner, the sandbox it came from and the login files left out. `asd template list` shows
 only images with all three: this owner's repository, its owner label, and a tag equal to its name label. An image name
-in Paddock's template or snapshot space is refused as `--image` (C06); a template is chosen by name, resolved to its
+in Asidee's template or snapshot space is refused as `--image` (C06); a template is chosen by name, resolved to its
 image ID under the template's lock, and the manifest records the template and the ID. The checklist's template check
 fails if the container runs another image and otherwise discloses the template, its source and date, whether it has
 been removed since, and, for a sandbox given a template's image ID as a plain image, that it is one. A template sandbox
@@ -487,21 +487,21 @@ is created and checked like any other (C04: every blocking check held, with live
 answer it).
 
 What a template holds: every file in the sandbox's own filesystem as the engine's layer has it, home folders included:
-shell history, `.env` files, package-manager tokens and any login not in Paddock's list. Removed before saving: the
+shell history, `.env` files, package-manager tokens and any login not in Asidee's list. Removed before saving: the
 login files the credentials check looks for (Claude, Codex, GitHub, git, SSH keys, AWS, netrc) under `/root` and
-`/home/*`, and Paddock's own relay and SSH host key. Not in it: processes and memory, `/dev/shm` and any other folder
+`/home/*`, and Asidee's own relay and SSH host key. Not in it: processes and memory, `/dev/shm` and any other folder
 gVisor keeps in memory (`/proc/mounts` inside shows them as tmpfs; it was so for `/tmp` in Alpine, whose `/tmp` is
 empty, and not in the default image, whose `/tmp` is not empty, so that `/tmp` is saved), volumes (inner Docker's
 `/var/lib/docker`, so no inner images or containers, and any volume the image declares), and the engine's
-`/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf`. The snapshot's result states this. Paddock does not claim a
+`/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf`. The snapshot's result states this. Asidee does not claim a
 template has no secrets: C02 shows `.npmrc` is carried.
 
 How it is made: the engine commits the sandbox, pausing a running one for the commit (C03: the engine's events show a
 pause and an unpause; the sandbox kept running with its processes and the same start time). A container of that
-image then runs under gVisor with no network and only Paddock's busybox, copied in to a randomly named folder, to
-delete the login files and Paddock's own files; a second commit saves the result under the template's name, and the
+image then runs under gVisor with no network and only Asidee's busybox, copied in to a randomly named folder, to
+delete the login files and Asidee's own files; a second commit saves the result under the template's name, and the
 intermediate image and container are removed. It needs a runtime with `--overlay2=none`, without which the engine does
-not see the sandbox's writes (C01's control reads a file from the engine right after it was written inside). Paddock
+not see the sandbox's writes (C01's control reads a file from the engine right after it was written inside). Asidee
 refuses a snapshot otherwise; no engine here lacks the flag, so that refusal is not measured. The pause makes the copy
 consistent at the file level for that moment, as a power cut would leave a disk: a program halfway through writing a
 file is saved halfway.
@@ -537,7 +537,7 @@ uses is deleted at once (C05, C07). A stopped sandbox can be saved without start
   and reach the sandbox's loopback with `ssh -L`. It cannot reach this machine or other addresses through sshd. The
   sandbox's own limits and guard still apply to what it runs.
 
-- **Something with your rights on this machine can change Paddock itself.** An agent running outside a sandbox, or an
+- **Something with your rights on this machine can change Asidee itself.** An agent running outside a sandbox, or an
   extension's command, runs as you. It could edit the core or call the engine directly. The checks catch a
   customization or an engine update that weakened a sandbox; they do not defend against code that already runs as you.
 - **Extensions run commands on this machine.** Install one the way you would install any script.
@@ -551,24 +551,24 @@ uses is deleted at once (C05, C07). A stopped sandbox can be saved without start
 - **Inner privileges belong to the sandbox.** `--docker` grants `NET_ADMIN` and `SYS_ADMIN` inside gVisor, including
   control of its inner network and mounts. It does not grant host namespaces or devices. An inner privileged container
   still shares the outer sandbox's limits and guard. The evals exercised its memory limit with an inner privileged
-  container. Independent limits set by the inner daemon are not a Paddock guarantee.
+  container. Independent limits set by the inner daemon are not an Asidee guarantee.
 - **Between two passes, up to 30 seconds, a weakened sandbox keeps running.** So does one whose guard was changed by
   something with root on the engine's host.
 - **The LAN and tailnet blocks are probed against stand-ins, not your devices.** IPv6 and the metadata address have no
   control: IPv6 is judged by the loaded rules, and metadata by one attempt that did not connect.
 - **The limits are read, not re-measured, by the checklist.** The evals measure them. On OrbStack, passing the memory
   limit kills the sandbox, and so does running out of the task limit: gVisor's own threads count against it, so a
-  limit of 256 held about a hundred processes. `paddock list` says which of the two happened.
-- **A template carries secrets that are not on Paddock's list.** Only the usual login files are removed. Shell history,
+  limit of 256 held about a hundred processes. `asd list` says which of the two happened.
+- **A template carries secrets that are not on Asidee's list.** Only the usual login files are removed. Shell history,
   `.env` files, package-manager tokens and logins kept elsewhere are saved, and every sandbox made from the template
   has them. A file being written at the moment of the save is saved as it was then.
 - **Inside a resized sandbox, gVisor does not show the new limits.** The engine's host enforces them; resize's report
   and the limits check are the place to read them, not `/proc/meminfo` or `nproc`.
-- **Two Paddocks on one engine share the guard.** Each sweeps only its own probe helpers, but a guard changed for one
+- **Two Asidees on one engine share the guard.** Each sweeps only its own probe helpers, but a guard changed for one
   is changed for both.
 - **Measurements belong to an engine and OS.** See `evals/SCORECARD.md` for OrbStack on Apple Silicon and
   `evals/SCORECARD.linux.md` for native Linux Docker. Docker Desktop, Colima, and Windows execution remain unmeasured.
-  Native Docker may still drop inter-bridge traffic with Paddock's guard removed. A Tailscale host may drop a synthetic
+  Native Docker may still drop inter-bridge traffic with Asidee's guard removed. A Tailscale host may drop a synthetic
   tailnet control. Neither result establishes a controlled live probe for that target.
 
 ## The daemon
@@ -579,15 +579,15 @@ and networks an interrupted verify left behind. A daemon that is stopping refuse
 finish, so a second daemon never runs beside it. It listens on:
 
 - a Unix socket in the state folder (mode 0600), used by the CLI;
-- a second one, `stream.sock` (mode 0600), for sessions only, including the ones `ssh NAME.paddock` opens;
+- a second one, `stream.sock` (mode 0600), for sessions only, including the ones `ssh NAME.asidee` opens;
 - `127.0.0.1` at each forward's port, relayed to the sandbox and nothing else;
-- `127.0.0.1` on port 7717 (or a free port), used by the dashboard. Requests need the token from `paddock ui` and a
+- `127.0.0.1` on port 7717 (or a free port), used by the dashboard. Requests need the token from `asd ui` and a
   `Host` header naming this server. `shutdown`, `sshSetup` (it can change `~/.ssh/config`) and sessions are not
   available here.
 
 Links add no listener here: each link's listener runs inside the sandbox that uses it, on that sandbox's loopback.
 
-State is in `~/.local/state/paddock`, configuration in `~/.config/paddock` (`PADDOCK_STATE_DIR`, `PADDOCK_CONFIG_DIR`).
+State is in `~/.local/state/asidee`, configuration in `~/.config/asidee` (`ASIDEE_STATE_DIR`, `ASIDEE_CONFIG_DIR`).
 Malformed request URLs, including invalid percent encoding in paths or query parameters, receive a generic HTTP 400
 before routing or reading dashboard files. No parser diagnostic is returned.
 
@@ -596,10 +596,10 @@ before routing or reading dashboard files. No parser diagnostic is returned.
 Other machines are experimental: `experimental` in `config.json` is off by default, because they are not yet proven on
 enough machines. While it is off, the daemon (in `core/machines.ts` and `core/hosts.ts`, not only the CLI) refuses
 `hostList`, `fleet` (`list --all`), `hostAttach`, `hostRemove`, `hostPlan`, `hostApply`, every request and stream with a
-`host` other than `local`, with code `dependency` (exit 5) and one sentence naming `paddock config set experimental on`.
+`host` other than `local`, with code `dependency` (exit 5) and one sentence naming `asd config set experimental on`.
 Nothing is contacted and `hosts.json` is not changed. Turning the setting off ends the primary's hosted forwards and
 streams. The target side is not gated: requests without a `host`, which another machine's primary sends through
-`paddock transport stdio`, are answered whatever this daemon's setting. Help marks the group experimental and off unless
+`asd transport stdio`, are answered whatever this daemon's setting. Help marks the group experimental and off unless
 turned on, since help may run without a daemon. The dashboard shows no machines. Unit tests and the M and N evals turn
 the setting on themselves; F10 measures the refusal with it off. The rest of this section describes the feature on.
 
@@ -615,7 +615,7 @@ Remote uninstall remains an explicit manual operation.
 
 ### The host-key pin
 
-Enrollment (attach, and the probes of host add) records the destination's public key from OpenSSH itself: Paddock passes
+Enrollment (attach, and the probes of host add) records the destination's public key from OpenSSH itself: Asidee passes
 a `KnownHostsCommand` that writes the key the server offered during key exchange to a private file and adds no trust;
 the user's own known_hosts must still accept the key (`StrictHostKeyChecking=yes`), and a key is recorded only when ssh
 got past that check (it did not exit 255) and reported exactly one plain key for the destination. This replaces a
@@ -646,7 +646,7 @@ known_hosts does not trust is refused as offline; a destination the known_hosts 
 fixtures cover the options passed and the old-record refusal. Not measured: a real remote machine with a changed key, a
 user `KnownHostsCommand` or `@cert-authority` setup at enrollment, and OpenSSH versions other than 10.3.
 
-`hosts.json` must be `{version: 1, hosts: [...]}`; each record in it is then read on its own. A record this Paddock does
+`hosts.json` must be `{version: 1, hosts: [...]}`; each record in it is then read on its own. A record this Asidee does
 not know (a future service kind or disk policy) or a damaged one is listed by `host
 list` and `list --all` as `unknown-record` with the reason, and routing to it is refused; the other hosts keep working.
 `host remove NAME --confirm NAME` forgets such a record, and attaching another host writes it back unchanged.
@@ -664,12 +664,12 @@ directory set explicitly. That command only relays bytes to an existing daemon s
 replace a daemon. When the daemon's side closes, it ends its stdout (up to five seconds for SSH to take the last
 bytes) and exits without waiting for SSH to close stdin. On the primary, a stream's frames already received, its exit
 status among them, are delivered after its ssh exits, and a request over an SSH link that has already ended fails at
-once as offline. `PADDOCK_SOCKET_ONLY=1` when starting the remote daemon disables its dashboard TCP listener. No
+once as offline. `ASIDEE_SOCKET_ONLY=1` when starting the remote daemon disables its dashboard TCP listener. No
 remote Docker context is introduced. Only the target daemon's core operates its engine or supplies checks.
 
 Each operation gets its own system SSH connection, reading the user's SSH config for ports and jump hosts. BatchMode
 and strict host-key verification are required; UpdateHostKeys, agent/X11 forwarding, configured port forwarding and
-shared control masters are disabled. Paddock writes no outer SSH config or trust file. The user must have established
+shared control masters are disabled. Asidee writes no outer SSH config or trust file. The user must have established
 outer host trust before attaching. The transport handshakes and sends the request on one HTTP connection. The
 handshake carries the version, protocols, methods, features, the artifact's own SHA-256 (`buildDigest`) and a source
 digest: SHA-256 over every file under `core/`, `cli/` and `ui/` and `package.json`, computed when the program is bundled
@@ -683,7 +683,7 @@ sent to the sandbox and nothing replaced:
 - by the remote stream socket: an open whose boot ID, protocol, version or source digest differs.
 
 `buildDigest` is shown but not compared, because it differs between platforms. There is no negotiation and no upgrade:
-the refusal says to build Paddock for that machine from this source (`bun build --compile --target=bun-linux-x64` or
+the refusal says to build Asidee for that machine from this source (`bun build --compile --target=bun-linux-x64` or
 `bun-linux-arm64`), put it in place of the recorded binary and restart that daemon. Local CLI build replacement retains
 its previous behavior. After a mutation is sent, transport failure means `outcome-unknown`; no mutation is
 automatically replayed.
@@ -717,7 +717,7 @@ return the cache and schedule independent refreshes with retries capped at 60 se
 its last-known sandboxes with `unknown` status and unknown checks, with the original check time. A machine with no
 successful summary has no sandbox inventory and is shown as connecting/offline, never as a successful empty list.
 
-The M eval group needs `PADDOCK_EVAL_HOST` naming an authorized Linux SSH fixture. It builds a native Linux artifact
+The M eval group needs `ASIDEE_EVAL_HOST` naming an authorized Linux SSH fixture. It builds a native Linux artifact
 here, checks its checksum after copying, starts a socket-only daemon in a private temporary home directory, attaches
 it, and removes it at teardown. It never installs packages, uses sudo, restarts Docker or edits system/SSH files.
 Reboot persistence and automatic recovery are unmeasured; the fixture daemon runs only until stopped, killed or reboot.
@@ -749,7 +749,7 @@ bytes is refused. Exactly one named Docker runtime is merged, with full before/a
 runtime plans validation, backup, configuration installation and Docker restart. Every running container is listed,
 even with live restore. An unchanged runtime that Docker has loaded plans no Docker restart. Only what is missing is
 planned: a binary, runtime or unit already in place is not installed again. Another artifact plans a restart of the
-Paddock service alone. `host add` on an existing alias shows `Mode: update`, refuses a changed daemon machine ID,
+Asidee service alone. `host add` on an existing alias shows `Mode: update`, refuses a changed daemon machine ID,
 SSH public key or state directory, and keeps the registration until verification succeeds. The plan names the running sandboxes that restart stops (N17).
 Each step records what it leaves on the host, and the CLI prints the plan as text with the destination's control characters removed.
 
@@ -761,7 +761,7 @@ with tty-scoped sudo timestamps. Automation uses `sudo -n` and needs noninteract
 restored and no registration (N13). A disconnected terminal cannot commit a host registration; an interrupted install can have an unknown outcome and names its journal.
 
 The system unit runs as the SSH user with `SupplementaryGroups=docker`, a fixed PATH, socket-only access and
-`Restart=on-failure`, after Docker. State/configuration live under `/var/lib/paddock/UID`. Login groups and sudoers are
+`Restart=on-failure`, after Docker. State/configuration live under `/var/lib/asidee/UID`. Login groups and sudoers are
 not changed. Docker authority is effectively root. Installation progress and the interrupted step are journaled there,
 separately from sandbox manifests. Failure reports the completed steps, what they left and what the interrupted step
 may have left, without shared-package rollback; a failure before the first step says that none ran. An installer
@@ -781,11 +781,11 @@ primary's source stays usable even after a smoke failure. A daemon from another 
 `host add` to review its update with an explicitly built matching artifact. No automatic rollback is attempted.
 
 Registration follows the artifact/source/protocol handshake, active/enabled service inspection, a ready local engine on
-the runtime `paddock-runsc`, all applicable blocking smoke checks at creation and again after a real disk write with
+the runtime `asidee-runsc`, all applicable blocking smoke checks at creation and again after a real disk write with
 host-side byte measurement, and smoke cleanup. `net-private` may be `weak` there: a host that already uses a stand-in
 range cannot have that range probed, and the plan says so. The smoke sandbox has no links; enrollment requires its `link-scope`
 result to be `info`, without claiming a link measurement. `verify` returns `diskUsedBytes` when measurable and omits it otherwise.
-Disk enforcement remains watched. The daemon prefers `paddock-runsc` to any other gVisor runtime registered on its
+Disk enforcement remains watched. The daemon prefers `asidee-runsc` to any other gVisor runtime registered on its
 engine (N16). That runtime is registered without `--net-raw` and does not advertise inner Docker, unless the host is
 enrolled with `--docker`; the option is part of the plan and its hash, and the smoke sandbox then has to pass the inner
 Docker check (N19). No hard disk helper, disk tools or sudoers entry is installed. No reboot recovery is claimed.
@@ -801,7 +801,7 @@ A hosted forward binds once on the primary's `127.0.0.1`. Its remote control str
 engine start time and numeric loopback port. Each accepted connection gets a separate SSH dial stream validated
 against that lease. The target checks the run every two seconds, and closes its lease and dials on stop/remove or
 daemon exit. It reports the requested lease in verify, while explicitly saying that the primary's listener is unknown
-from there; no check reports hosted forwards on the primary, where `paddock --host HOST forward list` shows them. The
+from there; no check reports hosted forwards on the primary, where `asd --host HOST forward list` shows them. The
 lease is renewed in both directions. The target's control emits a byte every five seconds; after fifteen seconds
 without one, a primary timer closes the listener and active connections. The primary writes a renewal byte every five
 seconds; after fifteen seconds without one (checked every two), the target ends the lease and its dials, and the
@@ -813,7 +813,7 @@ stopped by SIGSTOP (so it neither renews nor closes, and its SSH links stay up),
 exit, no relay was left on the target. These are awake-daemon measurements on one fixture, not a continuous enforcement
 claim during a suspended machine.
 
-Remote editor aliases are `SANDBOX.HOST.paddock`, preserving unqualified local aliases. Only the primary makes or
+Remote editor aliases are `SANDBOX.HOST.asidee`, preserving unqualified local aliases. Only the primary makes or
 reads its editor private key. The target receives its public half through socket-only `sshPrepare`, prepares guest
 sshd, and returns the guest public host key. The primary validates that data and writes its own state-directory SSH
 files. Both machine and sandbox IDs form the pinned HostKeyAlias; ProxyCommand also sends the expected sandbox ID.
@@ -862,7 +862,7 @@ process cleanup and private project copying have local K evals. See [macOS works
 boundary, test-root validation, copied-login limits and temporary-source handling. In particular, Apple events and
 Keychain authentication are not established by a policy decision or the presence of a credential file.
 
-`PADDOCK_WORKSPACE_ONLY=1` disables providers for a daemon used solely for workspaces. The K-only runner sets this
+`ASIDEE_WORKSPACE_ONLY=1` disables providers for a daemon used solely for workspaces. The K-only runner sets this
 with private state, so it neither discovers engines nor connects to registered machines. A normal daemon retains its
 existing provider sweep and sandbox enforcement.
 
@@ -871,7 +871,7 @@ parameter for the canonical per-user `T` folder, with a file read and write allo
 a `file-read-metadata` allowance for the literal folder that contains `T` (its listing and its `C` and `0` stay
 denied), which tools that create folders under `T` need. The off profile is unchanged. `workspaceSet` refuses running
 processes and clears old verification before later launches use the regenerated profile; setting the current value
-again rewrites a profile that a Paddock update changed, and launch's refusal names that command. Verification probes real `T` reads and writes, still-denied sibling paths, and a refused
+again rewrites a profile that an Asidee update changed, and launch's refusal names that command. Verification probes real `T` reads and writes, still-denied sibling paths, and a refused
 confined connection to a real listener in `T` beside an unconfined control, reporting the disclosed exception as
 `weak`. Inventory and removal include its shared-file, socket-file, cleanup and size limits. The live Seatbelt and
 `confstr` tests in `test/unit/workspaces.test.ts` measure temp-path, metadata and socket access, not PyTorch/MPS or

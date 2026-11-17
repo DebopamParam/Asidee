@@ -9,8 +9,8 @@ import { systemRunner } from "../../core/run"
 
 // The acceptance test for the product's promise, against a real engine: `bun run test:live`. Needs Docker with a gVisor
 // runtime. It creates one small sandbox, expects every blocking check to hold, and removes it.
-test.skipIf(!process.env.PADDOCK_LIVE)("a new sandbox on a real engine passes every blocking check", async () => {
-  const root = await mkdtemp(join(tmpdir(), "paddock-live-"))
+test.skipIf(!process.env.ASIDEE_LIVE)("a new sandbox on a real engine passes every blocking check", async () => {
+  const root = await mkdtemp(join(tmpdir(), "asidee-live-"))
   const core = new Core([new GvisorProvider(systemRunner)], { state: join(root, "state"), config: join(root, "config") }, systemRunner, "/nowhere")
   const name = `live-${Date.now().toString(36)}`
   try {

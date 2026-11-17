@@ -18,7 +18,7 @@ function fixture(inspect: Record<string, unknown>, du?: (paths: string[]) => str
     if (args[0] === "run") {
       runs.push(args)
       const paths = args.slice(args.indexOf("-sk") + 1)
-      return { exitCode: 0, stdout: du ? du(paths) : paths.map((path) => `${path === "/paddock-engine-files/0" ? 1331200 : 1}\t${path}`).join("\n"), stderr: "" }
+      return { exitCode: 0, stdout: du ? du(paths) : paths.map((path) => `${path === "/asidee-engine-files/0" ? 1331200 : 1}\t${path}`).join("\n"), stderr: "" }
     }
     return { exitCode: 1, stdout: "", stderr: "unexpected" }
   }
@@ -33,8 +33,8 @@ test("the disk watch counts the engine's /etc/hosts, /etc/hostname and /etc/reso
   // The helper runs under runc with no network and sees each engine file read-only; nothing inside the sandbox runs.
   expect(run.slice(0, 6)).toEqual(["run", "--rm", "--runtime", "runc", "--network", "none"])
   for (const [index, path] of [files.HostsPath, files.HostnamePath, files.ResolvConfPath].entries())
-    expect(run).toContain(`type=bind,src=${path},dst=/paddock-engine-files/${index},readonly`)
-  expect(run).toContain("paddock-demo:ro")
+    expect(run).toContain(`type=bind,src=${path},dst=/asidee-engine-files/${index},readonly`)
+  expect(run).toContain("asidee-demo:ro")
 })
 
 test("without volumes the engine files are still measured, and a container never started has none", async () => {

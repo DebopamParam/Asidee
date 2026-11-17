@@ -3,26 +3,26 @@ import { createHash } from "node:crypto"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { listManifests, validName, type Dirs } from "./state"
-import { PaddockError, type Manifest, type SshSetup } from "./types"
+import { AsideeError, type Manifest, type SshSetup } from "./types"
 
-// SSH for editors. `ssh NAME.paddock` runs a ProxyCommand that opens a session on the daemon's stream socket, and the
+// SSH for editors. `ssh NAME.asidee` runs a ProxyCommand that opens a session on the daemon's stream socket, and the
 // session runs the sandbox's sshd in inetd mode (-i) on that one connection: no port is opened on this machine, the
 // engine's host or the sandbox. Everything on this side lives in the state folder; the user's own SSH files are read,
 // and changed only by one Include line on request.
 export type SshAccess = { alias: string; user: string; home: string; batchReady: boolean; loopbackForwarding: boolean }
 
-// Inside the sandbox. A folder of Paddock's own, so the user's ~/.ssh is neither read nor trusted by this sshd.
-export const GUEST_SSH = "/.paddock/ssh"
-export const alias = (name: string, host?: string) => `${name}${host ? `.${host}` : ""}.paddock`
-export const hostKeyAlias = (manifest: Manifest) => `paddock-${manifest.id}`
+// Inside the sandbox. A folder of Asidee's own, so the user's ~/.ssh is neither read nor trusted by this sshd.
+export const GUEST_SSH = "/.asidee/ssh"
+export const alias = (name: string, host?: string) => `${name}${host ? `.${host}` : ""}.asidee`
+export const hostKeyAlias = (manifest: Manifest) => `asidee-${manifest.id}`
 const files = (dirs: Dirs) => ({ folder: join(dirs.state, "ssh"), key: join(dirs.state, "ssh", "editor_ed25519"), config: join(dirs.state, "ssh", "config"), knownHosts: join(dirs.state, "ssh", "known_hosts") })
-// The user's SSH configuration; PADDOCK_SSH_CONFIG names another one, which the evals use so ~/.ssh is never touched.
-export const userConfig = (env: Record<string, string | undefined> = process.env) => resolve(env.PADDOCK_SSH_CONFIG ?? join(homedir(), ".ssh", "config"))
+// The user's SSH configuration; ASIDEE_SSH_CONFIG names another one, which the evals use so ~/.ssh is never touched.
+export const userConfig = (env: Record<string, string | undefined> = process.env) => resolve(env.ASIDEE_SSH_CONFIG ?? join(homedir(), ".ssh", "config"))
 export const includeLine = (dirs: Dirs) => `Include ${quote(files(dirs).config)}`
 
 // ssh_config takes double-quoted arguments without escapes, so a path with a double quote or a line break cannot be said.
 function quote(path: string): string {
-  if (/["\n\r]/.test(path)) throw new PaddockError("usage", `Paddock cannot write an SSH configuration for the path ${JSON.stringify(path)}.`)
+  if (/["\n\r]/.test(path)) throw new AsideeError("usage", `Asidee cannot write an SSH configuration for the path ${JSON.stringify(path)}.`)
   return `"${path}"`
 }
 // ProxyCommand goes to /bin/sh after ssh expands %-tokens, so each word is single-quoted and each % doubled.
@@ -31,7 +31,7 @@ export const shellWord = (word: string) => `'${word.replace(/'/g, `'\\''`).repla
 const run = async (argv: string[]) => {
   const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe" })
   const [code, out, err] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()])
-  if (code !== 0) throw new PaddockError("dependency", `${argv[0]} failed: ${err.trim() || `exit ${code}`}`)
+  if (code !== 0) throw new AsideeError("dependency", `${argv[0]} failed: ${err.trim() || `exit ${code}`}`)
   return out
 }
 
@@ -42,9 +42,9 @@ export const keyFingerprint = (key: string) => `SHA256:${createHash("sha256").up
 export async function editorKey(dirs: Dirs): Promise<{ path: string; publicKey: string; fingerprint: string }> {
   const { folder, key } = files(dirs)
   await mkdir(folder, { recursive: true, mode: 0o700 }); await chmod(folder, 0o700)
-  if (!(await Bun.file(key).exists())) await run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "paddock-editor", "-f", key])
+  if (!(await Bun.file(key).exists())) await run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "asidee-editor", "-f", key])
   const publicKey = (await readFile(`${key}.pub`, "utf8")).trim()
-  if (!validPublicKey(publicKey)) throw new PaddockError("runtime", `${key}.pub is not an Ed25519 public key. Remove ${key} and its .pub to make a new one.`)
+  if (!validPublicKey(publicKey)) throw new AsideeError("runtime", `${key}.pub is not an Ed25519 public key. Remove ${key} and its .pub to make a new one.`)
   return { path: key, publicKey, fingerprint: (await run(["ssh-keygen", "-l", "-E", "sha256", "-f", `${key}.pub`])).split(/\s+/)[1] ?? "" }
 }
 
@@ -64,9 +64,9 @@ if [ -z "$sshd" ]; then
   sshd=/usr/sbin/sshd
 fi
 [ -x "$sshd" ] || { echo "OpenSSH's server was not installed." >&2; exit 4; }
-mkdir -p /run/sshd /var/empty "$dir"; chmod 755 /.paddock "$dir"
+mkdir -p /run/sshd /var/empty "$dir"; chmod 755 /.asidee "$dir"
 rm -f "$dir/host_ed25519" "$dir/host_ed25519.pub"
-ssh-keygen -q -t ed25519 -N "" -C paddock-guest -f "$dir/host_ed25519"
+ssh-keygen -q -t ed25519 -N "" -C asidee-guest -f "$dir/host_ed25519"
 printf '%s\\n' "$key" > "$dir/authorized_keys"; chmod 644 "$dir/authorized_keys"
 cat > "$dir/sshd_config" <<EOF
 HostKey $dir/host_ed25519
@@ -98,7 +98,7 @@ printf '%s\\n%s\\n%s\\n%s\\n' "$unlocked" "$home" "$sshd" "$(cat "$dir/host_ed25
 
 export function parseGuestSetup(output: string): { unlocked: boolean; home: string; sshd: string; hostKey: string } {
   const [unlocked, home, sshd, hostKey] = output.trim().split("\n").slice(-4).map((line) => line.trim())
-  if (!["yes", "no"].includes(unlocked!) || !home?.startsWith("/") || !sshd?.startsWith("/") || !hostKey || !validPublicKey(hostKey)) throw new PaddockError("runtime", "The sandbox did not report its SSH setup.")
+  if (!["yes", "no"].includes(unlocked!) || !home?.startsWith("/") || !sshd?.startsWith("/") || !hostKey || !validPublicKey(hostKey)) throw new AsideeError("runtime", "The sandbox did not report its SSH setup.")
   return { unlocked: unlocked === "yes", home, sshd, hostKey: hostKey.split(" ").slice(0, 2).join(" ") }
 }
 
@@ -109,9 +109,9 @@ export function selfCommand(): string[] {
 
 export function hostBlock(dirs: Dirs, manifest: Pick<Manifest, "name" | "id">, setup: SshSetup, self = selfCommand(), host?: { name: string; machineId: string }): string {
   const { key, knownHosts } = files(dirs)
-  const proxy = ["/usr/bin/env", `PADDOCK_STATE_DIR=${resolve(dirs.state)}`, `PADDOCK_CONFIG_DIR=${resolve(dirs.config)}`, ...self, ...(host ? ["--host", host.name] : []), "ssh", "proxy", manifest.name, ...(host ? ["--sandbox-id", manifest.id] : [])].map(shellWord).join(" ")
+  const proxy = ["/usr/bin/env", `ASIDEE_STATE_DIR=${resolve(dirs.state)}`, `ASIDEE_CONFIG_DIR=${resolve(dirs.config)}`, ...self, ...(host ? ["--host", host.name] : []), "ssh", "proxy", manifest.name, ...(host ? ["--sandbox-id", manifest.id] : [])].map(shellWord).join(" ")
   return [`Host ${alias(manifest.name, host?.name)}`, `  HostName ${alias(manifest.name, host?.name)}`, `  User ${setup.user}`, `  ProxyCommand ${proxy}`,
-    `  HostKeyAlias ${host ? `paddock-${host.machineId}-${manifest.id}` : `paddock-${manifest.id}`}`, `  UserKnownHostsFile ${quote(knownHosts)}`, "  GlobalKnownHostsFile /dev/null", "  StrictHostKeyChecking yes",
+    `  HostKeyAlias ${host ? `asidee-${host.machineId}-${manifest.id}` : `asidee-${manifest.id}`}`, `  UserKnownHostsFile ${quote(knownHosts)}`, "  GlobalKnownHostsFile /dev/null", "  StrictHostKeyChecking yes",
     "  UpdateHostKeys no", "  CheckHostIP no", `  IdentityFile ${quote(key)}`, "  IdentitiesOnly yes", "  IdentityAgent none", "  ForwardAgent no", "  GatewayPorts no",
     "  ForwardX11 no", "  PreferredAuthentications publickey", "  PasswordAuthentication no", "  KbdInteractiveAuthentication no", ""].join("\n")
 }
@@ -129,27 +129,27 @@ async function renderClientFiles(dirs: Dirs, manifests: Manifest[]): Promise<voi
   const set = manifests.filter((manifest) => manifest.ssh).sort((a, b) => a.name.localeCompare(b.name))
   const write = async (file: string, text: string) => { const temp = `${file}.tmp-${process.pid}`; await writeFile(temp, text, { mode: 0o600 }); await rename(temp, file) }
   const remotes = await remoteAliases(dirs)
-  await write(config, `# Written by Paddock; \`paddock ssh setup NAME\` changes it.\n${set.map((manifest) => hostBlock(dirs, manifest, manifest.ssh!)).join("\n")}\n${remotes.map((entry) => hostBlock(dirs, { name: entry.name, id: entry.sandboxId }, entry.setup, selfCommand(), { name: entry.host, machineId: entry.machineId })).join("\n")}`)
-  await write(knownHosts, set.map((manifest) => `${hostKeyAlias(manifest)} ${manifest.ssh!.hostKey}\n`).join("") + remotes.map((entry) => `paddock-${entry.machineId}-${entry.sandboxId} ${entry.setup.hostKey}\n`).join(""))
+  await write(config, `# Written by Asidee; \`asd ssh setup NAME\` changes it.\n${set.map((manifest) => hostBlock(dirs, manifest, manifest.ssh!)).join("\n")}\n${remotes.map((entry) => hostBlock(dirs, { name: entry.name, id: entry.sandboxId }, entry.setup, selfCommand(), { name: entry.host, machineId: entry.machineId })).join("\n")}`)
+  await write(knownHosts, set.map((manifest) => `${hostKeyAlias(manifest)} ${manifest.ssh!.hostKey}\n`).join("") + remotes.map((entry) => `asidee-${entry.machineId}-${entry.sandboxId} ${entry.setup.hostKey}\n`).join(""))
 }
 
 export type RemoteAlias = { host: string; name: string; machineId: string; sandboxId: string; setup: SshSetup }
 export function parseSshSetup(value: unknown): SshSetup {
-  if (typeof value !== "object" || value === null) throw new PaddockError("incompatible", "Invalid remote SSH setup.")
+  if (typeof value !== "object" || value === null) throw new AsideeError("incompatible", "Invalid remote SSH setup.")
   const setup = value as Record<string, unknown>
   if (typeof setup.user !== "string" || !/^[a-z_][a-z0-9_.-]{0,31}$/i.test(setup.user) || typeof setup.home !== "string" || !setup.home.startsWith("/") || /[\x00-\x1f]/.test(setup.home)
     || typeof setup.sshd !== "string" || !setup.sshd.startsWith("/") || /[\x00-\x1f]/.test(setup.sshd) || typeof setup.hostKey !== "string" || !validPublicKey(setup.hostKey)
-    || typeof setup.editorKey !== "string" || !/^SHA256:[A-Za-z0-9+/]{43}$/.test(setup.editorKey) || typeof setup.unlocked !== "boolean" || typeof setup.at !== "string" || !Number.isFinite(Date.parse(setup.at))) throw new PaddockError("incompatible", "Invalid remote SSH setup.")
-  if (setup.editorKeyOrigin !== undefined && setup.editorKeyOrigin !== "client") throw new PaddockError("incompatible", "Invalid editor key origin.")
+    || typeof setup.editorKey !== "string" || !/^SHA256:[A-Za-z0-9+/]{43}$/.test(setup.editorKey) || typeof setup.unlocked !== "boolean" || typeof setup.at !== "string" || !Number.isFinite(Date.parse(setup.at))) throw new AsideeError("incompatible", "Invalid remote SSH setup.")
+  if (setup.editorKeyOrigin !== undefined && setup.editorKeyOrigin !== "client") throw new AsideeError("incompatible", "Invalid editor key origin.")
   // Stored as validated: surrounding whitespace (a leading line break) would split its known_hosts line.
   return { user: setup.user, home: setup.home, sshd: setup.sshd, hostKey: setup.hostKey.trim(), editorKey: setup.editorKey, unlocked: setup.unlocked, at: setup.at, ...(setup.editorKeyOrigin === "client" ? { editorKeyOrigin: "client" } : {}) }
 }
 export async function remoteAliases(dirs: Dirs): Promise<RemoteAlias[]> {
   let value: unknown
   try { value = JSON.parse(await readFile(join(files(dirs).folder, "remotes.json"), "utf8")) } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error }
-  if (!Array.isArray(value)) throw new PaddockError("conflict", "The remote SSH alias file is damaged.")
+  if (!Array.isArray(value)) throw new AsideeError("conflict", "The remote SSH alias file is damaged.")
   return value.map((entry): RemoteAlias => {
-    if (typeof entry !== "object" || entry === null || typeof entry.machineId !== "string" || !/^[a-f0-9]{32}$/.test(entry.machineId) || typeof entry.sandboxId !== "string" || !/^[a-f0-9]{32}$/.test(entry.sandboxId)) throw new PaddockError("conflict", "The remote SSH alias file is damaged.")
+    if (typeof entry !== "object" || entry === null || typeof entry.machineId !== "string" || !/^[a-f0-9]{32}$/.test(entry.machineId) || typeof entry.sandboxId !== "string" || !/^[a-f0-9]{32}$/.test(entry.sandboxId)) throw new AsideeError("conflict", "The remote SSH alias file is damaged.")
     return { host: validName(entry.host), name: validName(entry.name), machineId: entry.machineId, sandboxId: entry.sandboxId, setup: parseSshSetup(entry.setup) }
   })
 }
@@ -171,10 +171,10 @@ export async function included(dirs: Dirs, path = userConfig()): Promise<boolean
 export async function addInclude(dirs: Dirs, path = userConfig()): Promise<boolean> {
   if (await included(dirs, path)) return false
   // Replacing a link would cut it from the file it points to, which may be managed elsewhere.
-  if ((await lstat(path).catch(() => undefined))?.isSymbolicLink()) throw new PaddockError("conflict", `${path} is a link. Add this line at its top yourself: ${includeLine(dirs)}`)
+  if ((await lstat(path).catch(() => undefined))?.isSymbolicLink()) throw new AsideeError("conflict", `${path} is a link. Add this line at its top yourself: ${includeLine(dirs)}`)
   const before = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error })
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
-  const temp = `${path}.paddock-${process.pid}`
+  const temp = `${path}.asidee-${process.pid}`
   await writeFile(temp, `${includeLine(dirs)}\n${before ?? ""}`, { mode: 0o600 })
   try { await rename(temp, path) } catch (error) { await rm(temp, { force: true }); throw error }
   return true

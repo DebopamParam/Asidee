@@ -1,15 +1,15 @@
 # Import logins into a sandbox
 
-This bundled extension runs on your machine with Bun and calls only `paddock exec`. It needs an already running sandbox
+This bundled extension runs on your machine with Bun and calls only `asd exec`. It needs an already running sandbox
 with Node on PATH. GitHub import also needs `gh`, `git`, and HTTPS access to `api.github.com` inside the sandbox.
 It does not create or start a sandbox, install tools, or change the core.
 
-To install the actions, copy this folder to `$PADDOCK_CONFIG_DIR/extensions/logins` (normally
-`~/.config/paddock/extensions/logins`), preserving the executable bit on `login.ts`. Run `paddock ext list` to check it.
+To install the actions, copy this folder to `$ASIDEE_CONFIG_DIR/extensions/logins` (normally
+`~/.config/asidee/extensions/logins`), preserving the executable bit on `login.ts`. Run `asd ext list` to check it.
 An installed extension reads files and, for Claude on macOS, the login Keychain with your machine's rights.
 
 ```sh
-# Run directly from the Paddock source, with paddock on PATH.
+# Run directly from the Asidee source, with asd on PATH.
 bun extensions/logins/login.ts profiles claude
 bun extensions/logins/login.ts import demo claude --profile work --setup
 bun extensions/logins/login.ts import demo codex --profile default --target personal
@@ -21,10 +21,10 @@ bun extensions/logins/login.ts logout demo codex --profile '~'
 bun extensions/logins/login.ts logout demo all
 
 # After installation, the dashboard and extension CLI offer the same non-secret fields.
-paddock ext run logins import demo --set agent=claude --set profile=work --set setup=true
-paddock ext run logins github demo --set account=octocat
-paddock ext run logins list demo
-paddock ext run logins logout demo --set agent=all
+asd ext run logins import demo --set agent=claude --set profile=work --set setup=true
+asd ext run logins github demo --set account=octocat
+asd ext run logins list demo
+asd ext run logins logout demo --set agent=all
 ```
 
 `default` selects the host's canonical `~/.claude` or `~/.codex`. Other names select `~/.claude-PROFILE` or
@@ -41,7 +41,7 @@ sandbox-manager reference did, so an API key in the guest environment does not t
 subscription login. Other `env` entries are kept.
 
 An existing credential requires `--replace` or the action's **Replace an existing login** checkbox. Credentials travel
-only on stdin to `paddock exec NAME --stdin -- …`. Guest writes use private temporary files and atomic publication with
+only on stdin to `asd exec NAME --stdin -- …`. Guest writes use private temporary files and atomic publication with
 mode 0600. New credentials use an exclusive hard link so a concurrent writer cannot silently replace one. Subprocess
 output is withheld on errors. No token belongs in `--set`, an argument, an environment field, or an extension manifest.
 
@@ -97,7 +97,7 @@ termination of matching Claude or Codex sessions under the same guest HOME and p
 may retain credentials in memory. GitHub logout removes the `github.com` section, preserving other hosts. It leaves the
 Git helper installed. Logout never revokes tokens or logs this machine out.
 
-Mutations hold the guest's empty `~/.paddock-logins.lock` directory. If a process is killed and leaves it behind, check
+Mutations hold the guest's empty `~/.asidee-logins.lock` directory. If a process is killed and leaves it behind, check
 that no import or logout is running before removing that empty directory inside the guest and retrying.
 
 The unit tests execute the receiver with temporary homes and fake transport, HTTPS, and host tools.
@@ -105,7 +105,7 @@ The unit tests execute the receiver with temporary homes and fake transport, HTT
 Checked live on 2026-11-11 in one sandbox on the default image, with the extension installed in a temporary
 configuration directory. A stand-in `security` that always fails was placed first on PATH, so no Keychain was read:
 - `profiles` listed this machine's file-backed Claude and Codex profiles. Importing one of each (Claude with `--setup`)
-  and this machine's `gh` login, directly and through `paddock ext run`, worked. In the guest, each credential was mode
+  and this machine's `gh` login, directly and through `asd ext run`, worked. In the guest, each credential was mode
   0600 with the same SHA-256 as the host file, `gh auth status` succeeded, Git's helper was `!gh auth git-credential`
   with no token in Git config, and Claude's `settings.json` had an empty `env.ANTHROPIC_API_KEY`. `--setup` reported a
   hook command missing in the guest.

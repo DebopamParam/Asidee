@@ -44,7 +44,7 @@ export async function checked(runner: Runner, argv: string[], stdin?: string): P
 }
 
 export function exec(runner: Runner, name: string, argv: string[], stdin?: string): Promise<string> {
-  return checked(runner, ["paddock", "exec", sandboxName(name), ...(stdin === undefined ? [] : ["--stdin"]), "--", ...argv], stdin)
+  return checked(runner, ["asd", "exec", sandboxName(name), ...(stdin === undefined ? [] : ["--stdin"]), "--", ...argv], stdin)
 }
 
 export function json(text: string): unknown {

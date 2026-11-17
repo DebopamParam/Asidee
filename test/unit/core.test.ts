@@ -13,7 +13,7 @@ import { fieldValues, loadExtensions, parseExtension } from "../../core/extensio
 import { configChecks, DOCKER_CAPABILITIES, dockerVolume, GvisorProvider, gvisorSetup, network, unsafeRuntimeArgs, type GuardState } from "../../core/providers/gvisor"
 import { OUTPUT_LIMIT, systemRunner } from "../../core/run"
 import { readConfig, readManifest, validSizes, validSpec, validTemplateName } from "../../core/state"
-import { PaddockError, type CheckResult, type Engine, type Limits, type Manifest, type Provider, type Stage, type Template } from "../../core/types"
+import { AsideeError, type CheckResult, type Engine, type Limits, type Manifest, type Provider, type Stage, type Template } from "../../core/types"
 
 const engine: Engine = { id: "fake:1", provider: "fake", label: "Fake engine", ready: true, problems: [], data: { context: "fake", runtime: "runsc" }, capabilities: { kernelIsolation: "gvisor", diskLimit: "watched", networkGuard: true, docker: true, execStream: true, loopbackRelay: true, resize: "live", snapshot: true } }
 const pass = (id: CheckResult["id"]): CheckResult => ({ id, status: "pass", evidence: "inspected", detail: "ok" })
@@ -33,10 +33,10 @@ function fakeProvider(overrides: Partial<Record<Stage, CheckResult[]>> = {}) {
     remove: async () => { state.exists = false; state.running = false },
     status: async () => !state.exists ? "missing" : state.running ? "running" : "stopped",
     exec: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
-    openExec: async () => { throw new PaddockError("dependency", "no sessions in the fake") },
+    openExec: async () => { throw new AsideeError("dependency", "no sessions in the fake") },
     generation: async () => state.running ? `run-${state.starts}` : undefined,
     prepareLoopback: async () => {},
-    dialLoopback: async () => { throw new PaddockError("dependency", "no sessions in the fake") },
+    dialLoopback: async () => { throw new AsideeError("dependency", "no sessions in the fake") },
     checks: async (_manifest, stage) => state.overrides[stage] ?? allPass(stage),
     diskUsedBytes: async () => 0,
     stoppedWhy: async () => undefined,
@@ -58,16 +58,16 @@ function fakeProvider(overrides: Partial<Record<Stage, CheckResult[]>> = {}) {
 }
 
 async function core(provider: Provider) {
-  const root = await mkdtemp(join(tmpdir(), "paddock-test-"))
+  const root = await mkdtemp(join(tmpdir(), "asidee-test-"))
   return new Core([provider], { state: join(root, "state"), config: join(root, "config") }, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere")
 }
 
 test("stored verification is dated history with current properties unknown across every lifecycle change", async () => {
-  const { provider, state } = fakeProvider(); const paddock = await core(provider)
-  const made = await paddock.create({ name: "demo" })
+  const { provider, state } = fakeProvider(); const asidee = await core(provider)
+  const made = await asidee.create({ name: "demo" })
   expect(made.checks.find((check) => check.id === "kernel")?.status).toBe("pass")
   const measured = made.sandbox.lastVerify!.at
-  const historical = async (instance = paddock) => {
+  const historical = async (instance = asidee) => {
     const saved = (await instance.get("demo")).lastVerify!
     expect(saved.at).toBe(measured)
     expect(saved.results.every((check) => check.status === "unknown" && check.evidence === "none")).toBe(true)
@@ -75,12 +75,12 @@ test("stored verification is dated history with current properties unknown acros
   }
   await historical()
   state.starts++; await historical()
-  await paddock.stop("demo"); await historical()
-  await paddock.start("demo"); await historical()
-  await historical(new Core([provider], paddock.dirs, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere"))
+  await asidee.stop("demo"); await historical()
+  await asidee.start("demo"); await historical()
+  await historical(new Core([provider], asidee.dirs, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere"))
   provider.checks = async () => { throw new Error("engine restarted or changed") }
   await historical()
-  expect((await paddock.list())[0]!.lastVerify?.results[0]?.status).toBe("unknown")
+  expect((await asidee.list())[0]!.lastVerify?.results[0]?.status).toBe("unknown")
 })
 
 test("a check the provider does not report is unknown, never a pass", () => {
@@ -91,33 +91,33 @@ test("a check the provider does not report is unknown, never a pass", () => {
 })
 
 test("remote relay leases require the current sandbox and run and are revoked on stop", async () => {
-  const { provider, state } = fakeProvider(); const paddock = await core(provider)
-  const made = await paddock.create({ name: "demo" }); const target = await paddock.sessionTarget("demo")
+  const { provider, state } = fakeProvider(); const asidee = await core(provider)
+  const made = await asidee.create({ name: "demo" }); const target = await asidee.sessionTarget("demo")
   expect(made.sandbox.sandboxId).toBe(target.sandboxId)
   const lease = { kind: "lease" as const, ...target, port: 3000, leaseId: "a".repeat(32) }
-  await expect(paddock.openSession({ ...lease, sandboxId: "b".repeat(32) })).rejects.toThrow("recreated")
-  await expect(paddock.openSession({ ...lease, generation: "old" })).rejects.toThrow("run changed")
-  const control = await paddock.openSession(lease); let ended = ""
+  await expect(asidee.openSession({ ...lease, sandboxId: "b".repeat(32) })).rejects.toThrow("recreated")
+  await expect(asidee.openSession({ ...lease, generation: "old" })).rejects.toThrow("run changed")
+  const control = await asidee.openSession(lease); let ended = ""
   control.on("end", (exit) => { ended = exit.error ?? "" })
-  const checks = (await paddock.verify("demo")).checks
+  const checks = (await asidee.verify("demo")).checks
   expect(checks.find((check) => check.id === "forwards")?.detail).toContain("SSH lease")
-  await expect(paddock.openSession({ ...lease, kind: "dial", port: 3001 })).rejects.toThrow("no longer open")
-  await expect(paddock.openSession({ ...lease, kind: "dial", leaseId: "b".repeat(32) })).rejects.toThrow("no longer open")
-  await paddock.stop("demo")
+  await expect(asidee.openSession({ ...lease, kind: "dial", port: 3001 })).rejects.toThrow("no longer open")
+  await expect(asidee.openSession({ ...lease, kind: "dial", leaseId: "b".repeat(32) })).rejects.toThrow("no longer open")
+  await asidee.stop("demo")
   expect(ended).toContain("stopped")
   expect(state.running).toBe(false)
-  await paddock.start("demo")
-  await expect(paddock.openSession({ ...lease, kind: "dial" })).rejects.toThrow("run changed")
+  await asidee.start("demo")
+  await expect(asidee.openSession({ ...lease, kind: "dial" })).rejects.toThrow("run changed")
 })
 
 test("a remote lease ends on its own when the primary stops renewing it, and lasts while it renews", async () => {
-  const { provider } = fakeProvider(); const paddock = await core(provider); paddock.leaseTtlMs = 200
-  await paddock.create({ name: "demo" }); const target = await paddock.sessionTarget("demo")
+  const { provider } = fakeProvider(); const asidee = await core(provider); asidee.leaseTtlMs = 200
+  await asidee.create({ name: "demo" }); const target = await asidee.sessionTarget("demo")
   const lease = { kind: "lease" as const, ...target, port: 3000, leaseId: "a".repeat(32) }
-  const renewed = await paddock.openSession(lease); let renewedEnd = ""
+  const renewed = await asidee.openSession(lease); let renewedEnd = ""
   renewed.on("end", (exit) => { renewedEnd = exit.error ?? "ended" })
   const timer = setInterval(() => renewed.write(new Uint8Array([1])), 50)
-  const silent = await paddock.openSession({ ...lease, leaseId: "b".repeat(32) }); let silentEnd = ""
+  const silent = await asidee.openSession({ ...lease, leaseId: "b".repeat(32) }); let silentEnd = ""
   silent.on("end", (exit) => { silentEnd = exit.error ?? "ended" })
   await Bun.sleep(600); clearInterval(timer)
   expect(silentEnd).toContain("did not renew")
@@ -140,8 +140,8 @@ test("unsupported blocking properties refuse creation and name the missing promi
     const stage = CHECKLIST.find((item) => item.id === id)!.stage
     const results = allPass(stage).map((entry): CheckResult => entry.id === id ? { ...entry, status: "unsupported", detail: "Engine cannot provide this." } : entry)
     expect(blockers(results).map((entry) => entry.id)).toEqual([id])
-    const { provider, state } = fakeProvider({ [stage]: results }); const paddock = await core(provider)
-    await expect(paddock.create({ name: "demo" })).rejects.toThrow(CHECKLIST.find((item) => item.id === id)!.title)
+    const { provider, state } = fakeProvider({ [stage]: results }); const asidee = await core(provider)
+    await expect(asidee.create({ name: "demo" })).rejects.toThrow(CHECKLIST.find((item) => item.id === id)!.title)
     expect(state.running).toBe(false)
   }
   expect(blockers([{ id: "disk", status: "unsupported", evidence: "none", detail: "No disk cap." }])).toEqual([])
@@ -150,19 +150,19 @@ test("unsupported blocking properties refuse creation and name the missing promi
 test("Docker Sandboxes is detection-only and refuses create without touching an engine", async () => {
   const calls: string[][] = []
   const provider = new DockerSandboxesProvider(async (argv) => { calls.push([...argv]); return { exitCode: 0, stdout: "1.0", stderr: "" } })
-  const paddock = await core(provider)
+  const asidee = await core(provider)
   expect((await provider.detect())[0]?.ready).toBe(false)
-  await expect(paddock.create({ name: "demo", engine: "docker-sandboxes" })).rejects.toThrow("does not support Docker Sandboxes yet")
+  await expect(asidee.create({ name: "demo", engine: "docker-sandboxes" })).rejects.toThrow("does not support Docker Sandboxes yet")
   expect(calls.every((argv) => argv.join(" ") === "sbx version")).toBe(true)
-  expect(await paddock.list()).toEqual([])
+  expect(await asidee.list()).toEqual([])
 })
 
 test("a spec keeps only known fields and refuses option-like images", () => {
   const spec = validSpec({ name: "demo", cpus: "3", privileged: true, mounts: ["/:/host"], runtime: "runc" })
   expect(spec).toEqual({ name: "demo", image: "docker/sandbox-templates:shell-docker", cpus: 3, memoryGb: 4, pids: 4096, diskGb: 20, docker: false })
-  expect(() => validSpec({ name: "demo", image: "--privileged" })).toThrow(PaddockError)
-  expect(() => validSpec({ name: "../x" })).toThrow(PaddockError)
-  expect(() => validSpec({ name: "demo", memoryGb: 0 })).toThrow(PaddockError)
+  expect(() => validSpec({ name: "demo", image: "--privileged" })).toThrow(AsideeError)
+  expect(() => validSpec({ name: "../x" })).toThrow(AsideeError)
+  expect(() => validSpec({ name: "demo", memoryGb: 0 })).toThrow(AsideeError)
 })
 
 test("create and resize share one range for each size, and resize keeps what is not given", () => {
@@ -170,7 +170,7 @@ test("create and resize share one range for each size, and resize keeps what is 
   expect(validSizes({}, base)).toEqual(base)
   expect(validSizes({ memoryGb: "8", pids: "100.4" }, base)).toEqual({ ...base, memoryGb: 8, pids: 100 })
   for (const input of [{ cpus: 0.2 }, { memoryGb: 0.2 }, { pids: 63 }, { diskGb: 0.5 }, { cpus: 65 }, { memoryGb: "lots" }, { pids: "-1" }])
-    expect(() => validSizes(input, base)).toThrow(PaddockError)
+    expect(() => validSizes(input, base)).toThrow(AsideeError)
 })
 
 test("a template is named like a sandbox, and its images are reached only by that name", () => {
@@ -178,8 +178,8 @@ test("a template is named like a sandbox, and its images are reached only by tha
   for (const name of ["", "-x", "Base", "a/b", "a:b", "x".repeat(32), 3]) expect(() => validTemplateName(name)).toThrow("template name")
   expect(validSpec({ name: "demo", template: "base" })).toMatchObject({ template: "base" })
   expect(() => validSpec({ name: "demo", template: "base", image: "ubuntu:24.04" })).toThrow("not both")
-  expect(() => validSpec({ name: "demo", template: "../x" })).toThrow(PaddockError)
-  for (const image of ["paddock-template-abc:base", "paddock-snapshot-abc:1"]) expect(() => validSpec({ name: "demo", image })).toThrow("--template")
+  expect(() => validSpec({ name: "demo", template: "../x" })).toThrow(AsideeError)
+  for (const image of ["asidee-template-abc:base", "asidee-snapshot-abc:1"]) expect(() => validSpec({ name: "demo", image })).toThrow("--template")
 })
 
 test("docker is a strict boolean, defaults off, and can be set or overridden in defaults", () => {
@@ -193,10 +193,10 @@ test("docker is a strict boolean, defaults off, and can be set or overridden in 
 test("an engine without inner Docker refuses the option before making a sandbox", async () => {
   const { provider, state } = fakeProvider()
   provider.detect = async () => [{ ...engine, capabilities: { ...engine.capabilities!, docker: false } }]
-  const paddock = await core(provider)
-  await expect(paddock.create({ name: "demo", docker: true })).rejects.toMatchObject({ code: "dependency" })
+  const asidee = await core(provider)
+  await expect(asidee.create({ name: "demo", docker: true })).rejects.toMatchObject({ code: "dependency" })
   expect(state.exists).toBe(false)
-  expect(await paddock.list()).toEqual([])
+  expect(await asidee.list()).toEqual([])
 })
 
 const manifest: Manifest = { version: 1, name: "demo", id: "abc", engine, spec: validSpec({ name: "demo" }), createdAt: "" }
@@ -210,14 +210,14 @@ function inspect(change: (value: any) => void = () => {}) {
   }
   change(value); return value
 }
-const failing = (value: ReturnType<typeof inspect>, guard: GuardState = "intact", bridge = "pdk123") =>
+const failing = (value: ReturnType<typeof inspect>, guard: GuardState = "intact", bridge = "asd123") =>
   configChecks(value, manifest, guard, bridge).filter((entry) => entry.status === "fail").map((entry) => entry.id)
 
 test("a container made the way the provider makes it passes the configuration checks", () => {
   expect(failing(inspect())).toEqual([])
-  expect(configChecks(inspect(), manifest, "intact", "pdk123").find((entry) => entry.id === "disk")!.status).toBe("weak")
+  expect(configChecks(inspect(), manifest, "intact", "asd123").find((entry) => entry.id === "disk")!.status).toBe("weak")
   const unmeasured = { ...manifest, engine: { ...engine, capabilities: { ...engine.capabilities!, diskLimit: "none" as const } } }
-  expect(configChecks(inspect(), unmeasured, "intact", "pdk123").find((entry) => entry.id === "disk")!.status).toBe("unsupported")
+  expect(configChecks(inspect(), unmeasured, "intact", "asd123").find((entry) => entry.id === "disk")!.status).toBe("unsupported")
 })
 
 test("each way of loosening a container fails its check", () => {
@@ -238,16 +238,16 @@ test("each way of loosening a container fails its check", () => {
   expect(failing(inspect((value) => { value.HostConfig.PortBindings = { "22/tcp": [{}] } }))).toEqual(["inbound"])
   expect(failing(inspect((value) => { value.HostConfig.Memory = 0 }))).toEqual(["limits"])
   expect(failing(inspect((value) => { value.HostConfig.PidsLimit = null }))).toEqual(["limits"])
-  // Set, but not to what the spec says: changed behind Paddock's back, or a resize the manifest does not know of.
+  // Set, but not to what the spec says: changed behind Asidee's back, or a resize the manifest does not know of.
   expect(failing(inspect((value) => { value.HostConfig.Memory = value.HostConfig.MemorySwap = 8 * 1024 ** 3 }))).toEqual(["limits"])
   expect(failing(inspect((value) => { value.HostConfig.PidsLimit = 8192 }))).toEqual(["limits"])
   expect(failing(inspect((value) => { value.HostConfig.NanoCpus = 3e9 }))).toEqual(["limits"])
 })
 
 test("the template check says what a sandbox was made from, and fails when the engine runs something else", () => {
-  const image = (labels: Record<string, string> = {}, tags = ["paddock-template-own:base"]) => ({ Id: "sha256:t", RepoTags: tags, Config: { Labels: labels } })
+  const image = (labels: Record<string, string> = {}, tags = ["asidee-template-own:base"]) => ({ Id: "sha256:t", RepoTags: tags, Config: { Labels: labels } })
   const templated: Manifest = { ...manifest, template: { name: "base", imageId: "sha256:t", source: "src", createdAt: "2026-11-11T00:00:00Z" } }
-  const check = (value: ReturnType<typeof inspect>, sandbox: Manifest, described?: ReturnType<typeof image>) => configChecks(value, sandbox, "intact", "pdk123", undefined, described, "own").find((entry) => entry.id === "template")!
+  const check = (value: ReturnType<typeof inspect>, sandbox: Manifest, described?: ReturnType<typeof image>) => configChecks(value, sandbox, "intact", "asd123", undefined, described, "own").find((entry) => entry.id === "template")!
   const running = (id: string) => inspect((value) => { (value as any).Image = id })
   expect(check(running("sha256:t"), templated, image())).toMatchObject({ status: "info" })
   expect(check(running("sha256:t"), templated, image()).detail).toContain("Template base, saved from the sandbox src")
@@ -255,7 +255,7 @@ test("the template check says what a sandbox was made from, and fails when the e
   expect(check(running("sha256:other"), templated, image()).status).toBe("fail")
   expect(check(running("sha256:t"), templated).status).toBe("unknown")
   expect(check(running("sha256:i"), manifest, image()).detail).toBe(`None: made from the image ${manifest.spec.image}.`)
-  expect(check(running("sha256:t"), manifest, image({ "dev.paddock.template": "base", "dev.paddock.template.owner": "own" })).detail).toContain("is Paddock template base's")
+  expect(check(running("sha256:t"), manifest, image({ "com.asidee.template": "base", "com.asidee.template.owner": "own" })).detail).toContain("is Asidee template base's")
 })
 
 test("Docker hardening accepts exactly its declared additions inside gVisor", () => {
@@ -264,7 +264,7 @@ test("Docker hardening accepts exactly its declared additions inside gVisor", ()
     value.HostConfig.CapAdd = caps
     value.Mounts = [{ Type: "volume", Name: dockerVolume(enabled), Source: "/engine/volume", Destination: "/var/lib/docker", RW: true }]
     change(value)
-  }), enabled, "intact", "pdk123", [{ Name: dockerVolume(enabled), Driver: "local", Options: null, Labels: { "dev.paddock.id": enabled.id, "dev.paddock.name": enabled.name } }])
+  }), enabled, "intact", "asd123", [{ Name: dockerVolume(enabled), Driver: "local", Options: null, Labels: { "com.asidee.id": enabled.id, "com.asidee.name": enabled.name } }])
   const hardening = (caps: string[], change?: (value: any) => void) => checked(caps, change).find((entry) => entry.id === "hardening")!
   expect(hardening([...DOCKER_CAPABILITIES])).toMatchObject({ status: "pass", evidence: "inspected" })
   expect(DOCKER_CAPABILITIES).toEqual(["NET_ADMIN", "SYS_ADMIN"])
@@ -286,7 +286,7 @@ test("every sandbox's main-process output must have bounded host logging, with o
     const sandbox = { ...manifest, spec: { ...manifest.spec, docker } }
     const limits = (LogConfig?: { Type: string; Config: Record<string, string> | null }) => configChecks(inspect((value) => {
       value.HostConfig.LogConfig = LogConfig
-    }), sandbox, "intact", "pdk123").find((entry) => entry.id === "limits")!
+    }), sandbox, "intact", "asd123").find((entry) => entry.id === "limits")!
     expect(limits({ Type: "json-file", Config: { "max-size": "10m", "max-file": "2" } }).status).toBe("pass")
     const invalid: Parameters<typeof limits>[0][] = [undefined, { Type: "json-file", Config: {} }, { Type: "json-file", Config: { "max-size": "10m" } },
       { Type: "json-file", Config: { "max-size": "10m", "max-file": "200" } }, { Type: "local", Config: { "max-size": "10m", "max-file": "2" } }]
@@ -300,8 +300,8 @@ test("every sandbox's main-process output must have bounded host logging, with o
 test("Docker volumes cannot disguise host folders or another sandbox's data", () => {
   const enabled = { ...manifest, spec: { ...manifest.spec, docker: true } }
   const value = inspect((value) => { value.Mounts = [{ Type: "volume", Name: dockerVolume(enabled), Destination: "/var/lib/docker", Source: "/engine/volume", RW: true }] })
-  const volume = { Name: dockerVolume(enabled), Driver: "local", Options: null, Labels: { "dev.paddock.id": enabled.id, "dev.paddock.name": enabled.name } }
-  const mounts = (volumes?: Parameters<typeof configChecks>[4]) => configChecks(value, enabled, "intact", "pdk123", volumes).find((entry) => entry.id === "mounts")!
+  const volume = { Name: dockerVolume(enabled), Driver: "local", Options: null, Labels: { "com.asidee.id": enabled.id, "com.asidee.name": enabled.name } }
+  const mounts = (volumes?: Parameters<typeof configChecks>[4]) => configChecks(value, enabled, "intact", "asd123", volumes).find((entry) => entry.id === "mounts")!
   expect(mounts([volume]).status).toBe("pass")
   expect(mounts().status).toBe("unknown")
   expect(mounts([]).status).toBe("unknown")
@@ -311,57 +311,57 @@ test("Docker volumes cannot disguise host folders or another sandbox's data", ()
 })
 
 test("create starts a sandbox whose checks hold, and remove needs its name repeated", async () => {
-  const { provider, state } = fakeProvider(); const paddock = await core(provider)
-  const made = await paddock.create({ name: "demo" })
+  const { provider, state } = fakeProvider(); const asidee = await core(provider)
+  const made = await asidee.create({ name: "demo" })
   expect(made.sandbox.status).toBe("running")
   expect(made.checks.length).toBe(CHECKLIST.length)
-  await expect(paddock.create({ name: "demo" })).rejects.toMatchObject({ code: "conflict" })
-  await expect(paddock.remove("demo", undefined)).rejects.toMatchObject({ code: "usage" })
+  await expect(asidee.create({ name: "demo" })).rejects.toMatchObject({ code: "conflict" })
+  await expect(asidee.remove("demo", undefined)).rejects.toMatchObject({ code: "usage" })
   expect(state.exists).toBe(true)
-  await paddock.remove("demo", "demo")
-  expect(await paddock.list()).toEqual([])
+  await asidee.remove("demo", "demo")
+  expect(await asidee.list()).toEqual([])
 })
 
 test("a command that prints more than the output limit is killed, and nothing it printed is returned", async () => {
   const whole = await systemRunner(["sh", "-c", `head -c ${OUTPUT_LIMIT} /dev/zero; exit 3`])
   expect(whole.exitCode).toBe(3); expect(whole.stdout.length).toBe(OUTPUT_LIMIT); expect(whole.overflow).toBeUndefined()
   const started = Date.now()
-  const over = await systemRunner(["sh", "-c", "yes paddock; echo finished > /dev/null"])
+  const over = await systemRunner(["sh", "-c", "yes asidee; echo finished > /dev/null"])
   expect(over).toMatchObject({ exitCode: 124, stdout: "", overflow: "stdout" })
   expect(over.stderr).toContain("16 MiB on stdout")
   expect(Date.now() - started).toBeLessThan(20_000)
-  expect(await systemRunner(["sh", "-c", "yes paddock >&2"], { maxOutputBytes: 1024 ** 2 })).toMatchObject({ exitCode: 124, stdout: "", overflow: "stderr" })
+  expect(await systemRunner(["sh", "-c", "yes asidee >&2"], { maxOutputBytes: 1024 ** 2 })).toMatchObject({ exitCode: 124, stdout: "", overflow: "stderr" })
   const bytes = new Uint8Array([0, 255, 128, 10, 0xc3])
   expect([...(await systemRunner(["cat"], { stdin: bytes, binary: true })).raw!]).toEqual([...bytes])
 })
 
 test("exec refuses output past the limit with an error that names it, never a cut-off result", async () => {
-  const { provider } = fakeProvider(); const paddock = await core(provider)
-  await paddock.create({ name: "demo" })
+  const { provider } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo" })
   provider.exec = async () => ({ exitCode: 124, stdout: "", stderr: "", overflow: "stdout" })
-  await expect(paddock.exec("demo", ["yes"])).rejects.toMatchObject({ code: "runtime", message: expect.stringContaining("16 MiB on stdout") })
+  await expect(asidee.exec("demo", ["yes"])).rejects.toMatchObject({ code: "runtime", message: expect.stringContaining("16 MiB on stdout") })
 })
 
 test("a sandbox whose configuration fails a check is never started", async () => {
   const { provider, state } = fakeProvider({ config: allPass("config").map((entry) => entry.id === "mounts" ? { ...entry, status: "fail" as const } : entry) })
-  const paddock = await core(provider)
-  await expect(paddock.create({ name: "demo" })).rejects.toMatchObject({ code: "check-failed" })
+  const asidee = await core(provider)
+  await expect(asidee.create({ name: "demo" })).rejects.toMatchObject({ code: "check-failed" })
   expect(state.starts).toBe(0)
-  expect((await paddock.get("demo")).status).toBe("stopped")
+  expect((await asidee.get("demo")).status).toBe("stopped")
 })
 
 test("a sandbox that fails a check once running is stopped again", async () => {
   const { provider, state } = fakeProvider({ runtime: [{ id: "kernel", status: "fail", evidence: "probed", detail: "not gVisor" }] })
-  const paddock = await core(provider)
-  await expect(paddock.create({ name: "demo" })).rejects.toMatchObject({ code: "check-failed" })
+  const asidee = await core(provider)
+  await expect(asidee.create({ name: "demo" })).rejects.toMatchObject({ code: "check-failed" })
   expect(state).toMatchObject({ starts: 1, stops: 1, running: false })
 })
 
 test("verify stops a running sandbox when a probe fails, and says why", async () => {
-  const { provider, state } = fakeProvider(); const paddock = await core(provider)
-  await paddock.create({ name: "demo" })
+  const { provider, state } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo" })
   state.overrides.probe = allPass("probe").map((entry) => entry.id === "net-host" ? { ...entry, status: "fail" as const } : entry)
-  const report = await paddock.verify("demo")
+  const report = await asidee.verify("demo")
   expect(report.ok).toBe(false)
   expect(report.sandbox.status).toBe("stopped")
   expect(report.sandbox.stopReason).toContain("Cannot reach the host")
@@ -369,13 +369,13 @@ test("verify stops a running sandbox when a probe fails, and says why", async ()
 })
 
 test("guard rules that could not be read block a start but do not stop a running sandbox", async () => {
-  const unreadable = configChecks(inspect(), manifest, "unknown", "pdk123")
+  const unreadable = configChecks(inspect(), manifest, "unknown", "asd123")
   expect(blockers(unreadable).map((entry) => entry.id)).toEqual(["network-guard"])
-  const { provider, state } = fakeProvider(); const paddock = await core(provider)
-  await paddock.create({ name: "demo" })
+  const { provider, state } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo" })
   state.overrides.config = unreadable
-  await paddock.enforce()
-  expect((await paddock.get("demo")).status).toBe("running")
+  await asidee.enforce()
+  expect((await asidee.get("demo")).status).toBe("running")
 })
 
 test("gVisor flags that open the host are recognized in every spelling", () => {
@@ -389,178 +389,178 @@ test("gVisor flags that open the host are recognized in every spelling", () => {
 })
 
 test("a start that fails halfway does not leave the sandbox running", async () => {
-  const { provider, state } = fakeProvider(); const paddock = await core(provider)
-  await paddock.create({ name: "demo" }); await paddock.stop("demo")
+  const { provider, state } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo" }); await asidee.stop("demo")
   provider.start = async () => { state.running = true; throw new Error("DNS could not be set") }
-  await expect(paddock.start("demo")).rejects.toThrow("DNS could not be set")
+  await expect(asidee.start("demo")).rejects.toThrow("DNS could not be set")
   expect(state.running).toBe(false)
 })
 
 for (const requireProbes of [true, false]) test(`a create whose first verify throws stops the sandbox and says so, require-probes ${requireProbes ? "on" : "off"}`, async () => {
-  const { provider, state } = fakeProvider(); const paddock = await core(provider)
-  await paddock.configSet({ requireProbes })
-  provider.checks = async (_manifest, stage) => { if (stage === "probe") throw new PaddockError("runtime", "A previous Paddock probe has not finished tearing down its routes."); return allPass(stage) }
-  await expect(paddock.create({ name: "demo" })).rejects.toThrow("demo was created but stopped, and is kept for diagnosis: its first checks could not finish. A previous Paddock probe")
+  const { provider, state } = fakeProvider(); const asidee = await core(provider)
+  await asidee.configSet({ requireProbes })
+  provider.checks = async (_manifest, stage) => { if (stage === "probe") throw new AsideeError("runtime", "A previous Asidee probe has not finished tearing down its routes."); return allPass(stage) }
+  await expect(asidee.create({ name: "demo" })).rejects.toThrow("demo was created but stopped, and is kept for diagnosis: its first checks could not finish. A previous Asidee probe")
   expect(state.running).toBe(false)
-  const saved = await readManifest(paddock.dirs, "demo")
+  const saved = await readManifest(asidee.dirs, "demo")
   expect(saved.stopReason).toContain("its first checks could not finish")
   expect(saved.checksPending).toBeUndefined()
 })
 
 test("a sandbox a crashed daemon started but never finished checking is stopped by the next daemon", async () => {
-  const { provider, state } = fakeProvider(); const paddock = await core(provider)
+  const { provider, state } = fakeProvider(); const asidee = await core(provider)
   // The first daemon dies inside the probe: the sandbox runs, and only the mark written before its start says so.
   let reached: () => void = () => {}
   const inProbe = new Promise<void>((resolve) => { reached = resolve })
   provider.checks = async (_manifest, stage) => { if (stage === "probe") { reached(); return new Promise<never>(() => {}) } return allPass(stage) }
-  void paddock.create({ name: "demo" })
+  void asidee.create({ name: "demo" })
   await inProbe
   expect(state.running).toBe(true)
-  expect((await readManifest(paddock.dirs, "demo")).checksPending).toBeString()
+  expect((await readManifest(asidee.dirs, "demo")).checksPending).toBeString()
   provider.checks = async (_manifest, stage) => state.overrides[stage] ?? allPass(stage)
-  const next = new Core([provider], paddock.dirs, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere")
+  const next = new Core([provider], asidee.dirs, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere")
   await next.enforce()
   expect(state.running).toBe(false)
-  const saved = await readManifest(paddock.dirs, "demo")
+  const saved = await readManifest(asidee.dirs, "demo")
   expect(saved.stopReason).toContain("its checks never finished: the daemon that started it ended first")
   expect(saved.checksPending).toBeUndefined()
   // Control: a start whose checks finished leaves no mark, and enforcement keeps it running.
   await next.start("demo")
-  expect((await readManifest(paddock.dirs, "demo")).checksPending).toBeUndefined()
+  expect((await readManifest(asidee.dirs, "demo")).checksPending).toBeUndefined()
   await next.enforce()
   expect(state.running).toBe(true)
 })
 
 test("verifying a stopped sandbox judges its configuration and does not call the rest a failure", async () => {
-  const { provider, state } = fakeProvider(); const paddock = await core(provider)
-  await paddock.create({ name: "demo" }); await paddock.stop("demo")
-  const report = await paddock.verify("demo")
+  const { provider, state } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo" }); await asidee.stop("demo")
+  const report = await asidee.verify("demo")
   expect(report.ok).toBe(true)
   expect(report.checks.find((entry) => entry.id === "kernel")).toMatchObject({ status: "unknown", detail: "Not checked: the sandbox is not running." })
   state.overrides.config = allPass("config").map((entry) => entry.id === "inbound" ? { ...entry, status: "fail" as const } : entry)
-  expect((await paddock.verify("demo")).ok).toBe(false)
+  expect((await asidee.verify("demo")).ok).toBe(false)
 })
 
 test("the daemon's pass stops a running sandbox that fails a check or passed its disk limit", async () => {
-  const { provider, state } = fakeProvider(); const paddock = await core(provider)
-  await paddock.create({ name: "demo", diskGb: 1 }); await paddock.create({ name: "other", diskGb: 1 })
-  await paddock.enforce()
-  expect((await paddock.get("demo")).status).toBe("running")
+  const { provider, state } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo", diskGb: 1 }); await asidee.create({ name: "other", diskGb: 1 })
+  await asidee.enforce()
+  expect((await asidee.get("demo")).status).toBe("running")
   provider.diskUsedBytes = async () => 2 * 1024 ** 3
-  await paddock.enforce()
-  expect(await paddock.get("demo")).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("disk watch") })
+  await asidee.enforce()
+  expect(await asidee.get("demo")).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("disk watch") })
   provider.diskUsedBytes = async () => 0
-  await paddock.start("demo")
+  await asidee.start("demo")
   state.overrides.config = allPass("config").map((entry) => entry.id === "network-guard" ? { ...entry, status: "fail" as const, detail: "guard missing" } : entry)
-  await paddock.enforce()
-  expect(await paddock.get("demo")).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("guard missing") })
+  await asidee.enforce()
+  expect(await asidee.get("demo")).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("guard missing") })
 })
 
 test("enforcement exceptions are recorded per sandbox, survive a daemon restart and do not skip other sandboxes", async () => {
   for (const operation of ["status", "checks", "diskUsedBytes"] as const) {
-    const { provider } = fakeProvider(); const paddock = await core(provider)
-    await paddock.create({ name: "demo" }); await paddock.create({ name: "other" })
+    const { provider } = fakeProvider(); const asidee = await core(provider)
+    await asidee.create({ name: "demo" }); await asidee.create({ name: "other" })
     const original = provider[operation]; let otherChecked = false
     const checks = provider.checks
     provider.checks = async (manifest, stage) => { if (manifest.name === "other") otherChecked = true; return checks(manifest, stage) }
     if (operation === "status") provider.status = async (manifest) => { if (manifest.name === "demo") throw new Error("engine offline"); return "running" }
     if (operation === "checks") provider.checks = async (manifest, stage) => { if (manifest.name === "demo") throw new Error("guard unreadable"); otherChecked = true; return checks(manifest, stage) }
     if (operation === "diskUsedBytes") provider.diskUsedBytes = async (manifest) => { if (manifest.name === "demo") throw new Error("disk unreadable"); return 0 }
-    await paddock.enforce()
+    await asidee.enforce()
     expect(otherChecked).toBe(true)
-    const saved = await readManifest(paddock.dirs, "demo")
+    const saved = await readManifest(asidee.dirs, "demo")
     expect(saved.enforcementProblem?.message).toContain("Enforcement could not be completed")
     expect(saved.enforcementProblem?.at).toMatch(/^\d{4}-/)
-    const restarted = new Core([provider], paddock.dirs, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere")
+    const restarted = new Core([provider], asidee.dirs, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere")
     expect((await restarted.get("demo")).enforcementProblem).toEqual(saved.enforcementProblem)
-    expect((await paddock.get("other")).enforcementProblem).toBeUndefined()
+    expect((await asidee.get("other")).enforcementProblem).toBeUndefined()
     Object.assign(provider, { [operation]: original })
-    await paddock.enforce()
-    expect((await paddock.get("demo")).enforcementProblem).toBeUndefined()
+    await asidee.enforce()
+    expect((await asidee.get("demo")).enforcementProblem).toBeUndefined()
   }
 })
 
 test("a failure enforcement acted on is cleared once the stop succeeds, and stays only while the stop failed", async () => {
-  const { provider, state } = fakeProvider(); const paddock = await core(provider)
-  await paddock.create({ name: "demo", diskGb: 1 })
+  const { provider, state } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo", diskGb: 1 })
   state.overrides.config = allPass("config").map((entry) => entry.id === "network-guard" ? { ...entry, status: "fail" as const, detail: "guard missing" } : entry)
-  await paddock.enforce()
-  const stopped = await paddock.get("demo")
+  await asidee.enforce()
+  const stopped = await asidee.get("demo")
   expect(stopped).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("guard missing") })
   expect(stopped.enforcementProblem).toBeUndefined()
-  expect((await readManifest(paddock.dirs, "demo")).enforcementProblem).toBeUndefined()
-  delete state.overrides.config; await paddock.start("demo")
+  expect((await readManifest(asidee.dirs, "demo")).enforcementProblem).toBeUndefined()
+  delete state.overrides.config; await asidee.start("demo")
   provider.diskUsedBytes = async () => 2 * 1024 ** 3
-  await paddock.enforce()
-  expect(await paddock.get("demo")).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("disk watch"), enforcementProblem: undefined })
+  await asidee.enforce()
+  expect(await asidee.get("demo")).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("disk watch"), enforcementProblem: undefined })
   // The stop failed: the sandbox still runs past its limit, and that is what stays shown.
-  provider.diskUsedBytes = async () => 0; await paddock.start("demo")
+  provider.diskUsedBytes = async () => 0; await asidee.start("demo")
   provider.diskUsedBytes = async () => 2 * 1024 ** 3; const stop = provider.stop
   provider.stop = async () => { throw new Error("stop refused") }
-  await paddock.enforce()
+  await asidee.enforce()
   expect(state.running).toBe(true)
-  expect((await paddock.get("demo")).enforcementProblem?.message).toMatch(/stop refused.*disk watch/)
+  expect((await asidee.get("demo")).enforcementProblem?.message).toMatch(/stop refused.*disk watch/)
   provider.stop = stop; provider.diskUsedBytes = async () => 0
 })
 
 test("a stale enforcement problem is cleared when the sandbox is found stopped and on an explicit start", async () => {
-  const { provider, state } = fakeProvider(); const paddock = await core(provider)
-  await paddock.create({ name: "demo" })
+  const { provider, state } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo" })
   provider.diskUsedBytes = async () => undefined
-  await paddock.enforce()
-  expect((await paddock.get("demo")).enforcementProblem?.message).toContain("Disk use could not be measured")
+  await asidee.enforce()
+  expect((await asidee.get("demo")).enforcementProblem?.message).toContain("Disk use could not be measured")
   // Stopped behind the daemon's back: nothing is left to enforce, so the warning goes.
   state.running = false
-  await paddock.enforce()
-  expect((await paddock.get("demo")).enforcementProblem).toBeUndefined()
-  expect((await readManifest(paddock.dirs, "demo")).enforcementProblem).toBeUndefined()
-  await paddock.start("demo"); await paddock.enforce()
-  expect((await paddock.get("demo")).enforcementProblem).toBeDefined()
+  await asidee.enforce()
+  expect((await asidee.get("demo")).enforcementProblem).toBeUndefined()
+  expect((await readManifest(asidee.dirs, "demo")).enforcementProblem).toBeUndefined()
+  await asidee.start("demo"); await asidee.enforce()
+  expect((await asidee.get("demo")).enforcementProblem).toBeDefined()
   // An explicit start passes its own blocking checks, so it begins without the old warning.
-  await paddock.stop("demo")
-  expect((await paddock.get("demo")).enforcementProblem).toBeDefined()
-  await paddock.start("demo")
-  expect((await paddock.get("demo")).enforcementProblem).toBeUndefined()
-  const saved = await readManifest(paddock.dirs, "demo")
+  await asidee.stop("demo")
+  expect((await asidee.get("demo")).enforcementProblem).toBeDefined()
+  await asidee.start("demo")
+  expect((await asidee.get("demo")).enforcementProblem).toBeUndefined()
+  const saved = await readManifest(asidee.dirs, "demo")
   expect(saved.enforcementProblem).toBeUndefined(); expect(saved.stopReason).toBeUndefined()
 })
 
 test("unmeasured disk use and exceptions consume the unknown budget, and failed stops stay visible", async () => {
-  const { provider, state } = fakeProvider(); const paddock = await core(provider)
-  await paddock.create({ name: "demo" })
+  const { provider, state } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo" })
   provider.diskUsedBytes = async () => undefined
-  await paddock.enforce()
-  expect((await paddock.get("demo")).enforcementProblem?.message).toContain("Disk use could not be measured")
+  await asidee.enforce()
+  expect((await asidee.get("demo")).enforcementProblem?.message).toContain("Disk use could not be measured")
   provider.checks = async () => { throw new Error("guard unreadable") }
   provider.stop = async () => { throw new Error("stop refused") }
-  for (let at = 1; at < UNCHECKED_PASSES; at++) await paddock.enforce()
+  for (let at = 1; at < UNCHECKED_PASSES; at++) await asidee.enforce()
   expect(state.running).toBe(true)
-  const view = await paddock.get("demo")
+  const view = await asidee.get("demo")
   expect(view.enforcementProblem?.message).toContain("stop refused")
   expect(view.enforcementProblem?.message).toContain("guard unreadable")
   provider.stop = async () => { state.running = false }
-  await paddock.enforce()
+  await asidee.enforce()
   expect(state.running).toBe(false)
-  expect((await paddock.get("demo")).stopReason).toContain("4 passes")
+  expect((await asidee.get("demo")).stopReason).toContain("4 passes")
 })
 
 test("stopping the daemon stops the sandboxes whose disk limit only it enforces", async () => {
-  const { provider } = fakeProvider(); const paddock = await core(provider)
-  await paddock.create({ name: "demo" })
-  expect(await paddock.stopWatched()).toEqual(["demo"])
-  expect(await paddock.get("demo")).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("daemon") })
+  const { provider } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo" })
+  expect(await asidee.stopWatched()).toEqual(["demo"])
+  expect(await asidee.get("demo")).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("daemon") })
 })
 
 test("extensions are declarations: bad ones are reported, field values are checked", async () => {
   const extension = parseExtension("tools", "/x", { name: "Tools", actions: [{ id: "go", label: "Go", run: ["./go.sh"], fields: [
     { id: "version", label: "Version", type: "text", default: "latest" }, { id: "mode", label: "Mode", type: "select", options: ["a", "b"], required: true }] }] })
   const action = extension.actions[0]!
-  expect(fieldValues(action, { mode: "a" })).toEqual({ PADDOCK_FIELD_VERSION: "latest", PADDOCK_FIELD_MODE: "a" })
-  expect(() => fieldValues(action, { mode: "c" })).toThrow(PaddockError)
-  expect(() => fieldValues(action, {})).toThrow(PaddockError)
-  expect(() => parseExtension("tools", "/x", { name: "Tools", actions: [{ id: "go", label: "Go", run: "rm -rf /" }] })).toThrow(PaddockError)
+  expect(fieldValues(action, { mode: "a" })).toEqual({ ASIDEE_FIELD_VERSION: "latest", ASIDEE_FIELD_MODE: "a" })
+  expect(() => fieldValues(action, { mode: "c" })).toThrow(AsideeError)
+  expect(() => fieldValues(action, {})).toThrow(AsideeError)
+  expect(() => parseExtension("tools", "/x", { name: "Tools", actions: [{ id: "go", label: "Go", run: "rm -rf /" }] })).toThrow(AsideeError)
 
-  const root = await mkdtemp(join(tmpdir(), "paddock-ext-"))
+  const root = await mkdtemp(join(tmpdir(), "asidee-ext-"))
   await mkdir(join(root, "extensions", "good"), { recursive: true }); await mkdir(join(root, "extensions", "bad"), { recursive: true })
   await writeFile(join(root, "extensions", "good", "extension.json"), JSON.stringify({ name: "Good", actions: [] }))
   await writeFile(join(root, "extensions", "bad", "extension.json"), "{")
@@ -570,23 +570,23 @@ test("extensions are declarations: bad ones are reported, field values are check
 })
 
 test("a running sandbox that cannot be checked for several passes in a row is stopped; one clear pass resets the count", async () => {
-  const { provider, state } = fakeProvider(); const paddock = await core(provider)
-  await paddock.create({ name: "demo" })
+  const { provider, state } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo" })
   const blind = allPass("config").map((entry) => entry.id === "network-guard" ? { ...entry, status: "unknown" as const } : entry)
   state.overrides.config = blind
-  for (let pass = 1; pass < UNCHECKED_PASSES; pass++) await paddock.enforce()
+  for (let pass = 1; pass < UNCHECKED_PASSES; pass++) await asidee.enforce()
   expect(state.running).toBe(true)
-  delete state.overrides.config; await paddock.enforce()
+  delete state.overrides.config; await asidee.enforce()
   state.overrides.config = blind
-  for (let pass = 1; pass < UNCHECKED_PASSES; pass++) await paddock.enforce()
+  for (let pass = 1; pass < UNCHECKED_PASSES; pass++) await asidee.enforce()
   expect(state.running).toBe(true)
-  await paddock.enforce()
+  await asidee.enforce()
   expect(state.running).toBe(false)
-  expect((await paddock.get("demo")).stopReason).toContain("could not check")
+  expect((await asidee.get("demo")).stopReason).toContain("could not check")
 })
 
 test("a config file with a mistake is refused by name, and its defaults obey the same limits as a request", async () => {
-  const root = await mkdtemp(join(tmpdir(), "paddock-config-")); const dirs = { state: join(root, "state"), config: root }
+  const root = await mkdtemp(join(tmpdir(), "asidee-config-")); const dirs = { state: join(root, "state"), config: root }
   expect(await readConfig(dirs)).toEqual({ defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5 })
   for (const bad of ['{"workspaceFreeSpaceGb":-1}', '{"workspaceFreeSpaceGb":"5"}', '{"workspaceFreeSpaceGb":100001}', '{"experimental":"on"}', '{"experimental":1}', "{ nope", "[]", "null", '{"defaults":"x"}', '{"engine":5}', '{"requireProbes":"off"}', '{"requireProbes":null}', '{"requireProbes":0}', '{"defaults":{"cpus":"lots"}}', '{"defaults":{"image":"--privileged"}}', '{"defaults":{"memoryGb":100000}}']) {
     await writeFile(join(root, "config.json"), bad)
@@ -597,26 +597,26 @@ test("a config file with a mistake is refused by name, and its defaults obey the
 })
 
 test("a damaged state file is listed as damaged and the other sandboxes still work", async () => {
-  const { provider } = fakeProvider(); const paddock = await core(provider)
-  await paddock.create({ name: "demo" })
-  await writeFile(join(paddock.dirs.state, "sandboxes", "broken.json"), "{ nope")
-  await writeFile(join(paddock.dirs.state, "sandboxes", "other.json"), '{"name":"someone-else"}')
-  const list = await paddock.list()
+  const { provider } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo" })
+  await writeFile(join(asidee.dirs.state, "sandboxes", "broken.json"), "{ nope")
+  await writeFile(join(asidee.dirs.state, "sandboxes", "other.json"), '{"name":"someone-else"}')
+  const list = await asidee.list()
   expect(list.map((entry) => `${entry.name}:${entry.status}`)).toEqual(["demo:running", "broken:damaged", "other:damaged"])
   expect(list[1]!.stopReason).toContain("broken.json")
-  await paddock.enforce()
-  expect((await paddock.verify("demo")).ok).toBe(true)
+  await asidee.enforce()
+  expect((await asidee.verify("demo")).ok).toBe(true)
 })
 
 test("a setup hook runs after the sandbox is free, so it can call back into it", async () => {
   const { provider } = fakeProvider()
-  const root = await mkdtemp(join(tmpdir(), "paddock-hook-")); const dirs = { state: join(root, "state"), config: join(root, "config") }
+  const root = await mkdtemp(join(tmpdir(), "asidee-hook-")); const dirs = { state: join(root, "state"), config: join(root, "config") }
   await mkdir(join(dirs.config, "extensions", "setup"), { recursive: true })
   await writeFile(join(dirs.config, "extensions", "setup", "extension.json"), JSON.stringify({ name: "Setup", hooks: { postCreate: ["./setup.sh"] } }))
-  let paddock: Core
-  // The hook's command stands in for a script that runs `paddock verify` on the new sandbox.
-  paddock = new Core([provider], dirs, async (_argv, options) => ({ exitCode: 0, stdout: String((await paddock.verify(options!.env!.PADDOCK_SANDBOX!)).ok), stderr: "" }), "/nowhere")
-  const made = await Promise.race([paddock.create({ name: "demo" }), Bun.sleep(2000).then(() => "stuck" as const)])
+  let asidee: Core
+  // The hook's command stands in for a script that runs `asd verify` on the new sandbox.
+  asidee = new Core([provider], dirs, async (_argv, options) => ({ exitCode: 0, stdout: String((await asidee.verify(options!.env!.ASIDEE_SANDBOX!)).ok), stderr: "" }), "/nowhere")
+  const made = await Promise.race([asidee.create({ name: "demo" }), Bun.sleep(2000).then(() => "stuck" as const)])
   expect(made).not.toBe("stuck")
   expect((made as Awaited<ReturnType<Core["create"]>>).hooks).toEqual([{ extension: "setup", exitCode: 0, output: "true" }])
 })
@@ -624,136 +624,136 @@ test("a setup hook runs after the sandbox is free, so it can call back into it",
 test("a session is refused on a stopped sandbox without starting it, and ends when its sandbox stops or goes", async () => {
   const { provider, state } = fakeProvider(); const closed: string[] = []
   provider.openExec = async () => ({ tty: false, write: () => true, end: () => {}, resize: async () => {}, pause: () => {}, resume: () => {}, close: (reason?: string) => { closed.push(reason ?? "") }, on: () => {} }) as never
-  const paddock = await core(provider)
-  await paddock.create({ name: "demo" })
-  await paddock.stop("demo")
+  const asidee = await core(provider)
+  await asidee.create({ name: "demo" })
+  await asidee.stop("demo")
   const starts = state.starts
-  await expect(paddock.openSession({ kind: "exec", name: "demo", argv: ["sh"], tty: false })).rejects.toMatchObject({ code: "conflict" })
+  await expect(asidee.openSession({ kind: "exec", name: "demo", argv: ["sh"], tty: false })).rejects.toMatchObject({ code: "conflict" })
   expect(state.starts).toBe(starts); expect(state.running).toBe(false)
-  await paddock.start("demo")
-  await paddock.openSession({ kind: "exec", name: "demo", argv: ["sh"], tty: false })
-  await paddock.stop("demo")
+  await asidee.start("demo")
+  await asidee.openSession({ kind: "exec", name: "demo", argv: ["sh"], tty: false })
+  await asidee.stop("demo")
   expect(closed).toEqual(["The session ended: demo was stopped."])
-  await paddock.start("demo"); await paddock.openSession({ kind: "exec", name: "demo", argv: ["sh"], tty: false })
-  await paddock.remove("demo", "demo")
+  await asidee.start("demo"); await asidee.openSession({ kind: "exec", name: "demo", argv: ["sh"], tty: false })
+  await asidee.remove("demo", "demo")
   expect(closed[1]).toBe("The session ended: demo was removed.")
 })
 
 test("a forward listens on loopback for one run of its sandbox and ends with it", async () => {
   const { provider, state } = fakeProvider()
-  const paddock = await core(provider)
-  await paddock.create({ name: "demo" })
+  const asidee = await core(provider)
+  await asidee.create({ name: "demo" })
   const reachable = (port: number) => new Promise<boolean>((resolve) => { const socket = connect(port, "127.0.0.1", () => { socket.destroy(); resolve(true) }); socket.on("error", () => resolve(false)) })
-  const made = await paddock.forwardAdd("demo", "8080")
+  const made = await asidee.forwardAdd("demo", "8080")
   expect(made).toMatchObject({ name: "demo", port: 8080, localAddress: "127.0.0.1", generation: "run-1" })
   expect(await reachable(made.localPort)).toBe(true)
-  const disclosed = (await paddock.verify("demo")).checks.find((check) => check.id === "forwards")!
+  const disclosed = (await asidee.verify("demo")).checks.find((check) => check.id === "forwards")!
   expect(disclosed.status).toBe("info"); expect(disclosed.detail).toContain(`127.0.0.1:${made.localPort} to port 8080 (${made.id})`)
-  await expect(paddock.forwardAdd("demo", 8080, made.localPort)).rejects.toMatchObject({ code: "conflict" })
-  await paddock.stop("demo")
-  expect(paddock.forwardList()).toEqual([]); expect(await reachable(made.localPort)).toBe(false)
-  await expect(paddock.forwardAdd("demo", 8080)).rejects.toMatchObject({ code: "conflict" })
+  await expect(asidee.forwardAdd("demo", 8080, made.localPort)).rejects.toMatchObject({ code: "conflict" })
+  await asidee.stop("demo")
+  expect(asidee.forwardList()).toEqual([]); expect(await reachable(made.localPort)).toBe(false)
+  await expect(asidee.forwardAdd("demo", 8080)).rejects.toMatchObject({ code: "conflict" })
   // A run the forward was not made for (the engine restarted it) ends the forward at the next connection.
-  await paddock.start("demo")
-  const again = await paddock.forwardAdd("demo", 8080)
+  await asidee.start("demo")
+  const again = await asidee.forwardAdd("demo", 8080)
   state.starts++
   await reachable(again.localPort); await Bun.sleep(50)
-  expect(paddock.forwardList("demo")).toEqual([])
-  const removed = await paddock.forwardAdd("demo", 9000)
-  expect(paddock.forwardRemove(removed.id)).toEqual({ closed: removed.id })
-  expect(() => paddock.forwardRemove(removed.id)).toThrow(PaddockError)
-  const last = await paddock.forwardAdd("demo", 9000)
-  await paddock.remove("demo", "demo")
+  expect(asidee.forwardList("demo")).toEqual([])
+  const removed = await asidee.forwardAdd("demo", 9000)
+  expect(asidee.forwardRemove(removed.id)).toEqual({ closed: removed.id })
+  expect(() => asidee.forwardRemove(removed.id)).toThrow(AsideeError)
+  const last = await asidee.forwardAdd("demo", 9000)
+  await asidee.remove("demo", "demo")
   expect(await reachable(last.localPort)).toBe(false)
-  for (const bad of [0, 70_000, "x"]) await expect(paddock.forwardAdd("demo", bad)).rejects.toMatchObject({ code: "usage" })
+  for (const bad of [0, 70_000, "x"]) await expect(asidee.forwardAdd("demo", bad)).rejects.toMatchObject({ code: "usage" })
 })
 
 test("resize refuses what it cannot do safely, and says when each limit applies", async () => {
   const { provider, state } = fakeProvider()
-  const paddock = await core(provider)
-  await paddock.create({ name: "demo" })
-  await expect(paddock.resize("ghost", { memoryGb: 8 })).rejects.toMatchObject({ code: "not-found" })
-  await expect(paddock.resize("demo", {})).rejects.toMatchObject({ code: "usage" })
-  await expect(paddock.resize("demo", { memoryGb: 0.1 })).rejects.toMatchObject({ code: "usage" })
-  await expect(paddock.resize("demo", { pids: 10 })).rejects.toMatchObject({ code: "usage" })
+  const asidee = await core(provider)
+  await asidee.create({ name: "demo" })
+  await expect(asidee.resize("ghost", { memoryGb: 8 })).rejects.toMatchObject({ code: "not-found" })
+  await expect(asidee.resize("demo", {})).rejects.toMatchObject({ code: "usage" })
+  await expect(asidee.resize("demo", { memoryGb: 0.1 })).rejects.toMatchObject({ code: "usage" })
+  await expect(asidee.resize("demo", { pids: 10 })).rejects.toMatchObject({ code: "usage" })
   // Running, using 3 GiB: lowering memory to 3 GB leaves no headroom; nothing changes.
   state.use = { memoryBytes: 3 * 1024 ** 3, tasks: 100 }
-  await expect(paddock.resize("demo", { memoryGb: 3 })).rejects.toMatchObject({ code: "conflict" })
+  await expect(asidee.resize("demo", { memoryGb: 3 })).rejects.toMatchObject({ code: "conflict" })
   expect(state.resized).toBeUndefined()
-  expect((await paddock.get("demo")).spec.memoryGb).toBe(4)
+  expect((await asidee.get("demo")).spec.memoryGb).toBe(4)
   state.use = { memoryBytes: 3 * 1024 ** 3, tasks: 3000 }
-  await expect(paddock.resize("demo", { pids: 3000 })).rejects.toMatchObject({ code: "conflict" })
+  await expect(asidee.resize("demo", { pids: 3000 })).rejects.toMatchObject({ code: "conflict" })
   state.use = undefined
-  await expect(paddock.resize("demo", { memoryGb: 2 })).rejects.toMatchObject({ code: "conflict" })
+  await expect(asidee.resize("demo", { memoryGb: 2 })).rejects.toMatchObject({ code: "conflict" })
   // Raising needs no reading. The engine's host confirms memory, not CPUs.
   state.live = { cpus: 2, memoryGb: 8, pids: 4096 }
-  const raised = await paddock.resize("demo", { memoryGb: 8, cpus: 3 })
+  const raised = await asidee.resize("demo", { memoryGb: 8, cpus: 3 })
   expect(raised.changes.map((change) => [change.limit, change.applies])).toEqual([["cpus", "next start"], ["memoryGb", "now"], ["pids", "unchanged"], ["diskGb", "unchanged"]])
   expect(state.resized).toEqual({ cpus: 3, memoryGb: 8, pids: 4096, diskGb: 20 } as Limits)
-  expect((await paddock.get("demo")).spec).toMatchObject({ cpus: 3, memoryGb: 8 })
+  expect((await asidee.get("demo")).spec).toMatchObject({ cpus: 3, memoryGb: 8 })
   expect(raised.checks.map((check) => check.id)).toContain("limits")
   // Stopped: everything waits for the next start, and lowering needs no reading.
-  await paddock.stop("demo")
-  const lowered = await paddock.resize("demo", { memoryGb: 1, diskGb: 10 })
+  await asidee.stop("demo")
+  const lowered = await asidee.resize("demo", { memoryGb: 1, diskGb: 10 })
   expect(lowered.changes.find((change) => change.limit === "memoryGb")!.applies).toBe("next start")
   expect(lowered.changes.find((change) => change.limit === "diskGb")!.applies).toBe("now")
 })
 
 test("a sandbox made from a template records it and runs its image; removing the template says who still uses it", async () => {
   const { provider, state } = fakeProvider()
-  const paddock = await core(provider)
-  await expect(paddock.create({ name: "copy", template: "base" })).rejects.toMatchObject({ code: "not-found" })
-  expect(await paddock.list()).toEqual([])
-  await paddock.create({ name: "src" })
-  await expect(paddock.snapshot("src", "Bad Name")).rejects.toMatchObject({ code: "usage" })
-  await expect(paddock.snapshot("ghost", "base")).rejects.toMatchObject({ code: "not-found" })
-  const saved = await paddock.snapshot("src", "base")
+  const asidee = await core(provider)
+  await expect(asidee.create({ name: "copy", template: "base" })).rejects.toMatchObject({ code: "not-found" })
+  expect(await asidee.list()).toEqual([])
+  await asidee.create({ name: "src" })
+  await expect(asidee.snapshot("src", "Bad Name")).rejects.toMatchObject({ code: "usage" })
+  await expect(asidee.snapshot("ghost", "base")).rejects.toMatchObject({ code: "not-found" })
+  const saved = await asidee.snapshot("src", "base")
   expect(saved.contents).toContain("home folders included")
-  const made = await paddock.create({ name: "copy", template: "base" })
+  const made = await asidee.create({ name: "copy", template: "base" })
   expect(made.sandbox.template).toMatchObject({ name: "base", imageId: "sha256:base", source: "src" })
   expect(state.created.at(-1)!.spec.image).toBe("sha256:base")
-  expect(await paddock.templateList()).toHaveLength(1)
+  expect(await asidee.templateList()).toHaveLength(1)
   state.templates[0]!.dependants = ["copy"]
-  const removed = await paddock.templateRemove("base")
+  const removed = await asidee.templateRemove("base")
   expect(removed).toMatchObject({ removed: "base", dependants: ["copy"] })
   expect(removed.note).toContain("keep working")
-  await expect(paddock.templateRemove("base")).rejects.toMatchObject({ code: "not-found" })
+  await expect(asidee.templateRemove("base")).rejects.toMatchObject({ code: "not-found" })
 })
 
 test("create requires unknown blocking probes by default and keeps only a stopped sandbox for diagnosis", async () => {
   const probes = allPass("probe").map((check): CheckResult => check.id === "net-host" || check.id === "net-peers"
     ? { ...check, status: "unknown", evidence: "none", detail: `${check.id}: the helper control did not answer.` } : check)
-  const { provider, state } = fakeProvider({ probe: probes }); const paddock = await core(provider)
-  expect((await paddock.configGet()).requireProbes).toBe(true)
-  await expect(paddock.create({ name: "demo", requireProbes: false })).rejects.toMatchObject({ code: "probes-required", details: probes.filter((check) => check.status === "unknown"),
-    message: expect.stringContaining("paddock config set require-probes off") })
+  const { provider, state } = fakeProvider({ probe: probes }); const asidee = await core(provider)
+  expect((await asidee.configGet()).requireProbes).toBe(true)
+  await expect(asidee.create({ name: "demo", requireProbes: false })).rejects.toMatchObject({ code: "probes-required", details: probes.filter((check) => check.status === "unknown"),
+    message: expect.stringContaining("asd config set require-probes off") })
   expect(state).toMatchObject({ starts: 1, stops: 1, running: false, exists: true })
-  const saved = await readManifest(paddock.dirs, "demo")
+  const saved = await readManifest(asidee.dirs, "demo")
   expect(saved.lastVerify?.results.filter((check) => check.status === "unknown")).toEqual(probes.filter((check) => check.status === "unknown"))
   expect(saved.stopReason).toContain("Cannot reach the host; Cannot reach other sandboxes")
-  expect((await paddock.list())[0]?.status).toBe("stopped")
+  expect((await asidee.list())[0]?.status).toBe("stopped")
 })
 
 test("turning the requirement off permits unknown probes without inventing a pass; verify and start keep running", async () => {
-  const { provider, state } = fakeProvider({ probe: [] }); const paddock = await core(provider)
-  await paddock.configSet({ requireProbes: false })
-  const made = await paddock.create({ name: "demo" })
+  const { provider, state } = fakeProvider({ probe: [] }); const asidee = await core(provider)
+  await asidee.configSet({ requireProbes: false })
+  const made = await asidee.create({ name: "demo" })
   expect(state.running).toBe(true)
   const unknown = made.checks.filter((check) => check.status === "unknown")
   // The core answers link-scope itself: with no links it is a disclosure, not an unknown.
   expect(unknown.map((check) => check.id)).toEqual(CHECKLIST.filter((item) => item.stage === "probe" && item.id !== "link-scope").map((item) => item.id))
   expect(made.checks.find((check) => check.id === "link-scope")).toMatchObject({ status: "info", evidence: "none" })
   expect(unknown.every((check) => check.evidence === "none")).toBe(true)
-  expect((await paddock.list())[0]?.lastVerify?.results.find((check) => check.id === "net-host")?.detail).toContain("unknown (none)")
-  await paddock.configSet({ requireProbes: true })
-  const verified = await paddock.verify("demo")
+  expect((await asidee.list())[0]?.lastVerify?.results.find((check) => check.id === "net-host")?.detail).toContain("unknown (none)")
+  await asidee.configSet({ requireProbes: true })
+  const verified = await asidee.verify("demo")
   expect(verified.ok).toBe(true); expect(verified.sandbox.status).toBe("running")
   expect(verified.checks.filter((check) => check.status === "unknown")).toEqual(unknown)
-  await paddock.stop("demo")
+  await asidee.stop("demo")
   const checks = provider.checks
   provider.checks = async (manifest, stage) => { if (stage === "probe") throw new Error("start must not probe"); return checks(manifest, stage) }
-  expect((await paddock.start("demo")).status).toBe("running")
-  await paddock.enforce()
+  expect((await asidee.start("demo")).status).toBe("running")
+  await asidee.enforce()
   expect(state.running).toBe(true)
 })
 
@@ -761,9 +761,9 @@ test("failed and unsupported blocking probes stop creation in both modes; nonblo
   for (const requireProbes of [true, false]) {
     for (const status of ["fail", "unsupported"] as const) {
       const probes = allPass("probe").map((check): CheckResult => check.id === "net-host" ? { ...check, status, detail: "Isolation was not provided." } : check)
-      const { provider, state } = fakeProvider({ probe: probes }); const paddock = await core(provider)
-      await paddock.configSet({ requireProbes })
-      await expect(paddock.create({ name: "demo" })).rejects.toMatchObject({ code: "check-failed", message: expect.stringContaining("Cannot reach the host (Isolation was not provided.)") })
+      const { provider, state } = fakeProvider({ probe: probes }); const asidee = await core(provider)
+      await asidee.configSet({ requireProbes })
+      await expect(asidee.create({ name: "demo" })).rejects.toMatchObject({ code: "check-failed", message: expect.stringContaining("Cannot reach the host (Isolation was not provided.)") })
       expect(state).toMatchObject({ starts: 1, stops: 1, running: false, exists: true })
       // A failure beside an unknown probe is a failed check: turning the requirement off would not let it through.
       const mixed = probes.map((check): CheckResult => check.id === "net-peers" ? { ...check, status: "unknown", evidence: "none", detail: "The control did not answer." } : check)
@@ -771,24 +771,24 @@ test("failed and unsupported blocking probes stop creation in both modes; nonblo
       await expect(other.create({ name: "demo" })).rejects.toMatchObject({ code: "check-failed" })
     }
     const { provider } = fakeProvider({ probe: allPass("probe").filter((check) => check.id !== "egress" && check.id !== "credentials") })
-    const paddock = await core(provider); await paddock.configSet({ requireProbes })
-    const made = await paddock.create({ name: "demo" })
+    const asidee = await core(provider); await asidee.configSet({ requireProbes })
+    const made = await asidee.create({ name: "demo" })
     expect(made.sandbox.status).toBe("running")
     expect(made.checks.find((check) => check.id === "egress")?.status).toBe("unknown")
   }
 })
 
 test("settings persist across core and daemon instances, preserve other config and take effect without restart", async () => {
-  const { provider, state } = fakeProvider({ probe: [] }); const paddock = await core(provider)
-  await mkdir(paddock.dirs.config, { recursive: true })
-  const file = join(paddock.dirs.config, "config.json")
+  const { provider, state } = fakeProvider({ probe: [] }); const asidee = await core(provider)
+  await mkdir(asidee.dirs.config, { recursive: true })
+  const file = join(asidee.dirs.config, "config.json")
   const existing = { defaults: { cpus: 1, image: "alpine" }, engine: "fake:1", future: { keep: true } }
   await writeFile(file, JSON.stringify(existing))
-  const table = methods(paddock, () => {})
+  const table = methods(asidee, () => {})
   expect(await table.configSet!.run({ requireProbes: false })).toMatchObject({ requireProbes: false, defaults: existing.defaults, engine: "fake:1" })
   expect(JSON.parse(await readFile(file, "utf8"))).toEqual({ ...existing, requireProbes: false })
   expect((await stat(file)).mode & 0o777).toBe(0o600)
-  const restarted = new Core([provider], paddock.dirs, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere")
+  const restarted = new Core([provider], asidee.dirs, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere")
   expect(await methods(restarted, () => {}).configGet!.run({})).toMatchObject({ requireProbes: false })
   expect((await restarted.create({ name: "demo" })).sandbox.status).toBe("running")
   await table.configSet!.run({ requireProbes: true })
@@ -801,8 +801,8 @@ test("settings persist across core and daemon instances, preserve other config a
 })
 
 test("settings require a boolean and loopback writes require both token and trusted Host", async () => {
-  const { provider } = fakeProvider(); const paddock = await core(provider)
-  const answer = createHandler(methods(paddock, () => {}), "secret", paddock.dirs.config)
+  const { provider } = fakeProvider(); const asidee = await core(provider)
+  const answer = createHandler(methods(asidee, () => {}), "secret", asidee.dirs.config)
   const post = (body: object, headers: Record<string, string> = {}) => new Request("http://127.0.0.1:7717/api/configSet", { method: "POST", headers: { host: "127.0.0.1:7717", authorization: "Bearer secret", ...headers }, body: JSON.stringify(body) })
   for (const value of ["off", 0, null, [], {}, undefined]) {
     expect((await answer(post({ requireProbes: value }), false, 7717)).status).toBe(400)
@@ -814,11 +814,11 @@ test("settings require a boolean and loopback writes require both token and trus
   expect((await answer(post({ requireProbes: false }, { authorization: "" }), false, 7717)).status).toBe(401)
   expect((await answer(post({ requireProbes: false }, { authorization: "Bearer wrong" }), false, 7717)).status).toBe(401)
   expect((await answer(post({ requireProbes: false }, { host: "evil.example:7717" }), false, 7717)).status).toBe(403)
-  expect((await paddock.configGet()).requireProbes).toBe(true)
+  expect((await asidee.configGet()).requireProbes).toBe(true)
   const response = await answer(post({ requireProbes: false }), false, 7717)
   expect(response.status).toBe(200)
   expect(await response.json()).toMatchObject({ ok: true, data: { requireProbes: false } })
-  expect((await paddock.configGet()).requireProbes).toBe(false)
+  expect((await asidee.configGet()).requireProbes).toBe(false)
 })
 
 test("routed create preserves the remote refusal text and code and uses only the remote probe setting", async () => {
@@ -830,10 +830,10 @@ test("routed create preserves the remote refusal text and code and uses only the
   const remoteHello = { ...hello, machineId: remote.machineId }
   const remoteHandle = createHandler({ ...methods(remote, () => {}), hello: { run: async () => remoteHello } }, "remote-token", remote.dirs.config)
   const machines = new Machines(local.dirs, hello, async () => ({ hello, sandboxes: [], checkedAt: new Date().toISOString() }), { connectPeer: () => ({ close: async () => {}, call: async (method, body = {}) =>
-    parseReply(await (await remoteHandle(new Request(`http://paddock/api/${method}`, { method: "POST", body: JSON.stringify(body) }), true, 0)).json()) }) })
-  await writeFile(join(local.dirs.config, "hosts.json"), JSON.stringify({ version: 1, hosts: [{ name: "build", ssh: "fixture", binary: "/fixture/paddock", stateDir: "/fixture/state", machineId: remote.machineId, addedAt: "2026-11-15", diskPolicy: "watched", service: "prepared" }] }))
+    parseReply(await (await remoteHandle(new Request(`http://asidee/api/${method}`, { method: "POST", body: JSON.stringify(body) }), true, 0)).json()) }) })
+  await writeFile(join(local.dirs.config, "hosts.json"), JSON.stringify({ version: 1, hosts: [{ name: "build", ssh: "fixture", binary: "/fixture/asd", stateDir: "/fixture/state", machineId: remote.machineId, addedAt: "2026-11-15", diskPolicy: "watched", service: "prepared" }] }))
   const localHandle = createHandler(methods(local, () => {}, () => false, machines), "local-token", local.dirs.config, machines)
-  const request = (host?: string) => new Request("http://paddock/api/create", { method: "POST", body: JSON.stringify({ name: "demo", host }) })
+  const request = (host?: string) => new Request("http://asidee/api/create", { method: "POST", body: JSON.stringify({ name: "demo", host }) })
   const direct = await (await remoteHandle(request(), true, 0)).json()
   expect(direct).toMatchObject({ ok: false, error: { code: "probes-required" } })
   if (!object(direct) || !object(direct.error) || typeof direct.error.message !== "string") throw new Error("The refusal has no message.")
@@ -856,67 +856,67 @@ test("routed create preserves the remote refusal text and code and uses only the
 })
 
 test("a create that fails before a container exists removes its record and permits retry", async () => {
-  const { provider } = fakeProvider(); const paddock = await core(provider)
+  const { provider } = fakeProvider(); const asidee = await core(provider)
   const create = provider.create
   provider.create = async () => { throw new Error("pull access denied") }
-  await expect(paddock.create({ name: "demo" })).rejects.toThrow("Nothing was kept")
-  expect(await paddock.list()).toEqual([])
+  await expect(asidee.create({ name: "demo" })).rejects.toThrow("Nothing was kept")
+  expect(await asidee.list()).toEqual([])
   provider.create = create
-  expect((await paddock.create({ name: "demo" })).sandbox.status).toBe("running")
+  expect((await asidee.create({ name: "demo" })).sandbox.status).toBe("running")
 })
 
 test("a failed create whose cleanup fails keeps its record and names the removal command", async () => {
-  const { provider } = fakeProvider(); const paddock = await core(provider)
+  const { provider } = fakeProvider(); const asidee = await core(provider)
   provider.create = async () => { throw new Error("pull access denied") }
-  provider.remove = async () => { throw new Error("network paddock-net-demo remains; engine unavailable") }
-  await expect(paddock.create({ name: "demo" })).rejects.toThrow("paddock remove demo --confirm demo")
-  expect((await paddock.list())[0]?.status).toBe("missing")
+  provider.remove = async () => { throw new Error("network asidee-net-demo remains; engine unavailable") }
+  await expect(asidee.create({ name: "demo" })).rejects.toThrow("asd remove demo --confirm demo")
+  expect((await asidee.list())[0]?.status).toBe("missing")
 })
 
 test("starting above a watched disk limit reports current use without retaining a stale stop reason", async () => {
-  const { provider } = fakeProvider(); const paddock = await core(provider)
-  await paddock.create({ name: "demo", diskGb: 1 })
-  await paddock.stop("demo")
-  expect(await paddock.start("demo")).not.toHaveProperty("diskWarning")
+  const { provider } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo", diskGb: 1 })
+  await asidee.stop("demo")
+  expect(await asidee.start("demo")).not.toHaveProperty("diskWarning")
   provider.diskUsedBytes = async () => 1.3 * 1024 ** 3
-  await paddock.enforce()
-  expect((await paddock.get("demo")).stopReason).toContain("disk watch")
-  expect(await paddock.start("demo")).toMatchObject({ status: "running", stopReason: undefined,
-    diskWarning: { usedBytes: 1.3 * 1024 ** 3, limitBytes: 1024 ** 3, message: expect.stringContaining("paddock resize demo --disk N") } })
-  await paddock.enforce()
-  expect((await paddock.get("demo")).status).toBe("stopped")
+  await asidee.enforce()
+  expect((await asidee.get("demo")).stopReason).toContain("disk watch")
+  expect(await asidee.start("demo")).toMatchObject({ status: "running", stopReason: undefined,
+    diskWarning: { usedBytes: 1.3 * 1024 ** 3, limitBytes: 1024 ** 3, message: expect.stringContaining("asd resize demo --disk N") } })
+  await asidee.enforce()
+  expect((await asidee.get("demo")).status).toBe("stopped")
 })
 
 test("the limits check counts one CPU in the singular, and the template check does not claim the credentials check sees every secret", () => {
-  const limits = (cpus: number) => configChecks(inspect((value) => { value.HostConfig.NanoCpus = cpus * 1e9 }), { ...manifest, spec: { ...manifest.spec, cpus } }, "intact", "pdk123").find((entry) => entry.id === "limits")!.detail
+  const limits = (cpus: number) => configChecks(inspect((value) => { value.HostConfig.NanoCpus = cpus * 1e9 }), { ...manifest, spec: { ...manifest.spec, cpus } }, "intact", "asd123").find((entry) => entry.id === "limits")!.detail
   expect(limits(1)).toContain(" 1 CPU. ")
   expect(limits(2)).toContain(" 2 CPUs. ")
   const templated: Manifest = { ...manifest, template: { name: "base", imageId: "sha256:t", source: "src", createdAt: "2026-11-11T00:00:00Z" } }
-  const detail = configChecks(inspect((value) => { (value as any).Image = "sha256:t" }), templated, "intact", "pdk123", undefined, { Id: "sha256:t", RepoTags: ["paddock-template-own:base"], Config: { Labels: {} } }, "own").find((entry) => entry.id === "template")!.detail
+  const detail = configChecks(inspect((value) => { (value as any).Image = "sha256:t" }), templated, "intact", "asd123", undefined, { Id: "sha256:t", RepoTags: ["asidee-template-own:base"], Config: { Labels: {} } }, "own").find((entry) => entry.id === "template")!.detail
   expect(detail).not.toContain("the credentials check says what is inside")
   expect(detail).toContain("other secrets saved in it (.env files, shell history, tokens) are not looked for")
 })
 
 test("a refused removal and a command on a stopped sandbox name the command to run", async () => {
-  const { provider } = fakeProvider(); const paddock = await core(provider)
-  await paddock.create({ name: "demo" })
-  await expect(paddock.remove("demo", undefined)).rejects.toThrow("Removing demo deletes everything in it. To confirm: `paddock remove demo --confirm demo`.")
-  await expect(paddock.remove("demo", "other")).rejects.toThrow("--confirm other does not match demo; nothing was removed.")
-  await paddock.remove("demo", "demo")
-  const stopped = new GvisorProvider(async () => ({ exitCode: 1, stdout: "", stderr: "Error: No such object: paddock-demo" }))
+  const { provider } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo" })
+  await expect(asidee.remove("demo", undefined)).rejects.toThrow("Removing demo deletes everything in it. To confirm: `asd remove demo --confirm demo`.")
+  await expect(asidee.remove("demo", "other")).rejects.toThrow("--confirm other does not match demo; nothing was removed.")
+  await asidee.remove("demo", "demo")
+  const stopped = new GvisorProvider(async () => ({ exitCode: 1, stdout: "", stderr: "Error: No such object: asidee-demo" }))
   for (const attempt of [() => stopped.exec(manifest, ["true"]), () => stopped.openExec(manifest, ["true"], { tty: false }), () => stopped.prepareLoopback(manifest)])
-    await expect(attempt()).rejects.toThrow("demo is not running. Start it with `paddock start demo`.")
+    await expect(attempt()).rejects.toThrow("demo is not running. Start it with `asd start demo`.")
 })
 
 
 test("stopped verification reports configuration scope and succeeds if that configuration holds", async () => {
-  const { provider } = fakeProvider(); const paddock = await core(provider)
-  await paddock.create({ name: "demo" }); await paddock.stop("demo")
-  expect(await paddock.verify("demo")).toMatchObject({ ok: true, configurationOnly: true })
+  const { provider } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo" }); await asidee.stop("demo")
+  expect(await asidee.verify("demo")).toMatchObject({ ok: true, configurationOnly: true })
 })
 
 test("B13: failed-create cleanup preserves the image dependency code without doubled punctuation", async () => {
-  const { provider } = fakeProvider(); const paddock = await core(provider)
-  provider.create = async () => { throw new PaddockError("dependency", "Cannot download image bad/image:0: pull access denied.") }
-  await expect(paddock.create({ name: "demo" })).rejects.toMatchObject({ code: "dependency", message: "Cannot download image bad/image:0: pull access denied. Nothing was kept for demo." })
+  const { provider } = fakeProvider(); const asidee = await core(provider)
+  provider.create = async () => { throw new AsideeError("dependency", "Cannot download image bad/image:0: pull access denied.") }
+  await expect(asidee.create({ name: "demo" })).rejects.toMatchObject({ code: "dependency", message: "Cannot download image bad/image:0: pull access denied. Nothing was kept for demo." })
 })

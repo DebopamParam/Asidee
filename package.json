@@ -1,16 +1,16 @@
 {
-  "name": "paddock",
+  "name": "asidee",
   "version": "0.4.0",
   "private": true,
   "type": "module",
   "bin": {
-    "paddock": "cli/cli.ts"
+    "asd": "cli/cli.ts"
   },
   "scripts": {
     "test": "bun test test/unit",
-    "test:live": "PADDOCK_LIVE=1 bun test test/live",
+    "test:live": "ASIDEE_LIVE=1 bun test test/live",
     "typecheck": "tsc --noEmit",
-    "build": "bun build --compile --minify --outfile dist/paddock cli/cli.ts"
+    "build": "bun build --compile --minify --outfile dist/asd cli/cli.ts"
   },
   "devDependencies": {
     "@types/bun": "1.4.4",

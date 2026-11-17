@@ -20,15 +20,15 @@ Sections still marked proposed describe later work. The enrollment implementatio
 - **Decided in stage 4 review:** two machines talk only when version, protocol 1 and source digest are equal; there
   is no protocol negotiation and no upgrade, and the refusal says how to rebuild the other machine. The artifact digest
   is reported, not compared, because it differs per platform. A forward lease is renewed in both directions (five
-  seconds, fifteen-second expiry). Hosted forwards have no check on the primary; `paddock --host HOST forward list` is
+  seconds, fifteen-second expiry). Hosted forwards have no check on the primary; `asd --host HOST forward list` is
   their evidence there (section 6's "primary listener inspection" is not built). `hosts.json` is read per record, so a
   record a later `host add` writes is refused alone, not the file.
 
 ## Evidence and scope
 
-Paddock source was read at commit `c8bc74d764c8446f83957e415fdd81b436a43774` using `git show HEAD:path`.
+Asidee source was read at commit `c8bc74d764c8446f83957e415fdd81b436a43774` using `git show HEAD:path`.
 This avoids depending on another agent's concurrent Docker-inside edits.
-The reference files were read from the working tree. Their historical measurements are reference reports, not Paddock results.
+The reference files were read from the working tree. Their historical measurements are reference reports, not Asidee results.
 No engine commands, evals, remote connections, builds, or installation steps were run during that original review.
 The enrollment implementation record below adds later measurements.
 All external behavior not established by those sources is marked **unverified**, with assumptions collected below.
@@ -43,7 +43,7 @@ All external behavior not established by those sources is marked **unverified**,
 | [CLI](../../cli/cli.ts), `ensureDaemon`, `shell` | Replaces a different local build automatically. Runs engine argv returned by `attach`. Exec buffers text. |
 | [Reference remote](../../../sandbox-manager/src/remote.ts) | SSH translates engine commands. Loop ext4 caps home and inner Docker, leaving system writes outside those caps. |
 | [Reference forwards](../../../sandbox-manager/src/forwards.ts) | Local SSH listeners tracked by PID. Supports LAN publication, which this design excludes. |
-| [Reference watchdog](../../../sandbox-manager/src/watchdog.ts), [lease](../../../sandbox-manager/src/dashboard-lease.ts) | Enforcement depends on a dashboard. Paddock must keep its daemon-owned enforcement instead. |
+| [Reference watchdog](../../../sandbox-manager/src/watchdog.ts), [lease](../../../sandbox-manager/src/dashboard-lease.ts) | Enforcement depends on a dashboard. Asidee must keep its daemon-owned enforcement instead. |
 | [Reference guide](../../../sandbox-manager/docs/sandbox-guide/our-implementation.md) | Describes cron recovery, guard-before-start, proxy SSH, and historical Linux tests. |
 
 Keep the Docker-inside option owned by its separate change. Add capabilities and checks without copying its unfinished implementation.
@@ -51,8 +51,8 @@ Do not import existing reference sandboxes, install a second dashboard, or intro
 
 ## 1. A machine owns its daemon and evidence
 
-Recommend one designated Paddock service account per engine-bearing machine.
-Multiple login accounts may exist, but v1 refuses a second owner using engine ID and an atomically created, owner-labelled `paddock-owner` volume.
+Recommend one designated Asidee service account per engine-bearing machine.
+Multiple login accounts may exist, but v1 refuses a second owner using engine ID and an atomically created, owner-labelled `asidee-owner` volume.
 This detects accidental duplicate enrollment; an engine administrator can bypass it. Its race behavior is **unverified U12**.
 The primary daemon also acts as a client gateway. It does not enforce another machine's sandboxes.
 A primary with no engine can still run this gateway and the existing web dashboard.
@@ -61,14 +61,14 @@ A primary with no engine can still run this gateway and the existing web dashboa
 
 | CLI usage | Meaning |
 |---|---|
-| `paddock list` | Local machine only, preserving current behavior. |
-| `paddock list --all` | One result per registered machine, including failed or stale machines. |
-| `paddock --host build create demo ...` | Run on the daemon registered as `build`. |
-| `paddock --host build shell demo` | Interactive session executed by that daemon's provider. |
-| `paddock --host build exec demo --stream -- COMMAND ...` | Binary-safe streamed exec through the daemon. |
-| `paddock --host build daemon status` | Remote service status, without automatic installation or replacement. |
-| `paddock --host build daemon stop` | Explicit socket-only shutdown through SSH. Stops watched sandboxes there. |
-| `paddock ui --open` | Open the primary dashboard, which groups all registered machines. |
+| `asd list` | Local machine only, preserving current behavior. |
+| `asd list --all` | One result per registered machine, including failed or stale machines. |
+| `asd --host build create demo ...` | Run on the daemon registered as `build`. |
+| `asd --host build shell demo` | Interactive session executed by that daemon's provider. |
+| `asd --host build exec demo --stream -- COMMAND ...` | Binary-safe streamed exec through the daemon. |
+| `asd --host build daemon status` | Remote service status, without automatic installation or replacement. |
+| `asd --host build daemon stop` | Explicit socket-only shutdown through SSH. Stops watched sandboxes there. |
+| `asd ui --open` | Open the primary dashboard, which groups all registered machines. |
 
 Use `--host`, not a prefix inside sandbox names. Unqualified names always mean local, even when absent locally.
 There is no global name search, implicit fallback, or broadcast mutation.
@@ -81,7 +81,7 @@ Engine IDs remain scoped to their machine. A remote `gvisor:default` is never re
 
 1. CLI calls the primary Unix socket with an optional registered `host` field in its request envelope.
 2. The gateway resolves that alias from its own registry, validates the method, and opens outbound SSH.
-3. It executes the fixed installed command `paddock transport stdio --protocol 1` on the target, with no SSH PTY.
+3. It executes the fixed installed command `asd transport stdio --protocol 1` on the target, with no SSH PTY.
 4. That command only relays bytes to its configured local daemon socket. It cannot start or replace the daemon.
 5. The gateway sends the target's ordinary HTTP request over that stream, with no `host` routing field.
 6. The target core validates the request again and operates its local provider. Results retain their machine identity.
@@ -149,7 +149,7 @@ Preserve buffered `exec` for existing JSON clients, with a bounded output size a
 `shell` requests a TTY; it sends terminal size and resize events, and restores local terminal settings on every exit.
 SSH itself uses `-T`; the guest TTY is owned by the target provider, never by an extra SSH terminal.
 
-Use a Unix-socket HTTP upgrade, `POST /api/session`, followed by `paddock-stream/1` frames.
+Use a Unix-socket HTTP upgrade, `POST /api/session`, followed by `asidee-stream/1` frames.
 Each frame has a one-byte kind, a four-byte network-order payload length, and at most 64 KiB of payload.
 Kinds are `stdin`, `stdout`, `stderr`, `eof`, `resize`, `exit`, and `error`; resize and exit have bounded JSON payloads.
 TTY output uses stdout only. Half-close sends `eof` while output continues. Stream errors are distinct from exit status.
@@ -163,7 +163,7 @@ Unix upgrade support, engine exec behavior, and Bun framing/backpressure are **u
 
 ## 2. Host enrollment is a reviewed installation plan
 
-`paddock host add build --ssh alice@linux` first probes read-only, prints the exact plan, and waits for an explicit `yes`.
+`asd host add build --ssh alice@linux` first probes read-only, prints the exact plan, and waits for an explicit `yes`.
 An unknown outer SSH host key must be accepted through SSH's normal trust flow before enrollment proceeds.
 V1 supports native Linux x86-64 and arm64, systemd, and audited Debian/Ubuntu installation recipes only.
 Other distributions can attach to an already prepared daemon; automatic package installation refuses unknown recipes.
@@ -172,17 +172,17 @@ Architecture, libc, package, and systemd compatibility are **unverified U4**.
 | Plan entry shown before consent | Recommended operation and privilege |
 |---|---|
 | Destination and identity | Show resolved SSH user, host-key fingerprint, OS, architecture, machine ID if present, engine, and current containers. |
-| Paddock | Copy the staged release into a root-owned private directory, check its SHA-256, then install that copy into `/opt/paddock/releases/<digest>/paddock`. |
-| Command path | Root-owned `/usr/local/bin/paddock` selects that release. Preserve an existing unrelated executable by refusing replacement. |
+| Asidee | Copy the staged release into a root-owned private directory, check its SHA-256, then install that copy into `/opt/asidee/releases/<digest>/asd`. |
+| Command path | Root-owned `/usr/local/bin/asd` selects that release. Preserve an existing unrelated executable by refusing replacement. |
 | Docker if missing | Show exact version, apt repositories, keys, package list, downloads, and `sudo apt-get ...` recipe before executing it. |
 | Docker authority | System unit uses `SupplementaryGroups=docker`. Show that Docker access is effectively host-root authority. No hidden group edits. |
-| gVisor | Install pinned checksum-verified `runsc` under `/opt/paddock/gvisor/<release>/runsc` with `sudo install`. |
-| Runtime registration | Back up and merge one named `runtimes.paddock-runsc` entry in `/etc/docker/daemon.json` with sudo. Preserve unrelated settings. |
+| gVisor | Install pinned checksum-verified `runsc` under `/opt/asidee/gvisor/<release>/runsc` with `sudo install`. |
+| Runtime registration | Back up and merge one named `runtimes.asidee-runsc` entry in `/etc/docker/daemon.json` with sudo. Preserve unrelated settings. |
 | Docker restart | If registration changes, include `sudo systemctl restart docker` and the names of every running container it can interrupt. |
-| Hard disk helper (stage 1d, excluded from host add) | Later: install root-owned `/usr/local/libexec/paddock-disk` and a narrowly scoped sudoers file. Only for the hard-disk choice. |
+| Hard disk helper (stage 1d, excluded from host add) | Later: install root-owned `/usr/local/libexec/asidee-disk` and a narrowly scoped sudoers file. Only for the hard-disk choice. |
 | Disk tools (stage 1d, excluded from host add) | Later: show installation of `e2fsprogs`, `util-linux`, and mount support, with each sudo package operation listed. |
-| State | `sudo install -d` creates `/var/lib/paddock/<uid>` owned by the service user, mode 0700. Config lives in its `config/`. |
-| Service | Install `/etc/systemd/system/paddock@<uid>.service`, run sudo daemon-reload and enable/start. Log to the journal. |
+| State | `sudo install -d` creates `/var/lib/asidee/<uid>` owned by the service user, mode 0700. Config lives in its `config/`. |
+| Service | Install `/etc/systemd/system/asidee@<uid>.service`, run sudo daemon-reload and enable/start. Log to the journal. |
 | Verification | Show the temporary sandbox, image digest, size, network probes, disk probe, cleanup, and expected duration as unknown. |
 
 Print the complete argv, file content diffs, hashes, and package recipe, not just the categories in this table.
@@ -229,11 +229,11 @@ Restore prior config or service links only if their hashes still match this inst
 
 | Command | Result |
 |---|---|
-| `paddock host list [--json]` | Aliases, destination, ID, version, service mode, disk policy, last contact, and connection state. |
-| `paddock host remove build --confirm build` | Forget the primary registry entry, cached rows, generated aliases, and primary forwards for this host. Works offline. |
-| `paddock host upgrade build [--artifact PATH --sha256 HASH]` | Not built. Use `paddock host add build --ssh DEST --artifact PATH --sha256 HASH` for a reviewed update plan. |
+| `asd host list [--json]` | Aliases, destination, ID, version, service mode, disk policy, last contact, and connection state. |
+| `asd host remove build --confirm build` | Forget the primary registry entry, cached rows, generated aliases, and primary forwards for this host. Works offline. |
+| `asd host upgrade build [--artifact PATH --sha256 HASH]` | Not built. Use `asd host add build --ssh DEST --artifact PATH --sha256 HASH` for a reviewed update plan. |
 
-Remove leaves remote Paddock, its service, checks, sandboxes, images, disks, runtime registration, packages, and logs intact.
+Remove leaves remote Asidee, its service, checks, sandboxes, images, disks, runtime registration, packages, and logs intact.
 It also leaves ordinary SSH config and known-host trust intact. Explain these leftovers before confirmation.
 It does not revoke the SSH user's access. Remote uninstall is a separate future operation, not a surprise flag on remove.
 
@@ -244,7 +244,7 @@ measurements; see the scorecard for the source revision and actual results. The 
 where they differ. [Enrollment instructions](../host-enrollment.md) contain the commands and manual uninstall steps.
 
 Host install staging uses fresh destination `mkdtemp` directories and `mkstemp` request files.
-Apply reports the stage path. The plan uses `@PADDOCK_STAGE@` and `@PADDOCK_REQUEST@` placeholders.
+Apply reports the stage path. The plan uses `@ASIDEE_STAGE@` and `@ASIDEE_REQUEST@` placeholders.
 Each privileged step that reads staged files copies them into a root-owned private directory,
 checks SHA-256 there, uses only those copies, then removes them. The script and digests are in the plan hash.
 Interactive installs refresh `sudo -v` before each privileged step. Repository source text in the
@@ -259,8 +259,8 @@ through the SSH command. Apply checks the read bytes against it before reading t
 | gVisor `20261026.0`, delivered as its release archive with a pinned SHA-512 per architecture and a pinned SHA-256 per file | On the arm64 fixture the last single-file release, `20251110.0`, could not start a container under Docker inside a sandbox; `20261026.0` does (N19). That release is `runsc`, the containerd shim and six files under `gvisor-bin/`. The destination downloads the archive and the installer takes only the files the plan names, each checked; N20 alters the archive five ways and each is refused before any step. N06 checks every installed file's digest, owner and mode. Release signing remains unverified U6. |
 | Watched disk policy only; no disk helper, disk packages or sudoers entry | Stage 1d is separate. N02 inspects the plan and N06 writes bytes, obtains an engine-side measurement and requires applicable blocking checks. |
 | Runtime has `--allow-suid` and `--overlay2=none`; `--net-raw` only with `host add --docker` | Raw sockets are a capability the owner chooses per host, shown in the plan and its hash. Without the option the host does not offer inner Docker and N06 sees `create --docker` refused. With it the smoke sandbox has to pass the inner Docker check, and N19 runs a container inside a sandbox made through the primary. No default-runtime change is made. |
-| The daemon prefers the runtime named `paddock-runsc` | An enrolled host can hold other gVisor runtimes, registered with other arguments. N16 registers one that sorts first and offers raw sockets; Paddock still runs on its own, and verification refuses a service that would not. |
-| Plan only what is missing | A binary, runtime, unit or registration that is already in place is not installed again, and Docker restarts only to load a runtime entry it lacks. N15 plans one step for a service enabled only until reboot. N17 installs another artifact with a Paddock service restart and no Docker restart; the plan names the running sandbox that restart stops. |
+| The daemon prefers the runtime named `asidee-runsc` | An enrolled host can hold other gVisor runtimes, registered with other arguments. N16 registers one that sorts first and offers raw sockets; Asidee still runs on its own, and verification refuses a service that would not. |
+| Plan only what is missing | A binary, runtime, unit or registration that is already in place is not installed again, and Docker restarts only to load a runtime entry it lacks. N15 plans one step for a service enabled only until reboot. N17 installs another artifact with an Asidee service restart and no Docker restart; the plan names the running sandbox that restart stops. |
 | A report of success is not enough | The installer's SSH session has to exit 0 (N17 returns 77 after a complete report: outcome unknown), and the smoke sandbox's verify after the disk write has to hold with every blocking check passing (N14 alters that reply three ways, beside an unaltered control). |
 | Existing Python 3 and usable signed apt cache are prerequisites | The probe must not install tools or refresh indexes before consent. An empty or unreadable recipe refuses before installation. Existing Docker access must be readable to enumerate restart impact. |
 | Show repository URLs without userinfo and hash original sources, keys and indexes; download the exact resolved .deb set and use `dpkg --install` | `apt-get --no-download` did not consume the staged local archives on the fixture. Direct installation avoids another dependency resolution or undeclared download after consent. N08 checks every installed version and unchanged login groups. No repository or key is added. |
@@ -295,7 +295,7 @@ anchors, not independently authenticated releases.
 
 Recommend one sparse loop-mounted ext4 image per sandbox, with an explicitly bounded filesystem layout.
 Do not copy the reference's two-directory scheme and call the whole sandbox capped.
-Paddock's proposed `diskMode: hard` makes the engine root read-only and puts every allowed persistent writable directory on that image.
+Asidee's proposed `diskMode: hard` makes the engine root read-only and puts every allowed persistent writable directory on that image.
 This trades unrestricted root-directory mutation for a cap that can be inspected and probed.
 Filesystem and image-layout compatibility are **unverified U7**. Until those gates pass, advertise watched, not hard.
 
@@ -328,17 +328,17 @@ If a writable root is required and the bounded layout is unsuitable, use watched
 `diskGb` remains binary GiB, matching current code. Metadata reduces usable space; expose both image bytes and usable bytes.
 The claim covers sandbox persistent writable files, not shared base-image downloads, engine metadata, daemon logs, or backups.
 It is not an aggregate reservation of host space. Sparse images can exhaust the host before any one reaches its logical limit.
-Report host free space and bound Paddock's own logs. Do not promise that several approved caps can all be filled simultaneously.
+Report host free space and bound Asidee's own logs. Do not promise that several approved caps can all be filled simultaneously.
 Package installation, generated engine files, nested Docker storage, and snapshots with this layout are **unverified U7**.
 Snapshot code must include managed disk data; plain `docker commit` cannot be assumed to preserve it.
 
 ### Privilege, truthful mounts, and evidence
 
-The root helper owns `/var/lib/paddock-disks/<uid>/<sandboxId>/disk.img`, mountpoint, and mount units.
+The root helper owns `/var/lib/asidee-disks/<uid>/<sandboxId>/disk.img`, mountpoint, and mount units.
 It accepts only `create`, `inspect`, `grow`, `mount`, and `remove` with validated IDs and bounded byte counts.
 No caller supplies a path, filesystem type, shell command, mount flags, or another user's ID.
 Validate parent ownership and refuse symlinks, hard-link substitutions, unexpected devices, and mismatched filesystem UUIDs.
-Runtime sudo is only `sudo -n /usr/local/libexec/paddock-disk ...`; refuse if the scoped permission is missing.
+Runtime sudo is only `sudo -n /usr/local/libexec/asidee-disk ...`; refuse if the scoped permission is missing.
 The helper creates the sparse file, formats ext4, mounts it, and creates its `data/` sentinel only on the mounted filesystem.
 The container uses strict bind mounts that refuse a missing source. Never auto-create a fallback directory on the host.
 System mount units restore the disks at boot. `Core.startChecked` still verifies the mount and reloads the network guard.
@@ -365,7 +365,7 @@ Unknown disk measurements must be reported and counted toward a bounded loss-of-
 
 ### Grow, shrink, and cleanup
 
-Use `paddock --host build resize demo --disk 40`. V1 requires a stopped sandbox for disk growth.
+Use `asd --host build resize demo --disk 40`. V1 requires a stopped sandbox for disk growth.
 Under its lock, journal old and requested sizes, enlarge the image, refresh loop capacity, then grow ext4 and inspect the result.
 Commit the new spec only after success. An interrupted grow retains recoverable phase information and both sizes.
 On restart, reconcile the actual filesystem before allowing start. Never truncate back to the old size as rollback.
@@ -377,7 +377,7 @@ Grow recovery, ext4 behavior under exhaustion, and cleanup failure handling are 
 
 ## 4. Forwards exist on the person's primary machine
 
-Use `paddock --host build forward add demo --port 3000 [--local-port 8080]`.
+Use `asd --host build forward add demo --port 3000 [--local-port 8080]`.
 The primary daemon binds `127.0.0.1`, never wildcard, LAN, IPv6 wildcard, or a supplied IP.
 Bind the actual listener once. An omitted local port requests port 0; return the assigned port after listening succeeds.
 An explicit occupied port fails. Do not probe a port, release it, then assume it is still free.
@@ -388,7 +388,7 @@ An explicit occupied port fails. Do not probe a port, release it, then assume it
 | Remote sandbox | Primary listener opens an SSH daemon stream to the selected target's `dial` session, then relays bytes. |
 | Service bound inside sandbox to loopback | Target provider executes a fixed guest relay dialing only `127.0.0.1:port`. |
 
-The relay is an internal mode of a Linux Paddock artifact for the guest architecture, copied inside by the core, including on a Mac primary.
+The relay is an internal mode of a Linux Asidee artifact for the guest architecture, copied inside by the core, including on a Mac primary.
 It runs inside gVisor, never with host privilege, and receives a numeric port rather than a destination hostname.
 Relay availability and gVisor socket behavior are **unverified U10**. No `nc` dependency or sandbox-installed tool is assumed.
 Neither case binds a TCP listener on the engine host as an intermediate step. No outer Docker `-p` or SSH `-R` is used.
@@ -411,14 +411,14 @@ Loopback is reachable by other processes on the primary, and a browser may conta
 
 ## 5. Editor SSH follows the same target daemon
 
-Generate `demo.paddock` for local and `demo.build.paddock` for remote sandboxes.
-`paddock --host build ssh setup demo` prepares guest sshd, generates fresh guest host keys, and installs only the client's public key.
+Generate `demo.asidee` for local and `demo.build.asidee` for remote sandboxes.
+`asd --host build ssh setup demo` prepares guest sshd, generates fresh guest host keys, and installs only the client's public key.
 It also writes a managed primary SSH include and a dedicated known-hosts file, preserving unrelated user config.
-`paddock ssh config` is not built. Use `paddock ssh access NAME` for the effective alias and
-`paddock ssh setup NAME --write-config` to write the include; `ssh proxy --alias ALIAS` is the internal ProxyCommand.
-Use an absolute Paddock executable path so GUI apps do not depend on an interactive shell PATH.
+`asd ssh config` is not built. Use `asd ssh access NAME` for the effective alias and
+`asd ssh setup NAME --write-config` to write the include; `ssh proxy --alias ALIAS` is the internal ProxyCommand.
+Use an absolute Asidee executable path so GUI apps do not depend on an interactive shell PATH.
 
-1. Editor runs ordinary `ssh demo.build.paddock`, with the primary's dedicated editor private key.
+1. Editor runs ordinary `ssh demo.build.asidee`, with the primary's dedicated editor private key.
 2. ProxyCommand calls the primary socket and opens `ssh-proxy` through the same registered machine route.
 3. Target core validates machine, sandbox ID, running state, and SSH capability, then opens provider exec in that sandbox.
 4. Provider executes fixed `/usr/sbin/sshd -i` under the guest root user. It never opens port 22 on either host.
@@ -431,7 +431,7 @@ Never copy the editor private key to a remote machine or bake it into a template
 Guest setup uses typed core operations. Guest package scripts run only inside gVisor and never in a privileged host helper.
 Only explicit setup/start may start a stopped sandbox; passive editor reconnect, proxy, shell, and poll refuse stopped targets.
 Allow local TCP forwarding within the inner SSH connection to guest loopback for editor and T3 launchers; deny reverse forwarding.
-Do not expose editor-driven listeners as Paddock-managed forwards. An independently invoked SSH client's bind choices remain its owner's responsibility.
+Do not expose editor-driven listeners as Asidee-managed forwards. An independently invoked SSH client's bind choices remain its owner's responsibility.
 sshd inetd mode, SFTP, editor bootstrap, and T3's particular SSH options are **unverified U11**.
 Stage 2 must separately verify the T3 server installation/version. A working alias alone does not mean `T3 ready`.
 
@@ -567,7 +567,7 @@ Sequence work into verifiable units. Each unit must pass its relevant outside me
 - **U5, conservative restart with one measured Docker version.** See the enrollment implementation record. Reload alternatives and other versions remain unverified.
 - **U6, partially measured.** Explicit native artifacts, checksums, embedded helper delivery and the multi-file gVisor archive are measured on the arm64 fixture. Signed releases and x86_64 installation remain unverified.
 - **U7, unverified.** Bounded-v1 preserves supported image layouts, package installs, generated files, nested Docker data, and snapshots without a persistent-write bypass.
-- **U8, unverified.** Candidate quota/storage backends and their limitations apply to any new Linux fixture; reference measurements establish no Paddock result there.
+- **U8, unverified.** Candidate quota/storage backends and their limitations apply to any new Linux fixture; reference measurements establish no Asidee result there.
 - **U9, unverified.** Scoped sudo helper, ext4 exhaustion/growth, mount identity/propagation, mount units, and interrupted cleanup satisfy the proposed safety properties.
 - **U10, unverified.** Guest relay and SSH stream/lease behavior support binary loopback services and the proposed forward-ending bounds, including sleep and partitions.
 - **U11, unverified.** Guest sshd inetd mode, pinned keys, SFTP, real editors, and T3 launch options work across both daemon hops without an open host port.

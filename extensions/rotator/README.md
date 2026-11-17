@@ -1,6 +1,6 @@
 # T3 account rotator
 
-Run with Bun and `paddock` on PATH against an already running sandbox. The guest needs Node, `ps`, Python 3, an installed
+Run with Bun and `asd` on PATH against an already running sandbox. The guest needs Node, `ps`, Python 3, an installed
 T3 CLI and T3's `~/.t3/userdata/settings.json` and database. Start T3 in the guest once before starting the rotator.
 Each selected provider needs at least two enabled, authenticated accounts for a switch to be possible.
 
@@ -12,11 +12,11 @@ bun extensions/rotator/rotator.ts NAME claude,codex
 bun extensions/rotator/rotator.ts NAME off
 ```
 
-Copy the whole folder to `$PADDOCK_CONFIG_DIR/extensions/rotator` (normally `~/.config/paddock/extensions/rotator`),
+Copy the whole folder to `$ASIDEE_CONFIG_DIR/extensions/rotator` (normally `~/.config/asidee/extensions/rotator`),
 preserving `rotator.ts`'s executable bit. Then use the dashboard or
-`paddock ext run rotator mode NAME --set mode=claude,codex`. The default action only reads status.
+`asd ext run rotator mode NAME --set mode=claude,codex`. The default action only reads status.
 
-Each start transfers the bundled `t3-account-rotator.py` on `paddock exec` stdin to
+Each start transfers the bundled `t3-account-rotator.py` on `asd exec` stdin to
 `~/.t3/account-rotator/rotate.py`. It replaces the old watcher and starts Python detached with closed stdin and private
 log output. It uses the guest's `.t3` base directory. The controller checks PID command identity before signalling and
 holds `~/.t3/account-rotator/.lock` during changes. An interrupted controller can leave the lock. Check for another
@@ -47,7 +47,7 @@ accounts and withholding private text.
 The original reference copy was checked live on 2026-11-11 in one sandbox on the default image, after the T3 extension's setup and one `t3 serve` to
 create the database: status before any start reported off and wrote nothing. Starting `claude` ran one
 `rotate.py --watch --providers claude` process from a byte-identical copy and logged `watching`; switching to
-`claude,codex` through `paddock ext run` replaced it with one process; `off` left no process and removed its PID file.
+`claude,codex` through `asd ext run` replaced it with one process; `off` left no process and removed its PID file.
 After a start, stopping and starting the sandbox left no process and status reported off for the stale PID.
 Not checked live: authentication checks, account switching and model preservation, which need two real authenticated
 accounts and a usage-limit failure. The later logging, helper-title and disabled-account changes have unit coverage

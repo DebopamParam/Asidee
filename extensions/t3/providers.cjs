@@ -1,5 +1,5 @@
 const fs = require("fs"), path = require("path"), os = require("os"), crypto = require("crypto")
-const home = os.homedir(), target = path.join(home, ".t3/userdata/settings.json"), ownershipFile = path.join(home, ".t3/userdata/paddock-providers.json")
+const home = os.homedir(), target = path.join(home, ".t3/userdata/settings.json"), ownershipFile = path.join(home, ".t3/userdata/asidee-providers.json")
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value)
 const exists = p => { try { return fs.lstatSync(p) } catch (e) { if (e.code === "ENOENT") return; throw e } }
 function safe(p, directory = false) {
@@ -45,7 +45,7 @@ function main() {
       let id = name === primary ? driver : agent + "-" + profile
       // An unowned collision belongs to the user, including a built-in provider they configured themselves.
       if (Object.hasOwn(instances, id) && !owned.includes(id)) {
-        id = "paddock-" + agent + "-" + profile
+        id = "asidee-" + agent + "-" + profile
         if (Object.hasOwn(instances, id) && !owned.includes(id)) throw new Error()
       }
       if (wanted.includes(id)) throw new Error()
@@ -65,7 +65,7 @@ function main() {
   atomic(ownershipFile, { instances: nextRecords })
   process.stdout.write(JSON.stringify(counts) + "\n")
 }
-const lock = path.join(home, ".paddock-logins.lock")
+const lock = path.join(home, ".asidee-logins.lock")
 let locked = false
 try { safe(lock, true); fs.mkdirSync(lock, { mode: 0o700 }); locked = true; main() }
 catch { process.stderr.write("Provider sync failed; settings left intact on validation failure; contents withheld.\n"); process.exitCode = 1 }

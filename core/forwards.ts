@@ -1,5 +1,5 @@
 import { createServer, type AddressInfo, type Server, type Socket } from "node:net"
-import { PaddockError, type Session } from "./types"
+import { AsideeError, type Session } from "./types"
 
 // A forward: one listener on this machine's loopback, each of whose connections is relayed through a session to the
 // same port on the sandbox's own loopback. It belongs to one run of one sandbox (its id and generation), never to a name.
@@ -19,7 +19,7 @@ export const LEASE_TTL_MS = 15_000
 
 export function validPort(value: unknown, what: string): number {
   const port = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value
-  if (!Number.isInteger(port) || (port as number) < 1 || (port as number) > 65_535) throw new PaddockError("usage", `${what} must be a whole number from 1 to 65535.`)
+  if (!Number.isInteger(port) || (port as number) < 1 || (port as number) > 65_535) throw new AsideeError("usage", `${what} must be a whole number from 1 to 65535.`)
   return port as number
 }
 
@@ -33,8 +33,8 @@ export function listenLoopback(localPort?: number): Promise<Server> {
     const server = createServer({ allowHalfOpen: true, pauseOnConnect: true })
     server.maxConnections = FORWARD_CONNECTIONS
     server.once("error", (error: NodeJS.ErrnoException) => reject(error.code === "EADDRINUSE"
-      ? new PaddockError("conflict", `127.0.0.1:${localPort} is already in use on this machine. Choose another --local-port, or leave it out to get a free one.`)
-      : new PaddockError("runtime", `Could not listen on 127.0.0.1:${localPort ?? 0}: ${error.message}`)))
+      ? new AsideeError("conflict", `127.0.0.1:${localPort} is already in use on this machine. Choose another --local-port, or leave it out to get a free one.`)
+      : new AsideeError("runtime", `Could not listen on 127.0.0.1:${localPort ?? 0}: ${error.message}`)))
     server.listen({ host: "127.0.0.1", port: localPort ?? 0, exclusive: true }, () => resolve(server))
   })
 }

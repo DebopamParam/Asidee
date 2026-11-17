@@ -8,30 +8,30 @@ isolated kernel, guarded networking or resource limits.
 ## Copy a project in and run it
 
 ```sh
-paddock workspace create render --copy /absolute/project
-paddock workspace shell render
-paddock workspace exec render -- ffmpeg -version
-paddock workspace exec render --stream -- cat output.mov > saved.mov
-paddock workspace verify render
-paddock workspace stop render
-paddock workspace remove render --confirm render
+asd workspace create render --copy /absolute/project
+asd workspace shell render
+asd workspace exec render -- ffmpeg -version
+asd workspace exec render --stream -- cat output.mov > saved.mov
+asd workspace verify render
+asd workspace stop render
+asd workspace remove render --confirm render
 ```
 
-Creation makes `~/Paddock/render/{home,tmp,work}`. The working directory is `work`. `--copy` copies the source's
+Creation makes `~/Asidee/render/{home,tmp,work}`. The working directory is `work`. `--copy` copies the source's
 contents there, including hidden files, with `cp -R -P -X`, then sets each copy's modification and access times and
 permission bits from the source (not setuid, setgid or sticky bits). Symlinks are copied as links, never followed.
 Ownership, ACLs, file flags and the source's extended attributes are not carried; a file hard-linked in the source
 becomes separate copies. macOS itself marks the copy: measured on macOS 26.7.1, every file this process tree writes
 gets `com.apple.provenance`, which cannot be removed, and a copy of a quarantined file gets a fresh
-`com.apple.quarantine` of its own. Paddock leaves that quarantine in place, so Gatekeeper still checks it.
+`com.apple.quarantine` of its own. Asidee leaves that quarantine in place, so Gatekeeper still checks it.
 `test/unit/workspaces.test.ts` covers a 0755 file and a 0555 folder with old times, a 0664 file, a symlink, an ACL
-and two extended attributes. Paddock opens the source for reading only and makes no hard links to it. Writes through symlinks to outside paths are still refused by the profile.
+and two extended attributes. Asidee opens the source for reading only and makes no hard links to it. Writes through symlinks to outside paths are still refused by the profile.
 Removing the workspace never walks or deletes the source. Copy out anything you want to keep before removing it.
-Only commands launched through `paddock workspace shell` or `exec` acquire the profile. Entering the folder with an
+Only commands launched through `asd workspace shell` or `exec` acquire the profile. Entering the folder with an
 ordinary shell, or opening its files through Finder, does not apply confinement.
 
 `--read PATH` is repeatable and grants read access, never write access. Paths are canonicalised and passed as `-D`
-parameters, never inserted as profile syntax. Home, SSH keys, workspace folders and their ancestors, Paddock state,
+parameters, never inserted as profile syntax. Home, SSH keys, workspace folders and their ancestors, Asidee state,
 and shared temporary folders cannot be opened with `--read`. A symlink's resolved target is allowed; the original
 home symlink can remain unreadable. `--path DIR` adds a canonical executable search directory. A directory under
 home also needs an allowed `--read`. Create lists readable tool-directory suggestions from the creator's PATH.
@@ -62,7 +62,7 @@ The limit is **watched, not capped**. While the daemon runs, every 30 seconds it
 running processes with `/usr/bin/du -sk` on its folder, so `home`, private `tmp` and `work` all count; shared host
 temp `T` does not. Over its limit, the daemon stops the workspace's processes as `workspace stop` does and records a
 reason that `workspace get` and `workspace list` show. The reason gives the space used and the limit, and two ways
-out: free space in the folder, or `paddock workspace set NAME disk N`. A workspace can overshoot by whatever it
+out: free space in the folder, or `asd workspace set NAME disk N`. A workspace can overshoot by whatever it
 writes in those 30 seconds. Nothing watches it while no daemon runs, and stopping the daemon does not stop
 workspaces. A workspace with no processes is not measured.
 
@@ -79,9 +79,9 @@ files with a warm cache. A cold cache was not measured.
 
 Below a machine-wide free-space floor, workspace launches are refused (exit 6) with a sentence giving the free space,
 the floor and the command to change it, and the pass stops running workspaces with the same sentence as their
-reason. `paddock config set workspace-free-space GiB` sets the floor: default 5, from 0 (off) to 100000. Free space is
+reason. `asd config set workspace-free-space GiB` sets the floor: default 5, from 0 (off) to 100000. Free space is
 `statfs`'s available space on the volume that holds the workspace folder. macOS purgeable space is not counted, so
-Finder can show more free space than Paddock does.
+Finder can show more free space than Asidee does.
 
 The checklist has both: `free-space` blocks a launch, create and verify when it fails or cannot be read; `disk`
 does not block and reads `weak` while under the limit, `fail` over it, or `unknown`, and states the 30-second
@@ -95,16 +95,16 @@ and restores the setting.
 that use `DARWIN_USER_TEMP_DIR` instead of `$TMPDIR`, create with `--host-temp` or change an idle workspace:
 
 ```sh
-paddock workspace create render --host-temp --no-logins
-paddock workspace stop render
-paddock workspace set render host-temp on
-paddock workspace set render host-temp off
+asd workspace create render --host-temp --no-logins
+asd workspace stop render
+asd workspace set render host-temp on
+asd workspace set render host-temp off
 ```
 
 Changing the setting refuses while any workspace processes run. Stop them first. The new profile applies to later
 shells and execs, and saved verification is cleared. If a partial update leaves the profile and manifest mismatched,
-execution refuses the integrity check. A Paddock update that changes the generated profile has the same effect on
-existing workspaces. The refusal names the command that recovers: setting the current value again (`paddock workspace
+execution refuses the integrity check. An Asidee update that changes the generated profile has the same effect on
+existing workspaces. The refusal names the command that recovers: setting the current value again (`asd workspace
 set NAME host-temp on` on a workspace that has it on) rewrites the profile from the saved settings.
 
 With the setting on, the profile adds two rules: file reads and writes only in this user's canonical per-user `T`
@@ -141,7 +141,7 @@ installed. Unit tests cover boolean validation, legacy defaults, original profil
 and dashboard DOM output. Dashboard appearance was not evaluated.
 
 CoreML was measured once outside the test suite, by hand on 2026-11-16 (Apple M5, macOS 26.7.1, ONNX Runtime 1.31.1,
-Python 3.12), using profiles generated by Paddock's code with the setting on and run with the same environment and
+Python 3.12), using profiles generated by Asidee's code with the setting on and run with the same environment and
 parameters as `exec`. ONNX Runtime's CoreML provider with an ML Program model failed with error 17 and fell back to
 the CPU without the metadata rule (three of three runs), and ran with it: 136 node executions on the CoreML provider,
 and a hand-built convolution model on `CPUAndGPU` took 0.05 s against 0.25 s on `CPUOnly`, with fp16-rounded
@@ -169,14 +169,14 @@ unverified.** No login or logout was attempted. Unit fixtures cover named file p
 copies. Code inside can read and send the imported logins over the open network. Refreshing a copy could affect
 other clients of that login; that behavior was not measured.
 
-Paddock passes no flags to disable an agent's own sandbox. The K20 eval explicitly starts Codex's sandbox with an
+Asidee passes no flags to disable an agent's own sandbox. The K20 eval explicitly starts Codex's sandbox with an
 unconfined control. Chrome, Codex and other nested sandboxes may need a user-chosen configuration to work here.
 Claude's own command sandbox is not measured.
 
 ## What stop and remove do
 
 The process finder asks macOS for all PIDs of this user. It accepts a PID only when the process is sandboxed, can
-read and create files in this workspace folder, and cannot read its `.paddock-tag`. Both folder and tag must exist.
+read and create files in this workspace folder, and cannot read its `.asidee-tag`. Both folder and tag must exist.
 Environment variables, names and process groups are not identity evidence.
 
 Stop rechecks that full criterion immediately before **each** signal. It sends SIGSTOP, then SIGKILL, and enumerates
@@ -192,7 +192,7 @@ profile only after another empty finder result. It does not follow symlinks or c
 One K16 run still showed a registration after pre-deletion unregistration. Remove now checks after deletion and
 retries its bundles for a bounded settling period. The database is filtered before collecting output because its
 full dump exceeds 16 MiB on this Mac. A leftover or unreadable database is reported.
-Multiple links can all be inside the workspace; Paddock cannot locate every external link. Outside hard links
+Multiple links can all be inside the workspace; Asidee cannot locate every external link. Outside hard links
 supplied by another program can share changes that survive removal.
 
 Removal cannot undo unified system logs, remote pushes or API calls, existing backups, or changes through outside
@@ -246,12 +246,12 @@ The finder calls `proc_listallpids` and `proc_pidinfo` directly through `bun:ffi
 variadic `sandbox_check` gave wrong decisions on Apple Silicon. A six-line C wrapper supplies the correct Darwin
 variadic ABI, compiled by Bun's built-in TinyCC into memory. No external compiler or helper binary is needed at
 runtime. TinyCC cannot read Bun's embedded virtual files, so the static wrapper source is materialised in
-`/private/tmp/paddock-ffi-*` and deleted immediately in a `finally` block. This works in source and compiled builds.
+`/private/tmp/asidee-ffi-*` and deleted immediately in a `finally` block. This works in source and compiled builds.
 
-Tests override `PADDOCK_WORKSPACES_ROOT` with a disposable directory under this checkout's ignored `dist/`. The
+Tests override `ASIDEE_WORKSPACES_ROOT` with a disposable directory under this checkout's ignored `dist/`. The
 override is canonicalised and must still be strictly inside the OS account's real home, separate from state and SSH
-keys. No test creates `~/Paddock` or a loose file in the home root. K's private daemon state lives in
-`/private/tmp/pdk-k-*`, outside Nix's automatically removed `TMPDIR`. `PADDOCK_WORKSPACE_ONLY=1` disables engine
+keys. No test creates `~/Asidee` or a loose file in the home root. K's private daemon state lives in
+`/private/tmp/asd-k-*`, outside Nix's automatically removed `TMPDIR`. `ASIDEE_WORKSPACE_ONLY=1` disables engine
 providers for that daemon. K-only runs do not discover engines, run sandbox teardown, invoke SSH or contact other
 registered machines. K01 briefly creates uniquely named control files under this user's temp folder, `/Users/Shared`
 and `/opt/homebrew/Cellar`, then deletes them. All other workspace fixtures are in `dist/` or private temporary state.

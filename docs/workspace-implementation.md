@@ -22,7 +22,7 @@ revision and each result.
    and explicit verify. Launch preserves the timestamp of the last full verify. Hard-link verification reads only;
    permission repair is enabled only by remove. K26 and unit tests use instrumented tools and unreadable directories.
 4. **Fallible confined controls.** Read/write policy checks have same-operation allowed controls on the workspace
-   folder. Global operation denials use another confined profile with the required allows, running only Paddock's
+   folder. Global operation denials use another confined profile with the required allows, running only Asidee's
    trusted `sleep`. `job-creation` needed an explicit allow in that control; allow-default alone returned denied.
    Misspelled operations return unknown and cannot establish a pass. The socket check opens a real private listener;
    the same command must receive its marker outside the profile, and the confined connect must fail. No pass relies
@@ -53,7 +53,7 @@ continues to run first. No process-selection guard was relaxed.
 
 K23 creates the workspace through the compiled CLI using default profiles, despite unrelated profile paths in the
 daemon environment. The shared reader retrieved the owner's default Claude Keychain credential. The private state
-and credential were written, and `paddock workspace exec ... -- claude auth status` reported `loggedIn: true`.
+and credential were written, and `asd workspace exec ... -- claude auth status` reported `loggedIn: true`.
 Credential values, account fields and subprocess status output are withheld; the report records only the boolean
 result and fixed diagnostic text. No login, logout, authenticated API call or refresh was performed.
 The default Codex credential was not imported because the reader could not obtain a valid readable credential.
@@ -85,16 +85,16 @@ command or SSH transport. K10 connects to Docker/nix sockets as a control withou
 ## Test scope and retained artifacts
 
 Workspace fixtures live under this checkout's ignored `dist/`, still validated as inside the account's real home.
-Private daemon state uses `/private/tmp/pdk-k-*`; runtime socket probes use `/private/tmp/paddock-check-*`. FFI wrapper
-sources use `/private/tmp/paddock-ffi-*` and are deleted immediately after loading. No fixture was created under
-`~/Paddock`, no loose file was created in the home root, and the cartoon project was neither opened nor copied.
+Private daemon state uses `/private/tmp/asd-k-*`; runtime socket probes use `/private/tmp/asidee-check-*`. FFI wrapper
+sources use `/private/tmp/asidee-ffi-*` and are deleted immediately after loading. No fixture was created under
+`~/Asidee`, no loose file was created in the home root, and the cartoon project was neither opened nor copied.
 
 The runner removes its workspaces, fixture app registrations/job, daemon and temporary directories. K01's exclusive
 write controls in the user's temp folder, `/Users/Shared` and `/opt/homebrew/Cellar` are removed. Final cleanup is
 audited separately before handback. No sudo, remote host, owner-container operation, Docker configuration edit,
 shell-configuration edit, Keychain write or preference edit is performed.
 
-The existing ignored `dist/paddock` is rebuilt and retained, alongside installed development packages. Temporary run
+The existing ignored `dist/asd` is rebuilt and retained, alongside installed development packages. Temporary run
 logs are removed after the results are recorded. Ordinary tool caches and macOS unified-log retention are not erased
 or audited. The source, operator documentation and separate workspace scorecard are the intended artifacts.
 

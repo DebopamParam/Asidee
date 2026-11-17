@@ -1,4 +1,4 @@
-import { PaddockError, type RunResult, type Runner } from "./types"
+import { AsideeError, type RunResult, type Runner } from "./types"
 
 // What one command may print on each stream. Much of what the core runs prints what a sandbox chooses (exec, and the
 // sandbox's own tools during checks), and all of it is held in the daemon's memory, so a sandbox could otherwise exhaust
@@ -40,6 +40,6 @@ export const systemRunner: Runner = async (argv, options = {}) => {
 }
 
 export function must(result: RunResult, what: string): RunResult {
-  if (result.exitCode !== 0) throw new PaddockError("runtime", `${what} failed: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.exitCode}`}`)
+  if (result.exitCode !== 0) throw new AsideeError("runtime", `${what} failed: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.exitCode}`}`)
   return result
 }

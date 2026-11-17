@@ -1,22 +1,22 @@
 import { cc, dlopen, ptr } from "bun:ffi"
 import { lstatSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { PaddockError } from "./types"
+import { AsideeError } from "./types"
 import wrapper from "./workspace-check.c" with { type: "text" }
 
 export function requireMac(platform = process.platform): void {
-  if (platform !== "darwin") throw new PaddockError("dependency", "Workspaces are available only on macOS. A workspace is not a sandbox.")
+  if (platform !== "darwin") throw new AsideeError("dependency", "Workspaces are available only on macOS. A workspace is not a sandbox.")
 }
 
 function library() {
   requireMac()
   // TinyCC opens an OS file, so Bun's embedded /$bunfs paths cannot be passed directly.
-  const temporary = mkdtempSync("/private/tmp/paddock-ffi-")
+  const temporary = mkdtempSync("/private/tmp/asidee-ffi-")
   const source = join(temporary, "check.c")
   const check = (() => {
     try {
       writeFileSync(source, wrapper, { mode: 0o600 })
-      return cc({ source, symbols: { paddock_sandbox_check: { args: ["i32", "ptr", "i32", "ptr"], returns: "i32" } } })
+      return cc({ source, symbols: { asidee_sandbox_check: { args: ["i32", "ptr", "i32", "ptr"], returns: "i32" } } })
     } finally { rmSync(temporary, { recursive: true, force: true }) }
   })()
   const proc = dlopen("/usr/lib/libSystem.B.dylib", {
@@ -37,7 +37,7 @@ export function decision(pid: number, operation: string | null, filter = 0, argu
   const input = { operation: operation === null ? null : cstr(operation), argument: cstr(argument) }
   // The FFI sees raw pointers; keep their buffers reachable while native code runs.
   liveInputs.add(input)
-  try { return lib().check.symbols.paddock_sandbox_check(pid, input.operation ? ptr(input.operation) : null, filter | (operation === null ? 0 : 0x40000000), ptr(input.argument)) }
+  try { return lib().check.symbols.asidee_sandbox_check(pid, input.operation ? ptr(input.operation) : null, filter | (operation === null ? 0 : 0x40000000), ptr(input.argument)) }
   finally { liveInputs.delete(input) }
 }
 
@@ -48,8 +48,8 @@ export function controlledDecision(pid: number, control: number, operation: stri
 }
 
 function paths(folder: string): void {
-  if (!lstatSync(folder).isDirectory() || !lstatSync(join(folder, ".paddock-tag")).isFile())
-    throw new PaddockError("check-failed", "The workspace folder and regular tag must exist before its processes can be identified.")
+  if (!lstatSync(folder).isDirectory() || !lstatSync(join(folder, ".asidee-tag")).isFile())
+    throw new AsideeError("check-failed", "The workspace folder and regular tag must exist before its processes can be identified.")
 }
 
 export function belongs(pid: number, folder: string): boolean {
@@ -58,7 +58,7 @@ export function belongs(pid: number, folder: string): boolean {
   const info = new Uint8Array(64)
   if (lib().proc.symbols.proc_pidinfo(pid, 13, 0, ptr(info), info.byteLength) !== info.byteLength || new DataView(info.buffer).getUint32(36, true) !== process.getuid?.()) return false
   return decision(pid, null) === 1 && decision(pid, "file-read-data", 1, folder) === 0
-    && decision(pid, "file-write-create", 1, folder) === 0 && decision(pid, "file-read-data", 1, join(folder, ".paddock-tag")) === 1
+    && decision(pid, "file-write-create", 1, folder) === 0 && decision(pid, "file-read-data", 1, join(folder, ".asidee-tag")) === 1
 }
 
 // The facts belongs() weighs, in words, for a refusal that has to say why a pid did not qualify.
@@ -70,23 +70,23 @@ export function profileEvidence(pid: number, folder: string): string {
   const path = length > 0 ? JSON.stringify(executable.subarray(0, length).toString().replace(/\0.*$/, "")) : "unknown"
   const parent = new DataView(info.buffer).getUint32(4, true)
   const answer = (value: number) => value === 0 ? "allowed" : value === 1 ? "denied" : `unknown (${value})`
-  return `pid ${pid} executable ${path}; parent ${parent}; uid ${new DataView(info.buffer).getUint32(36, true)} (Paddock's ${process.getuid?.()}); sandboxed ${decision(pid, null) === 1 ? "yes" : "no"}; `
+  return `pid ${pid} executable ${path}; parent ${parent}; uid ${new DataView(info.buffer).getUint32(36, true)} (Asidee's ${process.getuid?.()}); sandboxed ${decision(pid, null) === 1 ? "yes" : "no"}; `
     + `folder read ${answer(decision(pid, "file-read-data", 1, folder))} and write ${answer(decision(pid, "file-write-create", 1, folder))} (expected allowed); `
-    + `tag read ${answer(decision(pid, "file-read-data", 1, join(folder, ".paddock-tag")))} (expected denied)`
+    + `tag read ${answer(decision(pid, "file-read-data", 1, join(folder, ".asidee-tag")))} (expected denied)`
 }
 
 export function workspacePids(folder: string): number[] {
   paths(folder)
   for (let attempt = 0; attempt < 4; attempt++) {
     const count = lib().proc.symbols.proc_listallpids(null, 0)
-    if (count <= 0) throw new PaddockError("runtime", "macOS could not enumerate processes; nothing was signalled.")
+    if (count <= 0) throw new AsideeError("runtime", "macOS could not enumerate processes; nothing was signalled.")
     const pids = new Int32Array(count + 512 * (attempt + 1))
     const found = lib().proc.symbols.proc_listallpids(ptr(pids), pids.byteLength)
-    if (found <= 0) throw new PaddockError("runtime", "macOS returned no process inventory; nothing was signalled.")
+    if (found <= 0) throw new AsideeError("runtime", "macOS returned no process inventory; nothing was signalled.")
     if (found >= pids.length) continue
     return [...pids.subarray(0, found)].filter((pid) => belongs(pid, folder))
   }
-  throw new PaddockError("runtime", "The process inventory kept growing; no complete count is available.")
+  throw new AsideeError("runtime", "The process inventory kept growing; no complete count is available.")
 }
 
 export function signalWorkspacePid(pid: number, folder: string, signal: "SIGSTOP" | "SIGKILL"): boolean {
@@ -107,5 +107,5 @@ export async function stopWorkspaceProcesses(folder: string): Promise<void> {
     for (const pid of pids) signalWorkspacePid(pid, folder, "SIGKILL")
     await Bun.sleep(25)
   }
-  throw new PaddockError("check-failed", "Workspace processes remain after 100 stop rounds. Its folder and manifest were retained.")
+  throw new AsideeError("check-failed", "Workspace processes remain after 100 stop rounds. Its folder and manifest were retained.")
 }
