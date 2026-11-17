@@ -113,6 +113,10 @@ Not built yet:
 - Apple `container` support (a VM per sandbox; Apple silicon, macOS 26). It could become the macOS default once it
   passes the same checklist. Open questions first: a network guard the sandbox cannot switch off, without admin rights;
   the disk limit; whether freed memory returns to macOS; exec streams and loopback relay.
+- Guided setup (`asd setup`): the user chooses Docker Desktop or OrbStack (OrbStack recommended), sees one plan
+  (download a pinned `runsc`, add an `asidee-runsc` runtime, restart the engine, naming the containers that stop),
+  approves it once, and is told "ready" only after a test sandbox passes the checklist; `--remove` undoes it. Docker
+  Desktop first needs a test of where its VM can run `runsc` from.
 - A hard disk cap, Windows execution, a desktop app, and a signed release installer. The remote dashboard
   is later.
 - Docker Desktop and Colima measurements. Native Linux Docker and OrbStack have separate scorecards.
