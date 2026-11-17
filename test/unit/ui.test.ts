@@ -327,3 +327,42 @@ test("create sends Docker inside only when chosen, and shows the same create as 
   expect(bodies[0]).toMatchObject({ name: "one", docker: true }); expect(bodies[0]).not.toHaveProperty("dockerInside")
   expect(bodies[1]).not.toHaveProperty("docker")
 })
+
+test("create runs the chosen setup steps after the create, in the CLI's order, and stops at the first failure", async () => {
+  const bundled = ["logins", "repo", "t3"].map((id) => ({ id, name: id, actions: [] }))
+  const ui = await page({ ...base, list: () => [sandbox({ name: "fresh" })], extensions: () => ({ extensions: bundled, errors: [] }), create: (body) => ({ sandbox: { name: body.name } }),
+    action: (body) => body.action === "profiles" ? { exitCode: 0, stdout: `noise <b>\n${JSON.stringify({ agent: body.values.agent, profiles: ["work", "../x", "<b>"], token: "s3cret" })}\n`, stderr: "" }
+      : body.action === "clone" ? { exitCode: 2, stdout: "<i>no access</i>", stderr: "" } : { exitCode: 0, stdout: `${body.action} ok`, stderr: "" } })
+  const doc = ui.window.document as any
+  expect([...doc.getElementById("setup-claude").options].map((option: any) => option.textContent)).toEqual(["None", "work"])
+  expect(ui.text("#create-setup")).toContain("anything running there can read it")
+  expect(ui.text("#create-setup")).not.toContain("s3cret")
+  const form = doc.getElementById("create")
+  form.elements.namedItem("name").value = "fresh"; doc.getElementById("setup-gh").checked = true; doc.getElementById("setup-claude").value = "work"; doc.getElementById("setup-t3").checked = true
+  doc.getElementById("setup-repo").value = "acme/app.git"; form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
+  expect(ui.text("#create-command")).toContain("asd create fresh --gh --claude work --repo acme/app.git --t3")
+  form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  expect(ui.text("#create-error")).toBe("Repository takes a GitHub OWNER/REPO.")
+  expect(ui.calls.some((call) => call.method === "create")).toBe(false)
+  doc.getElementById("setup-repo").value = "acme/app"
+  form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  const create = ui.calls.find((call) => call.method === "create")!.body
+  expect(Object.keys(create).some((key) => key.startsWith("setup"))).toBe(false)
+  const steps = ui.calls.filter((call) => call.method === "action" && call.body.action !== "profiles").map((call) => call.body)
+  expect(steps).toEqual([{ extension: "logins", action: "github", sandbox: "fresh", values: {} }, { extension: "logins", action: "import", sandbox: "fresh", values: { agent: "claude", profile: "work", setup: true } },
+    { extension: "repo", action: "clone", sandbox: "fresh", values: { repository: "acme/app" } }])
+  const shown = ui.text("#sandboxes pre")
+  expect(shown).toContain("GitHub login: done"); expect(shown).toContain("Claude login work: done")
+  expect(shown).toContain("Clone acme/app: failed with exit 2 <i>no access</i>")
+  expect(shown).toContain("Clone acme/app failed; the steps after it did not run. fresh is kept.")
+  expect(doc.querySelector("#sandboxes pre i")).toBe(null)
+})
+
+test("setup inputs appear only for installed extensions", async () => {
+  const ui = await page({ ...base, list: () => [], extensions: () => ({ extensions: [{ id: "repo", name: "repo", actions: [] }], errors: [] }) })
+  const doc = ui.window.document
+  expect(doc.getElementById("setup-repo")).not.toBe(null)
+  for (const id of ["gh", "claude", "codex", "t3"]) expect(doc.getElementById(`setup-${id}`)).toBe(null)
+  expect(ui.text("#create-setup")).not.toContain("token")
+  expect(ui.calls.some((call) => call.method === "action")).toBe(false)
+})

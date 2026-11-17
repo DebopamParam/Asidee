@@ -82,6 +82,7 @@
       <div><label for="f-engine">Engine</label><select id="f-engine" name="engine"></select></div>
       <div><label for="f-docker">Docker inside</label><select id="f-docker" name="dockerInside"><option value="">Default</option><option value="true">On</option><option value="false">Off</option></select></div>
     </div>
+    <div id="create-setup"></div>
     <button class="primary">Create and verify</button>
     <div class="error" id="create-error"></div>
     <details><summary>The same from the CLI</summary><div id="create-command"></div></details>
@@ -195,6 +196,8 @@ const TABS = { sandboxes: "sandbox-section", usage: "usage-section", workspaces:
 let checklist = [], extensions = [], extensionErrors = [], available = [], open = new Set(), expanded = new Set(), busy = new Set(), output = {}, tab = "sandboxes"
 let sandboxes = [], engines = [], workspaces = [], workspaceProblem = "", forwards = [], links = [], ssh = {}, templates = [], templateProblem = ""
 let usage = [], usageProblem = "", remoteUsage = {}, machines, machineProblem = "", about, settings, savingSettings = false
+// profiles: this Mac's login profiles per agent, as the logins extension lists them; null when the listing failed.
+let profiles
 
 async function api(method, body = {}) {
   const response = await fetch(`/api/${method}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(body) })
@@ -569,6 +572,19 @@ function render() {
   fill(document.getElementById("f-engine"), ready.length ? ready.map((engine) => [engine.id, engine.label]) : [["", "No engine is ready"]], ready.some((engine) => engine.id === settings?.engine) ? settings.engine : ready[0]?.id ?? "")
   fill(document.getElementById("default-engine"), [["", "The first ready engine"], ...engines.map((engine) => [engine.id, `${engine.label}${engine.ready ? "" : " (not ready)"}`])], settings?.engine ?? "")
   fill(document.getElementById("f-template"), [["", settings?.defaults?.template ? `Default (${settings.defaults.template})` : "None"], ...templates.map((template) => [template.name, template.name])], "")
+  // The setup a create can run, for the bundled extensions that are installed. What was chosen survives a rebuild.
+  const kept = Object.fromEntries([...document.querySelectorAll("#create-setup input, #create-setup select")].map((input) => [input.id, input.type === "checkbox" ? input.checked : input.value]))
+  region("create-setup", [["logins", "repo", "t3"].filter(installed), profiles], (node) => {
+    const logins = installed("logins")
+    const profileSelect = (agent, label) => el("div", {}, el("label", { for: `setup-${agent}` }, label), el("select", { id: `setup-${agent}` },
+      el("option", { value: "" }, profiles?.[agent] === null ? "None (profiles unknown)" : "None"), ...(profiles?.[agent] ?? []).map((profile) => el("option", {}, profile))))
+    const fields = [logins ? el("label", {}, el("input", { id: "setup-gh", type: "checkbox" }), " GitHub login") : null, logins ? profileSelect("claude", "Claude login") : null, logins ? profileSelect("codex", "Codex login") : null,
+      installed("repo") ? el("div", {}, el("label", { for: "setup-repo" }, "Repository (OWNER/REPO)"), el("input", { id: "setup-repo", placeholder: "none" })) : null,
+      installed("t3") ? el("label", {}, el("input", { id: "setup-t3", type: "checkbox" }), " T3 Code") : null].filter(Boolean)
+    if (!fields.length) return
+    node.append(el("p", { class: "muted" }, `After the create, in this order; the first failure stops the rest and keeps the sandbox.${logins ? " A login's token is copied into the sandbox, where anything running there can read it." : ""}`), el("div", { class: "fields" }, ...fields))
+    for (const input of node.querySelectorAll("input, select")) if (input.id in kept) input.type === "checkbox" ? input.checked = kept[input.id] : input.value = kept[input.id]
+  })
   createCommand()
 }
 
@@ -579,11 +595,55 @@ function createCommand() {
   if (value("template")) parts.push("--template", value("template")); else if (value("image")) parts.push("--image", value("image"))
   for (const [field, flag] of [["cpus", "--cpus"], ["memoryGb", "--memory"], ["pids", "--pids"], ["diskGb", "--disk"]]) if (value(field)) parts.push(flag, value(field))
   if (value("engine") && value("engine") !== (settings?.engine ?? engines.find((engine) => engine.ready)?.id)) parts.push("--engine", value("engine"))
+  for (const step of setupSteps()) parts.push(...step.flags)
   const text = parts.join(" ")
   const node = document.getElementById("create-command")
   if (node.textContent !== `${text}Copy`) node.replaceChildren(command(text))
 }
 document.getElementById("create").addEventListener("input", createCommand)
+
+const installed = (id) => extensions.some((extension) => extension.id === id)
+const PROFILE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/, REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/
+// The CLI's `asd create NAME --gh --claude P --codex P --repo OWNER/REPO --t3`: the bundled extensions' actions, in the
+// order each needs the one before (a private clone needs GitHub; T3 finds the logins).
+function setupSteps() {
+  const input = (id) => document.getElementById(`setup-${id}`)
+  const steps = []
+  if (input("gh")?.checked) steps.push({ label: "GitHub login", flags: ["--gh"], extension: "logins", action: "github", values: {} })
+  for (const agent of ["claude", "codex"]) {
+    const profile = input(agent)?.value
+    if (profile) steps.push({ label: `${agent === "claude" ? "Claude" : "Codex"} login ${profile}`, flags: [`--${agent}`, profile], extension: "logins", action: "import", values: { agent, profile, setup: true } })
+  }
+  const repository = input("repo")?.value.trim()
+  if (repository) steps.push({ label: `Clone ${repository}`, flags: ["--repo", repository], extension: "repo", action: "clone", values: { repository } })
+  if (input("t3")?.checked) steps.push({ label: "T3 Code", flags: ["--t3"], extension: "t3", action: "setup", values: {} })
+  return steps
+}
+// Only the profile names are taken from the listing's output.
+async function readProfiles() {
+  profiles = {}
+  for (const agent of ["claude", "codex"]) {
+    try {
+      const result = await api("action", { extension: "logins", action: "profiles", values: { agent } })
+      const listed = result.exitCode === 0 ? result.stdout.split("\n").map((line) => { try { return JSON.parse(line) } catch { return undefined } }).find((entry) => entry?.agent === agent && Array.isArray(entry.profiles)) : undefined
+      profiles[agent] = listed ? listed.profiles.filter((profile) => typeof profile === "string" && PROFILE.test(profile)) : null
+    } catch { profiles[agent] = null }
+  }
+}
+// Runs after a create, as output under the new sandbox. The first failure stops the rest; the sandbox is kept.
+async function runSetup(name, steps) {
+  const lines = []
+  const show = (...last) => { output[name] = [...lines, ...last].join("\n"); render() }
+  for (const step of steps) {
+    show(`${step.label}…`)
+    let result
+    try { result = await api("action", { extension: step.extension, action: step.action, sandbox: name, values: step.values }) } catch (failure) { result = { stdout: failure.message } }
+    const text = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim()
+    lines.push(`${step.label}: ${result.exitCode === 0 ? "done" : typeof result.exitCode === "number" ? `failed with exit ${result.exitCode}` : "failed"}`, ...(text ? [text.replace(/^/gm, "  ")] : []))
+    if (result.exitCode !== 0) { lines.push("", `${step.label} failed; the steps after it did not run. ${name} is kept.`); break }
+  }
+  show()
+}
 
 async function refresh() {
   try {
@@ -601,6 +661,7 @@ async function refresh() {
     tab === "settings" || !about ? api("about").then((data) => { about = data }, () => {}) : null,
     tab === "extensions" ? api("extensions").then((data) => { extensions = data.extensions; extensionErrors = data.errors ?? []; available = data.available ?? [] }, () => {}) : null,
     tab === "machines" || tab === "usage" ? refreshMachines() : null,
+    installed("logins") && !profiles ? readProfiles() : null,
   ])
   render()
 }
@@ -615,15 +676,19 @@ async function refreshMachines() {
 document.getElementById("create").addEventListener("submit", async (event) => {
   event.preventDefault()
   const form = event.target; const button = form.querySelector("button.primary"); const error = document.getElementById("create-error")
+  const steps = setupSteps(); const repository = steps.find((step) => step.action === "clone")?.values.repository
+  if (repository !== undefined && (!REPOSITORY.test(repository) || repository.endsWith(".git"))) { error.textContent = "Repository takes a GitHub OWNER/REPO."; return }
   button.disabled = true; button.textContent = "Creating…"; error.textContent = ""
   const { dockerInside, ...body } = Object.fromEntries(new FormData(form))
   if (dockerInside) body.docker = dockerInside === "true"
   if (!body.template) delete body.template
-  try { const made = await api("create", body); open.add(made.sandbox.name); form.reset() }
+  let made
+  try { made = await api("create", body); open.add(made.sandbox.name); form.reset() }
   catch (failure) {
     error.textContent = failure.message
     if (failure.code === "probes-required") error.append(" ", el("button", { type: "button", onclick: () => { section("settings"); probeToggle.focus() } }, "Open settings"))
   }
+  if (made && steps.length) { button.textContent = "Setting up…"; await refresh(); await runSetup(made.sandbox.name, steps) }
   button.disabled = false; button.textContent = "Create and verify"; await refresh()
 })
 
