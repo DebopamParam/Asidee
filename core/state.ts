@@ -99,14 +99,18 @@ export async function scanManifests(dirs: Dirs): Promise<{ manifests: Manifest[]
 export const listManifests = async (dirs: Dirs) => (await scanManifests(dirs)).manifests
 
 // experimental: unproven features (today, other machines), off by default. workspaceFreeSpaceGb: below this much free
-// space where workspaces live, workspace launches are refused and the daemon stops running workspaces.
-export type Config = { defaults: Partial<typeof DEFAULT_SPEC>; engine?: string; requireProbes: boolean; experimental: boolean; workspaceFreeSpaceGb: number }
+// space where workspaces live, workspace launches are refused and the daemon stops running workspaces. diskWatchSeconds:
+// the pause between two measurements of a sandbox's watched disk limit.
+export type Config = { defaults: Partial<typeof DEFAULT_SPEC>; engine?: string; requireProbes: boolean; experimental: boolean; workspaceFreeSpaceGb: number; diskWatchSeconds: number }
 // What `configSet` may change.
-const SETTINGS = { requireProbes: "boolean", experimental: "boolean", workspaceFreeSpaceGb: "number" } as const
-const FREE_SPACE: [string, number, number] = ["workspaceFreeSpaceGb", 0, 100_000]
+const SETTINGS = { requireProbes: "boolean", experimental: "boolean", workspaceFreeSpaceGb: "number", diskWatchSeconds: "number" } as const
+// Each number setting's unit, lowest and highest value. The enforcement pass measures disk use every 30 s whatever
+// diskWatchSeconds says, so a longer pause than that would change nothing.
+const NUMBER_SETTINGS: Record<string, [string, number, number]> = { workspaceFreeSpaceGb: ["GiB", 0, 100_000], diskWatchSeconds: ["seconds", 1, 30] }
+export const DEFAULT_DISK_WATCH_SECONDS = 5
 const settingProblem = (key: keyof typeof SETTINGS, value: unknown): string | undefined => SETTINGS[key] === "boolean"
   ? typeof value === "boolean" ? undefined : `${key} must be a boolean (true or false)`
-  : typeof value === "number" && Number.isFinite(value) && value >= FREE_SPACE[1] && value <= FREE_SPACE[2] ? undefined : `${key} must be a number of GiB from ${FREE_SPACE[1]} to ${FREE_SPACE[2]}`
+  : ((unit: string, low: number, high: number) => typeof value === "number" && Number.isFinite(value) && value >= low && value <= high ? undefined : `${key} must be a number of ${unit} from ${low} to ${high}`)(...NUMBER_SETTINGS[key]!)
 // A config file with a mistake stops the request and says where, instead of being quietly ignored.
 async function configFile(dirs: Dirs): Promise<Record<string, unknown>> {
   const file = join(dirs.config, "config.json")
@@ -133,7 +137,7 @@ function parseConfig(dirs: Dirs, data: Record<string, unknown>): Config {
   try { validSpec({ ...defaults, name: "x" }) } catch (error) { wrong(`in defaults, ${(error as Error).message.replace(/^./, (first) => first.toLowerCase()).replace(/\.$/, "")}`) }
   const known = Object.fromEntries(Object.entries(defaults).filter(([key]) => key in DEFAULT_SPEC))
   return { defaults: known as Partial<typeof DEFAULT_SPEC>, engine: data.engine as string | undefined, requireProbes: data.requireProbes !== false, experimental: data.experimental === true,
-    workspaceFreeSpaceGb: (data.workspaceFreeSpaceGb as number | undefined) ?? 5 }
+    workspaceFreeSpaceGb: (data.workspaceFreeSpaceGb as number | undefined) ?? 5, diskWatchSeconds: (data.diskWatchSeconds as number | undefined) ?? DEFAULT_DISK_WATCH_SECONDS }
 }
 
 export async function readConfig(dirs: Dirs): Promise<Config> { return parseConfig(dirs, await configFile(dirs)) }
@@ -141,7 +145,7 @@ export async function readConfig(dirs: Dirs): Promise<Config> { return parseConf
 // The daemon serializes settings writes. Preserve defaults, engine and fields owned by other config consumers.
 export async function writeConfig(dirs: Dirs, input: Record<string, unknown>): Promise<Config> {
   const keys = Object.keys(input)
-  if (!keys.length || keys.some((key) => !Object.hasOwn(SETTINGS, key))) throw new AsideeError("usage", "Set requireProbes, experimental or workspaceFreeSpaceGb.")
+  if (!keys.length || keys.some((key) => !Object.hasOwn(SETTINGS, key))) throw new AsideeError("usage", "Set requireProbes, experimental, workspaceFreeSpaceGb or diskWatchSeconds.")
   for (const key of keys as Array<keyof typeof SETTINGS>) { const problem = settingProblem(key, input[key]); if (problem) throw new AsideeError("usage", `${problem.replace(/^./, (first) => first.toUpperCase())}.`) }
   const data = { ...await configFile(dirs), ...input }
   const config = parseConfig(dirs, data)

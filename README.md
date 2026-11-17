@@ -45,7 +45,8 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
 - The checklist, with live network probes that have controls, and a stop when a blocking check fails. The probes
   cover the host, other sandboxes, and stand-in addresses in each private (LAN) range and the tailnet range.
 - The firewall guard is compared rule for rule with the one Asidee ships, so an added or removed rule shows as changed.
-- A disk limit that the daemon watches (it stops a sandbox that passed its limit; it is not a hard cap). It needs a
+- A disk limit that the daemon watches (it stops a sandbox that passed its limit; it is not a hard cap). It measures
+  every 5 seconds; `asd config set disk-watch SECONDS` changes that, from 1 to 30. It needs a
   gVisor runtime registered with `--overlay2=none`; without it the checklist says there is no disk limit.
 - A stopped sandbox says why, in `asd list` and the dashboard: a failed check, the disk watch, the daemon
   stopping, or the engine killing it at its memory or task limit.

@@ -364,6 +364,43 @@ ev("H15", "The disk limit counts the engine's /etc/hosts: a sandbox that grows i
   }
 })
 
+ev("H17", "With disk-watch at 1 second, a sandbox past its limit is stopped within seconds, three times in a row, and a start still leaves time to free space", async () => {
+  await ensure(B, { pids: 256 })
+  const disk = (await socket("verify", { name: B })).reply.data.checks.find((check: { id: string }) => check.id === "disk")
+  if (disk.status !== "weak") skip(`the disk limit here is ${disk.status}, not watched`)
+  expect((await socket("configSet", { diskWatchSeconds: 1 })).reply.data?.diskWatchSeconds === 1, "the setting was not taken")
+  // An earlier eval may have just started it over its limit and freed the space: let the watch measure it under.
+  await Bun.sleep(3000)
+  // The 30 s pass would also stop it, 15 s after the write on average. Three stops in a row each within 8 s of the
+  // write's end are what that pass alone gives about one run in forty.
+  const waits: number[] = []
+  try {
+    for (let trial = 0; trial < 3; trial++) {
+      await asd(["exec", B, "--", "dd", "if=/dev/zero", "of=/big", "bs=1M", "count=1300"], { timeoutMs: 120_000 })
+      const ended = Date.now()
+      expect(await until(async () => (await view(B))?.status === "stopped", 8), `trial ${trial + 1}: the sandbox still ran 8 s after the write past its limit ended (earlier trials: ${waits.join(", ") || "none"} s)`)
+      waits.push(Math.round((Date.now() - ended) / 100) / 10)
+      expect(/disk watch/.test((await view(B))?.stopReason ?? ""), "it stopped without saying it was the disk watch")
+      const again = await socket("start", { name: B })
+      expect(again.reply.ok && again.reply.data.diskWarning, "the start after the stop did not warn that it is still over its limit")
+      // Still over its limit, and the watch runs every second: it must be left running long enough to free space.
+      await Bun.sleep(5000)
+      expect(await running(B), "started over its limit, it was stopped again within 5 s, before space could be freed")
+      expect((await asd(["exec", B, "--", "rm", "/big"])).code === 0, "the file could not be removed after the start")
+      // The window after an over-limit start ends at the first measurement under the limit; give the watch one.
+      await Bun.sleep(3000)
+    }
+    // Under its limit again: the recovery window has passed and it keeps running.
+    await Bun.sleep(35_000)
+    expect(await running(B), "it was stopped after the space was freed")
+    return `stopped ${waits.join(", ")} s after each write ended; after each start it ran 5 s over its limit and the file was removed`
+  } finally {
+    await socket("configSet", { diskWatchSeconds: 5 })
+    if (!await running(B)) await socket("start", { name: B })
+    await asd(["exec", B, "--", "rm", "-f", "/big"])
+  }
+})
+
 ev("H16", "A sandbox whose daemon is killed between its start and its first verify is stopped by the next daemon, not left running unverified", async () => {
   const name = `${PREFIX}-crash`
   const made = socket("create", { name, image: "alpine:latest", cpus: 1, memoryGb: 1, diskGb: 1 }).catch(() => undefined)
@@ -379,7 +416,9 @@ ev("H16", "A sandbox whose daemon is killed between its start and its first veri
     await asd(["list"])
     expect((await view(name))?.lastVerify === undefined, "control: a verify had already finished when the daemon was killed")
     expect(await until(async () => !await running(name), 75), "the sandbox still ran unverified 75 s after a new daemon started")
-    const reason = (await view(name))?.stopReason ?? ""
+    // The engine shows the container stopped a moment before the daemon has saved why.
+    let reason = ""
+    await until(async () => (reason = (await view(name))?.stopReason ?? "") !== "", 10)
     expect(/checks never finished/.test(reason), `it stopped without saying why: ${reason}`)
     return `stopped ${Math.round((Date.now() - killedAt) / 1000)} s after the kill: ${reason}`
   } finally { await socket("remove", { name, confirm: name }) }

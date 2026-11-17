@@ -40,17 +40,18 @@ unmeasured probe and its reason, with code `probes-required` (HTTP 422, CLI exit
 check results. Nonblocking unknown or unsupported checks remain disclosures.
 
 `config.json` has a boolean `requireProbes`, default `true`, a boolean `experimental`, default `false` (see
-[Machines](#machines)), and a number `workspaceFreeSpaceGb`, default 5, from 0 to 100000 (see
-[macOS workspaces](workspaces.md#disk-use-and-free-space)). `asd config get` reads the effective configuration;
-`asd config set require-probes on|off`, `asd config set experimental on|off` and
-`asd config set workspace-free-space GiB` change one setting each. Both support `--json` and `--host NAME`.
+[Machines](#machines)), a number `workspaceFreeSpaceGb`, default 5, from 0 to 100000 (see
+[macOS workspaces](workspaces.md#disk-use-and-free-space)), and a number `diskWatchSeconds`, default 5, from 1 to 30
+(see [Staying true after the start](#staying-true-after-the-start)). `asd config get` reads the effective configuration;
+`asd config set require-probes on|off`, `asd config set experimental on|off`,
+`asd config set workspace-free-space GiB` and `asd config set disk-watch SECONDS` change one setting each. Both support `--json` and `--host NAME`.
 With `requireProbes: false`, create accepts unknown blocking probes and reports them as unknown, never as passes.
 Failed and unsupported blocking probes still refuse create. The dashboard's **Settings** section has the same toggle.
 A create refused for unknown probes offers **Open settings**, which navigates and focuses the toggle without changing it.
 The sandbox list labels current isolation as **Not verified**; saved checks remain dated history.
 
 The daemon API exposes `configGet` and `configSet`; the latter accepts only `requireProbes` and `experimental`, each a
-boolean, and `workspaceFreeSpaceGb`, a number, and at least one of them.
+boolean, and `workspaceFreeSpaceGb` and `diskWatchSeconds`, each a number, and at least one of them.
 A settings write atomically replaces `config.json` with mode 0600, preserving defaults, engine selection and other fields.
 Writes are serialized within the daemon, and each create reads the current file without a daemon restart.
 Both methods are available over the user socket and on loopback with the dashboard token and accepted Host header.
@@ -111,6 +112,15 @@ Every 30 seconds the daemon repeats the configuration and runtime checks and the
 one that fails, recording the reason. A check that could not be made in one pass does not stop a running sandbox: that
 is usually an engine that was busy. Four such passes in a row do, because by then nobody is checking it. The probes are not repeated on the timer: they start containers, and `asd verify` runs them.
 
+Between those passes a second loop, the disk watch, measures only disk use on each running sandbox whose limit is
+watched, and stops one that is over. The next round starts `diskWatchSeconds` after the last one ended (default 5,
+from 1 to 30; `asd config set disk-watch SECONDS`), so slow measurements never stack up, and a changed setting applies
+from the next round without a daemon restart. A sandbox found over is measured a second time, under its lock, before
+it is stopped. A measurement that fails does nothing in this loop: the 30 second pass still measures, and only it
+counts unknowns. Each measurement starts one short helper container per sandbox. H17 sets one second and writes past
+a 1 GB limit three times: the sandbox was stopped 1.1 to 2.1 seconds after each write ended (OrbStack, a sandbox with
+little data; a measurement walks the sandbox's files, so it takes longer on a large one, which was not measured).
+
 Each unsuccessful enforcement pass records a timestamp and warning on that sandbox, shown by CLI list/get output
 and the collapsed dashboard as "Enforcement problem at …". This includes thrown status/check/disk errors, unknown
 blocking checks, unmeasured watched disk use and a failed stop attempt. These consume the same four-pass unknown
@@ -127,6 +137,9 @@ use above the limit adds `diskWarning` to the start result, with `usedBytes`, `l
 prints that message too: the sandbox runs so space can be freed with `asd exec NAME -- …`, but will be stopped
 again within about 30 seconds unless space is freed or its limit is raised with `asd resize NAME --disk N`.
 The warning describes that start's measurement and is not stored as a stop reason. An under-limit start omits it.
+For 30 seconds after such a start the sandbox is not stopped for its disk use, by the disk watch or by the 30 second
+pass, so there is time to free space; the window ends early at the disk watch's first measurement under the limit.
+It is kept in the daemon's memory: after a daemon restart an over-limit sandbox is stopped at once.
 
 ### How the guard is compared
 
@@ -543,8 +556,10 @@ uses is deleted at once (C05, C07). A stopped sandbox can be saved without start
 - **Extensions run commands on this machine.** Install one the way you would install any script.
 - **Egress is open.** A sandbox can reach the internet, so anything inside it, including logins you copy in, can be
   sent out. The checklist discloses both.
-- **The disk limit is watched, not capped,** on engines without a hard cap. A sandbox can write for up to 30 seconds
-  past its limit before it is stopped. A clean daemon stop stops the watched sandboxes first; after a daemon crash
+- **The disk limit is watched, not capped,** on engines without a hard cap. A sandbox can write past its limit for as
+  long as one round of the disk watch takes: `diskWatchSeconds` (default 5) plus one measurement and the stop. In the
+  30 seconds after a start that found it over its limit it is not stopped for disk use, unless it measured under the
+  limit in between. A clean daemon stop stops the watched sandboxes first; after a daemon crash
   nothing watches until a daemon runs again (its first act is a pass over every sandbox). Volumes an image declares,
   the inner Docker data volume and the engine's `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` are counted. The
   host log is not; it is bounded instead (two files of 10 MiB). Inner Docker shares this limit with the sandbox.

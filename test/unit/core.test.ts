@@ -456,6 +456,49 @@ test("the daemon's pass stops a running sandbox that fails a check or passed its
   expect(await asidee.get("demo")).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("guard missing") })
 })
 
+test("the disk watch stops a sandbox measured over its limit twice, and leaves a failed measurement to the daemon's pass", async () => {
+  const { provider } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo", diskGb: 1 })
+  await asidee.watchDisk()
+  expect((await asidee.get("demo")).status).toBe("running")
+  // Not measurable: never a stop here, however often, and nothing is recorded.
+  provider.diskUsedBytes = async () => undefined
+  for (let pass = 0; pass < UNCHECKED_PASSES + 2; pass++) await asidee.watchDisk()
+  provider.diskUsedBytes = async () => { throw new Error("disk unreadable") }
+  await asidee.watchDisk()
+  provider.diskUsedBytes = async () => 0
+  expect(await asidee.get("demo")).toMatchObject({ status: "running", enforcementProblem: undefined })
+  // Over on the first measurement only: the second, made under the sandbox's lock, decides.
+  let measured = 0
+  provider.diskUsedBytes = async () => measured++ === 0 ? 2 * 1024 ** 3 : 0
+  await asidee.watchDisk()
+  expect(measured).toBe(2)
+  expect((await asidee.get("demo")).status).toBe("running")
+  measured = 0
+  provider.diskUsedBytes = async () => { measured++; return 2 * 1024 ** 3 }
+  await asidee.watchDisk()
+  expect(measured).toBe(2)
+  // A stopped sandbox is not measured.
+  await asidee.watchDisk()
+  expect(measured).toBe(2)
+  expect(await asidee.get("demo")).toMatchObject({ status: "stopped", stopReason: expect.stringContaining("disk watch") })
+  // Started over its limit: the watch leaves it alone for the recovery window, so space can be freed.
+  expect((await asidee.start("demo")).diskWarning?.message).toContain("within about 30 seconds")
+  await asidee.watchDisk(); await asidee.enforce()
+  expect(await asidee.get("demo")).toMatchObject({ status: "running", enforcementProblem: undefined })
+  // The window ends once it measures under its limit; over again, it is stopped at the next measurement.
+  provider.diskUsedBytes = async () => 0
+  await asidee.watchDisk()
+  provider.diskUsedBytes = async () => 2 * 1024 ** 3
+  await asidee.watchDisk()
+  expect((await asidee.get("demo")).status).toBe("stopped")
+  // Still over when the window has passed: stopped.
+  await asidee.start("demo")
+  asidee.diskRecoveryMs = 0
+  await asidee.watchDisk()
+  expect((await asidee.get("demo")).status).toBe("stopped")
+})
+
 test("enforcement exceptions are recorded per sandbox, survive a daemon restart and do not skip other sandboxes", async () => {
   for (const operation of ["status", "checks", "diskUsedBytes"] as const) {
     const { provider } = fakeProvider(); const asidee = await core(provider)
@@ -587,13 +630,13 @@ test("a running sandbox that cannot be checked for several passes in a row is st
 
 test("a config file with a mistake is refused by name, and its defaults obey the same limits as a request", async () => {
   const root = await mkdtemp(join(tmpdir(), "asidee-config-")); const dirs = { state: join(root, "state"), config: root }
-  expect(await readConfig(dirs)).toEqual({ defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5 })
-  for (const bad of ['{"workspaceFreeSpaceGb":-1}', '{"workspaceFreeSpaceGb":"5"}', '{"workspaceFreeSpaceGb":100001}', '{"experimental":"on"}', '{"experimental":1}', "{ nope", "[]", "null", '{"defaults":"x"}', '{"engine":5}', '{"requireProbes":"off"}', '{"requireProbes":null}', '{"requireProbes":0}', '{"defaults":{"cpus":"lots"}}', '{"defaults":{"image":"--privileged"}}', '{"defaults":{"memoryGb":100000}}']) {
+  expect(await readConfig(dirs)).toEqual({ defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5 })
+  for (const bad of ['{"workspaceFreeSpaceGb":-1}', '{"diskWatchSeconds":0}', '{"diskWatchSeconds":31}', '{"diskWatchSeconds":"1"}', '{"workspaceFreeSpaceGb":"5"}', '{"workspaceFreeSpaceGb":100001}', '{"experimental":"on"}', '{"experimental":1}', "{ nope", "[]", "null", '{"defaults":"x"}', '{"engine":5}', '{"requireProbes":"off"}', '{"requireProbes":null}', '{"requireProbes":0}', '{"defaults":{"cpus":"lots"}}', '{"defaults":{"image":"--privileged"}}', '{"defaults":{"memoryGb":100000}}']) {
     await writeFile(join(root, "config.json"), bad)
     await expect(readConfig(dirs)).rejects.toThrow("config.json")
   }
   await writeFile(join(root, "config.json"), '{"defaults":{"image":"alpine:3","cpus":1,"privileged":true,"name":"x"},"engine":"gvisor:orbstack"}')
-  expect(await readConfig(dirs)).toEqual({ defaults: { image: "alpine:3", cpus: 1 }, engine: "gvisor:orbstack", requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5 })
+  expect(await readConfig(dirs)).toEqual({ defaults: { image: "alpine:3", cpus: 1 }, engine: "gvisor:orbstack", requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5 })
 })
 
 test("a damaged state file is listed as damaged and the other sandboxes still work", async () => {
@@ -796,6 +839,7 @@ test("settings persist across core and daemon instances, preserve other config a
   expect(await table.configSet!.run({ experimental: true })).toMatchObject({ requireProbes: true, experimental: true })
   expect(JSON.parse(await readFile(file, "utf8"))).toEqual({ ...existing, requireProbes: true, experimental: true })
   expect(await table.configSet!.run({ workspaceFreeSpaceGb: 12.5 })).toMatchObject({ workspaceFreeSpaceGb: 12.5 })
+  expect(await table.configSet!.run({ diskWatchSeconds: 1 })).toMatchObject({ diskWatchSeconds: 1, workspaceFreeSpaceGb: 12.5 })
   expect(await methods(restarted, () => {}).configGet!.run({})).toMatchObject({ workspaceFreeSpaceGb: 12.5 })
   expect(state.running).toBe(false)
 })
@@ -810,6 +854,7 @@ test("settings require a boolean and loopback writes require both token and trus
   expect((await answer(post({ requireProbes: false, engine: "other" }), false, 7717)).status).toBe(400)
   for (const value of ["on", 1, null]) expect((await answer(post({ experimental: value }), false, 7717)).status).toBe(400)
   for (const value of ["5", -1, 100_001, null, true]) expect((await answer(post({ workspaceFreeSpaceGb: value }), false, 7717)).status).toBe(400)
+  for (const value of ["1", 0, 0.5, 31, null, true]) expect((await answer(post({ diskWatchSeconds: value }), false, 7717)).status).toBe(400)
   expect((await answer(post({}), false, 7717)).status).toBe(400)
   expect((await answer(post({ requireProbes: false }, { authorization: "" }), false, 7717)).status).toBe(401)
   expect((await answer(post({ requireProbes: false }, { authorization: "Bearer wrong" }), false, 7717)).status).toBe(401)
@@ -883,6 +928,10 @@ test("starting above a watched disk limit reports current use without retaining 
   expect((await asidee.get("demo")).stopReason).toContain("disk watch")
   expect(await asidee.start("demo")).toMatchObject({ status: "running", stopReason: undefined,
     diskWarning: { usedBytes: 1.3 * 1024 ** 3, limitBytes: 1024 ** 3, message: expect.stringContaining("asd resize demo --disk N") } })
+  // It is given the 30 seconds the warning names, whenever the next pass falls.
+  await asidee.enforce()
+  expect(await asidee.get("demo")).toMatchObject({ status: "running", enforcementProblem: undefined })
+  asidee.diskRecoveryMs = 0
   await asidee.enforce()
   expect((await asidee.get("demo")).status).toBe("stopped")
 })

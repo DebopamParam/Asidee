@@ -194,17 +194,18 @@ test("transport stdio hands SSH every byte the daemon sent before it exits, even
 
 test("config get/set route settings and support JSON; invalid commands are refused", async () => {
   const calls: unknown[] = []
-  const asidee = await daemon({ configGet: (body: unknown) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5 } } },
-    configSet: (body: { requireProbes?: boolean; experimental?: boolean; workspaceFreeSpaceGb?: number }) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: body.requireProbes ?? true, experimental: body.experimental ?? false, workspaceFreeSpaceGb: body.workspaceFreeSpaceGb ?? 5 } } } })
-  expect(await asidee("config", "get")).toMatchObject({ code: 0, out: "require-probes on\nexperimental off\nworkspace-free-space 5 GiB\n" })
+  const asidee = await daemon({ configGet: (body: unknown) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5 } } },
+    configSet: (body: { requireProbes?: boolean; experimental?: boolean; workspaceFreeSpaceGb?: number; diskWatchSeconds?: number }) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: body.requireProbes ?? true, experimental: body.experimental ?? false, workspaceFreeSpaceGb: body.workspaceFreeSpaceGb ?? 5, diskWatchSeconds: body.diskWatchSeconds ?? 5 } } } })
+  expect(await asidee("config", "get")).toMatchObject({ code: 0, out: "require-probes on\nexperimental off\nworkspace-free-space 5 GiB\ndisk-watch 5 s\n" })
+  expect(await asidee("config", "set", "disk-watch", "1")).toMatchObject({ code: 0, out: "disk-watch 1 s\n" })
   expect(await asidee("config", "set", "workspace-free-space", "12.5")).toMatchObject({ code: 0, out: "workspace-free-space 12.5 GiB\n" })
   expect(await asidee("config", "set", "require-probes", "off")).toMatchObject({ code: 0, out: "require-probes off\n" })
   expect(await asidee("config", "set", "experimental", "on")).toMatchObject({ code: 0, out: "experimental on\n" })
   const json = await asidee("--host", "build", "config", "set", "require-probes", "on", "--json")
-  expect(JSON.parse(json.out)).toEqual({ ok: true, data: { defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5 } })
-  expect(calls).toEqual([{}, { workspaceFreeSpaceGb: 12.5 }, { requireProbes: false }, { experimental: true }, { host: "build", requireProbes: true }])
+  expect(JSON.parse(json.out)).toEqual({ ok: true, data: { defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5 } })
+  expect(calls).toEqual([{}, { diskWatchSeconds: 1 }, { workspaceFreeSpaceGb: 12.5 }, { requireProbes: false }, { experimental: true }, { host: "build", requireProbes: true }])
   expect(JSON.parse((await asidee("config", "get", "--json")).out).data.requireProbes).toBe(true)
-  for (const args of [["get", "extra"], ["set", "require-probes", "false"], ["set", "require-probes"], ["set", "bogus", "on"], ["set", "experimental", "yes"], ["set", "workspace-free-space", "lots"], ["set", "workspace-free-space", "on"], ["set", "require-probes", "5"]]) {
+  for (const args of [["get", "extra"], ["set", "require-probes", "false"], ["set", "require-probes"], ["set", "bogus", "on"], ["set", "experimental", "yes"], ["set", "workspace-free-space", "lots"], ["set", "workspace-free-space", "on"], ["set", "disk-watch", "fast"], ["set", "disk-watch"], ["set", "require-probes", "5"]]) {
     expect((await asidee("config", ...args)).code).toBe(2)
   }
 })

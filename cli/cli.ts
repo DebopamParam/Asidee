@@ -61,6 +61,7 @@ const GROUPS: Array<[string, string[]]> = [
     "asd config set experimental on|off     features not yet proven on enough machines: other machines (default off)",
     "asd config set workspace-free-space GiB below this much free space, workspace launches are refused and running",
     "                                           workspaces are stopped (default 5; 0 turns it off; purgeable space not counted)",
+    "asd config set disk-watch SECONDS      pause between two measurements of a watched disk limit (default 5; 1 to 30)",
   ]],
   ["Workspaces: on this Mac's own kernel, not a sandbox (macOS only)", [
     "asd workspace create NAME [--host-temp] [--disk GiB] [--copy PATH] [--read PATH]… [--path DIR]… [--no-logins | --claude-profile NAME --codex-profile NAME]",
@@ -402,11 +403,12 @@ async function main(argv: string[]): Promise<void> {
         const { positionals } = parse({})
         const [action, key, value] = positionals
         const settings: Record<string, keyof Config> = { "require-probes": "requireProbes", experimental: "experimental" }
-        const gb = key === "workspace-free-space" && /^\d+(\.\d+)?$/.test(value ?? "")
-        if (!((action === "get" && positionals.length === 1) || (action === "set" && positionals.length === 3 && (gb || (Object.hasOwn(settings, key!) && (value === "on" || value === "off"))))))
-          throw new AsideeError("usage", "Use asd config get, asd config set require-probes|experimental on|off, or asd config set workspace-free-space GiB.")
-        const config = await call<Config>(action === "get" ? "configGet" : "configSet", action === "get" ? {} : gb ? { workspaceFreeSpaceGb: Number(value) } : { [settings[key!]!]: value === "on" })
-        const lines = { "require-probes": config.requireProbes ? "on" : "off", experimental: config.experimental ? "on" : "off", "workspace-free-space": `${config.workspaceFreeSpaceGb} GiB` }
+        const numbers: Record<string, keyof Config> = { "workspace-free-space": "workspaceFreeSpaceGb", "disk-watch": "diskWatchSeconds" }
+        const number = Object.hasOwn(numbers, key ?? "") && /^\d+(\.\d+)?$/.test(value ?? "")
+        if (!((action === "get" && positionals.length === 1) || (action === "set" && positionals.length === 3 && (number || (Object.hasOwn(settings, key!) && (value === "on" || value === "off"))))))
+          throw new AsideeError("usage", "Use asd config get, asd config set require-probes|experimental on|off, asd config set workspace-free-space GiB, or asd config set disk-watch SECONDS.")
+        const config = await call<Config>(action === "get" ? "configGet" : "configSet", action === "get" ? {} : number ? { [numbers[key!]!]: Number(value) } : { [settings[key!]!]: value === "on" })
+        const lines = { "require-probes": config.requireProbes ? "on" : "off", experimental: config.experimental ? "on" : "off", "workspace-free-space": `${config.workspaceFreeSpaceGb} GiB`, "disk-watch": `${config.diskWatchSeconds} s` }
         return out(config, () => { for (const [name, text] of Object.entries(lines)) if (action === "get" || name === key) console.log(`${name} ${text}`) })
       }
       case "workspace": {

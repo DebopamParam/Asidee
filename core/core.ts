@@ -35,6 +35,8 @@ export type SandboxView = {
   template?: Manifest["template"]
 }
 
+const overDisk = (manifest: Manifest, used: number) => `Stopped by the disk watch: it used ${(used / 1024 ** 3).toFixed(1)} GB of its ${manifest.spec.diskGb} GB. Free space inside it after a start, or it is stopped again.`
+
 // Every operation on a sandbox. The rule it keeps: a sandbox runs only while no blocking check fails. Checks that need
 // only configuration run before a start, the rest right after it, and `enforce` repeats the cheap ones on a timer.
 export class Core {
@@ -49,6 +51,11 @@ export class Core {
   // Forwards by id. They live in this daemon only: a stop, restart or removal of their sandbox, or the daemon's exit,
   // ends them, and nothing brings one back.
   private readonly forwards = new Map<string, { view: Omit<ForwardView, "connections">; server: Server; connections: Set<Session>; watch: ReturnType<typeof setInterval> }>()
+  // When a start found a sandbox over its watched disk limit, by name. For diskRecoveryMs after it the sandbox is not
+  // stopped for its disk use, so there is time to free space; the disk watch ends that early once it measures under.
+  private readonly startedOver = new Map<string, number>()
+  diskRecoveryMs = 30_000
+  private recovering(name: string): boolean { return Date.now() - (this.startedOver.get(name) ?? -Infinity) < this.diskRecoveryMs }
   // A hosted forward's lease ends after this long without a renewal from the primary (core/forwards.ts).
   leaseTtlMs = LEASE_TTL_MS
   // Links between sandboxes (core/links.ts). Unlike forwards they are recorded, and come back after a restart.
@@ -255,11 +262,15 @@ export class Core {
       const manifest = await readManifest(this.dirs, name)
       await this.startChecked(manifest)
       const sandbox = await this.view(manifest)
+      this.startedOver.delete(name)
       if (manifest.engine.capabilities?.diskLimit === "watched") {
         const usedBytes = await this.provider(manifest).diskUsedBytes(manifest)
         const limitBytes = manifest.spec.diskGb * 1024 ** 3
-        if (usedBytes !== undefined && usedBytes > limitBytes) sandbox.diskWarning = { usedBytes, limitBytes,
-          message: `${name} uses ${(usedBytes / 1024 ** 3).toFixed(2)} GB of its ${manifest.spec.diskGb} GB disk limit. It will be stopped again within about 30 seconds unless space is freed or the disk is resized. Run \`asd exec ${name} -- …\` to free space, or \`asd resize ${name} --disk N\` to raise the limit.` }
+        if (usedBytes !== undefined && usedBytes > limitBytes) {
+          this.startedOver.set(name, Date.now())
+          sandbox.diskWarning = { usedBytes, limitBytes,
+            message: `${name} uses ${(usedBytes / 1024 ** 3).toFixed(2)} GB of its ${manifest.spec.diskGb} GB disk limit. It will be stopped again within about 30 seconds unless space is freed or the disk is resized. Run \`asd exec ${name} -- …\` to free space, or \`asd resize ${name} --disk N\` to raise the limit.` }
+        }
       }
       return sandbox
     })
@@ -617,8 +628,8 @@ export class Core {
           if (manifest.engine.capabilities?.diskLimit === "watched") {
             const used = await provider.diskUsedBytes(manifest)
             if (used === undefined) problems.push("Disk use could not be measured; the watched disk limit is unknown.")
-            else if (used > manifest.spec.diskGb * 1024 ** 3) {
-              const reason = `Stopped by the disk watch: it used ${(used / 1024 ** 3).toFixed(1)} GB of its ${manifest.spec.diskGb} GB. Free space inside it after a start, or it is stopped again.`
+            else if (used > manifest.spec.diskGb * 1024 ** 3 && !this.recovering(manifest.name)) {
+              const reason = overDisk(manifest, used)
               stoppingFor = reason
               await this.recordEnforcement(manifest, reason); await this.stopBecause(manifest, reason)
               this.unchecked.delete(manifest.name); return
@@ -634,6 +645,37 @@ export class Core {
     }
     // Then links: a sandbox that started behind Asidee's back, or a daemon that just started, opens them again here.
     await this.links.sync().catch(() => {})
+  }
+
+  // Called by the daemon between enforcement passes, so a sandbox past its watched disk limit is stopped sooner than
+  // the next pass. It only ever stops one that measured over: a measurement that fails is left to `enforce`, which
+  // counts it. Measured without the sandbox's lock, so a long operation on one sandbox does not hold up the others;
+  // one found over is measured again under the lock before it is stopped.
+  async watchDisk(): Promise<void> {
+    for (const listed of await listManifests(this.dirs)) {
+      if (listed.engine.capabilities?.diskLimit !== "watched") continue
+      try {
+        const over = async (manifest: Manifest) => {
+          if ((await this.provider(manifest).status(manifest)) !== "running") return undefined
+          const used = await this.provider(manifest).diskUsedBytes(manifest)
+          if (used === undefined) return undefined
+          const isOver = used > manifest.spec.diskGb * 1024 ** 3
+          // Asked again under the lock: a start that was running during the first measurement may have set it since.
+          // The window ends early once the sandbox measures under its limit.
+          if (isOver && this.recovering(manifest.name)) return undefined
+          this.startedOver.delete(manifest.name)
+          return isOver ? used : undefined
+        }
+        if (await over(listed) === undefined) continue
+        await this.exclusive(listed.name, async () => {
+          const manifest = await readManifest(this.dirs, listed.name)
+          const used = manifest.id === listed.id ? await over(manifest) : undefined
+          if (used === undefined) return
+          const reason = overDisk(manifest, used)
+          await this.recordEnforcement(manifest, reason); await this.stopBecause(manifest, reason)
+        })
+      } catch { /* `enforce` reports what cannot be read or measured. */ }
+    }
   }
 
   private async recordEnforcement(manifest: Manifest, message: string): Promise<void> {

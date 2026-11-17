@@ -12,7 +12,7 @@ import { PROTOCOL } from "./transport"
 import { DockerSandboxesProvider } from "./providers/docker-sandboxes"
 import { GvisorProvider } from "./providers/gvisor"
 import { OUTPUT_LIMIT, systemRunner } from "./run"
-import { checkSocketPath, daemonFile, socketPath, streamSocketPath, type Dirs } from "./state"
+import { checkSocketPath, daemonFile, DEFAULT_DISK_WATCH_SECONDS, socketPath, streamSocketPath, type Dirs } from "./state"
 import { sourceDigest } from "./source" with { type: "macro" }
 import { serveStream } from "./stream"
 import { AsideeError, type ErrorCode } from "./types"
@@ -228,6 +228,16 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   const enforce = async () => { if (enforcing) return; enforcing = true; try { await core.enforce() } catch (error) { process.stderr.write(`${JSON.stringify({ event: "enforcement-error", message: (error as Error).message })}\n`) } finally { enforcing = false } }
   void core.sweep().then(enforce)
   const timer = setInterval(() => { void enforce() }, ENFORCE_MS)
+  // The watched disk limit has a faster pass of its own between those. The next one starts diskWatchSeconds after the
+  // last ended, so slow measurements never stack up, and a changed setting applies from the next pass.
+  let diskTimer: ReturnType<typeof setTimeout> | undefined
+  const watchDisk = async () => {
+    // A config file with a mistake must not stop the watch; the default is used until it is fixed.
+    const seconds = await core.configGet().then((config) => config.diskWatchSeconds, () => DEFAULT_DISK_WATCH_SECONDS)
+    try { await core.watchDisk() } catch (error) { process.stderr.write(`${JSON.stringify({ event: "disk-watch-error", message: (error as Error).message })}\n`) }
+    if (!stopping) diskTimer = setTimeout(() => { void watchDisk() }, seconds * 1000)
+  }
+  void watchDisk()
   // Workspaces have a pass of their own, so a slow du never holds up a sandbox's. It does not stop workspaces when the
   // daemon stops: nothing watches them then, and the docs say so.
   let watching = false
@@ -239,7 +249,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
     process.on("SIGTERM", () => resolve(false)); process.on("SIGINT", () => resolve(false))
   })
   stopping = true
-  clearInterval(timer); clearInterval(watchTimer)
+  clearInterval(timer); clearInterval(watchTimer); clearTimeout(diskTimer)
   hosts.close()
   core.closeSessions()
   workspaces.closeSessions()

@@ -21,6 +21,7 @@ asd config get                         # effective settings on the selected mach
 asd config set require-probes on|off    # require blocking isolation probes at create, default on
 asd config set experimental on|off      # other machines (host, --host, list --all), default off
 asd config set workspace-free-space GiB  # below this, workspace launches are refused and running ones stopped, default 5
+asd config set disk-watch SECONDS       # pause between two measurements of a watched disk limit, default 5, 1 to 30
 asd exec NAME [--stdin] -- COMMAND ARG… # exit code, stdout and stderr are the command's; output as text
 asd exec NAME --stream -- COMMAND ARG…  # raw bytes in and out, no size limit
 asd start NAME | asd stop NAME
@@ -132,6 +133,9 @@ persistence and automatic sandbox recovery are not measured.
   measures use and warns in text and JSON (`diskWarning`) when still over: it will be stopped again within about
   30 seconds unless space is freed with `asd exec NAME -- …` or resized with `asd resize NAME --disk N`.
   The old stopped-state reason is cleared; the warning is a current measurement returned by start.
+  Between the 30 second passes the disk watch measures every `disk-watch` seconds (default 5) and stops a sandbox
+  that is over; after an over-limit start nothing stops it for disk use for 30 seconds, or until it measures under
+  its limit.
 - `asd resize` reports, for each limit, `now` (read back from the engine's host), `next start` or `unchanged`.
   Inside, gVisor does not show the new limits (`/proc/meminfo` keeps the old memory, `nproc` ignores the CPU limit);
   trust resize's report, not those. Lowering
@@ -296,7 +300,7 @@ Other files in that folder are served next to it. The page calls `POST /api/METH
 `checklist`, `engines`, `list`, `get`, `create`, `start`, `stop`, `remove`, `verify`, `resize`, `snapshot`, `templateList`,
 `templateRemove`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `linkAdd`, `linkList`, `linkRemove`, `sshAccess`, `extensions`, `action`, `summary`,
 `hostList`, `fleet`, `configGet`, `configSet`. `linkAdd` and `linkRemove` take `from`, `to` and `port`; `linkList` takes an optional `name`. `configGet` returns this machine's effective configuration. `configSet`
-accepts only `requireProbes` and `experimental`, each a boolean, and `workspaceFreeSpaceGb`, a number, saves them to `config.json` and returns the new
+accepts only `requireProbes` and `experimental`, each a boolean, and `workspaceFreeSpaceGb` and `diskWatchSeconds`, each a number, saves them to `config.json` and returns the new
 effective configuration. `requireProbes` affects later creates, not running sandboxes. With `experimental` off,
 `hostList`, `fleet` and any request with a `host` other than `local` are refused.
 
