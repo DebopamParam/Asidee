@@ -1177,6 +1177,6 @@ export function gvisorSetup(os = "", architecture = ""): string {
   const arch = /arm64|aarch64/.test(architecture) ? "aarch64" : "x86_64"
   const runtime = (path: string) => `"runtimes": { "runsc": { "path": "${path}", "runtimeArgs": ["--allow-suid", "--overlay2=none", "--net-raw"] } }`
   const download = `https://storage.googleapis.com/gvisor/releases/release/latest/${arch}/runsc (check it against runsc.sha512 beside it)`
-  if (os === "OrbStack") return `1. Download ${download} into a folder under your home, such as ~/.local/share/asidee/gvisor, and make it executable. 2. Add to ~/.orbstack/config/docker.json: ${runtime("/Users/YOU/.local/share/asidee/gvisor/runsc")}. 3. Run \`orb restart docker\` (it stops running containers).`
+  if (os === "OrbStack") return `Run \`asd setup\`: it does this after you approve its plan, then proves it with a test sandbox. By hand: 1. Download ${download} into a folder under your home, such as ~/.local/share/asidee/gvisor, and make it executable. 2. Add to ~/.orbstack/config/docker.json: ${runtime("/Users/YOU/.local/share/asidee/gvisor/runsc")}. 3. Run \`orb restart docker\` (it stops running containers).`
   return `1. Install gVisor: download ${download} to /usr/local/bin/runsc and make it executable, or follow https://gvisor.dev/docs/user_guide/install/. 2. Add to /etc/docker/daemon.json: ${runtime("/usr/local/bin/runsc")}. 3. Restart the engine, for example \`sudo systemctl restart docker\` (it stops running containers).`
 }

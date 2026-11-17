@@ -14,6 +14,7 @@ Asidee runs sandboxes for coding agents and checks each one against a fixed list
 Add `--json` to any command for `{"ok":true,"data":…}` or `{"ok":false,"error":{"code","message"}}`.
 
 ```sh
+asd setup [--docker]                    # macOS, once: give OrbStack gVisor after a plan the user approves
 asd doctor                              # engines and what each needs
 asd create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--pids N] [--disk GB]
 asd list

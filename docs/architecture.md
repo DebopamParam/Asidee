@@ -594,6 +594,20 @@ uses is deleted at once (C05, C07). A stopped sandbox can be saved without start
   Native Docker may still drop inter-bridge traffic with Asidee's guard removed. A Tailscale host may drop a synthetic
   tailnet control. Neither result establishes a controlled live probe for that target.
 
+## Engine setup
+
+`asd setup` (`core/setup.ts`) gives OrbStack a gVisor runtime. It runs in the CLI as the user, not in the daemon, so no
+dashboard or extension can edit the engine or restart it. It reads first and builds one plan: the pinned release
+host enrollment uses (archive sha512, every file's sha256) unpacked into `~/.local/share/asidee/gvisor/RELEASE`;
+`asidee-runsc` added to `~/.orbstack/config/docker.json` with every other setting kept (`mergeRuntime`); and
+`orb restart docker`, naming the running containers it stops. The person enters `yes`, or an agent passes the plan's
+hash with `--accept-plan`. Applying checks the archive, refuses any entry the plan does not name, and refuses to write
+the configuration if it changed since the plan. Then the CLI asks the daemon to create a test sandbox on the engine; it
+counts as set up only when that create passes, and the test sandbox is removed. An engine the daemon already finds
+ready changes nothing and gets only the test sandbox. `--remove` takes the runtime out, restarts and deletes the
+download, and refuses while any container still runs on `asidee-runsc`. Docker Desktop can be chosen but is refused:
+where its VM can run `runsc` from has not been measured.
+
 ## The daemon
 
 One daemon per user owns all state and serializes operations per sandbox, so two clients cannot race. A CLI that finds

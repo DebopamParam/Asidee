@@ -539,6 +539,9 @@ function render() {
       engine.capabilities ? el("div", { class: "muted" }, `Kernel isolation: ${engine.capabilities.kernelIsolation} · network guard: ${engine.capabilities.networkGuard ? "yes" : "no"} · disk limit: ${engine.capabilities.diskLimit} · Docker inside: ${engine.capabilities.docker ? "yes" : "no"} · resize: ${engine.capabilities.resize ?? "?"} · templates: ${engine.capabilities.snapshot ? "yes" : "no"}`) : null,
       ...engine.problems.map((problem) => el("div", { class: "muted" }, problem)), engine.fix ? el("div", { class: "muted" }, `Fix: ${engine.fix}`) : null))
     if (!engines.length) list.append(el("div", { class: "panel muted" }, "No engine found. Asidee needs Docker with a gVisor runtime."))
+    // Setup edits the engine and restarts it, so it runs only in a terminal, after its plan is approved.
+    list.append(el("div", { class: "panel" }, el("p", { class: "muted" }, "To give OrbStack gVisor, or to undo it, run setup in a terminal. It shows its plan and changes nothing until you approve it."),
+      command("asd setup"), command("asd setup --docker"), command("asd setup --remove")))
   })
 
   region("about", [about], (node) => {

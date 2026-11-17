@@ -113,10 +113,9 @@ Not built yet:
 - Apple `container` support (a VM per sandbox; Apple silicon, macOS 26). It could become the macOS default once it
   passes the same checklist. Open questions first: a network guard the sandbox cannot switch off, without admin rights;
   the disk limit; whether freed memory returns to macOS; exec streams and loopback relay.
-- Guided setup (`asd setup`): the user chooses Docker Desktop or OrbStack (OrbStack recommended), sees one plan
-  (download a pinned `runsc`, add an `asidee-runsc` runtime, restart the engine, naming the containers that stop),
-  approves it once, and is told "ready" only after a test sandbox passes the checklist; `--remove` undoes it. Docker
-  Desktop first needs a test of where its VM can run `runsc` from.
+- `asd setup` for Docker Desktop. It can be chosen, and says it cannot set it up yet: where Docker Desktop's VM can run
+  `runsc` from has not been measured. Setting up OrbStack is built; its apply step (config edit and engine restart) is
+  covered by unit tests only, since the development Mac's engine must not be restarted.
 - A hard disk cap, Windows execution, a desktop app, and a signed release installer. The remote dashboard
   is later.
 - Docker Desktop and Colima measurements. Native Linux Docker and OrbStack have separate scorecards.
@@ -156,9 +155,14 @@ removal limits and login status. The full sandbox scorecards were not regenerate
 ## Try it
 
 For sandboxes, you need [Bun](https://bun.sh) and Docker with a gVisor runtime. `nix develop` gives you Bun if you use Nix.
+On a Mac, `asd setup` gives your engine gVisor: you choose OrbStack (recommended) or Docker Desktop, approve one plan
+(download the pinned gVisor release into `~/.local/share/asidee/gvisor`, add an `asidee-runsc` runtime to
+`~/.orbstack/config/docker.json`, restart the engine, naming the containers that stop), and setup is done only after a
+test sandbox passes the checks. `asd setup --remove` undoes it.
 
 ```sh
 bun install
+bin/asd setup                  # once, on a Mac: give the engine gVisor and prove it
 bin/asd doctor                 # which engines are ready, and what the others need
 bin/asd create demo --image ubuntu:24.04
 bin/asd exec demo -- uname -a
