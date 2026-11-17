@@ -22,8 +22,10 @@ import { hostOption, type FleetView, type HostView } from "../core/machines"
 import { bounded, PROTOCOL, transportStdio } from "../core/transport"
 import { included, userConfig, type SshAccess } from "../core/ssh"
 import { systemRunner } from "../core/run"
+import { createSteps, runCreateSteps } from "./create-setup"
+import { hostVersion, prepareTemplate, validVersion } from "./prepare"
 import { applySetup, DOCKER_DESKTOP_UNSUPPORTED, installedEngines, orbstackEngine, planSetup, SETUP_DOWNLOADS, SETUP_ENGINE_NAMES, SETUP_ENGINES, setupChanges, setupPlanLines, type SetupEngine } from "../core/setup"
-import { checkSocketPath, DEFAULT_SPEC, defaultDirs, socketPath, streamSocketPath, type Config } from "../core/state"
+import { checkSocketPath, DEFAULT_SPEC, defaultDirs, socketPath, streamSocketPath, validTemplateName, type Config, type Defaults } from "../core/state"
 import { dataFrames, frame, FrameReader, type OpenRequest, type EnrollmentRequest } from "../core/stream"
 import { AsideeError, type CheckResult, type DiskWarning, type Engine, type ErrorCode, type RunResult, type Template } from "../core/types"
 
@@ -36,6 +38,9 @@ const GROUPS: Array<[string, string[]]> = [
     "asd setup --remove [--accept-plan HASH]   undo it: remove the runtime, restart the engine, delete the download",
     "asd doctor                         engines on this machine and what each one needs",
     "asd create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]",
+    "           [--gh] [--claude PROFILE] [--codex PROFILE] [--repo OWNER/REPO] [--t3]   then, with the bundled extensions: this",
+    "           Mac's GitHub login, a Claude or Codex login with its setup, a clone into ~/workspace, T3 Code. Each token is",
+    "           copied into the sandbox, where anything running there can read it.",
     "asd shell NAME [-- COMMAND…]       a shell, or one command on a terminal, inside the sandbox",
     "asd list                           your sandboxes",
     "asd list --all                     machines, including unavailable ones and unknown cached sandboxes (experimental)",
@@ -61,6 +66,10 @@ const GROUPS: Array<[string, string[]]> = [
     "asd resize NAME [--cpus N] [--memory GB] [--pids N] [--disk GB]   says which limits apply now and which at the next start",
     "asd snapshot NAME --as TEMPLATE    save the sandbox's files, minus the usual logins, as a template",
     "asd template list | template remove TEMPLATE [--engine ID]   sandboxes made from it keep working",
+    "asd template prepare [TEMPLATE] [--claude VERSION] [--codex VERSION] [--script FILE] [--replace] [--default] [--engine ID]",
+    "                                   a template for coding agents (default name agent): Claude Code and Codex at this",
+    "                                   machine's versions (or latest), tmux, fd, zip, htop, vim, nano; --script FILE runs",
+    "                                   as the sandbox's user before saving; --default makes new sandboxes start from it",
   ]],
   ["Settings", [
     "asd config get                     settings on the selected machine",
@@ -70,7 +79,7 @@ const GROUPS: Array<[string, string[]]> = [
     "                                           workspaces are stopped (default 5; 0 turns it off; purgeable space not counted)",
     "asd config set disk-watch SECONDS      pause between two measurements of a watched disk limit (default 5; 1 to 30)",
     "asd config set engine ID|auto          engine for new sandboxes, as asd doctor prints it (auto: the first ready one)",
-    "asd config set default-KEY VALUE|auto  what a new sandbox gets: default-image, default-cpus, default-memory (GiB),",
+    "asd config set default-KEY VALUE|auto  what a new sandbox gets: default-image or default-template, default-cpus, default-memory (GiB),",
     "                                           default-pids, default-disk (GiB), default-docker on|off",
     "asd config set terminal NAME           what the dashboard's Terminal button opens: default (the app for .command",
     "                                           files), terminal, ghostty, iterm, custom",
@@ -210,10 +219,10 @@ function detailLines(details: unknown): string[] {
 const refusal = (message: string) => shown(message.replace(/\s+/g, " "), true)
 
 // The config words for what a new sandbox gets, and the fields of `defaults` they set.
-const DEFAULT_KEYS: Record<string, keyof typeof DEFAULT_SPEC> = Object.fromEntries((Object.keys(DEFAULT_SPEC) as Array<keyof typeof DEFAULT_SPEC>).map((field) => [`default-${field.replace(/Gb$/, "").toLowerCase()}`, field]))
-const defaultShown = (config: Config, field: keyof typeof DEFAULT_SPEC) => {
-  const text = (value: unknown) => typeof value === "boolean" ? value ? "on" : "off" : field === "memoryGb" || field === "diskGb" ? `${value} GiB` : String(value)
-  return config.defaults[field] === undefined ? `auto (${text(DEFAULT_SPEC[field])})` : text(config.defaults[field])
+const DEFAULT_KEYS: Record<string, keyof Defaults> = { ...Object.fromEntries((Object.keys(DEFAULT_SPEC) as Array<keyof typeof DEFAULT_SPEC>).map((field) => [`default-${field.replace(/Gb$/, "").toLowerCase()}`, field])), "default-template": "template" }
+const defaultShown = (config: Config, field: keyof Defaults) => {
+  const text = (value: unknown) => value === undefined ? "none" : typeof value === "boolean" ? value ? "on" : "off" : field === "memoryGb" || field === "diskGb" ? `${value} GiB` : String(value)
+  return config.defaults[field] === undefined ? `auto (${text((DEFAULT_SPEC as Defaults)[field])})` : text(config.defaults[field])
 }
 const EXIT: Record<ErrorCode, number> = { runtime: 1, usage: 2, "not-found": 3, conflict: 4, dependency: 5, "check-failed": 6, "probes-required": 6, offline: 7, incompatible: 8, "identity-changed": 9, "outcome-unknown": 10 }
 let selectedHost: string | undefined
@@ -431,11 +440,15 @@ async function main(argv: string[]): Promise<void> {
           const field = DEFAULT_KEYS[key!]
           const current = field ? await call<Config>("configGet") : undefined
           const defaults = field ? { ...current!.defaults } as Record<string, unknown> : {}
-          if (field) { if (value === "auto") delete defaults[field]; else defaults[field] = typeof DEFAULT_SPEC[field] === "boolean" ? value === "on" ? true : value === "off" ? false : value : field === "image" ? value : Number(value) }
+          // An image and a template exclude each other, so setting one clears the other, and the reply says so.
+          const cleared = field === "image" ? "template" : field === "template" ? "image" : undefined
+          const clearing = value !== "auto" && cleared !== undefined && defaults[cleared] !== undefined
+          if (field) { if (value === "auto") delete defaults[field]; else defaults[field] = typeof (DEFAULT_SPEC as Defaults)[field] === "boolean" ? value === "on" ? true : value === "off" ? false : value : field === "image" || field === "template" ? value : Number(value) }
+          if (clearing) delete defaults[cleared!]
           const config = key === "terminal-command" ? await call<Config>("terminalCommandSet", { terminalCommand: value === "none" ? null : value })
             : await call<Config>("configSet", key === "engine" ? { engine: value === "auto" ? null : value } : key === "terminal" ? { terminal: value } : { defaults })
           const shownValue = key === "engine" ? config.engine ?? "auto" : key === "terminal" ? config.terminal : key === "terminal-command" ? `${config.terminalCommand ?? "none"} (terminal ${config.terminal})` : defaultShown(config, field!)
-          return out(config, () => console.log(`${key} ${shownValue}`))
+          return out(config, () => console.log(`${key} ${shownValue}${clearing ? ` (default-${cleared} is now auto)` : ""}`))
         }
         if (!((action === "get" && positionals.length === 1) || (action === "set" && positionals.length === 3 && (number || (Object.hasOwn(settings, key!) && (value === "on" || value === "off"))))))
           throw new AsideeError("usage", "Use asd config get, asd config set require-probes|experimental on|off, workspace-free-space GiB, disk-watch SECONDS, engine ID|auto, default-KEY VALUE|auto, terminal NAME, or terminal-command CMD|none. See asd config --help.")
@@ -579,15 +592,29 @@ async function main(argv: string[]): Promise<void> {
         return
       }
       case "create": {
-        const { values, positionals } = parse({ docker: { type: "boolean" }, image: { type: "string" }, template: { type: "string" }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" }, pids: { type: "string" }, engine: { type: "string" } })
-        const name = need(positionals[0], "a name"); creating = name
+        const { values, positionals } = parse({ docker: { type: "boolean" }, image: { type: "string" }, template: { type: "string" }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" }, pids: { type: "string" }, engine: { type: "string" },
+          gh: { type: "boolean" }, claude: { type: "string" }, codex: { type: "string" }, repo: { type: "string" }, t3: { type: "boolean" } })
+        const name = need(positionals[0], "a name")
+        // Checked before anything is made. The logins come from this Mac, and the extensions reach local sandboxes only.
+        const steps = createSteps(name, values)
+        if (steps.length && selectedHost && selectedHost !== "local") throw new AsideeError("usage", "--gh, --claude, --codex, --repo and --t3 work for sandboxes on this Mac only.")
+        creating = name
         const made = await call<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }> }>("create",
           { name, docker: values.docker, image: values.image, template: values.template, cpus: values.cpus, memoryGb: values.memory, diskGb: values.disk, pids: values.pids, engine: values.engine }, watching(name))
-        return out(made, () => {
+        if (!asJson) {
           printSandbox(made.sandbox); printChecks(made.checks, CHECKLIST, next("verify", name))
           for (const hook of made.hooks) console.log(`\n  ${shown(hook.extension)} (after create): ${hook.exitCode === 0 ? "done" : `failed with exit ${hook.exitCode}`}${hook.output ? `\n${shown(hook.output, true)}` : ""}`)
+          if (steps.length) console.log("")
+        }
+        const ran = await runCreateSteps(self, { ...process.env, PATH: `${cliDir}:${process.env.PATH ?? ""}` }, steps, (line) => { if (!asJson) console.log(line) })
+        const failed = ran.find((step) => step.exitCode !== 0)
+        out({ ...made, ...(steps.length ? { setup: ran } : {}) }, () => {
+          for (const step of ran) if (step.output) console.log(shown(step.output, true).replace(/^/gm, "  "))
+          if (failed) console.log(`\n${shown(failed.label)} failed with exit ${failed.exitCode}; the steps after it did not run. ${name} is kept.`)
           console.log(`\nNext: ${next("shell", name)}`)
         })
+        if (failed) process.exit(1)
+        return
       }
       case "list": case "ls": {
         const { values } = parse({ all: { type: "boolean" } })
@@ -648,7 +675,22 @@ async function main(argv: string[]): Promise<void> {
         })
       }
       case "template": case "templates": {
-        const { values, positionals } = parse({ engine: { type: "string" } }, rest.slice(1))
+        const { values, positionals } = parse({ engine: { type: "string" }, ...(rest[0] === "prepare" ? { claude: { type: "string" }, codex: { type: "string" }, script: { type: "string" }, replace: { type: "boolean" }, default: { type: "boolean" } } as const : {}) }, rest.slice(1))
+        if (rest[0] === "prepare") {
+          const name = validTemplateName(positionals[0] ?? "agent")
+          const given = values as { engine?: string; claude?: string; codex?: string; script?: string; replace?: boolean; default?: boolean }
+          let script: string | undefined
+          if (given.script !== undefined) {
+            try { script = await Bun.file(resolve(given.script)).text() } catch { throw new AsideeError("usage", `Cannot read the script ${given.script}.`) }
+          }
+          const versions = { claude: given.claude === undefined ? await hostVersion(systemRunner, "claude") : validVersion("claude", given.claude), codex: given.codex === undefined ? await hostVersion(systemRunner, "codex") : validVersion("codex", given.codex) }
+          const prepared = await prepareTemplate(call, { name, engine: given.engine, versions, script, replace: Boolean(given.replace) }, (line) => { if (!asJson) console.log(line) })
+          const config = given.default ? await call<Config>("configSet", { defaults: { ...Object.fromEntries(Object.entries((await call<Config>("configGet")).defaults).filter(([key]) => key !== "image")), template: name } }) : await call<Config>("configGet")
+          return out(prepared, () => {
+            console.log(`\nSaved template ${shown(prepared.template.name)} (${(prepared.template.sizeBytes / 1024 ** 2).toFixed(0)} MB) on ${shown(prepared.template.engine)}. It has:\n${prepared.tools.map((line) => `  ${shown(line)}`).join("\n")}`)
+            console.log(config.defaults.template === name ? `New sandboxes start from it. Back to the plain image: asd config set default-template auto` : `Use it: asd create NAME --template ${name}. Make it the default: asd config set default-template ${name}`)
+          })
+        }
         if (rest[0] === "list" || rest[0] === undefined) {
           const list = await call<Template[]>("templateList")
           return out(list, () => {
@@ -660,7 +702,7 @@ async function main(argv: string[]): Promise<void> {
           const removed = await call<{ removed: string; note: string }>("templateRemove", { name: need(positionals[0], "a template name"), engine: values.engine })
           return out(removed, () => console.log(`Removed template ${shown(removed.removed)}. ${shown(removed.note)}`))
         }
-        throw new AsideeError("usage", "Use `asd template list` or `asd template remove TEMPLATE`.")
+        throw new AsideeError("usage", "Use `asd template list`, `asd template prepare [TEMPLATE]` or `asd template remove TEMPLATE`.")
       }
       case "remove": case "rm": {
         const { values, positionals } = parse({ confirm: { type: "string" } })

@@ -240,7 +240,8 @@ export class Core {
         // Held until the container exists: from then on a removal of the template leaves its image to this sandbox.
         await this.exclusive(`template:${spec.template}`, async () => {
           const template = (await provider.templates(engine)).find((entry) => entry.name === spec.template)
-          if (!template) throw new AsideeError("not-found", `There is no template named ${spec.template} on ${engine.label}. See \`asd template list\`.`)
+          const fromDefault = input.template === undefined || input.template === ""
+          if (!template) throw new AsideeError("not-found", `There is no template named ${spec.template} on ${engine.label}. ${fromDefault ? `It is the default template for new sandboxes: make it with \`asd template prepare ${spec.template}\`, give --image, or clear the default with \`asd config set default-template auto\`.` : "See `asd template list`."}`)
           spec.image = template.imageId
           manifest.template = { name: template.name, imageId: template.imageId, source: template.source, createdAt: template.createdAt }
           await writeManifest(this.dirs, manifest)

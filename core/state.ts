@@ -50,11 +50,15 @@ export function validSizes(input: Record<string, unknown>, base: Sizes): Sizes {
 }
 
 // The only way a spec is made. Unknown fields are dropped, so a client cannot smuggle an engine option through.
-export function validSpec(input: Record<string, unknown>, defaults: Partial<typeof DEFAULT_SPEC> = {}): SandboxSpec {
+// A default template applies only when the request names neither an image nor a template.
+export type Defaults = Partial<typeof DEFAULT_SPEC> & { template?: string }
+export const DEFAULT_KEYS_ALLOWED = [...Object.keys(DEFAULT_SPEC), "template"]
+export function validSpec(input: Record<string, unknown>, defaults: Defaults = {}): SandboxSpec {
   const base = { ...DEFAULT_SPEC, ...defaults }
-  const template = input.template === undefined || input.template === "" ? undefined : validTemplateName(input.template)
-  if (template && input.image !== undefined && input.image !== "") throw new AsideeError("usage", "Give an image or a template, not both.")
-  const image = input.image === undefined || input.image === "" ? base.image : input.image
+  const named = (value: unknown) => value !== undefined && value !== ""
+  if (named(input.template) && named(input.image)) throw new AsideeError("usage", "Give an image or a template, not both.")
+  const template = named(input.template) ? validTemplateName(input.template) : !named(input.image) && named(base.template) ? validTemplateName(base.template) : undefined
+  const image = named(input.image) ? input.image : base.image
   if (typeof image !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$/.test(image)) throw new AsideeError("usage", "The image must be an image reference such as ubuntu:24.04.")
   // A template is used by its name, so the sandbox records it and its checklist says so.
   if (/^asidee-(template|snapshot)-/.test(image)) throw new AsideeError("usage", `${image} is one of Asidee's templates. Use --template with its name instead (see \`asd template list\`).`)
@@ -102,7 +106,7 @@ export const listManifests = async (dirs: Dirs) => (await scanManifests(dirs)).m
 // space where workspaces live, workspace launches are refused and the daemon stops running workspaces. diskWatchSeconds:
 // the pause between two measurements of a sandbox's watched disk limit. terminal: the app a dashboard button opens a
 // shell in (core/terminal.ts); terminalCommand: the command used when it is "custom".
-export type Config = { defaults: Partial<typeof DEFAULT_SPEC>; engine?: string; requireProbes: boolean; experimental: boolean; workspaceFreeSpaceGb: number; diskWatchSeconds: number
+export type Config = { defaults: Defaults; engine?: string; requireProbes: boolean; experimental: boolean; workspaceFreeSpaceGb: number; diskWatchSeconds: number
   terminal: Terminal; terminalCommand?: string }
 export const TERMINALS = ["default", "terminal", "ghostty", "iterm", "custom"] as const
 export type Terminal = typeof TERMINALS[number]
@@ -147,8 +151,8 @@ function parseConfig(dirs: Dirs, data: Record<string, unknown>): Config {
   const defaults = (data.defaults ?? {}) as Record<string, unknown>
   // The defaults pass the same validation as a request, so config cannot set what a request cannot.
   try { validSpec({ ...defaults, name: "x" }) } catch (error) { wrong(`in defaults, ${(error as Error).message.replace(/^./, (first) => first.toLowerCase()).replace(/\.$/, "")}`) }
-  const known = Object.fromEntries(Object.entries(defaults).filter(([key]) => key in DEFAULT_SPEC))
-  return { defaults: known as Partial<typeof DEFAULT_SPEC>, engine: data.engine as string | undefined, requireProbes: data.requireProbes !== false, experimental: data.experimental === true,
+  const known = Object.fromEntries(Object.entries(defaults).filter(([key]) => DEFAULT_KEYS_ALLOWED.includes(key)))
+  return { defaults: known as Defaults, engine: data.engine as string | undefined, requireProbes: data.requireProbes !== false, experimental: data.experimental === true,
     workspaceFreeSpaceGb: (data.workspaceFreeSpaceGb as number | undefined) ?? 5, diskWatchSeconds: (data.diskWatchSeconds as number | undefined) ?? DEFAULT_DISK_WATCH_SECONDS,
     terminal: (data.terminal as Terminal | undefined) ?? "default", ...(typeof data.terminalCommand === "string" ? { terminalCommand: data.terminalCommand } : {}) }
 }
@@ -164,8 +168,10 @@ export async function writeConfig(dirs: Dirs, input: Record<string, unknown>, wi
   for (const key of keys.filter((key) => Object.hasOwn(SETTINGS, key)) as Array<keyof typeof SETTINGS>) { const problem = settingProblem(key, input[key]); if (problem) throw new AsideeError("usage", `${problem.replace(/^./, (first) => first.toUpperCase())}.`) }
   if (input.defaults !== undefined && input.defaults !== null) {
     if (typeof input.defaults !== "object" || Array.isArray(input.defaults)) throw new AsideeError("usage", "defaults must be an object.")
-    const unknown = Object.keys(input.defaults).filter((key) => !(key in DEFAULT_SPEC))
-    if (unknown.length) throw new AsideeError("usage", `defaults may hold ${Object.keys(DEFAULT_SPEC).join(", ")}; not ${unknown.join(", ")}.`)
+    const unknown = Object.keys(input.defaults).filter((key) => !DEFAULT_KEYS_ALLOWED.includes(key))
+    if (unknown.length) throw new AsideeError("usage", `defaults may hold ${DEFAULT_KEYS_ALLOWED.join(", ")}; not ${unknown.join(", ")}.`)
+    const given = input.defaults as Record<string, unknown>
+    if (given.image !== undefined && given.template !== undefined) throw new AsideeError("usage", "A default image and a default template exclude each other. Set one of them.")
   }
   if (input.engine !== undefined && input.engine !== null && (typeof input.engine !== "string" || !ENGINE_ID.test(input.engine))) throw new AsideeError("usage", "engine must be an engine id, as `asd doctor` prints it, or null for the first ready engine.")
   if (input.terminal !== undefined && !TERMINALS.includes(input.terminal as Terminal)) throw new AsideeError("usage", `terminal must be one of ${TERMINALS.join(", ")}.`)
