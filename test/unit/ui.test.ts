@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { Window } from "happy-dom"
 import { workspaceDisclosure, HOST_TEMP_DISCLOSURE } from "../../core/workspace-profile"
 import { CHECKLIST, historical } from "../../core/checks"
+import { CATALOG } from "../../core/machines"
 import type { CheckResult } from "../../core/types"
 
 // Runs the dashboard's own script against a DOM, with the daemon's API replaced by canned replies. It checks what the
@@ -182,14 +183,16 @@ test("an unavailable setting cannot be changed and a sandbox with unknown probes
 })
 
 
-test("a workspace row shows why the daemon stopped it and a disk watch it could not make, with no control added", async () => {
+test("a workspace row shows why the daemon stopped it and a disk watch it could not make; its only controls open a terminal or copy a command", async () => {
   const stopReason = "Stopped by the daemon at 2026-11-16T10:00:00Z: render uses 2.00 GB of its 1 GB disk limit. Free space in /w/render, or raise the limit: asd workspace set render disk N"
   const ui = await page({ ...base, list: () => [], summary: () => ({ workspaces: [{ name: "render", status: "idle", processes: 0, folder: "/w/render", spec: { hostTemp: false, diskGb: 1 }, disclosure: workspaceDisclosure(false), stopReason,
     enforcementProblem: { at: "2026-11-16T10:00:30Z", message: "Its size could not be measured." } }] }) })
   const row = ui.window.document.querySelector("#workspaces .panel")!
   expect(row.textContent).toContain(stopReason)
   expect(row.textContent).toContain("Disk watch unknown at 2026-11-16T10:00:30Z: Its size could not be measured.")
-  expect(row.querySelectorAll("button, input, select")).toHaveLength(0)
+  expect(row.querySelectorAll("input, select")).toHaveLength(0)
+  expect([...new Set([...row.querySelectorAll("button")].map((node) => node.textContent))]).toEqual(["Terminal", "Copy"])
+  expect(row.textContent).toContain("asd workspace stop render")
 })
 
 test("each workspace row shows host-temp state and the shared-temp disclosure", async () => {
@@ -197,4 +200,130 @@ test("each workspace row shows host-temp state and the shared-temp disclosure", 
   const rows = [...ui.window.document.querySelectorAll("#workspaces .panel")].map((row) => row.textContent)
   expect(rows[0]).toContain("host-temp off"); expect(rows[0]).not.toContain(HOST_TEMP_DISCLOSURE)
   expect(rows[1]).toContain("host-temp on (shared, weaker)"); expect(rows[1]).toContain(HOST_TEMP_DISCLOSURE)
+})
+
+const usageOf = (over: object = {}) => ({ name: "demo", running: true, cpus: 2, memoryLimitBytes: 4 * 1024 ** 3, pidsLimit: 4096, diskLimitBytes: 20 * 1024 ** 3, cpuPercent: 37.5, memoryBytes: 512 * 1024 ** 2, tasks: 40, diskBytes: 3 * 1024 ** 3, diskMeasuredAt: "2026-11-18T10:00:00Z", ...over })
+
+test("live usage is written in place, so a form being typed in survives it", async () => {
+  let cpuPercent = 37.5
+  const ui = await page({ ...base, list: () => [sandbox()], usage: () => [usageOf({ cpuPercent })] })
+  expect(ui.text("[data-usage=demo]")).toContain("CPU 37.5% of 200% · memory 512 MB of 4.00 GB · 40 of 4096 tasks · disk 3.00 GB of 20.00 GB")
+  const input = (ui.button("Resize").closest("form") as any).elements.namedItem("cpus")
+  input.value = "3"
+  cpuPercent = 180
+  await (ui.window as any).asideeRefresh(); await ui.settle()
+  expect(ui.text("[data-usage=demo]")).toContain("CPU 180% of 200%")
+  expect(ui.window.document.contains(input)).toBe(true)
+  ui.button("Usage").click(); await ui.settle()
+  const cells = [...ui.window.document.querySelectorAll("#usage tbody td")].map((cell) => cell.textContent)
+  expect(cells.slice(0, 5)).toEqual(["demo", "running", "180% of 200%", "512 MB of 4.00 GB", "40 of 4096"])
+  expect(cells[5]).toStartWith("3.00 GB of 20.00 GB at ")
+})
+
+test("Terminal asks the daemon to open a window for that sandbox or workspace and shows what it ran", async () => {
+  const ui = await page({ ...base, list: () => [sandbox()], summary: () => ({ workspaces: [{ name: "notes", status: "idle", spec: { hostTemp: false }, disclosure: "Workspace, not a sandbox." }] }),
+    openTerminal: (body) => ({ opened: body.name, terminal: "ghostty", command: `'/x/asd' 'shell' '${body.name}'` }) })
+  ui.button("Terminal").click(); await ui.settle()
+  expect(ui.text("#sandboxes pre")).toContain("Opened in ghostty. If no window appeared, run: '/x/asd' 'shell' 'demo'")
+  ;(ui.window.document.querySelector("#workspaces button") as any).click(); await ui.settle()
+  expect(ui.calls.filter((call) => call.method === "openTerminal").map((call) => call.body)).toEqual([{ name: "demo", kind: "sandbox" }, { name: "notes", kind: "workspace" }])
+})
+
+test("a sandbox's More group resizes, runs a command, adds a forward and a link, and saves a template", async () => {
+  const ui = await page({ ...base, list: () => [sandbox()], forwardList: () => [], linkList: () => [],
+    resize: () => ({ changes: [{ limit: "cpus", from: 2, to: 3, applies: "now" }], checks: [] }), exec: () => ({ exitCode: 0, stdout: "hi\n", stderr: "" }),
+    forwardAdd: (body) => ({ id: "f1", name: "demo", localPort: 8080, port: Number(body.port), connections: 0 }), linkAdd: (body) => ({ ...body, address: "other:5432", trust: "trusted" }),
+    snapshot: (body) => ({ template: { name: body.as }, contents: "files" }) })
+  const submit = async (label: string, values: Record<string, string>) => {
+    const form = ui.button(label).closest("form") as any
+    for (const [name, value] of Object.entries(values)) form.elements.namedItem(name).value = value
+    form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  }
+  await submit("Resize", { cpus: "3" }); expect(ui.text("#sandboxes pre")).toContain("cpus: 2 → 3, now")
+  await submit("Run", { command: "echo hi" }); expect(ui.text("#sandboxes pre")).toBe("hi")
+  await submit("Add forward", { port: "8080" })
+  await submit("Add link", { to: "other", port: "5432" })
+  await submit("Save", { as: "base" }); expect(ui.text("#sandboxes pre")).toContain("Saved template base.")
+  const sent = ui.calls.filter((call) => ["resize", "exec", "forwardAdd", "linkAdd", "snapshot"].includes(call.method)).map((call) => [call.method, call.body])
+  expect(sent).toEqual([["resize", { name: "demo", cpus: "3" }], ["exec", { name: "demo", argv: ["sh", "-c", "echo hi"] }], ["forwardAdd", { name: "demo", port: "8080" }],
+    ["linkAdd", { from: "demo", to: "other", port: "5432" }], ["snapshot", { name: "demo", as: "base" }]])
+  expect(ui.text("#sandboxes")).toContain("asd ssh setup demo --write-config")
+})
+
+test("Settings shows every setting; each saves on its own, and the defaults save together", async () => {
+  let config: any = { defaults: { cpus: 1 }, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5, terminal: "default" }
+  const ui = await page({ ...base, list: () => [], about: () => ({ build: "0.4.0+1", builtInDefaults: { image: "img", cpus: 2, memoryGb: 4, pids: 4096, diskGb: 20, docker: false }, platform: "darwin", arch: "arm64", pid: 1, startedAt: "2026-11-18T00:00:00Z", stateDir: "/s", configDir: "/c", cli: "/x/asd" }),
+    configGet: () => config, configSet: (body) => { config = { ...config, ...body }; for (const key of Object.keys(body)) if (body[key] === null) delete config[key]; if (body.defaults === null) config.defaults = {}; return config } })
+  ui.button("Settings").click(); await ui.settle()
+  const get = (id: string) => ui.window.document.getElementById(id) as any
+  expect(get("disk-watch").value).toBe("5"); expect(get("terminal").value).toBe("default"); expect(get("d-cpus").value).toBe("1"); expect(get("d-memory").placeholder).toBe("4")
+  expect(get("terminal").querySelector("option[value=custom]").disabled).toBe(true)
+  expect(ui.text("#about")).toContain("/x/asd")
+  get("disk-watch").value = "2"; get("disk-watch").dispatchEvent(new ui.window.Event("change")); await ui.settle()
+  get("terminal").value = "ghostty"; get("terminal").dispatchEvent(new ui.window.Event("change")); await ui.settle()
+  get("d-cpus").value = ""; get("d-docker").value = "true"; get("default-engine").value = "fake:1"
+  get("defaults").dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  expect(ui.calls.filter((call) => call.method === "configSet").map((call) => call.body)).toEqual([{ diskWatchSeconds: 2 }, { terminal: "ghostty" }, { defaults: { docker: true }, engine: "fake:1" }])
+  expect(config).toMatchObject({ diskWatchSeconds: 2, terminal: "ghostty", defaults: { docker: true }, engine: "fake:1" })
+  expect(ui.text("#settings-section")).toContain("asd config set terminal-command")
+})
+
+test("extensions list their actions; a global action runs with no sandbox, a sandbox action asks which", async () => {
+  const global = { ...extension, id: "acct", name: "Accounts", actions: [{ id: "sync", label: "Sync", scope: "global", run: ["./sync"], fields: [] }, extension.actions[0]] }
+  const ui = await page({ ...base, extensions: () => ({ extensions: [global], errors: ["broken: extension.json is not valid JSON"] }), list: () => [sandbox()], action: () => ({ exitCode: 0, stdout: "synced", stderr: "" }) })
+  ui.button("Extensions").click(); await ui.settle()
+  expect(ui.text("#extensions")).toContain("broken: extension.json is not valid JSON")
+  const forms = [...ui.window.document.querySelectorAll("#extensions form")] as any[]
+  forms[0].dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  expect(forms[1].elements.namedItem("asidee-sandbox").value).toBe("demo")
+  forms[1].dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  expect(ui.calls.filter((call) => call.method === "action").map((call) => call.body)).toEqual([{ extension: "acct", action: "sync", values: {} }, { extension: "acct", action: "install", sandbox: "demo", values: { version: "latest", force: "false" } }])
+  expect(ui.text("#extensions pre")).toBe("synced")
+})
+
+test("templates are listed, can seed a new sandbox, and can be removed", async () => {
+  const template = { name: "base", engine: "fake:1", imageId: "sha256:x", source: "demo", sourceImage: "img", createdAt: "2026-11-18T00:00:00Z", sizeBytes: 2 * 1024 ** 3, loginsRemoved: [".claude"], dependants: [] }
+  const ui = await page({ ...base, list: () => [], templateList: () => [template], templateRemove: () => ({ removed: "base", imageId: "x", dependants: [], note: "Removed." }) })
+  ui.button("Templates").click(); await ui.settle()
+  expect(ui.text("#templates")).toContain("base · 2.00 GB · from demo (img)")
+  ui.button("New sandbox from it").click(); await ui.settle()
+  expect((ui.window.document.getElementById("f-template") as any).value).toBe("base")
+  ui.button("Templates").click(); await ui.settle()
+  ;(ui.window.document.querySelector("#templates button.danger") as any).click(); await ui.settle()
+  expect(ui.calls.find((call) => call.method === "templateRemove")!.body).toEqual({ name: "base", engine: "fake:1" })
+})
+
+test("machines are off until experimental is on; then remote sandboxes are routed by host", async () => {
+  const off = await page({ ...base, list: () => [] })
+  off.button("Machines").click(); await off.settle()
+  expect(off.text("#machines")).toContain("experimental and off")
+  expect(off.calls.some((call) => call.method === "fleet")).toBe(false)
+  const remote = sandbox({ name: "soak" })
+  const ui = await page({ ...base, list: () => [], configGet: () => ({ defaults: {}, requireProbes: true, experimental: true }), stop: () => ({}), usage: (body) => body.host ? [usageOf({ name: "soak" })] : [],
+    fleet: () => ({ machines: [{ machine: { host: { name: "local", machineId: "a" }, state: "online" }, stale: false }, { machine: { host: { name: "home-linux", ssh: "home-linux" }, state: "online", hello: { version: "0.4.0", service: "systemd" } }, cached: { sandboxes: [remote] }, stale: false }] }) })
+  ui.button("Machines").click(); await ui.settle()
+  expect(ui.text("#machines")).toContain("home-linux online")
+  ;(ui.window.document.querySelector("#machines button.small") as any).click(); await ui.settle()
+  expect(ui.calls.find((call) => call.method === "stop")!.body).toEqual({ name: "soak", host: "home-linux" })
+  ui.button("Usage").click(); await ui.settle()
+  expect([...ui.window.document.querySelectorAll("#usage tbody td")].slice(0, 2).map((cell) => cell.textContent)).toEqual(["soak (home-linux)", "running"])
+})
+
+test("the page calls only methods open to the dashboard", async () => {
+  const ui = await page({ ...base, list: () => [sandbox()], summary: () => ({ workspaces: [] }), usage: () => [], forwardList: () => [], linkList: () => [], templateList: () => [], about: () => ({}) })
+  for (const tab of ["Usage", "Workspaces", "Templates", "Machines", "Extensions", "Settings", "Sandboxes"]) { ui.button(tab).click(); await ui.settle() }
+  const used = [...new Set(ui.calls.map((call) => call.method))]
+  expect(used.filter((method) => (CATALOG as Record<string, readonly string[]>)[method]?.[0] !== "dashboard")).toEqual([])
+})
+
+test("create sends Docker inside only when chosen, and shows the same create as a CLI command", async () => {
+  const ui = await page({ ...base, list: () => [], create: (body) => ({ sandbox: { name: body.name } }) })
+  const form = ui.window.document.getElementById("create") as any
+  const submit = async (name: string, docker: string) => { form.elements.namedItem("name").value = name; form.elements.namedItem("dockerInside").value = docker; form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
+    const shown = ui.text("#create-command"); form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle(); return shown }
+  expect(await submit("one", "true")).toContain("asd create one --docker")
+  expect(await submit("two", "")).toContain("asd create two")
+  const bodies = ui.calls.filter((call) => call.method === "create").map((call) => call.body)
+  expect(bodies[0]).toMatchObject({ name: "one", docker: true }); expect(bodies[0]).not.toHaveProperty("dockerInside")
+  expect(bodies[1]).not.toHaveProperty("docker")
 })

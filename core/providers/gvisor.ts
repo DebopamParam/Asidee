@@ -586,14 +586,15 @@ export class GvisorProvider implements Provider {
     return { memoryGb: Number(memoryMax) / 1024 ** 3, pids: Number(pidsMax), cpus: quota / period }
   }
 
-  async usage(manifest: Manifest): Promise<{ memoryBytes: number; tasks: number } | undefined> {
+  async usage(manifest: Manifest): Promise<{ memoryBytes: number; tasks: number; cpuNs?: number } | undefined> {
     const inspect = await this.inspect(manifest)
     if (!inspect?.State.Running || !inspect.Id) return undefined
     const reply = await engineApi(await this.endpoint(manifest.engine), "GET", `/containers/${inspect.Id}/stats?stream=false&one-shot=true`)
     const memory = reply.body?.memory_stats; const tasks = reply.body?.pids_stats?.current
     if (reply.status !== 200 || typeof memory?.usage !== "number" || typeof tasks !== "number") throw new AsideeError("runtime", `The engine did not report what ${manifest.name} uses: ${reply.body?.message ?? `HTTP ${reply.status}`}`)
     // As docker stats counts it: the page cache the kernel can drop is not in use.
-    return { memoryBytes: memory.usage - (memory.stats?.inactive_file ?? 0), tasks }
+    const cpuNs = reply.body?.cpu_stats?.cpu_usage?.total_usage
+    return { memoryBytes: memory.usage - (memory.stats?.inactive_file ?? 0), tasks, ...(typeof cpuNs === "number" ? { cpuNs } : {}) }
   }
 
   private async runtimeEntry(engine: Engine, runtime: string): Promise<RuntimeEntry | undefined> {

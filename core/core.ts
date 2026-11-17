@@ -35,6 +35,9 @@ export type SandboxView = {
   template?: Manifest["template"]
 }
 
+export type SandboxUsage = { name: string; running: boolean; cpus: number; memoryLimitBytes: number; pidsLimit: number; diskLimitBytes: number; cpuPercent?: number; memoryBytes?: number
+  tasks?: number; diskBytes?: number; diskMeasuredAt?: string; problem?: string }
+
 const overDisk = (manifest: Manifest, used: number) => `Stopped by the disk watch: it used ${(used / 1024 ** 3).toFixed(1)} GB of its ${manifest.spec.diskGb} GB. Free space inside it after a start, or it is stopped again.`
 
 // Every operation on a sandbox. The rule it keeps: a sandbox runs only while no blocking check fails. Checks that need
@@ -56,11 +59,15 @@ export class Core {
   private readonly startedOver = new Map<string, number>()
   diskRecoveryMs = 30_000
   private recovering(name: string): boolean { return Date.now() - (this.startedOver.get(name) ?? -Infinity) < this.diskRecoveryMs }
+  // The last disk measurement of each sandbox and when it was made, for the dashboard's usage view; and the CPU time
+  // each had used at the previous usage call, to give the share of a CPU between two calls.
+  private readonly diskSeen = new Map<string, { bytes: number; at: string }>()
+  private readonly cpuSeen = new Map<string, { ns: number; at: number }>()
   // A hosted forward's lease ends after this long without a renewal from the primary (core/forwards.ts).
   leaseTtlMs = LEASE_TTL_MS
   // Links between sandboxes (core/links.ts). Unlike forwards they are recorded, and come back after a restart.
   readonly links: Links
-  constructor(private readonly providers: readonly Provider[], readonly dirs: Dirs, private readonly run: Runner, private readonly cliDir: string, readonly machineId = "") {
+  constructor(private readonly providers: readonly Provider[], readonly dirs: Dirs, private readonly run: Runner, readonly cliDir: string, readonly machineId = "") {
     this.links = new Links(dirs, (manifest) => this.provider(manifest))
   }
 
@@ -78,7 +85,32 @@ export class Core {
   }
 
   configGet() { return readConfig(this.dirs) }
-  configSet(input: Record<string, unknown>) { return this.exclusive(":config", () => writeConfig(this.dirs, input)) }
+  // withCommand: the request came over the CLI's socket, so it may set the custom terminal command.
+  configSet(input: Record<string, unknown>, withCommand = false) { return this.exclusive(":config", () => writeConfig(this.dirs, input, withCommand)) }
+
+  private async measureDisk(manifest: Manifest): Promise<number | undefined> {
+    const used = await this.provider(manifest).diskUsedBytes(manifest)
+    if (used !== undefined) this.diskSeen.set(manifest.name, { bytes: used, at: new Date().toISOString() })
+    return used
+  }
+
+  // What each sandbox uses now, against its limits. cpuPercent is the share of one CPU since the previous call, as
+  // docker stats counts it (200 is two CPUs busy), so the first call has none; disk is the last measurement the disk
+  // watch, a start or a verify made, with its time. Nothing here is measured for a stopped sandbox.
+  async usage(): Promise<SandboxUsage[]> {
+    return Promise.all((await listManifests(this.dirs)).map(async (manifest): Promise<SandboxUsage> => {
+      const limits = { cpus: manifest.spec.cpus, memoryLimitBytes: manifest.spec.memoryGb * 1024 ** 3, pidsLimit: manifest.spec.pids, diskLimitBytes: manifest.spec.diskGb * 1024 ** 3 }
+      const disk = this.diskSeen.get(manifest.name)
+      const seen = disk ? { diskBytes: disk.bytes, diskMeasuredAt: disk.at } : {}
+      let use: Awaited<ReturnType<Provider["usage"]>>
+      try { use = await this.provider(manifest).usage(manifest) } catch (error) { return { name: manifest.name, running: false, ...limits, ...seen, problem: (error as Error).message } }
+      if (!use) { this.cpuSeen.delete(manifest.name); return { name: manifest.name, running: false, ...limits, ...seen } }
+      const now = Date.now(); const before = this.cpuSeen.get(manifest.name)
+      if (use.cpuNs !== undefined) this.cpuSeen.set(manifest.name, { ns: use.cpuNs, at: now })
+      const cpuPercent = before && use.cpuNs !== undefined && use.cpuNs >= before.ns && now > before.at ? (use.cpuNs - before.ns) / ((now - before.at) * 1e6) * 100 : undefined
+      return { name: manifest.name, running: true, ...limits, ...seen, memoryBytes: use.memoryBytes, tasks: use.tasks, ...(cpuPercent !== undefined ? { cpuPercent: Math.round(cpuPercent * 10) / 10 } : {}) }
+    }))
+  }
 
   async engines(): Promise<Engine[]> { return (await Promise.all(this.providers.map((provider) => provider.detect()))).flat() }
 
@@ -264,7 +296,7 @@ export class Core {
       const sandbox = await this.view(manifest)
       this.startedOver.delete(name)
       if (manifest.engine.capabilities?.diskLimit === "watched") {
-        const usedBytes = await this.provider(manifest).diskUsedBytes(manifest)
+        const usedBytes = await this.measureDisk(manifest)
         const limitBytes = manifest.spec.diskGb * 1024 ** 3
         if (usedBytes !== undefined && usedBytes > limitBytes) {
           this.startedOver.set(name, Date.now())
@@ -293,6 +325,7 @@ export class Core {
       this.activity.set(name, "Removing")
       this.endSessions(name, `The session ended: ${name} was removed.`)
       await this.provider(manifest).remove(manifest); await deleteManifest(this.dirs, name)
+      this.diskSeen.delete(name); this.cpuSeen.delete(name)
       await this.links.forget(manifest).catch(() => {})
       this.enforcementProblems.delete(name); this.unchecked.delete(name)
       if (manifest.ssh) await writeClientFiles(this.dirs, await listManifests(this.dirs))
@@ -324,7 +357,7 @@ export class Core {
           throw new AsideeError("conflict", `${name} runs ${use.tasks} tasks now (gVisor's own threads count); a limit of ${next.pids} would leave it under ${Math.round((1 - SHRINK_HEADROOM) * 100)}% headroom, and a gVisor sandbox that passes it ends. Nothing was changed.`)
       }
       if (next.diskGb < before.diskGb && manifest.engine.capabilities?.diskLimit !== "none") {
-        const used = await provider.diskUsedBytes(manifest)
+        const used = await this.measureDisk(manifest)
         if (used === undefined) throw new AsideeError("conflict", `${name}'s disk use could not be measured, so its disk limit was not lowered. Nothing was changed.`)
         if (used > next.diskGb * 1024 ** 3) throw new AsideeError("conflict", `${name} uses ${gb(used)} of disk, more than ${next.diskGb} GB; the watch would stop it at once. Nothing was changed.`)
       }
@@ -398,7 +431,7 @@ export class Core {
   verify(name: string): Promise<{ sandbox: SandboxView; checks: CheckResult[]; ok: boolean; configurationOnly: boolean; diskUsedBytes?: number }> {
     return this.exclusive(validName(name), async () => {
       const manifest = await readManifest(this.dirs, name); const { checks, failed, configurationOnly } = await this.verifyNow(manifest)
-      return { sandbox: await this.view(manifest), checks, ok: failed.length === 0, configurationOnly, diskUsedBytes: await this.provider(manifest).diskUsedBytes(manifest) }
+      return { sandbox: await this.view(manifest), checks, ok: failed.length === 0, configurationOnly, diskUsedBytes: await this.measureDisk(manifest) }
     })
   }
 
@@ -626,7 +659,7 @@ export class Core {
           }
           const blind = blockers(results); const problems = blind.length ? [`Could not check ${describe(blind)}`] : []
           if (manifest.engine.capabilities?.diskLimit === "watched") {
-            const used = await provider.diskUsedBytes(manifest)
+            const used = await this.measureDisk(manifest)
             if (used === undefined) problems.push("Disk use could not be measured; the watched disk limit is unknown.")
             else if (used > manifest.spec.diskGb * 1024 ** 3 && !this.recovering(manifest.name)) {
               const reason = overDisk(manifest, used)
@@ -657,7 +690,7 @@ export class Core {
       try {
         const over = async (manifest: Manifest) => {
           if ((await this.provider(manifest).status(manifest)) !== "running") return undefined
-          const used = await this.provider(manifest).diskUsedBytes(manifest)
+          const used = await this.measureDisk(manifest)
           if (used === undefined) return undefined
           const isOver = used > manifest.spec.diskGb * 1024 ** 3
           // Asked again under the lock: a start that was running during the first measurement may have set it since.

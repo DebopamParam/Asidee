@@ -630,13 +630,13 @@ test("a running sandbox that cannot be checked for several passes in a row is st
 
 test("a config file with a mistake is refused by name, and its defaults obey the same limits as a request", async () => {
   const root = await mkdtemp(join(tmpdir(), "asidee-config-")); const dirs = { state: join(root, "state"), config: root }
-  expect(await readConfig(dirs)).toEqual({ defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5 })
+  expect(await readConfig(dirs)).toEqual({ defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5, terminal: "default" })
   for (const bad of ['{"workspaceFreeSpaceGb":-1}', '{"diskWatchSeconds":0}', '{"diskWatchSeconds":31}', '{"diskWatchSeconds":"1"}', '{"workspaceFreeSpaceGb":"5"}', '{"workspaceFreeSpaceGb":100001}', '{"experimental":"on"}', '{"experimental":1}', "{ nope", "[]", "null", '{"defaults":"x"}', '{"engine":5}', '{"requireProbes":"off"}', '{"requireProbes":null}', '{"requireProbes":0}', '{"defaults":{"cpus":"lots"}}', '{"defaults":{"image":"--privileged"}}', '{"defaults":{"memoryGb":100000}}']) {
     await writeFile(join(root, "config.json"), bad)
     await expect(readConfig(dirs)).rejects.toThrow("config.json")
   }
   await writeFile(join(root, "config.json"), '{"defaults":{"image":"alpine:3","cpus":1,"privileged":true,"name":"x"},"engine":"gvisor:orbstack"}')
-  expect(await readConfig(dirs)).toEqual({ defaults: { image: "alpine:3", cpus: 1 }, engine: "gvisor:orbstack", requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5 })
+  expect(await readConfig(dirs)).toEqual({ defaults: { image: "alpine:3", cpus: 1 }, engine: "gvisor:orbstack", requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5, terminal: "default" })
 })
 
 test("a damaged state file is listed as damaged and the other sandboxes still work", async () => {
@@ -851,7 +851,12 @@ test("settings require a boolean and loopback writes require both token and trus
   for (const value of ["off", 0, null, [], {}, undefined]) {
     expect((await answer(post({ requireProbes: value }), false, 7717)).status).toBe(400)
   }
-  expect((await answer(post({ requireProbes: false, engine: "other" }), false, 7717)).status).toBe(400)
+  // A custom terminal command runs on the Mac, so a page with the token cannot set it, alone or beside another setting.
+  for (const body of [{ requireProbes: false, terminalCommand: "sh -c {command}" }, { terminalCommand: "sh -c {command}" }, { terminal: "custom" }, { terminal: "xterm" }, { engine: "Bad Engine" }, { engine: 5 },
+    { defaults: { privileged: true } }, { defaults: { cpus: "lots" } }, { defaults: { image: "--privileged" } }, { defaults: [] }]) expect((await answer(post(body), false, 7717)).status).toBe(400)
+  const viaPage = await answer(new Request("http://127.0.0.1:7717/api/terminalCommandSet", { method: "POST", headers: { host: "127.0.0.1:7717", authorization: "Bearer secret" }, body: JSON.stringify({ terminalCommand: "sh -c {command}" }) }), false, 7717)
+  expect(viaPage.status).toBe(403)
+  expect((await asidee.configGet()).terminalCommand).toBeUndefined()
   for (const value of ["on", 1, null]) expect((await answer(post({ experimental: value }), false, 7717)).status).toBe(400)
   for (const value of ["5", -1, 100_001, null, true]) expect((await answer(post({ workspaceFreeSpaceGb: value }), false, 7717)).status).toBe(400)
   for (const value of ["1", 0, 0.5, 31, null, true]) expect((await answer(post({ diskWatchSeconds: value }), false, 7717)).status).toBe(400)
@@ -864,6 +869,16 @@ test("settings require a boolean and loopback writes require both token and trus
   expect(response.status).toBe(200)
   expect(await response.json()).toMatchObject({ ok: true, data: { requireProbes: false } })
   expect((await asidee.configGet()).requireProbes).toBe(false)
+  expect(await (await answer(post({ defaults: { cpus: 1, docker: true }, engine: "fake:1", terminal: "ghostty" }), false, 7717)).json()).toMatchObject({ ok: true, data: { defaults: { cpus: 1, docker: true }, engine: "fake:1", terminal: "ghostty" } })
+  expect(await (await answer(post({ defaults: null, engine: null }), false, 7717)).json()).toMatchObject({ ok: true, data: { defaults: {}, terminal: "ghostty" } })
+  expect((await asidee.configGet()).engine).toBeUndefined()
+  // Over the socket the CLI can set it; setting it chooses it, and clearing it goes back to the default terminal.
+  const viaSocket = (body: object) => answer(new Request("http://asidee/api/terminalCommandSet", { method: "POST", body: JSON.stringify(body) }), true, 0).then((response) => response.json())
+  expect(await viaSocket({ terminalCommand: "two\nlines {command}" })).toMatchObject({ ok: false })
+  expect(await viaSocket({ terminalCommand: "no placeholder" })).toMatchObject({ ok: false })
+  expect(await viaSocket({ terminalCommand: "kitty sh -c {command}" })).toMatchObject({ ok: true, data: { terminal: "custom", terminalCommand: "kitty sh -c {command}" } })
+  expect(await viaSocket({ terminalCommand: null })).toMatchObject({ ok: true, data: { terminal: "default" } })
+  expect((await asidee.configGet()).terminalCommand).toBeUndefined()
 })
 
 test("routed create preserves the remote refusal text and code and uses only the remote probe setting", async () => {
@@ -968,4 +983,29 @@ test("B13: failed-create cleanup preserves the image dependency code without dou
   const { provider } = fakeProvider(); const asidee = await core(provider)
   provider.create = async () => { throw new AsideeError("dependency", "Cannot download image bad/image:0: pull access denied.") }
   await expect(asidee.create({ name: "demo" })).rejects.toMatchObject({ code: "dependency", message: "Cannot download image bad/image:0: pull access denied. Nothing was kept for demo." })
+})
+
+test("usage gives each sandbox's CPU share between two calls, memory and tasks against its limits, and its last disk measurement", async () => {
+  const { provider } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo", cpus: 2, memoryGb: 1, diskGb: 10 })
+  let cpuNs = 5e9
+  provider.usage = async () => ({ memoryBytes: 300 * 1024 ** 2, tasks: 12, cpuNs })
+  provider.diskUsedBytes = async () => 3 * 1024 ** 3
+  const [first] = await asidee.usage()
+  expect(first).toMatchObject({ name: "demo", running: true, cpus: 2, memoryBytes: 300 * 1024 ** 2, memoryLimitBytes: 1024 ** 3, tasks: 12, diskLimitBytes: 10 * 1024 ** 3 })
+  expect(first!.cpuPercent).toBeUndefined()
+  await asidee.verify("demo")
+  await Bun.sleep(100); cpuNs += 1e8
+  const [second] = await asidee.usage()
+  // 0.1 s of CPU in about 0.1 s: about one CPU busy.
+  expect(second!.cpuPercent).toBeGreaterThan(50); expect(second!.cpuPercent).toBeLessThanOrEqual(101)
+  expect(second).toMatchObject({ diskBytes: 3 * 1024 ** 3 })
+  expect(Date.parse(second!.diskMeasuredAt!)).toBeGreaterThan(Date.now() - 10_000)
+  provider.usage = async () => undefined
+  const [stopped] = await asidee.usage()
+  expect(stopped).toMatchObject({ running: false, diskBytes: 3 * 1024 ** 3 }); expect(stopped!.memoryBytes).toBeUndefined()
+  provider.usage = async () => { throw new Error("engine away") }
+  expect((await asidee.usage())[0]).toMatchObject({ running: false, problem: "engine away" })
+  await asidee.stop("demo"); await asidee.remove("demo", "demo")
+  expect(await asidee.usage()).toEqual([])
 })

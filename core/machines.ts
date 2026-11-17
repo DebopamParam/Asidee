@@ -24,6 +24,7 @@ export const CATALOG = {
   hostList: ["dashboard", "primary"], fleet: ["dashboard", "primary"], hostAttach: ["socket", "primary"], hostPlan: ["socket", "primary"], hostApply: ["socket", "primary"], hostRemove: ["socket", "primary"],
   sessionTarget: ["socket", "read"],
   sshPrepare: ["socket", "write"],
+  terminalCommandSet: ["socket", "primary"], about: ["dashboard", "primary"], usage: ["dashboard", "read"], openTerminal: ["dashboard", "primary"],
 } as const
 export type MethodName = keyof typeof CATALOG
 export const EXPERIMENTAL_OFF = "Other machines are experimental and off on this machine: they are not yet proven on enough machines. To turn them on: asd config set experimental on"
@@ -215,6 +216,7 @@ const REPLIES: Partial<Record<MethodName, (value: unknown, hello: Hello) => unkn
   verify: withRow({ sandbox: "object", checks: [CHECK], ok: "boolean" }), resize: withRow({ sandbox: "object", changes: [CHANGE], checks: [CHECK] }),
   snapshot: shaped({ template: TEMPLATE, contents: "string" }), templateList: shaped([TEMPLATE]), templateRemove: shaped({ removed: "string", imageId: "string", dependants: ["string"], note: "string" }),
   exec: shaped(RUN), action: shaped(RUN), extensions: shaped({ extensions: [{ id: "string", name: "string", "description?": "string", actions: [{ id: "string", label: "string", fields: [{ id: "string" }] }] }], errors: ["string"] }),
+  usage: shaped([{ name: "string", running: "boolean", cpus: "number", memoryLimitBytes: "number", pidsLimit: "number", diskLimitBytes: "number" }]),
   shutdown: shaped({ stopping: "boolean" }), sessionTarget: shaped({ name: "string", machineId: id, sandboxId: id, generation: "string" }),
   sshPrepare: (value) => { shaped({ sandboxId: id, setup: "object" })(value); parseSshSetup((value as { setup: unknown }).setup); return value },
 }

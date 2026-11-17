@@ -193,7 +193,7 @@ export interface Provider {
   // instance has afterwards, read from the engine's host; undefined when it is stopped or they could not be read.
   resize(manifest: Manifest, limits: Limits): Promise<Limits | undefined>
   // What a running sandbox uses now; undefined when it is not running.
-  usage(manifest: Manifest): Promise<{ memoryBytes: number; tasks: number } | undefined>
+  usage(manifest: Manifest): Promise<{ memoryBytes: number; tasks: number; cpuNs?: number } | undefined>
   // Makes a template from the sandbox's files, minus the usual login files, and returns it as templates() lists it.
   snapshot(manifest: Manifest, name: string): Promise<Template>
   templates(engine: Engine): Promise<Template[]>

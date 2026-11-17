@@ -45,13 +45,21 @@ check results. Nonblocking unknown or unsupported checks remain disclosures.
 (see [Staying true after the start](#staying-true-after-the-start)). `asd config get` reads the effective configuration;
 `asd config set require-probes on|off`, `asd config set experimental on|off`,
 `asd config set workspace-free-space GiB` and `asd config set disk-watch SECONDS` change one setting each. Both support `--json` and `--host NAME`.
+`defaults` holds what a new sandbox gets when its create does not say (`image`, `cpus`, `memoryGb`, `pids`, `diskGb`,
+`docker`), checked like a create; `engine` is the engine id new sandboxes use, or none for the first ready one
+(`asd config set default-cpus N`, `default-memory GiB`, … or `auto`; `asd config set engine ID|auto`). `terminal` is what
+the dashboard's Terminal button opens: `default` (the Mac's app for `.command` files), `terminal`, `ghostty`, `iterm`
+(not tested) or `custom`, which runs `terminalCommand`, one line with `{command}` where the shell-quoted script path goes.
 With `requireProbes: false`, create accepts unknown blocking probes and reports them as unknown, never as passes.
 Failed and unsupported blocking probes still refuse create. The dashboard's **Settings** section has the same toggle.
 A create refused for unknown probes offers **Open settings**, which navigates and focuses the toggle without changing it.
 The sandbox list labels current isolation as **Not verified**; saved checks remain dated history.
 
 The daemon API exposes `configGet` and `configSet`; the latter accepts only `requireProbes` and `experimental`, each a
-boolean, and `workspaceFreeSpaceGb` and `diskWatchSeconds`, each a number, and at least one of them.
+boolean, `workspaceFreeSpaceGb` and `diskWatchSeconds`, each a number, `defaults` and `engine` (`null` removes either)
+and `terminal`, and at least one of them. `terminalCommand` is not among them: it runs on the Mac with the user's
+rights, so a page holding the dashboard token could otherwise run anything. Only the socket-only `terminalCommandSet`
+(`asd config set terminal-command CMD|none`) sets it; setting one chooses `custom`, clearing it goes back to `default`.
 A settings write atomically replaces `config.json` with mode 0600, preserving defaults, engine selection and other fields.
 Writes are serialized within the daemon, and each create reads the current file without a daemon restart.
 Both methods are available over the user socket and on loopback with the dashboard token and accepted Host header.
@@ -672,7 +680,8 @@ names on two machines have distinct identities. `machineId` can also be supplied
 routed call, stream, forward and SSH setup/access whose `machineId` differs from the host's record is refused before
 any connection is opened. An unknown host never falls back. Buffered sandbox operations, engines, templates, extensions, checklist,
 verify and daemon status/stop route over SSH. Streams, primary loopback forwards and SSH setup/access also select
-the remote daemon. The dashboard UI has not been changed to group remote machines.
+the remote daemon. The dashboard's Machines tab lists each machine with its cached sandboxes, and starts, stops,
+verifies and opens terminals in them by `host`.
 
 The gateway executes the registered absolute binary's fixed `transport stdio --protocol 1` command, with the state
 directory set explicitly. That command only relays bytes to an existing daemon socket; it cannot install, start or
@@ -850,7 +859,9 @@ The `workspaceList`, `workspaceGet`, `workspaceCreate`, `workspaceExec`, `worksp
 `workspaceRemove`, `workspaceSet` and `workspaceVerify` methods are all socket-only and local. Shells and streamed exec use the
 existing stream socket with `kind: "workspace"`; remote routes and a requested user are refused. The dashboard's
 read-only summary carries a separate workspace inventory. Dashboard workspace actions remain unavailable to honor
-socket-only authority. Summary reads manifests and tagged-process counts without identity repair, chmod or tree
+socket-only authority; the dashboard shows each as a CLI command to copy. Its one workspace button, Terminal, asks
+`openTerminal` (see [Dashboard](#dashboard)) for a window that runs `asd workspace shell NAME`, which hands the page
+nothing back. Summary reads manifests and tagged-process counts without identity repair, chmod or tree
 walks. Of the status views, CLI list/get alone request live size measurements. The 30-second sandbox enforcement pass
 does no workspace work. A separate 30-second pass (`Workspaces.watch`) measures each workspace with running processes
 and stops it, recording `stopReason`, past its watched `diskGb` limit or below the `workspaceFreeSpaceGb` floor; a
@@ -909,3 +920,23 @@ values withheld. The CLI also provides streamed exec, port forwards, and SSH acc
 option, and the core resizes sandboxes and saves them as templates. Buffered operations can select a prepared remote
 daemon; streams, forwards and editor aliases use the same route. Reviewed system-service enrollment is available
 with explicit artifacts. A hard disk cap, user-service installation and automatic reboot recovery are not built.
+
+## Dashboard
+
+`ui/index.html` is one page with no build step, a client of the API like any other. Its tabs: **Sandboxes** (each
+sandbox's controls and live use; under More, resize, a command run with `sh -c`, save as template, forwards, links,
+SSH access and CLI commands; and the create form, which also shows the same create as a CLI command), **Usage**,
+**Workspaces**, **Templates**, **Machines** (with `experimental` on), **Extensions** (every installed extension's actions;
+a sandbox action asks which sandbox) and **Settings** (every setting above, the engines and what this daemon is).
+Whatever is socket-only (workspace changes, SSH setup, machines, daemon stop) is shown as the command, with a Copy
+button. A unit test fails if the page calls a method that is not open to the dashboard.
+
+Three methods exist for it. `usage` gives each sandbox's use against its limits: CPU as the share of one CPU between
+two calls (none on the first; the engine's own CPU-time counter), memory and tasks as the engine reports them, and
+disk as the last measurement the disk watch, a start or a verify made, with its time. It measures nothing new on disk.
+Routed with `host`, it answers for that machine. `about` gives the version, platform, process, folders and built-in
+defaults of this daemon. `openTerminal` takes `name`, `kind` (`sandbox` or `workspace`) and an optional `machine`; it is
+macOS only and never routed. The caller chooses what to open, never the command: it writes a script under
+`STATE/terminal/` (mode 0700, removed by itself when it starts, or after an hour) that runs `asd shell NAME` (or
+`asd --host MACHINE shell NAME`, or `asd workspace shell NAME`) with this daemon's folders, and opens it in the chosen
+terminal. Nothing the window shows comes back to the caller.

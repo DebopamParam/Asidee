@@ -100,9 +100,18 @@ export const listManifests = async (dirs: Dirs) => (await scanManifests(dirs)).m
 
 // experimental: unproven features (today, other machines), off by default. workspaceFreeSpaceGb: below this much free
 // space where workspaces live, workspace launches are refused and the daemon stops running workspaces. diskWatchSeconds:
-// the pause between two measurements of a sandbox's watched disk limit.
-export type Config = { defaults: Partial<typeof DEFAULT_SPEC>; engine?: string; requireProbes: boolean; experimental: boolean; workspaceFreeSpaceGb: number; diskWatchSeconds: number }
-// What `configSet` may change.
+// the pause between two measurements of a sandbox's watched disk limit. terminal: the app a dashboard button opens a
+// shell in (core/terminal.ts); terminalCommand: the command used when it is "custom".
+export type Config = { defaults: Partial<typeof DEFAULT_SPEC>; engine?: string; requireProbes: boolean; experimental: boolean; workspaceFreeSpaceGb: number; diskWatchSeconds: number
+  terminal: Terminal; terminalCommand?: string }
+export const TERMINALS = ["default", "terminal", "ghostty", "iterm", "custom"] as const
+export type Terminal = typeof TERMINALS[number]
+// A custom terminal command runs on this Mac with the user's rights, so it is set only through the CLI's socket
+// (`terminalCommand` below), never by the dashboard: a page that could set it could run anything.
+const TERMINAL_COMMAND = /^[^\x00-\x1f\x7f]{1,500}$/
+const ENGINE_ID = /^[a-z0-9][a-z0-9:._-]{0,100}$/
+// What `configSet` may change. defaults, engine and terminal are checked on their own below; null removes defaults or
+// engine.
 const SETTINGS = { requireProbes: "boolean", experimental: "boolean", workspaceFreeSpaceGb: "number", diskWatchSeconds: "number" } as const
 // Each number setting's unit, lowest and highest value. The enforcement pass measures disk use every 30 s whatever
 // diskWatchSeconds says, so a longer pause than that would change nothing.
@@ -132,22 +141,38 @@ function parseConfig(dirs: Dirs, data: Record<string, unknown>): Config {
   for (const key of Object.keys(SETTINGS) as Array<keyof typeof SETTINGS>) { const problem = data[key] === undefined ? undefined : settingProblem(key, data[key]); if (problem) wrong(problem) }
   if (data.defaults !== undefined && !isObject(data.defaults)) wrong("defaults must be an object")
   if (data.engine !== undefined && typeof data.engine !== "string") wrong("engine must be an engine id, as `asd doctor` prints it")
+  if (data.terminal !== undefined && !TERMINALS.includes(data.terminal as Terminal)) wrong(`terminal must be one of ${TERMINALS.join(", ")}`)
+  if (data.terminalCommand !== undefined && (typeof data.terminalCommand !== "string" || !TERMINAL_COMMAND.test(data.terminalCommand) || !data.terminalCommand.includes("{command}"))) wrong("terminalCommand must be one line that contains {command}")
+  if (data.terminal === "custom" && data.terminalCommand === undefined) wrong("terminal is custom, but there is no terminalCommand")
   const defaults = (data.defaults ?? {}) as Record<string, unknown>
   // The defaults pass the same validation as a request, so config cannot set what a request cannot.
   try { validSpec({ ...defaults, name: "x" }) } catch (error) { wrong(`in defaults, ${(error as Error).message.replace(/^./, (first) => first.toLowerCase()).replace(/\.$/, "")}`) }
   const known = Object.fromEntries(Object.entries(defaults).filter(([key]) => key in DEFAULT_SPEC))
   return { defaults: known as Partial<typeof DEFAULT_SPEC>, engine: data.engine as string | undefined, requireProbes: data.requireProbes !== false, experimental: data.experimental === true,
-    workspaceFreeSpaceGb: (data.workspaceFreeSpaceGb as number | undefined) ?? 5, diskWatchSeconds: (data.diskWatchSeconds as number | undefined) ?? DEFAULT_DISK_WATCH_SECONDS }
+    workspaceFreeSpaceGb: (data.workspaceFreeSpaceGb as number | undefined) ?? 5, diskWatchSeconds: (data.diskWatchSeconds as number | undefined) ?? DEFAULT_DISK_WATCH_SECONDS,
+    terminal: (data.terminal as Terminal | undefined) ?? "default", ...(typeof data.terminalCommand === "string" ? { terminalCommand: data.terminalCommand } : {}) }
 }
 
 export async function readConfig(dirs: Dirs): Promise<Config> { return parseConfig(dirs, await configFile(dirs)) }
 
-// The daemon serializes settings writes. Preserve defaults, engine and fields owned by other config consumers.
-export async function writeConfig(dirs: Dirs, input: Record<string, unknown>): Promise<Config> {
+// The daemon serializes settings writes. Preserve fields owned by other config consumers. withCommand: the request came
+// over the CLI's socket, the only way terminalCommand can be set.
+export async function writeConfig(dirs: Dirs, input: Record<string, unknown>, withCommand = false): Promise<Config> {
   const keys = Object.keys(input)
-  if (!keys.length || keys.some((key) => !Object.hasOwn(SETTINGS, key))) throw new AsideeError("usage", "Set requireProbes, experimental, workspaceFreeSpaceGb or diskWatchSeconds.")
-  for (const key of keys as Array<keyof typeof SETTINGS>) { const problem = settingProblem(key, input[key]); if (problem) throw new AsideeError("usage", `${problem.replace(/^./, (first) => first.toUpperCase())}.`) }
-  const data = { ...await configFile(dirs), ...input }
+  const allowed = [...Object.keys(SETTINGS), "defaults", "engine", "terminal", ...(withCommand ? ["terminalCommand"] : [])]
+  if (!keys.length || keys.some((key) => !allowed.includes(key))) throw new AsideeError("usage", `Set ${allowed.join(", ")}.${withCommand || !keys.includes("terminalCommand") ? "" : " terminalCommand is set with the CLI only: asd config set terminal-command '…'."}`)
+  for (const key of keys.filter((key) => Object.hasOwn(SETTINGS, key)) as Array<keyof typeof SETTINGS>) { const problem = settingProblem(key, input[key]); if (problem) throw new AsideeError("usage", `${problem.replace(/^./, (first) => first.toUpperCase())}.`) }
+  if (input.defaults !== undefined && input.defaults !== null) {
+    if (typeof input.defaults !== "object" || Array.isArray(input.defaults)) throw new AsideeError("usage", "defaults must be an object.")
+    const unknown = Object.keys(input.defaults).filter((key) => !(key in DEFAULT_SPEC))
+    if (unknown.length) throw new AsideeError("usage", `defaults may hold ${Object.keys(DEFAULT_SPEC).join(", ")}; not ${unknown.join(", ")}.`)
+  }
+  if (input.engine !== undefined && input.engine !== null && (typeof input.engine !== "string" || !ENGINE_ID.test(input.engine))) throw new AsideeError("usage", "engine must be an engine id, as `asd doctor` prints it, or null for the first ready engine.")
+  if (input.terminal !== undefined && !TERMINALS.includes(input.terminal as Terminal)) throw new AsideeError("usage", `terminal must be one of ${TERMINALS.join(", ")}.`)
+  if (input.terminalCommand !== undefined && input.terminalCommand !== null && (typeof input.terminalCommand !== "string" || !TERMINAL_COMMAND.test(input.terminalCommand) || !input.terminalCommand.includes("{command}"))) throw new AsideeError("usage", "The terminal command is one line that contains {command}, where the script to run goes.")
+  const data: Record<string, unknown> = { ...await configFile(dirs), ...input }
+  for (const key of ["defaults", "engine", "terminalCommand"]) if (data[key] === null) delete data[key]
+  if (data.terminal === "custom" && typeof data.terminalCommand !== "string") throw new AsideeError("usage", "Set the custom command first, with the CLI: asd config set terminal-command '…' (it must contain {command}).")
   const config = parseConfig(dirs, data)
   await mkdir(dirs.config, { recursive: true, mode: 0o700 })
   const file = join(dirs.config, "config.json"); const temp = `${file}.tmp-${process.pid}`

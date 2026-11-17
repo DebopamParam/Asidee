@@ -22,6 +22,10 @@ asd config set require-probes on|off    # require blocking isolation probes at c
 asd config set experimental on|off      # other machines (host, --host, list --all), default off
 asd config set workspace-free-space GiB  # below this, workspace launches are refused and running ones stopped, default 5
 asd config set disk-watch SECONDS       # pause between two measurements of a watched disk limit, default 5, 1 to 30
+asd config set engine ID|auto           # engine for new sandboxes (auto: the first ready one)
+asd config set default-cpus N|auto      # also default-image, default-memory, default-pids, default-disk, default-docker on|off
+asd config set terminal NAME            # the dashboard's Terminal button: default, terminal, ghostty, iterm or custom
+asd config set terminal-command CMD|none  # custom terminal, e.g. 'kitty sh -c {command}'; CLI only
 asd exec NAME [--stdin] -- COMMAND ARG… # exit code, stdout and stderr are the command's; output as text
 asd exec NAME --stream -- COMMAND ARG…  # raw bytes in and out, no size limit
 asd start NAME | asd stop NAME
@@ -299,9 +303,10 @@ Other files in that folder are served next to it. The page calls `POST /api/METH
 `Authorization: Bearer TOKEN`; it reads the token from the `#token=` part of the link `asd ui` prints. Methods:
 `checklist`, `engines`, `list`, `get`, `create`, `start`, `stop`, `remove`, `verify`, `resize`, `snapshot`, `templateList`,
 `templateRemove`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `linkAdd`, `linkList`, `linkRemove`, `sshAccess`, `extensions`, `action`, `summary`,
-`hostList`, `fleet`, `configGet`, `configSet`. `linkAdd` and `linkRemove` take `from`, `to` and `port`; `linkList` takes an optional `name`. `configGet` returns this machine's effective configuration. `configSet`
-accepts only `requireProbes` and `experimental`, each a boolean, and `workspaceFreeSpaceGb` and `diskWatchSeconds`, each a number, saves them to `config.json` and returns the new
-effective configuration. `requireProbes` affects later creates, not running sandboxes. With `experimental` off,
+`hostList`, `fleet`, `configGet`, `configSet`, `usage`, `about`, `openTerminal`. `linkAdd` and `linkRemove` take `from`, `to` and `port`; `linkList` takes an optional `name`. `configGet` returns this machine's effective configuration. `configSet`
+accepts only `requireProbes` and `experimental`, each a boolean, `workspaceFreeSpaceGb` and `diskWatchSeconds`, each a number, `defaults` and `engine` (`null` removes either) and `terminal`, saves them to `config.json` and returns the new
+effective configuration; the custom terminal command is CLI only. `usage` returns each sandbox's CPU, memory, tasks and last disk measurement against its limits;
+`openTerminal` with `name` and `kind` (`sandbox` or `workspace`) opens a shell in a terminal window on this Mac. `requireProbes` affects later creates, not running sandboxes. With `experimental` off,
 `hostList`, `fleet` and any request with a `host` other than `local` are refused.
 
 Requests can include `host` to select a registered machine. A sandbox's API address is `{host, name}` and its returned

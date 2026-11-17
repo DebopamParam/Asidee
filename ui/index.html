@@ -9,19 +9,21 @@
   @media (prefers-color-scheme: dark) { :root { --bg: #161614; --panel: #201f1c; --ink: #ecebe6; --muted: #9a978d; --line: #35332e; --accent: #7fc4ad; --bad: #ef8a80; --warn: #e0b060; } }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, sans-serif; }
-  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
-  h1 { font-size: 20px; margin: 0 0 4px; } h2 { font-size: 15px; margin: 28px 0 8px; }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 20px; margin: 0 0 4px; } h2 { font-size: 15px; margin: 28px 0 8px; } h3 { font-size: 14px; margin: 14px 0 6px; }
   p.sub { color: var(--muted); margin: 0 0 16px; }
+  nav { margin-bottom: 4px; }
+  nav button[aria-pressed=true] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 10px; }
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .grow { flex: 1; min-width: 160px; }
   .name { font-weight: 600; } .muted { color: var(--muted); font-size: 13px; }
   .badge { font-size: 12px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--line); }
-  .badge.running { color: var(--accent); border-color: var(--accent); }
+  .badge.running, .badge.online, .badge.ready { color: var(--accent); border-color: var(--accent); }
   button { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
   button:hover { border-color: var(--accent); } button:disabled { opacity: .5; cursor: default; }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
-  button.danger { color: var(--bad); }
+  button.danger { color: var(--bad); } button.small { font-size: 13px; padding: 2px 8px; }
   input, select { font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); width: 100%; }
   input[type=checkbox] { width: auto; }
   label { display: block; font-size: 13px; color: var(--muted); }
@@ -31,7 +33,22 @@
   .mark { font-weight: 700; } .pass .mark { color: var(--accent); } .fail .mark { color: var(--bad); } .weak .mark, .unknown .mark { color: var(--warn); }
   .detail { grid-column: 2; color: var(--muted); font-size: 13px; }
   pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; margin: 10px 0 0; }
+  code { font: 13px ui-monospace, monospace; }
+  .cmd { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+  .cmd code { flex: 1; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; overflow-x: auto; white-space: nowrap; }
   .error { color: var(--bad); margin: 8px 0 0; font-size: 14px; }
+  details { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+  details > summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+  details details { border-top: none; margin-left: 4px; }
+  .usage { font-variant-numeric: tabular-nums; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 13px; }
+  .scroll { overflow-x: auto; }
+  .setting { display: grid; grid-template-columns: minmax(160px, 220px) 1fr; gap: 6px 16px; align-items: start; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .setting:last-child { border-bottom: none; }
+  .setting > label { font-size: 14px; color: var(--ink); }
+  @media (max-width: 560px) { .setting { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -41,37 +58,127 @@
   <div id="notice"></div>
   <nav class="row" aria-label="Sections">
     <button id="sandboxes-tab" type="button" aria-pressed="true" aria-controls="sandbox-section">Sandboxes</button>
+    <button id="usage-tab" type="button" aria-pressed="false" aria-controls="usage-section">Usage</button>
+    <button id="workspaces-tab" type="button" aria-pressed="false" aria-controls="workspace-section">Workspaces</button>
+    <button id="templates-tab" type="button" aria-pressed="false" aria-controls="template-section">Templates</button>
+    <button id="machines-tab" type="button" aria-pressed="false" aria-controls="machine-section">Machines</button>
+    <button id="extensions-tab" type="button" aria-pressed="false" aria-controls="extension-section">Extensions</button>
     <button id="settings-tab" type="button" aria-pressed="false" aria-controls="settings-section">Settings</button>
   </nav>
+
   <section id="sandbox-section" aria-labelledby="sandboxes-tab">
   <h2>Sandboxes</h2>
   <div id="sandboxes"></div>
-  <h2>Workspaces: not sandboxes</h2>
-  <div id="workspaces"></div>
   <h2>New sandbox</h2>
   <form id="create" class="panel">
     <div class="fields">
       <div><label for="f-name">Name</label><input id="f-name" name="name" required pattern="[a-z0-9][a-z0-9-]{0,30}"></div>
       <div><label for="f-image">Image (blank: default)</label><input id="f-image" name="image"></div>
-      <div><label for="f-cpus">CPUs</label><input id="f-cpus" name="cpus" type="number" step="0.25" placeholder="2"></div>
-      <div><label for="f-memory">Memory (GB)</label><input id="f-memory" name="memoryGb" type="number" step="0.25" placeholder="4"></div>
-      <div><label for="f-disk">Disk (GB)</label><input id="f-disk" name="diskGb" type="number" placeholder="20"></div>
+      <div><label for="f-template">Or a template</label><select id="f-template" name="template"></select></div>
+      <div><label for="f-cpus">CPUs</label><input id="f-cpus" name="cpus" type="number" step="0.25"></div>
+      <div><label for="f-memory">Memory (GB)</label><input id="f-memory" name="memoryGb" type="number" step="0.25"></div>
+      <div><label for="f-pids">Tasks</label><input id="f-pids" name="pids" type="number" step="1"></div>
+      <div><label for="f-disk">Disk (GB)</label><input id="f-disk" name="diskGb" type="number"></div>
       <div><label for="f-engine">Engine</label><select id="f-engine" name="engine"></select></div>
+      <div><label for="f-docker">Docker inside</label><select id="f-docker" name="dockerInside"><option value="">Default</option><option value="true">On</option><option value="false">Off</option></select></div>
     </div>
     <button class="primary">Create and verify</button>
     <div class="error" id="create-error"></div>
+    <details><summary>The same from the CLI</summary><div id="create-command"></div></details>
   </form>
-  <h2>Engines</h2>
-  <div id="engines"></div>
   </section>
+
+  <section id="usage-section" aria-labelledby="usage-tab" hidden>
+    <h2>Usage now</h2>
+    <p class="muted">Measured every few seconds while this page is open. CPU is the share of one CPU, so 200% is two CPUs busy. Disk is the last measurement of the disk watch, a start or a verify.</p>
+    <div id="usage" class="panel scroll"></div>
+  </section>
+
+  <section id="workspace-section" aria-labelledby="workspaces-tab" hidden>
+    <h2>Workspaces: not sandboxes</h2>
+    <div id="workspaces"></div>
+    <h2>Workspace commands</h2>
+    <div class="panel">
+      <p class="muted">Workspaces are managed from the CLI only: their methods are not open to web pages. Copy a command into a terminal.</p>
+      <div id="workspace-commands"></div>
+    </div>
+  </section>
+
+  <section id="template-section" aria-labelledby="templates-tab" hidden>
+    <h2>Templates</h2>
+    <p class="muted">A template is a sandbox's files, saved without the usual login files. Save one from a sandbox's More menu. Removing a template keeps the sandboxes made from it working.</p>
+    <div id="templates"></div>
+  </section>
+
+  <section id="machine-section" aria-labelledby="machines-tab" hidden>
+    <h2>Machines</h2>
+    <div id="machines"></div>
+    <h2>Machine commands</h2>
+    <div class="panel">
+      <p class="muted">Adding and removing machines changes SSH access and installs software, so it is done from the CLI only.</p>
+      <div id="machine-commands"></div>
+    </div>
+  </section>
+
+  <section id="extension-section" aria-labelledby="extensions-tab" hidden>
+    <h2>Extensions</h2>
+    <p class="muted">Installed extensions and their actions. An action runs a command of the extension's on this machine, with the asd command first on its PATH.</p>
+    <div id="extensions"></div>
+  </section>
+
   <section id="settings-section" aria-labelledby="settings-tab" hidden>
     <h2>Settings</h2>
     <div class="panel">
-      <label for="require-probes"><input id="require-probes" type="checkbox" disabled aria-describedby="require-probes-help"> Require isolation probes</label>
-      <p id="require-probes-help" class="muted">On by default. When off, sandboxes can be created without their isolation probes having run; they show as not verified. Failed or unsupported blocking probes still refuse creation.</p>
-      <p class="muted">Applies to this machine's daemon and future creates. A remote daemon uses its own setting. Changing this does not rerun checks or restart sandboxes.</p>
+      <div class="setting">
+        <label for="require-probes"><input id="require-probes" type="checkbox" disabled aria-describedby="require-probes-help"> Require isolation probes</label>
+        <div><p id="require-probes-help" class="muted">On by default. When off, sandboxes can be created without their isolation probes having run; they show as not verified. Failed or unsupported blocking probes still refuse creation.</p>
+        <p class="muted">Applies to this machine's daemon and future creates. A remote daemon uses its own setting. Changing this does not rerun checks or restart sandboxes.</p></div>
+      </div>
+      <div class="setting">
+        <label for="experimental"><input id="experimental" type="checkbox" disabled> Experimental features</label>
+        <p class="muted">Features not yet proven on enough machines: today, other machines. Off by default.</p>
+      </div>
+      <div class="setting">
+        <label for="disk-watch">Disk watch (seconds)</label>
+        <div><input id="disk-watch" type="number" min="1" max="30" step="1" disabled><p class="muted">Pause between two measurements of a sandbox's watched disk limit, 1 to 30. Default 5.</p></div>
+      </div>
+      <div class="setting">
+        <label for="workspace-free-space">Workspace free space (GiB)</label>
+        <div><input id="workspace-free-space" type="number" min="0" step="0.5" disabled><p class="muted">Below this much free space where workspaces live, workspace launches are refused and running workspaces are stopped. Default 5.</p></div>
+      </div>
+      <div class="setting">
+        <label for="terminal">Terminal</label>
+        <div><select id="terminal" disabled>
+          <option value="default">The Mac's default for .command files (Terminal unless changed)</option>
+          <option value="terminal">Terminal</option>
+          <option value="ghostty">Ghostty</option>
+          <option value="iterm">iTerm</option>
+          <option value="custom">Custom command</option>
+        </select>
+        <p class="muted">What a Terminal button opens. Inside, a sandbox runs bash when it has it, else sh.</p>
+        <div id="terminal-custom"></div></div>
+      </div>
       <div id="settings-error" class="error" role="status"></div>
     </div>
+    <h2>New sandboxes get</h2>
+    <form id="defaults" class="panel">
+      <div class="fields">
+        <div><label for="default-engine">Engine</label><select id="default-engine" name="engine"></select></div>
+        <div><label for="d-image">Image</label><input id="d-image" name="image"></div>
+        <div><label for="d-cpus">CPUs</label><input id="d-cpus" name="cpus" type="number" step="0.25"></div>
+        <div><label for="d-memory">Memory (GB)</label><input id="d-memory" name="memoryGb" type="number" step="0.25"></div>
+        <div><label for="d-pids">Tasks</label><input id="d-pids" name="pids" type="number" step="1"></div>
+        <div><label for="d-disk">Disk (GB)</label><input id="d-disk" name="diskGb" type="number"></div>
+        <div><label for="d-docker">Docker inside</label><select id="d-docker"><option value="">Built-in</option><option value="true">On</option><option value="false">Off</option></select></div>
+      </div>
+      <p class="muted">Blank means Asidee's built-in value, shown greyed. A create can still ask for anything else.</p>
+      <button class="primary" id="save-defaults">Save</button>
+      <div class="error" id="defaults-error" role="status"></div>
+    </form>
+    <h2>Engines</h2>
+    <div id="engines"></div>
+    <h2>About</h2>
+    <div id="about" class="panel"></div>
   </section>
 </main>
 <script>
@@ -82,7 +189,11 @@ if (hash.get("token")) { sessionStorage.setItem("asidee-token", hash.get("token"
 const token = sessionStorage.getItem("asidee-token") ?? ""
 const MARK = { pass: "✓", weak: "~", fail: "✗", unsupported: "–", unknown: "?", info: "i" }
 const WORD = { weak: "holds in a weaker form", fail: "does not hold", unsupported: "not available on this engine", unknown: "could not be checked" }
-let checklist = [], extensions = [], open = new Set(), busy = new Set(), output = {}
+const TABS = { sandboxes: "sandbox-section", usage: "usage-section", workspaces: "workspace-section", templates: "template-section", machines: "machine-section", extensions: "extension-section", settings: "settings-section" }
+// open: sandboxes whose past checks are shown; expanded: groups opened by hand, which the browser keeps open itself.
+let checklist = [], extensions = [], extensionErrors = [], open = new Set(), expanded = new Set(), busy = new Set(), output = {}, tab = "sandboxes"
+let sandboxes = [], engines = [], workspaces = [], workspaceProblem = "", forwards = [], links = [], ssh = {}, templates = [], templateProblem = ""
+let usage = [], usageProblem = "", remoteUsage = {}, machines, machineProblem = "", about, settings, savingSettings = false
 
 async function api(method, body = {}) {
   const response = await fetch(`/api/${method}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(body) })
@@ -96,117 +207,368 @@ const el = (tag, attrs = {}, ...children) => {
   node.append(...children.filter((child) => child !== null && child !== undefined && child !== false))
   return node
 }
-let settings, savingSettings = false
-const probeToggle = document.getElementById("require-probes")
+const gib = (bytes) => bytes === undefined ? "?" : bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(2)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`
+const when = (iso) => new Date(iso).toLocaleTimeString()
+// A command for the CLI, with a button that copies it. Used for everything the dashboard is not allowed to do.
+function command(text) {
+  const button = el("button", { type: "button", class: "small", onclick: async () => {
+    try { await window.navigator.clipboard.writeText(text); button.textContent = "Copied" } catch { button.textContent = "Select and copy" }
+    setTimeout(() => { button.textContent = "Copy" }, 1500)
+  } }, "Copy")
+  return el("div", { class: "cmd" }, el("code", {}, text), button)
+}
+// A closed group that stays open across refreshes once opened.
+function group(key, label, ...children) {
+  const node = el("details", { ontoggle: () => { node.open ? expanded.add(key) : expanded.delete(key) } }, el("summary", {}, label), ...children)
+  if (expanded.has(key)) node.open = true
+  return node
+}
+
 function section(name) {
-  for (const key of ["sandboxes", "settings"]) {
-    document.getElementById(key === "sandboxes" ? "sandbox-section" : "settings-section").hidden = key !== name
+  tab = name
+  for (const [key, id] of Object.entries(TABS)) {
+    document.getElementById(id).hidden = key !== name
     document.getElementById(`${key}-tab`).setAttribute("aria-pressed", String(key === name))
   }
+  void refresh()
 }
-document.getElementById("sandboxes-tab").addEventListener("click", () => section("sandboxes"))
-document.getElementById("settings-tab").addEventListener("click", () => section("settings"))
+for (const key of Object.keys(TABS)) document.getElementById(`${key}-tab`).addEventListener("click", () => section(key))
+
+// Settings. Each control saves on its own; a refresh never overwrites one that is being saved or has focus.
+const probeToggle = document.getElementById("require-probes")
+const controls = { requireProbes: probeToggle, experimental: document.getElementById("experimental"), diskWatchSeconds: document.getElementById("disk-watch"),
+  workspaceFreeSpaceGb: document.getElementById("workspace-free-space"), terminal: document.getElementById("terminal") }
+const defaultFields = { image: "d-image", cpus: "d-cpus", memoryGb: "d-memory", pids: "d-pids", diskGb: "d-disk", docker: "d-docker" }
+let defaultsDirty = false
+function showSettings() {
+  for (const [key, control] of Object.entries(controls)) {
+    control.disabled = !settings
+    if (!settings || document.activeElement === control) continue
+    if (control.type === "checkbox") control.checked = key === "requireProbes" ? settings[key] !== false : settings[key] === true
+    else control.value = String(settings[key] ?? "")
+  }
+  if (settings) controls.terminal.querySelector("option[value=custom]").disabled = !settings.terminalCommand
+  const custom = document.getElementById("terminal-custom"); custom.replaceChildren()
+  if (settings?.terminalCommand) custom.append(el("p", { class: "muted" }, "Custom command, set from the CLI:"), command(settings.terminalCommand))
+  custom.append(el("p", { class: "muted" }, "Another terminal: a custom command opens it, with {command} where the script to run goes. It runs on this Mac, so only the CLI can set it:"),
+    command("asd config set terminal-command 'kitty sh -c {command}'"))
+  if (settings && !defaultsDirty) {
+    const builtIn = about?.builtInDefaults ?? {}
+    for (const [key, id] of Object.entries(defaultFields)) {
+      const input = document.getElementById(id); const value = settings.defaults?.[key]
+      input.value = value === undefined ? "" : String(value)
+      if (input.tagName === "INPUT") input.placeholder = builtIn[key] === undefined ? "" : String(builtIn[key])
+    }
+    document.getElementById("default-engine").value = settings.engine ?? ""
+  }
+  const create = { cpus: "f-cpus", memoryGb: "f-memory", pids: "f-pids", diskGb: "f-disk", image: "f-image" }
+  for (const [key, id] of Object.entries(create)) {
+    const value = settings?.defaults?.[key] ?? about?.builtInDefaults?.[key]
+    document.getElementById(id).placeholder = value === undefined ? "" : String(value)
+  }
+}
 async function readSettings() {
   if (savingSettings) return
   try {
     const config = await api("configGet")
     if (savingSettings) return
-    settings = config; probeToggle.checked = settings.requireProbes; probeToggle.disabled = false
+    settings = config
     document.getElementById("settings-error").textContent = ""
   } catch (error) {
-    probeToggle.disabled = true
+    settings = undefined
     document.getElementById("settings-error").textContent = `Settings unavailable: ${error.message}`
   }
+  showSettings()
 }
-probeToggle.addEventListener("change", async () => {
-  savingSettings = true; probeToggle.disabled = true
+async function saveSetting(body) {
+  savingSettings = true; for (const control of Object.values(controls)) control.disabled = true
   const error = document.getElementById("settings-error"); error.textContent = ""
-  try { settings = await api("configSet", { requireProbes: probeToggle.checked }) }
+  try { settings = await api("configSet", body) }
   catch (failure) { error.textContent = failure.message }
-  probeToggle.checked = settings.requireProbes; probeToggle.disabled = false; savingSettings = false
+  savingSettings = false
+  const focused = document.activeElement; focused?.blur?.(); showSettings(); focused?.focus?.()
+}
+for (const [key, control] of Object.entries(controls)) control.addEventListener("change", () => {
+  void saveSetting({ [key]: control.type === "checkbox" ? control.checked : control.type === "number" ? Number(control.value) : control.value })
 })
+const defaultsForm = document.getElementById("defaults")
+defaultsForm.addEventListener("input", () => { defaultsDirty = true })
+defaultsForm.addEventListener("submit", async (event) => {
+  event.preventDefault()
+  const error = document.getElementById("defaults-error"); error.textContent = ""
+  const defaults = {}
+  for (const [key, id] of Object.entries(defaultFields)) {
+    const value = document.getElementById(id).value.trim()
+    if (value === "") continue
+    defaults[key] = value === "true" || value === "false" ? value === "true" : key === "image" ? value : Number(value)
+  }
+  const engine = document.getElementById("default-engine").value
+  try { settings = await api("configSet", { defaults: Object.keys(defaults).length ? defaults : null, engine: engine || null }); defaultsDirty = false; showSettings() }
+  catch (failure) { error.textContent = failure.message }
+})
+
 const title = (id) => checklist.find((item) => item.id === id)?.title ?? id
 
-async function act(name, key, task) {
-  busy.add(`${name}:${key}`); delete output[name]; render()
-  try { const result = await task(); if (result && typeof result.exitCode === "number") output[name] = `${result.stdout}${result.stderr}`.trim() || `Done (exit ${result.exitCode}).` }
-  catch (error) { output[name] = error.message }
-  busy.delete(`${name}:${key}`); await refresh()
+// key: what output and busy state belong to (a sandbox's name, or ext:ID); what: the button that started it.
+async function act(key, what, task) {
+  busy.add(`${key}:${what}`); delete output[key]; render()
+  try {
+    const result = await task()
+    if (result && typeof result.exitCode === "number") output[key] = `${result.stdout}${result.stderr}`.trim() || `Done (exit ${result.exitCode}).`
+    else if (typeof result === "string") output[key] = result
+  } catch (error) { output[key] = error.message }
+  busy.delete(`${key}:${what}`); await refresh()
 }
 
-function actionForm(sandbox, extension, action) {
+function actionForm(extension, action, sandbox) {
+  const key = sandbox ? sandbox.name : `ext:${extension.id}`
   const form = el("form", { class: "row", onsubmit: (event) => {
     event.preventDefault()
     const values = Object.fromEntries(action.fields.map((field) => [field.id, field.type === "checkbox" ? String(form.elements[field.id].checked) : form.elements[field.id].value]))
-    act(sandbox.name, `${extension.id}/${action.id}`, () => api("action", { extension: extension.id, action: action.id, sandbox: sandbox.name, values }))
+    const target = sandbox ? sandbox.name : form.elements["asidee-sandbox"]?.value
+    act(key, `${extension.id}/${action.id}`, () => api("action", { extension: extension.id, action: action.id, ...(action.scope === "sandbox" ? { sandbox: target } : {}), values }))
   } })
+  if (!sandbox && action.scope === "sandbox") form.append(el("label", { class: "grow" }, "Sandbox", el("select", { name: "asidee-sandbox" }, ...sandboxes.filter((entry) => entry.status === "running").map((entry) => el("option", {}, entry.name)))))
   for (const field of action.fields) {
     const input = field.type === "select" ? el("select", { name: field.id }, ...field.options.map((option) => el("option", {}, option)))
       : el("input", { name: field.id, type: field.type === "checkbox" ? "checkbox" : field.type, "aria-label": field.label, placeholder: field.label })
     if (field.default !== undefined) field.type === "checkbox" ? input.checked = field.default === true : input.value = field.default
     form.append(el("label", { class: field.type === "checkbox" ? "" : "grow" }, field.type === "checkbox" ? field.label + " " : "", input))
   }
-  const running = busy.has(`${sandbox.name}:${extension.id}/${action.id}`)
+  const running = busy.has(`${key}:${extension.id}/${action.id}`)
   form.append(el("button", running ? { disabled: "" } : { title: action.description ?? "" }, running ? "Running…" : action.label))
   return form
 }
 
-let sandboxes = [], engines = [], workspaces = [], workspaceProblem = "", drawn = ""
-// Rebuilds the page only when what it shows changed, so the 3-second refresh does not wipe a form someone is typing in.
-function render() {
-  const state = JSON.stringify([sandboxes, engines, workspaces, workspaceProblem, extensions, [...open], [...busy], output])
-  if (state === drawn) return
-  drawn = state
-  const list = document.getElementById("sandboxes"); list.replaceChildren()
-  if (!sandboxes.length) list.append(el("div", { class: "panel muted" }, "No sandboxes yet. Create one below."))
-  for (const sandbox of sandboxes) {
-    if (sandbox.status === "damaged") { list.append(el("div", { class: "panel" }, el("span", { class: "name" }, sandbox.name), " ", el("span", { class: "badge" }, "damaged"), el("div", { class: "error" }, sandbox.stopReason))); continue }
-    const is = (key) => busy.has(`${sandbox.name}:${key}`)
-    const button = (label, key, task, extra = {}) => el("button", { ...extra, ...(is(key) ? { disabled: "" } : {}), onclick: () => act(sandbox.name, key, task) }, is(key) ? "Working…" : label)
-    const panel = el("div", { class: "panel" },
-      el("div", { class: "row" },
-        el("div", { class: "grow" }, el("span", { class: "name" }, sandbox.name), " ", el("span", { class: `badge ${sandbox.status}` }, sandbox.status), " ", el("span", { class: "badge unknown" }, "Not verified"),
-          el("div", { class: "muted" }, `${sandbox.spec.cpus} CPU · ${sandbox.spec.memoryGb} GB memory · ${sandbox.spec.diskGb} GB disk · ${sandbox.engine}`),
-          sandbox.activity ? el("div", { class: "muted" }, `${sandbox.activity}…`) : null,
-          sandbox.lastVerify ? el("div", { class: "muted" }, `Last measured ${sandbox.lastVerify.at}. Historical only; current checks unknown.`) : null,
-          sandbox.stopReason ? el("div", { class: "muted" }, sandbox.stopReason) : null),
-        sandbox.status === "running" ? button("Stop", "stop", () => api("stop", { name: sandbox.name })) : button("Start", "start", () => api("start", { name: sandbox.name })),
-        button("Verify", "verify", async () => { open.add(sandbox.name); await api("verify", { name: sandbox.name }) }),
-        el("button", { onclick: () => { open.has(sandbox.name) ? open.delete(sandbox.name) : open.add(sandbox.name); render() } },
-          sandbox.lastVerify ? "Past checks" : "Not verified"),
-        el("button", { class: "danger", onclick: () => { const typed = prompt(`This deletes ${sandbox.name} and everything in it. Type its name to confirm.`); if (typed !== null) act(sandbox.name, "remove", () => api("remove", { name: sandbox.name, confirm: typed })) } }, "Remove")))
-    if (sandbox.status === "running") for (const extension of extensions) for (const action of extension.actions.filter((entry) => entry.scope === "sandbox")) panel.append(el("div", { style: "margin-top:10px" }, actionForm(sandbox, extension, action)))
-    if (sandbox.enforcementProblem) panel.append(el("div", { class: "error" }, `Enforcement problem at ${sandbox.enforcementProblem.at}: ${sandbox.enforcementProblem.message}`))
-    if (output[sandbox.name]) panel.append(el("pre", {}, output[sandbox.name]))
-    if (open.has(sandbox.name) && sandbox.lastVerify) {
-      panel.append(el("ul", { class: "checks" }, ...sandbox.lastVerify.results.map((check) => el("li", { class: "unknown" },
-        el("span", { class: "mark", title: "unknown" }, MARK.unknown),
-        el("span", {}, title(check.id), el("span", { class: "muted" }, " — current property unknown")),
-        el("span", { class: "detail" }, check.detail))),
-        el("li", { class: "muted" }, el("span"), `Checked ${new Date(sandbox.lastVerify.at).toLocaleString()}.`)))
-    }
-    list.append(panel)
-  }
-  const workspaceList = document.getElementById("workspaces"); workspaceList.replaceChildren()
-  for (const workspace of workspaces) workspaceList.append(el("div", { class: "panel" },
-    el("div", {}, el("span", { class: "name" }, workspace.name), `: workspace, not a sandbox; ${workspace.status}, host-temp ${workspace.spec ? workspace.spec.hostTemp ? "on (shared, weaker)" : "off" : "unknown"}, ${workspace.processes ?? "unknown"} processes`),
-    el("div", { class: "muted" }, workspace.folder), workspace.problem ? el("div", { class: "error" }, workspace.problem) : null,
-    workspace.stopReason ? el("div", { class: "error" }, workspace.stopReason) : null,
-    workspace.enforcementProblem ? el("div", { class: "error" }, `Disk watch unknown at ${workspace.enforcementProblem.at}: ${workspace.enforcementProblem.message}`) : null,
-    el("div", { class: "muted" }, workspace.disclosure), el("div", { class: "muted" }, "Use asd workspace in the CLI to stop, verify or remove. Workspace methods are socket-only.")))
-  if (workspaceProblem) workspaceList.append(el("div", { class: "panel error" }, `Workspaces unknown: ${workspaceProblem}`))
-  else if (!workspaces.length) workspaceList.append(el("div", { class: "panel muted" }, "No workspaces. A workspace is not a sandbox."))
-  const enginesNode = document.getElementById("engines"); enginesNode.replaceChildren()
-  for (const engine of engines) enginesNode.append(el("div", { class: "panel" },
-    el("div", {}, el("span", { class: "name" }, engine.label), " ", el("span", { class: `badge ${engine.ready ? "running" : ""}` }, engine.ready ? "ready" : "not ready")),
-    engine.capabilities ? el("div", { class: "muted" }, `Kernel isolation: ${engine.capabilities.kernelIsolation} · network guard: ${engine.capabilities.networkGuard ? "yes" : "no"} · disk limit: ${engine.capabilities.diskLimit}`) : null,
-    ...engine.problems.map((problem) => el("div", { class: "muted" }, problem)), engine.fix ? el("div", { class: "muted" }, `Fix: ${engine.fix}`) : null))
-  if (!engines.length) enginesNode.append(el("div", { class: "panel muted" }, "No engine found. Asidee needs Docker with a gVisor runtime."))
-  const select = document.getElementById("f-engine"); const chosen = select.value; const ready = engines.filter((engine) => engine.ready)
-  select.replaceChildren(...ready.map((engine) => el("option", { value: engine.id }, engine.label)))
-  if (!ready.length) select.append(el("option", { value: "" }, "No engine is ready"))
-  select.value = ready.some((engine) => engine.id === chosen) ? chosen : ready[0]?.id ?? ""
+// A small form whose fields go to one API call. fields: [name, label, type?]
+function miniForm(key, what, label, fields, send) {
+  const form = el("form", { class: "row", onsubmit: (event) => {
+    event.preventDefault()
+    const values = Object.fromEntries(fields.map(([name]) => [name, form.elements[name].value.trim()]))
+    act(key, what, () => send(values))
+  } }, ...fields.map(([name, text, type = "text"]) => el("label", { class: "grow" }, text, el("input", { name, type, ...(type === "number" ? { step: "any" } : {}) }))))
+  form.append(el("button", busy.has(`${key}:${what}`) ? { disabled: "" } : {}, busy.has(`${key}:${what}`) ? "Working…" : label))
+  return form
 }
+
+const terminal = (name, kind, machine) => api("openTerminal", { name, kind, ...(machine ? { machine } : {}) })
+  .then((done) => `Opened in ${done.terminal === "default" ? "the default terminal" : done.terminal}. If no window appeared, run: ${done.command}`)
+
+function sandboxPanel(sandbox) {
+  if (sandbox.status === "damaged") return el("div", { class: "panel" }, el("span", { class: "name" }, sandbox.name), " ", el("span", { class: "badge" }, "damaged"), el("div", { class: "error" }, sandbox.stopReason))
+  const name = sandbox.name
+  const is = (key) => busy.has(`${name}:${key}`)
+  const button = (label, key, task, extra = {}) => el("button", { ...extra, ...(is(key) ? { disabled: "" } : {}), onclick: () => act(name, key, task) }, is(key) ? "Working…" : label)
+  const running = sandbox.status === "running"
+  const panel = el("div", { class: "panel" },
+    el("div", { class: "row" },
+      el("div", { class: "grow" }, el("span", { class: "name" }, name), " ", el("span", { class: `badge ${sandbox.status}` }, sandbox.status), " ", el("span", { class: "badge unknown" }, "Not verified"),
+        el("div", { class: "muted" }, `${sandbox.spec.cpus} CPU · ${sandbox.spec.memoryGb} GB memory · ${sandbox.spec.diskGb} GB disk · ${sandbox.engine}`),
+        el("div", { class: "muted usage", "data-usage": name }),
+        sandbox.activity ? el("div", { class: "muted" }, `${sandbox.activity}…`) : null,
+        sandbox.diskWarning ? el("div", { class: "error" }, sandbox.diskWarning.message) : null,
+        sandbox.lastVerify ? el("div", { class: "muted" }, `Last measured ${sandbox.lastVerify.at}. Historical only; current checks unknown.`) : null,
+        sandbox.stopReason ? el("div", { class: "muted" }, sandbox.stopReason) : null),
+      running ? button("Stop", "stop", () => api("stop", { name })) : button("Start", "start", () => api("start", { name })),
+      running ? button("Terminal", "terminal", () => terminal(name, "sandbox"), { title: "Open a shell in this sandbox in a terminal window on this Mac" }) : null,
+      button("Verify", "verify", async () => { open.add(name); await api("verify", { name }) }),
+      el("button", { onclick: () => { open.has(name) ? open.delete(name) : open.add(name); render() } }, sandbox.lastVerify ? "Past checks" : "Not verified"),
+      el("button", { class: "danger", onclick: () => { const typed = prompt(`This deletes ${name} and everything in it. Type its name to confirm.`); if (typed !== null) act(name, "remove", () => api("remove", { name, confirm: typed })) } }, "Remove")))
+  if (running) for (const extension of extensions) for (const action of extension.actions.filter((entry) => entry.scope === "sandbox")) panel.append(el("div", { style: "margin-top:10px" }, actionForm(extension, action, sandbox)))
+  if (sandbox.enforcementProblem) panel.append(el("div", { class: "error" }, `Enforcement problem at ${sandbox.enforcementProblem.at}: ${sandbox.enforcementProblem.message}`))
+  if (output[name]) panel.append(el("pre", {}, output[name]))
+  if (open.has(name) && sandbox.lastVerify) {
+    panel.append(el("ul", { class: "checks" }, ...sandbox.lastVerify.results.map((check) => el("li", { class: "unknown" },
+      el("span", { class: "mark", title: "unknown" }, MARK.unknown),
+      el("span", {}, title(check.id), el("span", { class: "muted" }, " — current property unknown")),
+      el("span", { class: "detail" }, check.detail))),
+      el("li", { class: "muted" }, el("span"), `Checked ${new Date(sandbox.lastVerify.at).toLocaleString()}.`)))
+  }
+  const mine = forwards.filter((forward) => forward.name === name)
+  const myLinks = links.filter((link) => link.from === name || link.to === name)
+  const access = ssh[name]
+  panel.append(group(`more:${name}`, "More: resize, run a command, template, forwards, links, SSH, commands",
+    group(`resize:${name}`, "Resize", el("p", { class: "muted" }, "Blank keeps a limit as it is. CPUs, memory and tasks change now when the engine allows; the disk limit is the daemon's own and applies at its next measurement."),
+      miniForm(name, "resize", "Resize", [["cpus", "CPUs", "number"], ["memoryGb", "Memory (GB)", "number"], ["pids", "Tasks", "number"], ["diskGb", "Disk (GB)", "number"]], async (values) => {
+        const body = Object.fromEntries(Object.entries(values).filter(([, value]) => value !== ""))
+        const done = await api("resize", { name, ...body })
+        return done.changes.map((change) => `${change.limit}: ${change.from} → ${change.to}, ${change.applies}${change.note ? ` (${change.note})` : ""}`).join("\n") || "Nothing changed."
+      })),
+    running ? group(`exec:${name}`, "Run a command", el("p", { class: "muted" }, "Runs with sh -c inside the sandbox and shows what it printed. For anything interactive, use Terminal."),
+      miniForm(name, "exec", "Run", [["command", "Command"]], (values) => api("exec", { name, argv: ["sh", "-c", values.command] }))) : null,
+    group(`snapshot:${name}`, "Save as a template", el("p", { class: "muted" }, "Saves this sandbox's files, without the usual login files, under a template name. A running sandbox pauses for the copy."),
+      miniForm(name, "snapshot", "Save", [["as", "Template name"]], async (values) => { const done = await api("snapshot", { name, as: values.as }); return `Saved template ${done.template.name}.\n${done.contents}` })),
+    group(`forwards:${name}`, `Forwards (${mine.length})`,
+      el("p", { class: "muted" }, "127.0.0.1 on this machine to a port on the sandbox's loopback. A forward ends when the sandbox or the daemon stops. Any process on this machine can connect to it."),
+      ...mine.map((forward) => el("div", { class: "row" }, el("span", { class: "grow" }, `127.0.0.1:${forward.localPort} → port ${forward.port} inside · ${forward.connections} connections`),
+        button("Remove", `forward-${forward.id}`, () => api("forwardRemove", { id: forward.id }), { class: "small" }))),
+      running ? miniForm(name, "forward", "Add forward", [["port", "Port inside", "number"], ["localPort", "Local port (blank: same)", "number"]], async (values) => {
+        const made = await api("forwardAdd", { name, port: values.port, ...(values.localPort ? { localPort: values.localPort } : {}) })
+        return `Forwarding 127.0.0.1:${made.localPort} to port ${made.port} in ${name}.`
+      }) : el("p", { class: "muted" }, "Start the sandbox to add a forward.")),
+    group(`links:${name}`, `Links (${myLinks.length})`,
+      el("p", { class: "muted" }, "Programs in one sandbox connect to another's port, and nothing else of it. A link comes back after restarts."),
+      ...myLinks.map((link) => el("div", {}, el("div", { class: "row" }, el("span", { class: "grow" }, `${link.from} → ${link.to}:${link.port} · ${link.state}${link.reason ? ` (${link.reason})` : ""} · reach it at ${link.address}`),
+        button("Remove", `link-${link.from}-${link.to}-${link.port}`, () => api("linkRemove", { from: link.from, to: link.to, port: link.port }), { class: "small" })), el("div", { class: "muted" }, link.trust))),
+      miniForm(name, "link", "Add link", [["to", "To sandbox"], ["port", "Port", "number"]], async (values) => {
+        const made = await api("linkAdd", { from: name, to: values.to, port: values.port })
+        return `Linked: programs in ${made.from} reach ${made.to}:${made.port} at ${made.address}. ${made.trust}`
+      })),
+    group(`ssh:${name}`, "SSH and editors",
+      el("p", { class: "muted" }, "An sshd inside the sandbox, reached through the daemon with no open port. Setting it up writes to your SSH configuration, so it is done from the CLI."),
+      access ? el("div", { class: "muted" }, access.error ? access.error : `Alias ${access.alias}, user ${access.user}, home ${access.home}; ${access.batchReady ? "ready" : "not set up yet"}${access.loopbackForwarding ? "; loopback forwarding on" : ""}.`) : null,
+      el("div", { class: "row" }, button(access ? "Check again" : "Check access", "ssh", async () => { try { ssh[name] = await api("sshAccess", { name }) } catch (error) { ssh[name] = { error: error.message } } }, { class: "small" })),
+      command(`asd ssh setup ${name} --write-config`), command(`ssh ${access?.alias ?? `${name}.asidee`}`)),
+    group(`commands:${name}`, "CLI commands",
+      command(`asd shell ${name}`), command(`asd exec ${name} -- uname -a`), command(`asd verify ${name}`), command(`asd remove ${name} --confirm ${name}`))))
+  return panel
+}
+
+function usageLine(entry, sandbox) {
+  if (!entry) return ""
+  if (entry.problem) return `Usage unknown: ${entry.problem}`
+  const disk = entry.diskBytes === undefined ? "disk not measured yet" : `disk ${gib(entry.diskBytes)} of ${gib(entry.diskLimitBytes)} (at ${when(entry.diskMeasuredAt)})`
+  if (!entry.running) return sandbox?.status === "running" ? `Starting… · ${disk}` : disk
+  return `CPU ${entry.cpuPercent === undefined ? "…" : `${entry.cpuPercent}%`} of ${entry.cpus * 100}% · memory ${gib(entry.memoryBytes)} of ${gib(entry.memoryLimitBytes)} · ${entry.tasks} of ${entry.pidsLimit} tasks · ${disk}`
+}
+
+// Rebuilds a part of the page only when what it shows changed, so the refresh does not wipe a form someone is typing in.
+const drawn = {}
+function region(id, data, build) {
+  const key = JSON.stringify(data)
+  if (drawn[id] === key) return
+  drawn[id] = key
+  const node = document.getElementById(id); node.replaceChildren(); build(node)
+}
+
+function render() {
+  region("sandboxes", [sandboxes, extensions, forwards, links, ssh, [...open], [...busy], output], (list) => {
+    if (!sandboxes.length) list.append(el("div", { class: "panel muted" }, "No sandboxes yet. Create one below."))
+    for (const sandbox of sandboxes) list.append(sandboxPanel(sandbox))
+  })
+  // Live numbers are written in place, without a rebuild.
+  for (const node of document.querySelectorAll("[data-usage]")) node.textContent = usageLine(usage.find((entry) => entry.name === node.getAttribute("data-usage")), sandboxes.find((entry) => entry.name === node.getAttribute("data-usage")))
+
+  region("usage", [usage, usageProblem, remoteUsage, workspaces], (node) => {
+    const rows = (entries, machine) => entries.map((entry) => el("tr", {}, el("td", {}, machine ? `${entry.name} (${machine})` : entry.name), el("td", {}, entry.problem ? "unknown" : entry.running ? "running" : "stopped"),
+      el("td", {}, entry.running ? `${entry.cpuPercent ?? "…"}% of ${entry.cpus * 100}%` : ""), el("td", {}, entry.running ? `${gib(entry.memoryBytes)} of ${gib(entry.memoryLimitBytes)}` : ""),
+      el("td", {}, entry.running ? `${entry.tasks} of ${entry.pidsLimit}` : ""), el("td", {}, entry.diskBytes === undefined ? `not measured of ${gib(entry.diskLimitBytes)}` : `${gib(entry.diskBytes)} of ${gib(entry.diskLimitBytes)} at ${when(entry.diskMeasuredAt)}`)))
+    const remote = Object.entries(remoteUsage)
+    node.append(el("table", {}, el("thead", {}, el("tr", {}, ...["Sandbox", "State", "CPU", "Memory", "Tasks", "Disk"].map((text) => el("th", {}, text)))),
+      el("tbody", {}, ...rows(usage), ...remote.flatMap(([machine, entries]) => Array.isArray(entries) ? rows(entries, machine) : [el("tr", {}, el("td", { colspan: "6", class: "muted" }, `${machine}: ${entries}`))]))))
+    if (usageProblem) node.append(el("div", { class: "error" }, `Usage unknown: ${usageProblem}`))
+    else if (!usage.length && !remote.length) node.append(el("p", { class: "muted" }, "No sandboxes."))
+    if (workspaces.length) {
+      node.append(el("h3", {}, "Workspaces"), el("p", { class: "muted" }, "A workspace's CPU and memory are not measured; its processes are counted."))
+      node.append(el("table", {}, el("tbody", {}, ...workspaces.map((workspace) => el("tr", {}, el("td", {}, workspace.name), el("td", {}, workspace.status), el("td", {}, `${workspace.processes ?? "unknown"} processes`))))))
+    }
+  })
+
+  region("workspaces", [workspaces, workspaceProblem, [...busy], output], (list) => {
+    for (const workspace of workspaces) {
+      const key = `workspace:${workspace.name}`
+      list.append(el("div", { class: "panel" },
+        el("div", { class: "row" }, el("div", { class: "grow" }, el("span", { class: "name" }, workspace.name), `: workspace, not a sandbox; ${workspace.status}, host-temp ${workspace.spec ? workspace.spec.hostTemp ? "on (shared, weaker)" : "off" : "unknown"}, ${workspace.processes ?? "unknown"} processes${workspace.spec?.diskGb !== undefined ? `, disk limit ${workspace.spec.diskGb} GiB (watched)` : ""}`),
+          el("button", { ...(busy.has(`${key}:terminal`) ? { disabled: "" } : {}), title: "Open a shell in this workspace in a terminal window", onclick: () => act(key, "terminal", () => terminal(workspace.name, "workspace")) }, "Terminal")),
+        el("div", { class: "muted" }, workspace.folder), workspace.problem ? el("div", { class: "error" }, workspace.problem) : null,
+        workspace.stopReason ? el("div", { class: "error" }, workspace.stopReason) : null,
+        workspace.enforcementProblem ? el("div", { class: "error" }, `Disk watch unknown at ${workspace.enforcementProblem.at}: ${workspace.enforcementProblem.message}`) : null,
+        el("div", { class: "muted" }, workspace.disclosure),
+        output[key] ? el("pre", {}, output[key]) : null,
+        group(`ws-commands:${workspace.name}`, "Stop, verify, change or remove (CLI)",
+          ...[`asd workspace get ${workspace.name}`, `asd workspace verify ${workspace.name}`, `asd workspace stop ${workspace.name}`, `asd workspace set ${workspace.name} disk 20`,
+            `asd workspace set ${workspace.name} host-temp off`, `asd workspace exec ${workspace.name} -- pwd`, `asd workspace remove ${workspace.name} --confirm ${workspace.name}`].map(command))))
+    }
+    if (workspaceProblem) list.append(el("div", { class: "panel error" }, `Workspaces unknown: ${workspaceProblem}`))
+    else if (!workspaces.length) list.append(el("div", { class: "panel muted" }, "No workspaces. A workspace is not a sandbox."))
+  })
+
+  region("templates", [templates, templateProblem, [...busy], output], (list) => {
+    for (const template of templates) list.append(el("div", { class: "panel" },
+      el("div", { class: "row" }, el("div", { class: "grow" }, el("span", { class: "name" }, template.name), ` · ${gib(template.sizeBytes)} · from ${template.source} (${template.sourceImage}) · ${new Date(template.createdAt).toLocaleString()}`,
+        el("div", { class: "muted" }, `Engine ${template.engine}. Used by: ${template.dependants.length ? template.dependants.join(", ") : "no sandbox"}. Login files left out: ${template.loginsRemoved.length ? template.loginsRemoved.join(", ") : "none found"}.`)),
+        el("button", { onclick: () => { document.getElementById("f-template").value = template.name; document.getElementById("f-image").value = ""; section("sandboxes"); document.getElementById("f-name").focus() } }, "New sandbox from it"),
+        el("button", { class: "danger", ...(busy.has(`template:${template.name}:remove`) ? { disabled: "" } : {}), onclick: () => act(`template:${template.name}`, "remove", async () => { const done = await api("templateRemove", { name: template.name, engine: template.engine }); return done.note }) }, "Remove")),
+      output[`template:${template.name}`] ? el("pre", {}, output[`template:${template.name}`]) : null))
+    if (templateProblem) list.append(el("div", { class: "panel error" }, `Templates unknown: ${templateProblem}`))
+    else if (!templates.length) list.append(el("div", { class: "panel muted" }, "No templates yet."))
+  })
+
+  region("machines", [machines, machineProblem, settings?.experimental, [...busy], output], (list) => {
+    if (machineProblem) { list.append(el("div", { class: "panel muted" }, machineProblem), settings?.experimental ? null : el("button", { onclick: () => section("settings") }, "Open settings")); return }
+    for (const { machine, cached, stale } of machines?.machines ?? []) {
+      const remote = machine.host.name !== "local" ? machine.host.name : undefined
+      const panel = el("div", { class: "panel" }, el("div", {}, el("span", { class: "name" }, remote ?? "This Mac"), " ", el("span", { class: `badge ${machine.state}` }, machine.state), stale ? el("span", { class: "muted" }, " · last known, not current") : null),
+        machine.error ? el("div", { class: "error" }, machine.error) : null,
+        machine.hello ? el("div", { class: "muted" }, `Asidee ${machine.hello.version} · ${machine.host.ssh ?? ""} · service ${machine.hello.service ?? "unknown"}${machine.receivedAt ? ` · heard ${when(machine.receivedAt)}` : ""}`) : null)
+      for (const sandbox of remote ? cached?.sandboxes ?? [] : []) {
+        const key = `${remote}/${sandbox.name}`
+        const button = (label, what, task) => el("button", { class: "small", ...(busy.has(`${key}:${what}`) ? { disabled: "" } : {}), onclick: () => act(key, what, task) }, busy.has(`${key}:${what}`) ? "Working…" : label)
+        panel.append(el("div", { class: "row", style: "margin-top:8px" }, el("span", { class: "grow" }, el("span", { class: "name" }, sandbox.name), " ", el("span", { class: `badge ${sandbox.status}` }, sandbox.status), ` · ${sandbox.spec.cpus} CPU · ${sandbox.spec.memoryGb} GB · ${sandbox.spec.diskGb} GB disk`),
+          sandbox.status === "running" ? button("Stop", "stop", () => api("stop", { name: sandbox.name, host: remote })) : button("Start", "start", () => api("start", { name: sandbox.name, host: remote })),
+          sandbox.status === "running" ? button("Terminal", "terminal", () => terminal(sandbox.name, "sandbox", remote)) : null,
+          button("Verify", "verify", async () => { const done = await api("verify", { name: sandbox.name, host: remote }); return done.checks.map((check) => `${MARK[check.status] ?? "?"} ${title(check.id)}: ${check.detail}`).join("\n") })),
+          output[key] ? el("pre", {}, output[key]) : null)
+      }
+      if (remote) panel.append(group(`machine-commands:${remote}`, "CLI commands", command(`asd --host ${remote} list`), command(`asd --host ${remote} create NAME`), command(`asd host remove ${remote} --confirm ${remote}`)))
+      list.append(panel)
+    }
+  })
+
+  region("extensions", [extensions, extensionErrors, sandboxes.filter((entry) => entry.status === "running").map((entry) => entry.name), [...busy], output], (list) => {
+    for (const problem of extensionErrors) list.append(el("div", { class: "panel error" }, problem))
+    for (const extension of extensions) {
+      const key = `ext:${extension.id}`
+      const panel = el("div", { class: "panel" }, el("div", {}, el("span", { class: "name" }, extension.name), el("span", { class: "muted" }, ` · ${extension.id}`)),
+        extension.description ? el("div", { class: "muted" }, extension.description) : null,
+        extension.dir ? el("div", { class: "muted" }, `In ${extension.dir}`) : null,
+        extension.hooks?.postCreate ? el("div", { class: "muted" }, `After each create it runs: ${extension.hooks.postCreate.join(" ")}`) : null)
+      for (const action of extension.actions) panel.append(el("h3", {}, `${action.label}${action.scope === "sandbox" ? " (on a sandbox)" : ""}`),
+        action.description ? el("div", { class: "muted" }, action.description) : null, el("div", { class: "muted" }, `Runs: ${action.run.join(" ")}`), actionForm(extension, action))
+      if (!extension.actions.length) panel.append(el("div", { class: "muted" }, "No actions."))
+      if (output[key]) panel.append(el("pre", {}, output[key]))
+      panel.append(command(`asd ext run ${extension.id} ACTION [SANDBOX] --set FIELD=VALUE`))
+      list.append(panel)
+    }
+    if (!extensions.length && !extensionErrors.length) list.append(el("div", { class: "panel muted" }, "No extensions installed."))
+  })
+
+  region("engines", [engines], (list) => {
+    for (const engine of engines) list.append(el("div", { class: "panel" },
+      el("div", {}, el("span", { class: "name" }, engine.label), " ", el("span", { class: `badge ${engine.ready ? "running" : ""}` }, engine.ready ? "ready" : "not ready"), el("span", { class: "muted" }, ` · ${engine.id}`)),
+      engine.capabilities ? el("div", { class: "muted" }, `Kernel isolation: ${engine.capabilities.kernelIsolation} · network guard: ${engine.capabilities.networkGuard ? "yes" : "no"} · disk limit: ${engine.capabilities.diskLimit} · Docker inside: ${engine.capabilities.docker ? "yes" : "no"} · resize: ${engine.capabilities.resize ?? "?"} · templates: ${engine.capabilities.snapshot ? "yes" : "no"}`) : null,
+      ...engine.problems.map((problem) => el("div", { class: "muted" }, problem)), engine.fix ? el("div", { class: "muted" }, `Fix: ${engine.fix}`) : null))
+    if (!engines.length) list.append(el("div", { class: "panel muted" }, "No engine found. Asidee needs Docker with a gVisor runtime."))
+  })
+
+  region("about", [about], (node) => {
+    if (!about) { node.append(el("p", { class: "muted" }, "Unknown.")); return }
+    node.append(el("table", {}, el("tbody", {}, ...[["Version", about.build], ["Daemon", `${about.stopping ? "stopping" : "running"}, process ${about.pid}, since ${new Date(about.startedAt).toLocaleString()}`],
+      ["Platform", `${about.platform} ${about.arch}`], ["The asd command", about.cli], ["State folder", about.stateDir], ["Settings folder", about.configDir]].map(([label, value]) => el("tr", {}, el("th", {}, label), el("td", {}, el("code", {}, value)))))),
+      el("h3", {}, "Daemon"), el("p", { class: "muted" }, "Stopping the daemon stops the sandboxes it watches. It is done from the CLI."), command("asd daemon stop"), command("asd doctor"), command("asd ui"))
+  })
+
+  // Selects whose options come from the daemon keep what was chosen.
+  const ready = engines.filter((engine) => engine.ready)
+  const fill = (select, options, fallback) => { const chosen = select.value; select.replaceChildren(...options.map(([value, label]) => el("option", { value }, label))); select.value = options.some(([value]) => value === chosen) ? chosen : fallback }
+  fill(document.getElementById("f-engine"), ready.length ? ready.map((engine) => [engine.id, engine.label]) : [["", "No engine is ready"]], ready.some((engine) => engine.id === settings?.engine) ? settings.engine : ready[0]?.id ?? "")
+  fill(document.getElementById("default-engine"), [["", "The first ready engine"], ...engines.map((engine) => [engine.id, `${engine.label}${engine.ready ? "" : " (not ready)"}`])], settings?.engine ?? "")
+  fill(document.getElementById("f-template"), [["", "None"], ...templates.map((template) => [template.name, template.name])], "")
+  createCommand()
+}
+
+function createCommand() {
+  const form = document.getElementById("create"); const value = (name) => form.elements[name].value.trim()
+  const parts = ["asd create", value("name") || "NAME"]
+  if (value("dockerInside") === "true") parts.push("--docker")
+  if (value("template")) parts.push("--template", value("template")); else if (value("image")) parts.push("--image", value("image"))
+  for (const [field, flag] of [["cpus", "--cpus"], ["memoryGb", "--memory"], ["pids", "--pids"], ["diskGb", "--disk"]]) if (value(field)) parts.push(flag, value(field))
+  if (value("engine") && value("engine") !== (settings?.engine ?? engines.find((engine) => engine.ready)?.id)) parts.push("--engine", value("engine"))
+  const text = parts.join(" ")
+  const node = document.getElementById("create-command")
+  if (node.textContent !== `${text}Copy`) node.replaceChildren(command(text))
+}
+document.getElementById("create").addEventListener("input", createCommand)
 
 async function refresh() {
   try {
@@ -215,15 +577,34 @@ async function refresh() {
   } catch (error) {
     document.getElementById("notice").replaceChildren(el("div", { class: "panel error" }, token ? error.message : "Open this page with the link that `asd ui` prints."))
   }
-  await readSettings()
+  await Promise.all([
+    readSettings(),
+    api("usage").then((data) => { usage = data; usageProblem = "" }, (error) => { usage = []; usageProblem = error.message }),
+    api("forwardList").then((data) => { forwards = data }, () => { forwards = [] }),
+    api("linkList").then((data) => { links = data }, () => { links = [] }),
+    api("templateList").then((data) => { templates = data; templateProblem = "" }, (error) => { templates = []; templateProblem = error.message }),
+    tab === "settings" || !about ? api("about").then((data) => { about = data }, () => {}) : null,
+    tab === "extensions" ? api("extensions").then((data) => { extensions = data.extensions; extensionErrors = data.errors ?? [] }, () => {}) : null,
+    tab === "machines" || tab === "usage" ? refreshMachines() : null,
+  ])
   render()
+}
+
+async function refreshMachines() {
+  if (!settings?.experimental) { machines = undefined; remoteUsage = {}; machineProblem = "Other machines are experimental and off on this machine. Turn on Experimental features in Settings, then add a machine from the CLI."; return }
+  try { machines = await api("fleet"); machineProblem = "" } catch (error) { machines = undefined; machineProblem = error.message }
+  const online = (machines?.machines ?? []).filter(({ machine }) => machine.host.name !== "local" && machine.state === "online").map(({ machine }) => machine.host.name)
+  remoteUsage = Object.fromEntries(await Promise.all(online.map((host) => api("usage", { host }).then((data) => [host, data], (error) => [host, `usage unknown: ${error.message}`]))))
 }
 
 document.getElementById("create").addEventListener("submit", async (event) => {
   event.preventDefault()
-  const form = event.target; const button = form.querySelector("button"); const error = document.getElementById("create-error")
+  const form = event.target; const button = form.querySelector("button.primary"); const error = document.getElementById("create-error")
   button.disabled = true; button.textContent = "Creating…"; error.textContent = ""
-  try { const made = await api("create", Object.fromEntries(new FormData(form))); open.add(made.sandbox.name); form.reset() }
+  const { dockerInside, ...body } = Object.fromEntries(new FormData(form))
+  if (dockerInside) body.docker = dockerInside === "true"
+  if (!body.template) delete body.template
+  try { const made = await api("create", body); open.add(made.sandbox.name); form.reset() }
   catch (failure) {
     error.textContent = failure.message
     if (failure.code === "probes-required") error.append(" ", el("button", { type: "button", onclick: () => { section("settings"); probeToggle.focus() } }, "Open settings"))
@@ -232,7 +613,7 @@ document.getElementById("create").addEventListener("submit", async (event) => {
 })
 
 ;(async () => {
-  try { [checklist, engines, { extensions }] = await Promise.all([api("checklist"), api("engines"), api("extensions")]) } catch {}
+  try { [checklist, engines, { extensions, errors: extensionErrors = [] }] = await Promise.all([api("checklist"), api("engines"), api("extensions")]) } catch {}
   await refresh(); setInterval(refresh, 3000)
   window.asideeRefresh = refresh
 })()

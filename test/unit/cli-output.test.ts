@@ -194,20 +194,37 @@ test("transport stdio hands SSH every byte the daemon sent before it exits, even
 
 test("config get/set route settings and support JSON; invalid commands are refused", async () => {
   const calls: unknown[] = []
-  const asidee = await daemon({ configGet: (body: unknown) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5 } } },
-    configSet: (body: { requireProbes?: boolean; experimental?: boolean; workspaceFreeSpaceGb?: number; diskWatchSeconds?: number }) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: body.requireProbes ?? true, experimental: body.experimental ?? false, workspaceFreeSpaceGb: body.workspaceFreeSpaceGb ?? 5, diskWatchSeconds: body.diskWatchSeconds ?? 5 } } } })
-  expect(await asidee("config", "get")).toMatchObject({ code: 0, out: "require-probes on\nexperimental off\nworkspace-free-space 5 GiB\ndisk-watch 5 s\n" })
+  const asidee = await daemon({ configGet: (body: unknown) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5, terminal: "default" } } },
+    configSet: (body: { requireProbes?: boolean; experimental?: boolean; workspaceFreeSpaceGb?: number; diskWatchSeconds?: number }) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: body.requireProbes ?? true, experimental: body.experimental ?? false, workspaceFreeSpaceGb: body.workspaceFreeSpaceGb ?? 5, diskWatchSeconds: body.diskWatchSeconds ?? 5, terminal: "default" } } } })
+  expect(await asidee("config", "get")).toMatchObject({ code: 0, out: "require-probes on\nexperimental off\nworkspace-free-space 5 GiB\ndisk-watch 5 s\nengine auto\ndefault-image auto (docker/sandbox-templates:shell-docker)\ndefault-cpus auto (2)\ndefault-memory auto (4 GiB)\ndefault-pids auto (4096)\ndefault-disk auto (20 GiB)\ndefault-docker auto (off)\nterminal default\nterminal-command none\n" })
   expect(await asidee("config", "set", "disk-watch", "1")).toMatchObject({ code: 0, out: "disk-watch 1 s\n" })
   expect(await asidee("config", "set", "workspace-free-space", "12.5")).toMatchObject({ code: 0, out: "workspace-free-space 12.5 GiB\n" })
   expect(await asidee("config", "set", "require-probes", "off")).toMatchObject({ code: 0, out: "require-probes off\n" })
   expect(await asidee("config", "set", "experimental", "on")).toMatchObject({ code: 0, out: "experimental on\n" })
   const json = await asidee("--host", "build", "config", "set", "require-probes", "on", "--json")
-  expect(JSON.parse(json.out)).toEqual({ ok: true, data: { defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5 } })
+  expect(JSON.parse(json.out)).toEqual({ ok: true, data: { defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5, terminal: "default" } })
   expect(calls).toEqual([{}, { diskWatchSeconds: 1 }, { workspaceFreeSpaceGb: 12.5 }, { requireProbes: false }, { experimental: true }, { host: "build", requireProbes: true }])
   expect(JSON.parse((await asidee("config", "get", "--json")).out).data.requireProbes).toBe(true)
   for (const args of [["get", "extra"], ["set", "require-probes", "false"], ["set", "require-probes"], ["set", "bogus", "on"], ["set", "experimental", "yes"], ["set", "workspace-free-space", "lots"], ["set", "workspace-free-space", "on"], ["set", "disk-watch", "fast"], ["set", "disk-watch"], ["set", "require-probes", "5"]]) {
     expect((await asidee("config", ...args)).code).toBe(2)
   }
+})
+
+test("config sets the engine, what a new sandbox gets and the terminal; the custom command goes through its own method", async () => {
+  const calls: Array<[string, unknown]> = []
+  let config: Record<string, unknown> = { defaults: { cpus: 1 }, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5, terminal: "default" }
+  const set = (method: string) => (body: Record<string, unknown>) => { calls.push([method, body]); config = { ...config, ...body }; for (const key of Object.keys(body)) if (body[key] === null) delete config[key]; return { ok: true, data: config } }
+  const asidee = await daemon({ configGet: () => ({ ok: true, data: config }), configSet: set("configSet"), terminalCommandSet: (body: Record<string, unknown>) => set("terminalCommandSet")({ ...body, terminal: body.terminalCommand === null ? "default" : "custom" }) })
+  expect(await asidee("config", "set", "engine", "gvisor:orbstack")).toMatchObject({ code: 0, out: "engine gvisor:orbstack\n" })
+  expect(await asidee("config", "set", "engine", "auto")).toMatchObject({ code: 0, out: "engine auto\n" })
+  expect(await asidee("config", "set", "default-memory", "8")).toMatchObject({ code: 0, out: "default-memory 8 GiB\n" })
+  expect(await asidee("config", "set", "default-docker", "on")).toMatchObject({ code: 0, out: "default-docker on\n" })
+  expect(await asidee("config", "set", "default-cpus", "auto")).toMatchObject({ code: 0, out: "default-cpus auto (2)\n" })
+  expect(await asidee("config", "set", "terminal", "ghostty")).toMatchObject({ code: 0, out: "terminal ghostty\n" })
+  expect(await asidee("config", "set", "terminal-command", "kitty sh -c {command}")).toMatchObject({ code: 0, out: "terminal-command kitty sh -c {command} (terminal custom)\n" })
+  expect(await asidee("config", "set", "terminal-command", "none")).toMatchObject({ code: 0, out: "terminal-command none (terminal default)\n" })
+  expect(calls).toEqual([["configSet", { engine: "gvisor:orbstack" }], ["configSet", { engine: null }], ["configSet", { defaults: { cpus: 1, memoryGb: 8 } }], ["configSet", { defaults: { cpus: 1, memoryGb: 8, docker: true } }],
+    ["configSet", { defaults: { memoryGb: 8, docker: true } }], ["configSet", { terminal: "ghostty" }], ["terminalCommandSet", { terminalCommand: "kitty sh -c {command}", terminal: "custom" }], ["terminalCommandSet", { terminalCommand: null, terminal: "default" }]])
 })
 
 test("a required-probe refusal prints the reason and exact local or hosted command with exit 6", async () => {

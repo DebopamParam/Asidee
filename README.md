@@ -141,7 +141,8 @@ distinct `port (process)` listeners; `--json` keeps the full detail. When stop, 
 its stderr says why before the session ends. Signal exits use 128 plus the signal number (137 for SIGKILL).
 
 Workspaces require macOS and Bun, without a Docker engine. The separate workspace checklist never weakens the
-sandbox checklist. All workspace methods are socket-only; the dashboard displays them in their own section.
+sandbox checklist. All workspace methods are socket-only; the dashboard displays them in their own section, with each change as a CLI
+command to copy, and a Terminal button.
 See [macOS workspaces](docs/workspaces.md) and [their separate K scorecard](evals/SCORECARD.workspace.md) for controls,
 removal limits and login status. The full sandbox scorecards were not regenerated for this feature.
 

@@ -12,9 +12,10 @@ import { PROTOCOL } from "./transport"
 import { DockerSandboxesProvider } from "./providers/docker-sandboxes"
 import { GvisorProvider } from "./providers/gvisor"
 import { OUTPUT_LIMIT, systemRunner } from "./run"
-import { checkSocketPath, daemonFile, DEFAULT_DISK_WATCH_SECONDS, socketPath, streamSocketPath, type Dirs } from "./state"
+import { checkSocketPath, daemonFile, DEFAULT_DISK_WATCH_SECONDS, DEFAULT_SPEC, socketPath, streamSocketPath, type Dirs } from "./state"
 import { sourceDigest } from "./source" with { type: "macro" }
 import { serveStream } from "./stream"
+import { openTerminal } from "./terminal"
 import { AsideeError, type ErrorCode } from "./types"
 import builtInUi from "../ui/index.html" with { type: "text" }
 import pkg from "../package.json"
@@ -27,6 +28,7 @@ export const VERSION: string = pkg.version
 // The version plus when this program file was written. A daemon left running by an older build of the same version
 // (a rebuild during development) has another one, and the CLI replaces it.
 export const BUILD: string = (() => { try { return `${VERSION}+${Math.round(statSync(Bun.main.startsWith("/$bunfs/") ? process.execPath : Bun.main).mtimeMs)}` } catch { return VERSION } })()
+const STARTED = new Date().toISOString()
 // What this program was built from: two machines talk only when it is the same (core/machines.ts, compatible).
 export const SOURCE: string = sourceDigest()
 const DEFAULT_PORT = 7717
@@ -80,6 +82,15 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     sshPrepare: { run: (body) => core.sshSetup(String(body.name), false, typeof body.publicKey === "string" ? body.publicKey : ""), socketOnly: true },
     configGet: { run: () => core.configGet() },
     configSet: { run: async (body) => { const config = await core.configSet(body); if (!config.experimental) machines?.suspend(); return config } },
+    // The custom terminal command runs on this Mac as the user, so only the CLI sets it (core/terminal.ts).
+    terminalCommandSet: { run: async (body) => {
+      // Setting a command chooses it; clearing it goes back to the default terminal if it was chosen.
+      const clear = typeof body.terminalCommand !== "string"
+      return core.configSet({ terminalCommand: clear ? null : body.terminalCommand, ...(!clear ? { terminal: "custom" } : (await core.configGet()).terminal === "custom" ? { terminal: "default" } : {}) }, true)
+    }, socketOnly: true },
+    about: { run: async () => ({ version: VERSION, build: BUILD, platform: process.platform, arch: process.arch, pid: process.pid, startedAt: STARTED, stopping: stopping(), stateDir: core.dirs.state, configDir: core.dirs.config, cli: join(core.cliDir, "asd"), builtInDefaults: DEFAULT_SPEC }) },
+    usage: { run: () => core.usage() },
+    openTerminal: { run: (body) => openTerminal(core.dirs, core.cliDir, systemRunner, { name: String(body.name), kind: body.kind === "workspace" ? "workspace" : body.kind === undefined ? "sandbox" : body.kind as "sandbox", ...(typeof body.machine === "string" ? { machine: body.machine } : {}) }) },
     checklist: { run: async () => CHECKLIST },
     engines: { run: () => core.engines() },
     list: { run: () => core.list() },

@@ -18,7 +18,7 @@ import type { HostPlan } from "../core/hosts"
 import { hostOption, type FleetView, type HostView } from "../core/machines"
 import { bounded, PROTOCOL, transportStdio } from "../core/transport"
 import { included, userConfig, type SshAccess } from "../core/ssh"
-import { checkSocketPath, defaultDirs, socketPath, streamSocketPath, type Config } from "../core/state"
+import { checkSocketPath, DEFAULT_SPEC, defaultDirs, socketPath, streamSocketPath, type Config } from "../core/state"
 import { dataFrames, frame, FrameReader, type OpenRequest, type EnrollmentRequest } from "../core/stream"
 import { AsideeError, type CheckResult, type DiskWarning, type Engine, type ErrorCode, type RunResult, type Template } from "../core/types"
 
@@ -62,6 +62,13 @@ const GROUPS: Array<[string, string[]]> = [
     "asd config set workspace-free-space GiB below this much free space, workspace launches are refused and running",
     "                                           workspaces are stopped (default 5; 0 turns it off; purgeable space not counted)",
     "asd config set disk-watch SECONDS      pause between two measurements of a watched disk limit (default 5; 1 to 30)",
+    "asd config set engine ID|auto          engine for new sandboxes, as asd doctor prints it (auto: the first ready one)",
+    "asd config set default-KEY VALUE|auto  what a new sandbox gets: default-image, default-cpus, default-memory (GiB),",
+    "                                           default-pids, default-disk (GiB), default-docker on|off",
+    "asd config set terminal NAME           what the dashboard's Terminal button opens: default (the app for .command",
+    "                                           files), terminal, ghostty, iterm, custom",
+    "asd config set terminal-command CMD|none  a command that opens a terminal, with {command} where the script to run",
+    "                                           goes, e.g. 'kitty sh -c {command}'; sets terminal to custom",
   ]],
   ["Workspaces: on this Mac's own kernel, not a sandbox (macOS only)", [
     "asd workspace create NAME [--host-temp] [--disk GiB] [--copy PATH] [--read PATH]… [--path DIR]… [--no-logins | --claude-profile NAME --codex-profile NAME]",
@@ -193,6 +200,12 @@ function detailLines(details: unknown): string[] {
 // A refused enrollment says what was changed and what was left, which is longer than other errors: all of it, on one line.
 const refusal = (message: string) => shown(message.replace(/\s+/g, " "), true)
 
+// The config words for what a new sandbox gets, and the fields of `defaults` they set.
+const DEFAULT_KEYS: Record<string, keyof typeof DEFAULT_SPEC> = Object.fromEntries((Object.keys(DEFAULT_SPEC) as Array<keyof typeof DEFAULT_SPEC>).map((field) => [`default-${field.replace(/Gb$/, "").toLowerCase()}`, field]))
+const defaultShown = (config: Config, field: keyof typeof DEFAULT_SPEC) => {
+  const text = (value: unknown) => typeof value === "boolean" ? value ? "on" : "off" : field === "memoryGb" || field === "diskGb" ? `${value} GiB` : String(value)
+  return config.defaults[field] === undefined ? `auto (${text(DEFAULT_SPEC[field])})` : text(config.defaults[field])
+}
 const EXIT: Record<ErrorCode, number> = { runtime: 1, usage: 2, "not-found": 3, conflict: 4, dependency: 5, "check-failed": 6, "probes-required": 6, offline: 7, incompatible: 8, "identity-changed": 9, "outcome-unknown": 10 }
 let selectedHost: string | undefined
 const dirs = defaultDirs()
@@ -405,10 +418,22 @@ async function main(argv: string[]): Promise<void> {
         const settings: Record<string, keyof Config> = { "require-probes": "requireProbes", experimental: "experimental" }
         const numbers: Record<string, keyof Config> = { "workspace-free-space": "workspaceFreeSpaceGb", "disk-watch": "diskWatchSeconds" }
         const number = Object.hasOwn(numbers, key ?? "") && /^\d+(\.\d+)?$/.test(value ?? "")
+        if (action === "set" && positionals.length === 3 && (key === "engine" || key === "terminal" || key === "terminal-command" || Object.hasOwn(DEFAULT_KEYS, key!))) {
+          const field = DEFAULT_KEYS[key!]
+          const current = field ? await call<Config>("configGet") : undefined
+          const defaults = field ? { ...current!.defaults } as Record<string, unknown> : {}
+          if (field) { if (value === "auto") delete defaults[field]; else defaults[field] = typeof DEFAULT_SPEC[field] === "boolean" ? value === "on" ? true : value === "off" ? false : value : field === "image" ? value : Number(value) }
+          const config = key === "terminal-command" ? await call<Config>("terminalCommandSet", { terminalCommand: value === "none" ? null : value })
+            : await call<Config>("configSet", key === "engine" ? { engine: value === "auto" ? null : value } : key === "terminal" ? { terminal: value } : { defaults })
+          const shownValue = key === "engine" ? config.engine ?? "auto" : key === "terminal" ? config.terminal : key === "terminal-command" ? `${config.terminalCommand ?? "none"} (terminal ${config.terminal})` : defaultShown(config, field!)
+          return out(config, () => console.log(`${key} ${shownValue}`))
+        }
         if (!((action === "get" && positionals.length === 1) || (action === "set" && positionals.length === 3 && (number || (Object.hasOwn(settings, key!) && (value === "on" || value === "off"))))))
-          throw new AsideeError("usage", "Use asd config get, asd config set require-probes|experimental on|off, asd config set workspace-free-space GiB, or asd config set disk-watch SECONDS.")
+          throw new AsideeError("usage", "Use asd config get, asd config set require-probes|experimental on|off, workspace-free-space GiB, disk-watch SECONDS, engine ID|auto, default-KEY VALUE|auto, terminal NAME, or terminal-command CMD|none. See asd config --help.")
         const config = await call<Config>(action === "get" ? "configGet" : "configSet", action === "get" ? {} : number ? { [numbers[key!]!]: Number(value) } : { [settings[key!]!]: value === "on" })
-        const lines = { "require-probes": config.requireProbes ? "on" : "off", experimental: config.experimental ? "on" : "off", "workspace-free-space": `${config.workspaceFreeSpaceGb} GiB`, "disk-watch": `${config.diskWatchSeconds} s` }
+        const lines = { "require-probes": config.requireProbes ? "on" : "off", experimental: config.experimental ? "on" : "off", "workspace-free-space": `${config.workspaceFreeSpaceGb} GiB`, "disk-watch": `${config.diskWatchSeconds} s`, engine: config.engine ?? "auto",
+          ...Object.fromEntries(Object.entries(DEFAULT_KEYS).map(([name, field]) => [name, defaultShown(config, field)])),
+          terminal: config.terminal, "terminal-command": config.terminalCommand ?? "none" }
         return out(config, () => { for (const [name, text] of Object.entries(lines)) if (action === "get" || name === key) console.log(`${name} ${text}`) })
       }
       case "workspace": {
