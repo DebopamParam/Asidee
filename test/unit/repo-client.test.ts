@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { createHash } from "node:crypto"
-import { chmod, readFile } from "node:fs/promises"
+import { chmod, mkdir, readdir, readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { deflateSync } from "node:zlib"
 import { clone, MAX_BUNDLE_BYTES, parseBundle, repository, save } from "../../extensions/repo/repo"
@@ -109,6 +109,13 @@ test("clone uses only a guest gh helper, leaves a clean credential-free remote, 
   expect(config).not.toContain("credential")
   expect(config).not.toContain("token")
   await expect(clone(transport.runner, "demo", "owner/repo", "workspace")).rejects.toThrow("failed")
+  // An empty directory, as images ship ~/workspace, takes the clone; one with anything in it does not.
+  await mkdir(join(home, "empty"))
+  await clone(transport.runner, "demo", "owner/repo", "empty")
+  expect(await Bun.file(join(home, "empty/tracked")).text()).toBe("committed")
+  await put(home, "busy/note", "mine")
+  await expect(clone(transport.runner, "demo", "owner/repo", "busy")).rejects.toThrow("failed")
+  expect(await readdir(join(home, "busy"))).toEqual(["note"])
 })
 
 test("save cannot prune existing host tags or run hooks under aggressive host fetch settings", async () => {

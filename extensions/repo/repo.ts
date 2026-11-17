@@ -115,5 +115,5 @@ export async function main(argv: string[], env = process.env): Promise<void> {
   } else throw new Error("Use clone or save.")
 }
 // The command line, run by Bun directly or from inside the asd binary for an installed extension.
-export const command = (argv: string[]) => main(argv).catch(() => { console.error("Repository operation failed. Clone needs a new guest path; save needs a committed branch, host Git and an export of at most 128 MiB. Subprocess output withheld."); process.exitCode = 1 })
+export const command = (argv: string[]) => main(argv).catch(() => { console.error("Repository operation failed. Clone needs a new or empty guest path; save needs a committed branch, host Git and an export of at most 128 MiB. Subprocess output withheld."); process.exitCode = 1 })
 if (import.meta.main) command(process.argv.slice(2))

@@ -5,7 +5,7 @@ import { agentName, run } from "./client"
 import { discoverProfiles } from "./credentials"
 import { importGithub, importLogin, listLogins, logout, type Login } from "./logins"
 
-const HELP = `Asidee logins (requires Bun here and Node in the running sandbox)
+const HELP = `Asidee logins (needs Node in the running sandbox)
   login.ts profiles claude|codex
   login.ts import NAME claude|codex [--profile default] [--target PROFILE] [--setup] [--replace]
   login.ts github NAME [--gh [--account ACCOUNT]] [--replace]

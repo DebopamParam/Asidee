@@ -89,6 +89,9 @@ PermitOpen 127.0.0.1:* localhost:*
 Subsystem sftp internal-sftp
 LogLevel ERROR
 EOF
+# Sessions get the PATH exec gets (the image's), not sshd's own; an sshd older than 8.7 lacks SetEnv, so it goes without.
+printf 'SetEnv "PATH=%s"\\n' "$PATH" >> "$dir/sshd_config"
+"$sshd" -t -f "$dir/sshd_config" 2>/dev/null || sed -i '$d' "$dir/sshd_config"
 # sshd refuses even a key for an account whose password is locked (a leading !). * still allows no password.
 unlocked=no
 if [ -w /etc/shadow ] && grep -q "^$user:!" /etc/shadow; then sed -i "s/^$user:![^:]*:/$user:*:/" /etc/shadow; unlocked=yes; fi

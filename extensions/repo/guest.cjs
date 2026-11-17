@@ -21,7 +21,9 @@ async function main() {
   safeDir(work)
   if (input.action === "clone") {
     if (typeof input.repository !== "string" || !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/.test(input.repository) || input.repository.endsWith(".git")) fail()
-    if (fs.existsSync(work)) fail()
+    // A missing path or an empty directory (images often ship an empty ~/workspace); a rename onto anything else fails.
+    const vacant = () => { try { const stat = fs.lstatSync(work); return stat.isDirectory() && fs.readdirSync(work).length === 0 } catch (e) { if (e.code === "ENOENT") return true; throw e } }
+    if (!vacant()) fail()
     fs.mkdirSync(path.dirname(work), { recursive: true, mode: 0o700 })
     const staging = fs.mkdtempSync(path.join(path.dirname(work), ".asidee-clone-"))
     try {
@@ -31,7 +33,7 @@ async function main() {
       const result = cp.spawnSync("git", args, { stdio: "ignore", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } })
       if (result.status !== 0) fail()
       // Never merge into an existing guest checkout.
-      if (fs.existsSync(work)) fail()
+      if (!vacant()) fail()
       fs.renameSync(path.join(staging, "repo"), work)
       return { cloned: true }
     } finally { fs.rmSync(staging, { recursive: true, force: true }) }

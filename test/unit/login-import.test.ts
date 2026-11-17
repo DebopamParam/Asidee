@@ -32,7 +32,7 @@ function guestRunner(guestHome: string, prefix = "") {
     expect(argv.join(" ")).not.toContain(secret)
     const at = argv.indexOf("--")
     expect(argv.slice(at + 1, at + 3)).toEqual(["node", "-e"])
-    expect(argv.includes("--stdin")).toBe(stdin !== undefined)
+    expect(argv.includes("--stream")).toBe(stdin !== undefined)
     const child = Bun.spawn([process.execPath, "-e", prefix + argv[at + 3], ...argv.slice(at + 4)], {
       env: { ...process.env, HOME: guestHome, XDG_CONFIG_HOME: join(guestHome, ".config"), GH_CONFIG_DIR: join(guestHome, ".config/gh") },
       stdin: stdin === undefined ? "ignore" : new Blob([stdin]), stdout: "pipe", stderr: "pipe",
@@ -239,7 +239,7 @@ test("failed runner output, spawn errors, invalid JSON and CLI parsing never bec
 
 test("terminal stdin and manifest fields work through a fake asd command without putting secrets in argv", async () => {
   const h = await home(), g = await home(), bin = join(h, "bin")
-  await put(h, "bin/asd", `#!${process.execPath}\nconst fs = require("fs");\nfs.appendFileSync(process.env.CALLS, JSON.stringify(process.argv.slice(2)) + "\\n");\nconst args = process.argv.slice(2), at = args.indexOf("--");\nconst child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(githubFixture)} + args[at + 3], ...args.slice(at + 4)], { env: { ...process.env, HOME: process.env.GUEST_HOME }, stdin: args.includes("--stdin") ? new Blob([await Bun.stdin.text()]) : "ignore", stdout: "inherit", stderr: "inherit" });\nprocess.exitCode = await child.exited;\n`, 0o700)
+  await put(h, "bin/asd", `#!${process.execPath}\nconst fs = require("fs");\nfs.appendFileSync(process.env.CALLS, JSON.stringify(process.argv.slice(2)) + "\\n");\nconst args = process.argv.slice(2), at = args.indexOf("--");\nconst child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(githubFixture)} + args[at + 3], ...args.slice(at + 4)], { env: { ...process.env, HOME: process.env.GUEST_HOME }, stdin: args.includes("--stream") ? new Blob([await Bun.stdin.text()]) : "ignore", stdout: "inherit", stderr: "inherit" });\nprocess.exitCode = await child.exited;\n`, 0o700)
   const env = { ...process.env, HOME: h, GH_CONFIG_DIR: join(g, ".config/gh"), XDG_CONFIG_HOME: join(g, ".config"), PATH: `${bin}:${process.env.PATH}`, GUEST_HOME: g, CALLS: join(h, "calls.jsonl") }
   const cli = join(import.meta.dir, "../../extensions/logins/login.ts")
   const invoke = async (args: string[], input?: string, fields: Record<string, string> = {}) => {
