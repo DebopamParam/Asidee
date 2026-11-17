@@ -702,7 +702,7 @@ async function main(argv: string[]): Promise<void> {
           const config = given.default ? await call<Config>("configSet", { defaults: { ...Object.fromEntries(Object.entries((await call<Config>("configGet")).defaults).filter(([key]) => key !== "image")), template: name } }) : await call<Config>("configGet")
           return out(prepared, () => {
             console.log(`\nSaved template ${shown(prepared.template.name)} (${(prepared.template.sizeBytes / 1024 ** 2).toFixed(0)} MB) on ${shown(prepared.template.engine)}. It has:\n${prepared.tools.map((line) => `  ${shown(line)}`).join("\n")}`)
-            console.log(config.defaults.template === name ? `New sandboxes start from it. Back to the plain image: asd config set default-template auto` : `Use it: asd create NAME --template ${name}. Make it the default: asd config set default-template ${name}`)
+            console.log(config.defaults.template === name ? `New sandboxes start from it. Back to the plain image: ${next("config", "set", "default-template", "auto")}` : `Use it: ${next("create", "NAME", "--template", name)}. Make it the default: ${next("config", "set", "default-template", name)}`)
           })
         }
         if (rest[0] === "list" || rest[0] === undefined) {
