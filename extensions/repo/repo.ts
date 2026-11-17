@@ -6,6 +6,8 @@ import { isAbsolute, join, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { checked, exec, json, object, run, sandboxName, type Runner } from "./client"
 import { inspectBundle } from "./bundle"
+// Embedded, so the extension also runs from inside the asd binary.
+import GUEST from "./guest.cjs" with { type: "text" }
 
 // The inflated limits in bundle.ts allow about 128 MiB of pack; the transfer cap matches them.
 export const MAX_BUNDLE_BYTES = 128 * 1024 * 1024
@@ -32,7 +34,7 @@ function workspace(value: string): string {
   if (!value || value.length > 4096 || /[\0\r\n]/.test(value)) throw new Error("Give a guest workspace path.")
   return value
 }
-const source = () => Bun.file(join(import.meta.dir, "guest.cjs")).text()
+const source = async () => GUEST
 async function guest(runner: Runner, name: string, input: { action: "clone"; repository: string; workspace: string }): Promise<unknown> {
   return json(await exec(runner, name, ["node", "-e", await source()], JSON.stringify(input)))
 }
@@ -112,4 +114,6 @@ export async function main(argv: string[], env = process.env): Promise<void> {
     console.log(JSON.stringify(await save(run, { name, workspace: work, target, branch: (values.branch ?? env.ASIDEE_FIELD_BRANCH) || undefined })))
   } else throw new Error("Use clone or save.")
 }
-if (import.meta.main) main(process.argv.slice(2)).catch(() => { console.error("Repository operation failed. Clone needs a new guest path; save needs a committed branch, host Git and an export of at most 128 MiB. Subprocess output withheld."); process.exitCode = 1 })
+// The command line, run by Bun directly or from inside the asd binary for an installed extension.
+export const command = (argv: string[]) => main(argv).catch(() => { console.error("Repository operation failed. Clone needs a new guest path; save needs a committed branch, host Git and an export of at most 128 MiB. Subprocess output withheld."); process.exitCode = 1 })
+if (import.meta.main) command(process.argv.slice(2))

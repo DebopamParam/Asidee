@@ -1,5 +1,6 @@
-import { readdir, readFile } from "node:fs/promises"
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { isAbsolute, join } from "node:path"
+import { BUNDLED } from "../extensions/catalog"
 import { AsideeError, type RunResult, type Runner } from "./types"
 import type { Dirs } from "./state"
 
@@ -11,7 +12,8 @@ import type { Dirs } from "./state"
 
 export type Field = { id: string; label: string; type: "text" | "number" | "checkbox" | "select"; options?: string[]; default?: string | number | boolean; required?: boolean }
 export type Action = { id: string; label: string; description?: string; scope: "sandbox" | "global"; fields: Field[]; run: string[] }
-export type Extension = { id: string; name: string; description?: string; dir: string; actions: Action[]; hooks: { postCreate?: string[] } }
+export type Extension = { id: string; name: string; description?: string; dir: string; actions: Action[]; hooks: { postCreate?: string[] }; bundled?: boolean }
+export type Available = { id: string; name: string; description?: string; installed: boolean }
 
 const ID = /^[a-z0-9][a-z0-9-]{0,40}$/
 const isCommand = (value: unknown): value is string[] => Array.isArray(value) && value.length > 0 && value.every((part) => typeof part === "string")
@@ -43,10 +45,63 @@ export async function loadExtensions(dirs: Dirs): Promise<{ extensions: Extensio
   for (const entry of (await readdir(root, { withFileTypes: true }).catch(() => [])).sort((a, b) => a.name.localeCompare(b.name))) {
     if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
     const dir = join(root, entry.name)
-    try { extensions.push(parseExtension(entry.name, dir, JSON.parse(await readFile(join(dir, "extension.json"), "utf8")))) }
+    try {
+      const raw: unknown = JSON.parse(await readFile(join(dir, "extension.json"), "utf8"))
+      if (!marker(raw)) extensions.push(parseExtension(entry.name, dir, raw))
+      else if (raw.bundled === entry.name && Object.hasOwn(BUNDLED, entry.name)) extensions.push(bundled(entry.name, dir))
+      else throw new AsideeError("usage", `Extension ${entry.name}: it names a bundled extension this asd does not have.`)
+    }
     catch (error) { errors.push(error instanceof AsideeError ? error.message : `Extension ${entry.name}: ${(error as Error).message}`) }
   }
   return { extensions, errors }
+}
+
+// The command that runs a bundled extension's code inside the asd binary.
+export const BUNDLED_RUN = "extension-run"
+const marker = (raw: unknown): raw is { bundled: unknown } => typeof raw === "object" && raw !== null && !Array.isArray(raw) && "bundled" in raw
+
+// An installed bundled extension is a folder holding only {"bundled": ID}. Its declaration comes from this binary and
+// each of its commands is run by asd itself, so it needs no Bun and an upgrade of asd updates it.
+function bundled(id: string, dir: string): Extension {
+  const declaration = BUNDLED[id] as { actions?: Array<{ run: string[] }> }
+  const actions = (declaration.actions ?? []).map((action) => ({ ...action, run: ["asd", BUNDLED_RUN, id, ...action.run.slice(1)] }))
+  return { ...parseExtension(id, dir, { ...declaration, actions }), bundled: true }
+}
+
+export function availableExtensions(installed: readonly Extension[]): Available[] {
+  return Object.keys(BUNDLED).map((id) => {
+    const { name, description } = BUNDLED[id] as { name: string; description?: string }
+    return { id, name, description, installed: installed.some((extension) => extension.id === id && extension.bundled === true) }
+  })
+}
+
+function bundledId(id: unknown): string {
+  if (typeof id !== "string" || !Object.hasOwn(BUNDLED, id)) throw new AsideeError("not-found", `No bundled extension is named ${String(id).slice(0, 60)}. Bundled: ${Object.keys(BUNDLED).join(", ")}.`)
+  return id
+}
+const installedMarker = (dir: string) => readFile(join(dir, "extension.json"), "utf8").then((text) => JSON.parse(text) as unknown, () => undefined)
+
+// Never writes over a folder of the user's own: only a missing one, or the marker of the same bundled extension.
+export async function installExtension(dirs: Dirs, id: unknown): Promise<Extension> {
+  const name = bundledId(id); const dir = join(dirs.config, "extensions", name)
+  const existing = await installedMarker(dir)
+  if (await stat(dir).then(() => true, () => false) && !(marker(existing) && existing.bundled === name))
+    throw new AsideeError("conflict", `${dir} already exists and is not the bundled ${name}, so it was not changed. Move it away first.`)
+  await mkdir(dir, { recursive: true, mode: 0o700 })
+  await writeFile(join(dir, "extension.json"), `${JSON.stringify({ bundled: name })}\n`)
+  return bundled(name, dir)
+}
+
+// Removes only what installExtension wrote; an extension of the user's own is theirs to delete.
+export async function removeExtension(dirs: Dirs, id: unknown): Promise<{ removed: string }> {
+  const name = bundledId(id); const dir = join(dirs.config, "extensions", name)
+  const existing = await installedMarker(dir)
+  if (!marker(existing) || existing.bundled !== name) {
+    if (!await stat(dir).then(() => true, () => false)) throw new AsideeError("not-found", `${name} is not installed.`)
+    throw new AsideeError("conflict", `${dir} is not the bundled ${name} that asd installs, so asd leaves it alone. Delete it yourself if you mean to.`)
+  }
+  await rm(dir, { recursive: true, force: true })
+  return { removed: name }
 }
 
 export function fieldValues(action: Action, values: Record<string, unknown>): Record<string, string> {
@@ -70,6 +125,7 @@ export function fieldValues(action: Action, values: Record<string, unknown>): Re
 // cliDir: where the `asd` command lives, put first on PATH so the command can call back into the core.
 export function runCommand(run: Runner, extension: Extension, command: string[], env: Record<string, string>, cliDir: string): Promise<RunResult> {
   const [program, ...args] = command
-  const resolved = program!.startsWith("./") || (!isAbsolute(program!) && program!.includes("/")) ? join(extension.dir, program!) : program!
+  // asd itself is the daemon's own binary, which also runs bundled extensions.
+  const resolved = program === "asd" ? join(cliDir, "asd") : program!.startsWith("./") || (!isAbsolute(program!) && program!.includes("/")) ? join(extension.dir, program!) : program!
   return run([resolved, ...args], { cwd: extension.dir, timeoutMs: 1_800_000, env: { ...env, ASIDEE_EXTENSION_DIR: extension.dir, PATH: `${cliDir}:${process.env.PATH ?? ""}` } })
 }

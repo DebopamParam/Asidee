@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
 import type { Server } from "node:net"
 import { blockers, CHECKLIST, complete, failures, historical, titleOf } from "./checks"
-import { fieldValues, loadExtensions, runCommand } from "./extensions"
+import { availableExtensions, fieldValues, installExtension, loadExtensions, removeExtension, runCommand } from "./extensions"
 import { boundPort, FORWARD_REACH, LEASE_TTL_MS, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
 import { Links } from "./links"
 import { OUTPUT_LIMIT } from "./run"
@@ -614,7 +614,12 @@ export class Core {
     return { id: "ssh", status: "info", evidence: "inspected", detail: `Set up ${manifest.ssh.at.slice(0, 10)} for ${manifest.ssh.user} (${manifest.ssh.home}) with ${manifest.ssh.editorKeyOrigin === "client" ? "the requesting client's editor public key" : "this machine's editor key"} ${manifest.ssh.editorKey}, ${manifest.ssh.editorKeyOrigin === "client" ? "whose private half is not installed by this daemon" : "kept in Asidee's state folder"}. Anything that can read that private key can log in as ${manifest.ssh.user} and forward to the sandbox's loopback; no agent forwarding, no other key.${manifest.ssh.unlocked ? ` Setup replaced ${manifest.ssh.user}'s locked password with * (still no password) because sshd refuses a locked account.` : ""}` }
   }
 
-  extensions() { return loadExtensions(this.dirs) }
+  async extensions() {
+    const loaded = await loadExtensions(this.dirs)
+    return { ...loaded, available: availableExtensions(loaded.extensions) }
+  }
+  installExtension(id: unknown) { return installExtension(this.dirs, id) }
+  removeExtension(id: unknown) { return removeExtension(this.dirs, id) }
 
   async runAction(extensionId: unknown, actionId: unknown, sandbox: unknown, values: unknown): Promise<RunResult> {
     const extension = (await loadExtensions(this.dirs)).extensions.find((entry) => entry.id === extensionId)

@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
-import { join } from "node:path"
 import { exec, json, object, run, sandboxName, type Runner } from "./client"
+// Embedded, so the extension also runs from inside the asd binary.
+import WRITE from "./write.cjs" with { type: "text" }
 
 type Check = { id: string; status: "pass" | "weak" | "fail" | "unsupported" | "unknown" | "info"; evidence: "probed" | "inspected" | "none"; detail: string }
 type View = { name: string; engine: string; status: string; spec: { image: string; cpus: number; memoryGb: number; diskGb: number; pids: number } }
@@ -47,7 +48,7 @@ export async function writeDocs(runner: Runner, name: string, workspace: string)
   const report = parseReport(reply.data)
   if (report.sandbox.name !== name) throw new Error("Verification named a different sandbox.")
   if (report.sandbox.status !== "running") throw new Error("Verification reports a sandbox that is not running. No document was written.")
-  await exec(runner, name, ["node", "-e", await Bun.file(join(import.meta.dir, "write.cjs")).text(), workspace], render(report))
+  await exec(runner, name, ["node", "-e", WRITE, workspace], render(report))
 }
 export async function main(argv: string[], env = process.env): Promise<void> {
   if (argv.includes("--help")) { console.log("env-docs.ts NAME [WORKSPACE]. WORKSPACE defaults to the guest's ~/workspace. Runs asd verify before writing env_docs/SANDBOX.md."); return }
@@ -55,4 +56,6 @@ export async function main(argv: string[], env = process.env): Promise<void> {
   await writeDocs(run, argv[0] ?? env.ASIDEE_SANDBOX ?? "", argv[1] ?? env.ASIDEE_FIELD_WORKSPACE ?? "workspace")
   console.log("Wrote env_docs/SANDBOX.md from the reported checklist.")
 }
-if (import.meta.main) main(process.argv.slice(2)).catch(() => { console.error("Environment docs failed. Check list/verify, the running sandbox, Node and workspace. Subprocess output withheld."); process.exitCode = 1 })
+// The command line, run by Bun directly or from inside the asd binary for an installed extension.
+export const command = (argv: string[]) => main(argv).catch(() => { console.error("Environment docs failed. Check list/verify, the running sandbox, Node and workspace. Subprocess output withheld."); process.exitCode = 1 })
+if (import.meta.main) command(process.argv.slice(2))

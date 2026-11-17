@@ -191,7 +191,7 @@ const MARK = { pass: "✓", weak: "~", fail: "✗", unsupported: "–", unknown:
 const WORD = { weak: "holds in a weaker form", fail: "does not hold", unsupported: "not available on this engine", unknown: "could not be checked" }
 const TABS = { sandboxes: "sandbox-section", usage: "usage-section", workspaces: "workspace-section", templates: "template-section", machines: "machine-section", extensions: "extension-section", settings: "settings-section" }
 // open: sandboxes whose past checks are shown; expanded: groups opened by hand, which the browser keeps open itself.
-let checklist = [], extensions = [], extensionErrors = [], open = new Set(), expanded = new Set(), busy = new Set(), output = {}, tab = "sandboxes"
+let checklist = [], extensions = [], extensionErrors = [], available = [], open = new Set(), expanded = new Set(), busy = new Set(), output = {}, tab = "sandboxes"
 let sandboxes = [], engines = [], workspaces = [], workspaceProblem = "", forwards = [], links = [], ssh = {}, templates = [], templateProblem = ""
 let usage = [], usageProblem = "", remoteUsage = {}, machines, machineProblem = "", about, settings, savingSettings = false
 
@@ -515,8 +515,18 @@ function render() {
     }
   })
 
-  region("extensions", [extensions, extensionErrors, sandboxes.filter((entry) => entry.status === "running").map((entry) => entry.name), [...busy], output], (list) => {
+  region("extensions", [extensions, extensionErrors, available, sandboxes.filter((entry) => entry.status === "running").map((entry) => entry.name), [...busy], output], (list) => {
     for (const problem of extensionErrors) list.append(el("div", { class: "panel error" }, problem))
+    const button = (label, key, what, task) => el("button", { class: "small", ...(busy.has(`${key}:${what}`) ? { disabled: "" } : {}), onclick: () => act(key, what, task) }, busy.has(`${key}:${what}`) ? "Working…" : label)
+    const installable = available.filter((entry) => !entry.installed)
+    if (installable.length) {
+      const panel = el("div", { class: "panel" }, el("h3", {}, "Bundled with Asidee, not installed"))
+      for (const entry of installable) panel.append(el("div", { class: "row", style: "margin-top:8px" },
+        el("span", { class: "grow" }, el("span", { class: "name" }, entry.name), el("span", { class: "muted" }, ` · ${entry.id}`), entry.description ? el("div", { class: "muted" }, entry.description) : null),
+        button("Install", `ext:${entry.id}`, "install", () => api("extensionInstall", { id: entry.id }).then(() => `Installed ${entry.name}.`))),
+        output[`ext:${entry.id}`] && !extensions.some((extension) => extension.id === entry.id) ? el("pre", {}, output[`ext:${entry.id}`]) : null)
+      list.append(panel)
+    }
     for (const extension of extensions) {
       const key = `ext:${extension.id}`
       const panel = el("div", { class: "panel" }, el("div", {}, el("span", { class: "name" }, extension.name), el("span", { class: "muted" }, ` · ${extension.id}`)),
@@ -528,6 +538,7 @@ function render() {
       if (!extension.actions.length) panel.append(el("div", { class: "muted" }, "No actions."))
       if (output[key]) panel.append(el("pre", {}, output[key]))
       panel.append(command(`asd ext run ${extension.id} ACTION [SANDBOX] --set FIELD=VALUE`))
+      if (extension.bundled) panel.append(button("Remove", key, "remove", () => api("extensionRemove", { id: extension.id }).then(() => `Removed ${extension.name}.`)))
       list.append(panel)
     }
     if (!extensions.length && !extensionErrors.length) list.append(el("div", { class: "panel muted" }, "No extensions installed."))
@@ -587,7 +598,7 @@ async function refresh() {
     api("linkList").then((data) => { links = data }, () => { links = [] }),
     api("templateList").then((data) => { templates = data; templateProblem = "" }, (error) => { templates = []; templateProblem = error.message }),
     tab === "settings" || !about ? api("about").then((data) => { about = data }, () => {}) : null,
-    tab === "extensions" ? api("extensions").then((data) => { extensions = data.extensions; extensionErrors = data.errors ?? [] }, () => {}) : null,
+    tab === "extensions" ? api("extensions").then((data) => { extensions = data.extensions; extensionErrors = data.errors ?? []; available = data.available ?? [] }, () => {}) : null,
     tab === "machines" || tab === "usage" ? refreshMachines() : null,
   ])
   render()
@@ -616,7 +627,7 @@ document.getElementById("create").addEventListener("submit", async (event) => {
 })
 
 ;(async () => {
-  try { [checklist, engines, { extensions, errors: extensionErrors = [] }] = await Promise.all([api("checklist"), api("engines"), api("extensions")]) } catch {}
+  try { [checklist, engines, { extensions, errors: extensionErrors = [], available = [] }] = await Promise.all([api("checklist"), api("engines"), api("extensions")]) } catch {}
   await refresh(); setInterval(refresh, 3000)
   window.asideeRefresh = refresh
 })()

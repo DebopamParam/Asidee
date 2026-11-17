@@ -93,4 +93,6 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
   } else throw new Error("Unknown login action. Run login.ts --help.")
 }
 
-if (import.meta.main) main(process.argv.slice(2)).catch((error: unknown) => { console.error(error instanceof Error ? error.message : "Login operation failed; contents withheld."); process.exitCode = 1 })
+// The command line, run by Bun directly or from inside the asd binary for an installed extension.
+export const command = (argv: string[]) => main(argv).catch((error: unknown) => { console.error(error instanceof Error ? error.message : "Login operation failed; contents withheld."); process.exitCode = 1 })
+if (import.meta.main) command(process.argv.slice(2))

@@ -12,7 +12,8 @@ import type { WorkspaceReport, WorkspaceView, WorkspaceRemoval } from "../core/w
 import { HOST_TEMP_DISCLOSURE, WORKSPACE_DISCLOSURE } from "../core/workspace-profile"
 import type { ResizeChange, SandboxView } from "../core/core"
 import { BUILD, readDaemonFile, runDaemon, VERSION } from "../core/daemon"
-import type { Extension } from "../core/extensions"
+import { BUNDLED_RUN, type Available, type Extension } from "../core/extensions"
+import { runBundled } from "./bundled"
 import { FORWARD_REACH, type ForwardView } from "../core/forwards"
 import { RELAY } from "../core/providers/gvisor"
 import { LINK_LIMITS, type LinkView } from "../core/links"
@@ -96,7 +97,9 @@ const GROUPS: Array<[string, string[]]> = [
     "asd host remove NAME --confirm NAME  forget a prepared host; remote files and service stay",
   ]],
   ["Extensions, dashboard and daemon", [
-    "asd ext list",
+    "asd ext list                       installed extensions, and the bundled ones you can install",
+    "asd ext install EXTENSION          install a bundled extension: logins, repo, env-docs, t3, rotator",
+    "asd ext remove EXTENSION           remove a bundled extension asd installed",
     "asd ext run EXTENSION ACTION [SANDBOX] [--set FIELD=VALUE]…",
     "asd ui [--open]                    the dashboard's address",
     "asd daemon status | stop | run",
@@ -759,17 +762,30 @@ async function main(argv: string[]): Promise<void> {
       }
       case "ext": {
         if (rest[0] === "list" || rest[0] === undefined) {
-          const loaded = await call<{ extensions: Extension[]; errors: string[] }>("extensions")
+          const loaded = await call<{ extensions: Extension[]; errors: string[]; available?: Available[] }>("extensions")
           return out(loaded, () => {
-            if (!loaded.extensions.length) console.log(`No extensions. Put one in ${join(dirs.config, "extensions")}.`)
+            if (!loaded.extensions.length) console.log(`No extensions installed. Install a bundled one with \`asd ext install NAME\`, or put your own in ${join(dirs.config, "extensions")}.`)
             for (const extension of loaded.extensions) {
               console.log(`${shown(extension.id)}: ${shown(extension.name)}${extension.description ? ` (${shown(extension.description)})` : ""}`)
               for (const action of extension.actions) console.log(`  ${shown(action.id)}: ${shown(action.label)}${action.fields.length ? `  [${shown(action.fields.map((field) => field.id).join(", "))}]` : ""}`)
             }
             for (const error of loaded.errors) console.log(`! ${shown(error)}`)
+            const installable = (loaded.available ?? []).filter((entry) => !entry.installed)
+            if (installable.length) {
+              console.log("\nBundled, not installed (asd ext install NAME):")
+              for (const entry of installable) console.log(`  ${shown(entry.id)}: ${shown(entry.name)}${entry.description ? ` (${shown(entry.description)})` : ""}`)
+            }
           })
         }
-        if (rest[0] !== "run") throw new AsideeError("usage", "Use `asd ext list` or `asd ext run EXTENSION ACTION [SANDBOX]`.")
+        if (rest[0] === "install") {
+          const installed = await call<Extension>("extensionInstall", { id: need(rest[1], "an extension") })
+          return out(installed, () => console.log(`Installed ${shown(installed.id)}: ${shown(installed.name)}. Its actions: ${shown(installed.actions.map((action) => action.id).join(", "))}. Run one with \`asd ext run ${shown(installed.id)} ACTION [SANDBOX]\`, or from the dashboard.`))
+        }
+        if (rest[0] === "remove" || rest[0] === "rm") {
+          const removed = await call<{ removed: string }>("extensionRemove", { id: need(rest[1], "an extension") })
+          return out(removed, () => console.log(`Removed ${shown(removed.removed)}. What it did inside sandboxes stays there.`))
+        }
+        if (rest[0] !== "run") throw new AsideeError("usage", "Use `asd ext list`, `asd ext install NAME`, `asd ext remove NAME` or `asd ext run EXTENSION ACTION [SANDBOX]`.")
         let parsed
         try { parsed = parseArgs({ args: rest.slice(1), options: { set: { type: "string", multiple: true } }, allowPositionals: true }) } catch (error) { throw argumentError(error, "ext run") }
         const { values, positionals } = parsed
@@ -885,4 +901,5 @@ async function main(argv: string[]): Promise<void> {
   }
 }
 
-await main(process.argv.slice(2))
+if (process.argv[2] === BUNDLED_RUN) await runBundled(process.argv.slice(3))
+else await main(process.argv.slice(2))
