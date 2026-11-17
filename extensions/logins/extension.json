@@ -6,7 +6,7 @@
       "id": "import",
       "label": "Import an agent login",
       "scope": "sandbox",
-      "description": "The login is copied into the sandbox: anything running there can read it and send it out over the internet, and Asidee has no secret proxy yet. Reads only the selected profile's login. macOS may ask for Keychain access. Setup copying overwrites allowlisted settings files.",
+      "description": "The login is copied into the sandbox: anything running there can read it and send it out over the internet, and Asidee has no secret proxy yet. Both copies hold the same refresh token: when one side refreshes it, the other may be logged out (not measured). Reads only the selected profile's login. macOS may ask for Keychain access. Setup copying overwrites allowlisted settings files.",
       "fields": [
         { "id": "agent", "label": "Agent", "type": "select", "options": ["claude", "codex"], "default": "claude" },
         { "id": "profile", "label": "Host profile (default means canonical)", "type": "text", "default": "default" },

@@ -42,6 +42,8 @@ const GROUPS: Array<[string, string[]]> = [
     "           Mac's GitHub login, a Claude or Codex login with its setup, a clone into ~/workspace, T3 Code. Each token is",
     "           copied into the sandbox, where anything running there can read it.",
     "asd shell NAME [-- COMMAND…]       a shell, or one command on a terminal, inside the sandbox",
+    "asd claude NAME [PROFILE] [-- ARG…]   Claude Code in ~/workspace with an imported login: PROFILE, or the only one",
+    "asd codex NAME [PROFILE] [-- ARG…]    the same for Codex",
     "asd list                           your sandboxes",
     "asd list --all                     machines, including unavailable ones and unknown cached sandboxes (experimental)",
   ]],
@@ -224,6 +226,18 @@ const defaultShown = (config: Config, field: keyof Defaults) => {
   const text = (value: unknown) => value === undefined ? "none" : typeof value === "boolean" ? value ? "on" : "off" : field === "memoryGb" || field === "diskGb" ? `${value} GiB` : String(value)
   return config.defaults[field] === undefined ? `auto (${text((DEFAULT_SPEC as Defaults)[field])})` : text(config.defaults[field])
 }
+// `asd claude|codex NAME [PROFILE]`, inside the sandbox: $1 agent, $2 profile or empty, $3 the variable that selects it.
+const AGENT_LAUNCH = `cd "$HOME/workspace" 2>/dev/null || cd
+agent=$1 profile=$2 variable=$3; shift 3; dir=
+if [ -n "$profile" ]; then
+  dir="$HOME/.$agent-$profile"
+  [ -d "$dir" ] || { echo "There is no $agent login $profile in this sandbox. Import it: asd ext run logins import NAME --set agent=$agent --set profile=$profile" >&2; exit 3; }
+else
+  count=0; for found in "$HOME/.$agent"-*/; do [ -d "$found" ] && { dir=\${found%/}; count=$((count + 1)); }; done
+  [ "$count" -gt 1 ] && { echo "This sandbox has several $agent logins; name one: asd $agent NAME PROFILE" >&2; exit 2; }
+fi
+[ -n "$dir" ] && export "$variable=$dir"
+exec "$agent" "$@"`
 const EXIT: Record<ErrorCode, number> = { runtime: 1, usage: 2, "not-found": 3, conflict: 4, dependency: 5, "check-failed": 6, "probes-required": 6, offline: 7, incompatible: 8, "identity-changed": 9, "outcome-unknown": 10 }
 let selectedHost: string | undefined
 const dirs = defaultDirs()
@@ -720,6 +734,15 @@ async function main(argv: string[]): Promise<void> {
       case "shell": {
         const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY)
         return await session({ kind: "exec", name: need(rest[0], "a name"), argv: tail.length ? tail : ["sh", "-c", "command -v bash >/dev/null && exec bash -l || exec sh -l"], tty,
+          ...(tty && process.stdout.columns > 0 && process.stdout.rows > 0 ? { cols: process.stdout.columns, rows: process.stdout.rows } : {}) })
+      }
+      case "claude": case "codex": {
+        // The agent in ~/workspace with an imported login: PROFILE, else the only one imported, else its own.
+        const { positionals } = parse({})
+        const name = need(positionals[0], "a name"), profile = positionals[1] ?? ""
+        if (profile && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(profile)) throw new AsideeError("usage", "A login profile is 1 to 48 letters, digits, underscores or hyphens.")
+        const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY)
+        return await session({ kind: "exec", name, argv: ["sh", "-c", AGENT_LAUNCH, "asd", command, profile, command === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME", ...tail], tty,
           ...(tty && process.stdout.columns > 0 && process.stdout.rows > 0 ? { cols: process.stdout.columns, rows: process.stdout.rows } : {}) })
       }
       case "forward": {
