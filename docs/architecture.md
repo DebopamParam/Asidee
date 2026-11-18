@@ -1019,7 +1019,7 @@ where the dialog appears; a 5-second test dialog started from it timed out as ex
 |---|---|---|
 | `sshSetup` | open without `writeConfig`; asked with it | Asidee's own SSH files only, or also the user's `~/.ssh/config` Include line |
 | `terminalCommandSet` | asked when setting; open when clearing | the command runs as the user on each Terminal button |
-| `workspaceCreate`, `workspaceSet`, `workspaceExec`, `workspaceStop`, `workspaceRemove` | asked (exec on every run) | workspaces run on the Mac's own kernel as the user |
+| `workspaceCreate`, `workspaceSet`, `workspaceExec`, `workspaceStop`, `workspaceRemove` | asked (exec on every run, its text input shown in full; other input is CLI-only) | workspaces run on the Mac's own kernel as the user |
 | `workspaceList`, `workspaceGet`, `workspaceVerify` | open | reads, and Asidee's own fixed probes |
 | `hostAttach`, `hostRemove` | asked | SSH with the user's keys; ends sessions and forwards |
 | `shutdown` | asked, no options | stops watched sandboxes; keeping them is the CLI's upgrade path |

@@ -1032,4 +1032,8 @@ test("exactly the listed methods ask on the Mac; the rest stay socket-only and a
   expect((await viaPage("shutdown", { keepSandboxes: true })).status).toBe(400)
   expect((await viaPage("workspaceStop", { name: "demo", force: true })).status).toBe(400)
   expect(asked).toEqual([])
+  // A run's input is shown in full, since to an interpreter it is the program; input that is not text is not asked.
+  const run = await table.workspaceExec!.approve!({ name: "demo", argv: ["bash"], stdinBase64: Buffer.from("rm -rf ~\n").toString("base64") })
+  expect(run).toMatchObject({ details: ['"bash"', "With this input:", '"rm -rf ~\\n"'], cli: "asd workspace exec demo --stdin -- bash" })
+  expect(() => table.workspaceExec!.approve!({ name: "demo", argv: ["bash"], stdinBase64: Buffer.from([0xff, 0xfe]).toString("base64") })).toThrow("text input only")
 })

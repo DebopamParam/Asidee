@@ -101,9 +101,12 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     // Each run is asked: a window of free runs would be exactly what a leaked token needs.
     workspaceExec: { run: (body, signal) => workspaces.exec(String(body.name), body.argv, execStdin(body), signal), approve: (body) => {
       const name = workspace(body); only(body, ["name", "argv", "stdin", "stdinBase64"])
-      const argv = validArgv(body.argv); const input = body.stdin !== undefined || body.stdinBase64 !== undefined
-      return { action: `Run a command in the workspace ${literal(name)}, on this Mac as you. It is not a sandbox:`, details: [argv.map(literal).join(" "), ...(input ? ["The request also sends it input."] : [])],
-        cli: `asd workspace exec ${name}${input ? " --stdin" : ""} -- ${argv.map(word).join(" ")}` }
+      const argv = validArgv(body.argv); const given = execStdin(body)
+      // The input is shown too: to bash or any interpreter it is the program. Text only, so the dialog can show all of it.
+      let input: string | undefined
+      try { input = given === undefined || typeof given === "string" ? given : new TextDecoder("utf-8", { fatal: true }).decode(given) } catch { throw new AsideeError("usage", "From the dashboard a workspace run takes text input only, which the dialog shows. Use the CLI for other input.") }
+      return { action: `Run a command in the workspace ${literal(name)}, on this Mac as you. It is not a sandbox:`, details: [argv.map(literal).join(" "), ...(input !== undefined ? ["With this input:", literal(input)] : [])],
+        cli: `asd workspace exec ${name}${input !== undefined ? " --stdin" : ""} -- ${argv.map(word).join(" ")}` }
     } },
     workspaceShell: { run: async (body) => ({ workspace: await workspaces.get(String(body.name), false), stream: "workspace", argv: ["/bin/zsh", "-l"] }), socketOnly: true },
     workspaceStop: { run: (body) => workspaces.stop(String(body.name)), approve: (body) => {
@@ -219,8 +222,9 @@ const notApproved = (answer: keyof typeof APPROVAL, approval: Approval) => {
 // viaSocket: the request came over the Unix socket, which only this user can open. Otherwise it came over loopback TCP,
 // where any local process or web page can try, so it must carry the token and name this server as its Host (a page on
 // another site that resolves its own name to 127.0.0.1 does not). There a method with approve runs only once the person
-// at the Mac allows it, one dialog at a time, so a token holder cannot stack them up.
-export function createHandler(table: Record<string, Method>, token: string, configDir: string, machines?: Machines, approver: Approver = dialogApprover(systemRunner)) {
+// at the Mac allows it, one dialog at a time, so a token holder cannot stack them up. Only the daemon passes the real
+// dialog; any other caller, a test included, gets "unavailable" and never puts one on the screen.
+export function createHandler(table: Record<string, Method>, token: string, configDir: string, machines?: Machines, approver: Approver = async () => "unavailable") {
   let asking = false
   return async (request: Request, viaSocket: boolean, port: number): Promise<Response> => {
     let url: URL; let pathname: string
@@ -311,7 +315,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   // A daemon that is stopping still answers `version`, so a client waits for it instead of starting a second one, and
   // takes no new work: a sandbox started now would be stopped, or left unwatched, a moment later.
   let stopping = false
-  const answer = createHandler(methods(core, (keep) => stop(keep), () => stopping, machines, hosts, workspaces), token, dirs.config, machines)
+  const answer = createHandler(methods(core, (keep) => stop(keep), () => stopping, machines, hosts, workspaces), token, dirs.config, machines, dialogApprover(systemRunner))
   const handle = (request: Request, viaSocket: boolean, port: number): Promise<Response> =>
     stopping && URL.canParse(request.url) && new URL(request.url).pathname !== "/api/version"
       ? Promise.resolve(json(STATUS.conflict, { ok: false, error: { code: "conflict", message: "The daemon is stopping. Try again in a moment." } }))
