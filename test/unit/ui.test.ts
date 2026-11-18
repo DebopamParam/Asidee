@@ -340,7 +340,7 @@ test("create sends Docker inside only when chosen, and shows the same create as 
 })
 
 test("create runs the chosen setup steps after the create, in the CLI's order, and stops at the first failure", async () => {
-  const bundled = ["logins", "repo", "t3"].map((id) => ({ id, name: id, actions: [] }))
+  const bundled = ["logins", "repo", "skills", "t3"].map((id) => ({ id, name: id, actions: [] }))
   const ui = await page({ ...base, list: () => [sandbox({ name: "fresh" })], extensions: () => ({ extensions: bundled, errors: [] }), create: (body) => ({ sandbox: { name: body.name } }),
     action: (body) => body.action === "profiles" ? { exitCode: 0, stdout: `noise <b>\n${JSON.stringify({ agent: body.values.agent, profiles: ["work", "home", "../x", "<b>"], token: "s3cret" })}\n`, stderr: "" }
       : body.action === "clone" ? { exitCode: 2, stdout: "<i>no access</i>", stderr: "" } : { exitCode: 0, stdout: `${body.action} ok`, stderr: "" } })
@@ -352,6 +352,10 @@ test("create runs the chosen setup steps after the create, in the CLI's order, a
   form.elements.namedItem("name").value = "fresh"; doc.getElementById("setup-gh").checked = true; doc.getElementById("setup-claude-work").checked = true; doc.getElementById("setup-claude-home").checked = true; doc.getElementById("setup-t3").checked = true
   doc.getElementById("setup-repo").value = "acme/app.git"; form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
   expect(ui.text("#create-command")).toContain("asd create fresh --gh --claude work --claude home --repo acme/app.git --t3")
+  // Skills and plugins come after the clone, which needs an empty ~/workspace.
+  doc.getElementById("setup-skills").value = "~/hq"; form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
+  expect(ui.text("#create-command")).toContain("--repo acme/app.git --skills ~/hq --t3")
+  doc.getElementById("setup-skills").value = ""
   // The browser sets T3 up first, so its one flag stands for both.
   doc.getElementById("setup-t3-browser").checked = true; form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
   expect(ui.text("#create-command")).toContain("--repo acme/app.git --t3-browserCopy")

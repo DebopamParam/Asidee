@@ -89,7 +89,8 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   the sandbox being prepared.
 - One-step create: `asd create demo --gh --claude PROFILE --codex PROFILE --repo OWNER/REPO --t3` runs the bundled
   extensions after the create: this machine's GitHub login, each login with its setup (repeat `--claude` or `--codex`
-  for several), a clone into `~/workspace`, and T3 Code. `--t3-browser` also installs the Chrome T3's browser pane uses. The first failure stops the rest and keeps the sandbox. On this machine only.
+  for several), a clone into `~/workspace`, `--skills DIR` (that folder's agent skills and plugins into
+  `~/workspace`) and T3 Code. `--t3-browser` also installs the Chrome T3's browser pane uses. The first failure stops the rest and keeps the sandbox. On this machine only.
 - `asd claude demo [PROFILE]` and `asd codex demo [PROFILE]` open the agent in `~/workspace` with an imported login.
   The dashboard opens the same in a terminal window on the Mac.
 - The daemon, the CLI with `--json`, a web dashboard, and extensions. What the dashboard does to the Mac itself
@@ -245,9 +246,9 @@ dashboard and add extensions freely, and none of that can change what a sandbox 
 ## Customizing
 
 - **Extensions** add actions and hooks. An extension is a folder in `~/.config/asidee/extensions/` with an
-  `extension.json`; see [extensions/examples/agent-tools](extensions/examples/agent-tools). Five extensions ship
+  `extension.json`; see [extensions/examples/agent-tools](extensions/examples/agent-tools). Six extensions ship
   inside `asd`: [logins](extensions/logins), [repo](extensions/repo), [env-docs](extensions/env-docs),
-  [t3](extensions/t3) and [rotator](extensions/rotator). `asd ext list` shows the ones not yet installed;
+  [t3](extensions/t3), [rotator](extensions/rotator) and [skills](extensions/skills). `asd ext list` shows the ones not yet installed;
   `asd ext install NAME` (or the dashboard's Install button) installs one and `asd ext remove NAME` removes it. They
   need neither Bun nor the Asidee source.
 - **The dashboard** is replaced by putting your own `index.html` in `~/.config/asidee/ui/`.

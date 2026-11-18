@@ -940,7 +940,7 @@ with explicit artifacts. A hard disk cap, user-service installation and automati
 
 ### Bundled extensions
 
-logins, repo, env-docs, t3 and rotator are compiled into the `asd` binary (`extensions/catalog.ts`, `cli/bundled.ts`).
+logins, repo, skills, env-docs, t3 and rotator are compiled into the `asd` binary (`extensions/catalog.ts`, `cli/bundled.ts`).
 Installing one writes a marker folder, `~/.config/asidee/extensions/NAME/extension.json` containing only
 `{"bundled":"NAME"}`. When the daemon loads extensions, a marker takes its declaration from the binary and each action's
 `run` becomes `asd extension-run NAME …`, a hidden subcommand the daemon starts from its own binary. Neither Bun nor
@@ -979,7 +979,8 @@ is used by `validSpec` only when a request names neither an image nor a template
 template exclude each other.
 
 `asd create … --gh --claude P… --codex P… --repo OWNER/REPO --t3` (`cli/create-setup.ts`) checks its options before the
-create, then runs `asd extension-run` for GitHub, each login with its setup, the clone, T3 and T3's browser (`--t3-browser`, which implies `--t3`), in that order, stopping
+create, then runs `asd extension-run` for GitHub, each login with its setup, the clone, the skills import (after the clone, which needs an empty
+`~/workspace`), T3 and T3's browser (`--t3-browser`, which implies `--t3`), in that order, stopping
 at the first failure and keeping the sandbox. The logins read this machine's credentials and the extensions reach
 local sandboxes only, so these options are refused with `--host`. `asd claude|codex NAME [PROFILE]` is a session like
 `shell` that selects an imported login with `CLAUDE_CONFIG_DIR` or `CODEX_HOME`.

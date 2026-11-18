@@ -444,7 +444,7 @@ async function sshSetup(name, writeConfig) {
 
 // Buckets: the bundled extensions sorted by what a person is doing, on every page. Others go under Other.
 const BUCKETS = [
-  { id: "agents", name: "Agents and logins", extensions: ["logins"] },
+  { id: "agents", name: "Agents and logins", extensions: ["logins", "skills"] },
   { id: "t3", name: "T3 Code", extensions: ["t3", "rotator"] },
   { id: "code", name: "Code and docs", extensions: ["repo", "env-docs"] },
 ]
@@ -930,7 +930,7 @@ function render() {
   for (const radio of document.querySelectorAll("#template-pills input")) radio.checked = radio.value === templateSelect.value
   // The setup a create can run, for the bundled extensions that are installed. What was chosen survives a rebuild.
   const kept = Object.fromEntries([...document.querySelectorAll("#create-setup input, #create-setup select")].map((input) => [input.id, input.type === "checkbox" ? input.checked : input.value]))
-  region("create-setup", [["logins", "repo", "t3"].filter(installed), profiles], (node) => {
+  region("create-setup", [["logins", "repo", "skills", "t3"].filter(installed), profiles], (node) => {
     const logins = installed("logins")
     // One box per profile: each becomes its own login in the sandbox, so several of one agent can be chosen.
     const pill = (id, text, data = {}) => el("label", { class: "pill" }, el("input", { id, type: "checkbox", ...data }), text)
@@ -939,7 +939,8 @@ function render() {
         : [el("span", { class: "muted" }, profiles?.[agent] === null ? "Profiles unknown" : "No profiles on this Mac")])))
     // Grouped as on a sandbox's card.
     const buckets = [
-      ["Agents and logins", logins ? [el("div", {}, el("label", {}, "GitHub"), el("div", { class: "pills" }, pill("setup-gh", "This Mac's login"))), profileSelect("claude", "Claude logins"), profileSelect("codex", "Codex logins")] : []],
+      ["Agents and logins", [...logins ? [el("div", {}, el("label", {}, "GitHub"), el("div", { class: "pills" }, pill("setup-gh", "This Mac's login"))), profileSelect("claude", "Claude logins"), profileSelect("codex", "Codex logins")] : [],
+        ...installed("skills") ? [el("div", {}, el("label", { for: "setup-skills" }, "Skills and plugins from this Mac folder (its .agents and .claude)"), el("input", { id: "setup-skills", placeholder: "none, or ~/path/to/folder" }))] : []]],
       ["T3 Code", installed("t3") ? [el("div", { class: "pills" }, pill("setup-t3", "Set up T3 Code"), pill("setup-t3-browser", "Install T3's browser (Chrome)"))] : []],
       ["Code and docs", installed("repo") ? [el("div", {}, el("label", { for: "setup-repo" }, "Clone a repository (OWNER/REPO)"), el("input", { id: "setup-repo", placeholder: "none" }))] : []],
     ].filter(([, fields]) => fields.length)
@@ -979,6 +980,9 @@ function setupSteps() {
   }
   const repository = input("repo")?.value.trim()
   if (repository) steps.push({ label: `Clone ${repository}`, flags: ["--repo", repository], extension: "repo", action: "clone", values: { repository } })
+  // After the clone, which needs an empty ~/workspace.
+  const skills = input("skills")?.value.trim()
+  if (skills) steps.push({ label: `Skills and plugins from ${skills}`, flags: ["--skills", skills], extension: "skills", action: "import", values: { source: skills } })
   // The browser goes into T3's runtime, so it sets T3 up first.
   const t3Browser = input("t3-browser")?.checked
   if (input("t3")?.checked || t3Browser) steps.push({ label: "T3 Code", flags: t3Browser ? [] : ["--t3"], extension: "t3", action: "setup", values: {} })

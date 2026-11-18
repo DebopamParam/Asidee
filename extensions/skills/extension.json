@@ -1,0 +1,26 @@
+{
+  "name": "Skills and plugins",
+  "description": "Copy a host folder's agent skills, plugins and subagents into a sandbox's workspace, links kept.",
+  "actions": [
+    {
+      "id": "import",
+      "label": "Import skills and plugins",
+      "scope": "sandbox",
+      "description": "Copies .agents/skills, .agents/plugins, .claude/skills, .claude/agents and .claude/commands from the host folder into the sandbox workspace. Memory, settings and other files stay on the host. Anything running in the sandbox can read the copies.",
+      "fields": [
+        { "id": "source", "label": "Host folder that holds .agents or .claude", "type": "text", "required": true },
+        { "id": "instructions", "label": "Also copy its AGENTS.md and CLAUDE.md", "type": "checkbox", "default": false },
+        { "id": "workspace", "label": "Guest folder", "type": "text", "default": "workspace" },
+        { "id": "replace", "label": "Replace files there that Asidee did not import", "type": "checkbox", "default": false }
+      ],
+      "run": ["./skills.ts", "import"]
+    },
+    {
+      "id": "remove",
+      "label": "Remove imported skills and plugins",
+      "scope": "sandbox",
+      "fields": [{ "id": "workspace", "label": "Guest folder", "type": "text", "default": "workspace" }],
+      "run": ["./skills.ts", "remove"]
+    }
+  ]
+}
