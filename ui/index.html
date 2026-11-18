@@ -914,7 +914,9 @@ function render() {
   fill(document.getElementById("f-engine"), ready.length ? ready.map((engine) => [engine.id, engine.label]) : [["", "No engine is ready"]], ready.some((engine) => engine.id === settings?.engine) ? settings.engine : ready[0]?.id ?? "")
   fill(document.getElementById("p-engine"), ready.length ? ready.map((engine) => [engine.id, engine.label]) : [["", "No engine is ready"]], ready.some((engine) => engine.id === settings?.engine) ? settings.engine : ready[0]?.id ?? "")
   fill(document.getElementById("default-engine"), [["", "The first ready engine"], ...engines.map((engine) => [engine.id, `${engine.label}${engine.ready ? "" : " (not ready)"}`])], settings?.engine ?? "")
-  const templateSelect = document.getElementById("f-template"), templateOptions = [["", settings?.defaults?.template ? `Default (${settings.defaults.template})` : "None"], ...templates.map((template) => [template.name, template.name])]
+  // The default template is one option, named as itself; blank sends no template, so the daemon applies the default.
+  const templateSelect = document.getElementById("f-template"), defaultTemplate = settings?.defaults?.template
+  const templateOptions = [["", defaultTemplate ? `${defaultTemplate} (default)` : "None"], ...templates.filter((template) => template.name !== defaultTemplate).map((template) => [template.name, template.name])]
   fill(templateSelect, templateOptions, "")
   // The select is the form's field; the pills show its options and set it.
   region("template-pills", templateOptions, (node) => node.append(...templateOptions.map(([value, label]) => el("label", { class: "pill" },

@@ -476,3 +476,14 @@ test("the Logins pop-up lists the sandbox's logins as cards, re-imports or adds 
   ;(ui.window.document.querySelector("#modal .card") as any).click(); await ui.settle()
   expect(ui.calls.find((call) => call.method === "openTerminal")!.body).toEqual({ name: "demo", kind: "claude", profile: "work" })
 })
+
+test("the default template is offered once, as itself, and creating with it sends no template", async () => {
+  const template = (name: string) => ({ name, engine: "fake:1", sizeBytes: 1, source: "x", sourceImage: "y", createdAt: "2026-11-18T00:00:00Z", dependants: [], loginsRemoved: [] })
+  const ui = await page({ ...base, list: () => [], configGet: () => ({ defaults: { template: "agent" }, requireProbes: true }), templateList: () => [template("agent"), template("other")], create: (body) => ({ sandbox: { name: body.name } }) })
+  const pills = [...ui.window.document.querySelectorAll("#template-pills label")].map((node) => node.textContent)
+  expect(pills).toEqual(["agent (default)", "other"])
+  const form = ui.window.document.getElementById("create") as any
+  form.elements.namedItem("name").value = "fresh"
+  form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  expect(ui.calls.find((call) => call.method === "create")!.body).not.toHaveProperty("template")
+})
