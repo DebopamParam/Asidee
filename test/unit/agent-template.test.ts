@@ -176,16 +176,17 @@ test("templatePrepare and its progress are open to the dashboard and can be rout
 test("a create's --gh, --claude, --codex, --repo and --t3 become extension runs in dependency order, checked first", async () => {
   const { createSteps, runCreateSteps } = await import("../../cli/create-setup")
   expect(createSteps("demo", {})).toEqual([])
-  expect(createSteps("demo", { t3: true, repo: "o/r", codex: "work", claude: "deb", gh: true }).map((step) => step.argv)).toEqual([
+  expect(createSteps("demo", { t3: true, repo: "o/r", codex: ["work"], claude: ["deb", "work", "deb"], gh: true }).map((step) => step.argv)).toEqual([
     ["logins", "github", "demo", "--gh"],
     ["logins", "import", "demo", "claude", "--profile", "deb", "--setup"],
+    ["logins", "import", "demo", "claude", "--profile", "work", "--setup"],
     ["logins", "import", "demo", "codex", "--profile", "work", "--setup"],
     ["repo", "clone", "demo", "o/r"],
     ["t3", "setup", "demo"],
   ])
   for (const repo of ["o", "o/r.git", "-o/r", "o/r/x", "https://github.com/o/r"]) expect(() => createSteps("demo", { repo })).toThrow("--repo")
-  for (const claude of ["", "../x", "--setup", "a b"]) expect(() => createSteps("demo", { claude })).toThrow("--claude")
+  for (const claude of ["", "../x", "--setup", "a b"]) expect(() => createSteps("demo", { claude: ["deb", claude] })).toThrow("--claude")
   // The first failure stops the rest.
-  const ran = await runCreateSteps(["sh", "-c", 'echo "$3"; [ "$3" != import ]', "sh"], {}, createSteps("demo", { gh: true, claude: "deb", t3: true }), () => {})
+  const ran = await runCreateSteps(["sh", "-c", 'echo "$3"; [ "$3" != import ]', "sh"], {}, createSteps("demo", { gh: true, claude: ["deb"], t3: true }), () => {})
   expect(ran.map((step) => [step.label, step.exitCode, step.output])).toEqual([["GitHub login", 0, "github"], ["Claude login deb", 1, "import"]])
 })

@@ -38,9 +38,9 @@ const GROUPS: Array<[string, string[]]> = [
     "asd setup --remove [--accept-plan HASH]   undo it: remove the runtime, restart the engine, delete the download",
     "asd doctor                         engines on this machine and what each one needs",
     "asd create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]",
-    "           [--gh] [--claude PROFILE] [--codex PROFILE] [--repo OWNER/REPO] [--t3]   then, with the bundled extensions: this",
-    "           Mac's GitHub login, a Claude or Codex login with its setup, a clone into ~/workspace, T3 Code. Each token is",
-    "           copied into the sandbox, where anything running there can read it.",
+    "           [--gh] [--claude PROFILE…] [--codex PROFILE…] [--repo OWNER/REPO] [--t3]   then, with the bundled extensions: this",
+    "           Mac's GitHub login, Claude or Codex logins with their setup (repeat a flag for several), a clone into",
+    "           ~/workspace, T3 Code. Each token is copied into the sandbox, where anything running there can read it.",
     "asd shell NAME [-- COMMAND…]       a shell, or one command on a terminal, inside the sandbox",
     "asd claude NAME [PROFILE] [-- ARG…]   Claude Code in ~/workspace with an imported login: PROFILE, or the only one",
     "asd codex NAME [PROFILE] [-- ARG…]    the same for Codex",
@@ -428,7 +428,7 @@ async function main(argv: string[]): Promise<void> {
   const out = (data: unknown, human: () => void) => { if (asJson) console.log(JSON.stringify({ ok: true, data })); else human() }
   // Progress lines only for a person: --json output stays one line.
   const watching = (name: string) => asJson ? undefined : name
-  const parse = (options: Record<string, { type: "string" | "boolean" }>, args = rest) => {
+  const parse = <T extends Record<string, { type: "string" | "boolean"; multiple?: boolean }>>(options: T, args = rest) => {
     try { return parseArgs({ args, options, allowPositionals: true }) }
     catch (error) { throw argumentError(error, args === rest ? command! : `${command} ${rest[0]}`) }
   }
@@ -608,7 +608,7 @@ async function main(argv: string[]): Promise<void> {
       }
       case "create": {
         const { values, positionals } = parse({ docker: { type: "boolean" }, image: { type: "string" }, template: { type: "string" }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" }, pids: { type: "string" }, engine: { type: "string" },
-          gh: { type: "boolean" }, claude: { type: "string" }, codex: { type: "string" }, repo: { type: "string" }, t3: { type: "boolean" } })
+          gh: { type: "boolean" }, claude: { type: "string", multiple: true }, codex: { type: "string", multiple: true }, repo: { type: "string" }, t3: { type: "boolean" } })
         const name = need(positionals[0], "a name")
         // Checked before anything is made. The logins come from this Mac, and the extensions reach local sandboxes only.
         const steps = createSteps(name, values)

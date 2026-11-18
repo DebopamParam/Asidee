@@ -331,16 +331,16 @@ test("create sends Docker inside only when chosen, and shows the same create as 
 test("create runs the chosen setup steps after the create, in the CLI's order, and stops at the first failure", async () => {
   const bundled = ["logins", "repo", "t3"].map((id) => ({ id, name: id, actions: [] }))
   const ui = await page({ ...base, list: () => [sandbox({ name: "fresh" })], extensions: () => ({ extensions: bundled, errors: [] }), create: (body) => ({ sandbox: { name: body.name } }),
-    action: (body) => body.action === "profiles" ? { exitCode: 0, stdout: `noise <b>\n${JSON.stringify({ agent: body.values.agent, profiles: ["work", "../x", "<b>"], token: "s3cret" })}\n`, stderr: "" }
+    action: (body) => body.action === "profiles" ? { exitCode: 0, stdout: `noise <b>\n${JSON.stringify({ agent: body.values.agent, profiles: ["work", "home", "../x", "<b>"], token: "s3cret" })}\n`, stderr: "" }
       : body.action === "clone" ? { exitCode: 2, stdout: "<i>no access</i>", stderr: "" } : { exitCode: 0, stdout: `${body.action} ok`, stderr: "" } })
   const doc = ui.window.document as any
-  expect([...doc.getElementById("setup-claude").options].map((option: any) => option.textContent)).toEqual(["None", "work"])
+  expect([...doc.querySelectorAll('#create-setup input[data-agent="claude"]')].map((box: any) => box.dataset.profile)).toEqual(["work", "home"])
   expect(ui.text("#create-setup")).toContain("anything running there can read it")
   expect(ui.text("#create-setup")).not.toContain("s3cret")
   const form = doc.getElementById("create")
-  form.elements.namedItem("name").value = "fresh"; doc.getElementById("setup-gh").checked = true; doc.getElementById("setup-claude").value = "work"; doc.getElementById("setup-t3").checked = true
+  form.elements.namedItem("name").value = "fresh"; doc.getElementById("setup-gh").checked = true; doc.getElementById("setup-claude-work").checked = true; doc.getElementById("setup-claude-home").checked = true; doc.getElementById("setup-t3").checked = true
   doc.getElementById("setup-repo").value = "acme/app.git"; form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
-  expect(ui.text("#create-command")).toContain("asd create fresh --gh --claude work --repo acme/app.git --t3")
+  expect(ui.text("#create-command")).toContain("asd create fresh --gh --claude work --claude home --repo acme/app.git --t3")
   form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
   expect(ui.text("#create-error")).toBe("Repository takes a GitHub OWNER/REPO.")
   expect(ui.calls.some((call) => call.method === "create")).toBe(false)
@@ -350,7 +350,7 @@ test("create runs the chosen setup steps after the create, in the CLI's order, a
   expect(Object.keys(create).some((key) => key.startsWith("setup"))).toBe(false)
   const steps = ui.calls.filter((call) => call.method === "action" && call.body.action !== "profiles").map((call) => call.body)
   expect(steps).toEqual([{ extension: "logins", action: "github", sandbox: "fresh", values: {} }, { extension: "logins", action: "import", sandbox: "fresh", values: { agent: "claude", profile: "work", setup: true } },
-    { extension: "repo", action: "clone", sandbox: "fresh", values: { repository: "acme/app" } }])
+    { extension: "logins", action: "import", sandbox: "fresh", values: { agent: "claude", profile: "home", setup: true } }, { extension: "repo", action: "clone", sandbox: "fresh", values: { repository: "acme/app" } }])
   const shown = ui.text("#sandboxes pre")
   expect(shown).toContain("GitHub login: done"); expect(shown).toContain("Claude login work: done")
   expect(shown).toContain("Clone acme/app: failed with exit 2 <i>no access</i>")

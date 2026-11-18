@@ -2,9 +2,9 @@ import { profileName } from "../core/credentials"
 import { BUNDLED_RUN } from "../core/extensions"
 import { AsideeError } from "../core/types"
 
-// `asd create NAME --gh --claude P --codex P --repo OWNER/REPO --t3`: after the create, the bundled extensions' own
+// `asd create NAME --gh --claude P… --codex P… --repo OWNER/REPO --t3`: after the create, the bundled extensions' own
 // commands, in the order each needs the one before (a private clone needs GitHub; T3 finds the logins).
-export type CreateSetup = { gh?: boolean; claude?: string; codex?: string; repo?: string; t3?: boolean }
+export type CreateSetup = { gh?: boolean; claude?: string[]; codex?: string[]; repo?: string; t3?: boolean }
 export type SetupStep = { label: string; argv: string[] }
 export type StepResult = { label: string; exitCode: number; output: string }
 const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/
@@ -15,8 +15,8 @@ export function createSteps(name: string, options: CreateSetup): SetupStep[] {
   const steps: SetupStep[] = []
   if (options.gh) steps.push({ label: "GitHub login", argv: ["logins", "github", name, "--gh"] })
   for (const agent of ["claude", "codex"] as const) {
-    const value = options[agent]
-    if (value !== undefined) steps.push({ label: `${agent === "claude" ? "Claude" : "Codex"} login ${value}`, argv: ["logins", "import", name, agent, "--profile", profile(agent, value), "--setup"] })
+    // Each profile is its own guest login, so several of one agent sit side by side. A repeat is imported once.
+    for (const value of new Set(options[agent] ?? [])) steps.push({ label: `${agent === "claude" ? "Claude" : "Codex"} login ${value}`, argv: ["logins", "import", name, agent, "--profile", profile(agent, value), "--setup"] })
   }
   if (options.repo !== undefined) steps.push({ label: `Clone ${options.repo}`, argv: ["repo", "clone", name, options.repo] })
   if (options.t3) steps.push({ label: "T3 Code", argv: ["t3", "setup", name] })

@@ -685,8 +685,10 @@ function render() {
   const kept = Object.fromEntries([...document.querySelectorAll("#create-setup input, #create-setup select")].map((input) => [input.id, input.type === "checkbox" ? input.checked : input.value]))
   region("create-setup", [["logins", "repo", "t3"].filter(installed), profiles], (node) => {
     const logins = installed("logins")
-    const profileSelect = (agent, label) => el("div", {}, el("label", { for: `setup-${agent}` }, label), el("select", { id: `setup-${agent}` },
-      el("option", { value: "" }, profiles?.[agent] === null ? "None (profiles unknown)" : "None"), ...(profiles?.[agent] ?? []).map((profile) => el("option", {}, profile))))
+    // One box per profile: each becomes its own login in the sandbox, so several of one agent can be chosen.
+    const profileSelect = (agent, label) => el("div", {}, el("label", {}, label), el("div", { class: "row" },
+      ...(profiles?.[agent]?.length ? profiles[agent].map((profile) => el("label", { class: "check" }, el("input", { id: `setup-${agent}-${profile}`, type: "checkbox", "data-agent": agent, "data-profile": profile }), profile))
+        : [el("span", { class: "muted" }, profiles?.[agent] === null ? "Profiles unknown" : "No profiles on this Mac")])))
     const fields = [logins ? el("label", {}, el("input", { id: "setup-gh", type: "checkbox" }), " GitHub login") : null, logins ? profileSelect("claude", "Claude login") : null, logins ? profileSelect("codex", "Codex login") : null,
       installed("repo") ? el("div", {}, el("label", { for: "setup-repo" }, "Repository (OWNER/REPO)"), el("input", { id: "setup-repo", placeholder: "none" })) : null,
       installed("t3") ? el("label", {}, el("input", { id: "setup-t3", type: "checkbox" }), " T3 Code") : null].filter(Boolean)
@@ -719,9 +721,9 @@ function setupSteps() {
   const input = (id) => document.getElementById(`setup-${id}`)
   const steps = []
   if (input("gh")?.checked) steps.push({ label: "GitHub login", flags: ["--gh"], extension: "logins", action: "github", values: {} })
-  for (const agent of ["claude", "codex"]) {
-    const profile = input(agent)?.value
-    if (profile) steps.push({ label: `${agent === "claude" ? "Claude" : "Codex"} login ${profile}`, flags: [`--${agent}`, profile], extension: "logins", action: "import", values: { agent, profile, setup: true } })
+  for (const agent of ["claude", "codex"]) for (const box of document.querySelectorAll(`#create-setup input[data-agent="${agent}"]:checked`)) {
+    const profile = box.dataset.profile
+    steps.push({ label: `${agent === "claude" ? "Claude" : "Codex"} login ${profile}`, flags: [`--${agent}`, profile], extension: "logins", action: "import", values: { agent, profile, setup: true } })
   }
   const repository = input("repo")?.value.trim()
   if (repository) steps.push({ label: `Clone ${repository}`, flags: ["--repo", repository], extension: "repo", action: "clone", values: { repository } })
