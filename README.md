@@ -2,7 +2,7 @@
 
 Sandboxes for coding agents, on the engine you already have, that are checked instead of assumed.
 
-"Asidee" is a working name. This is an early alpha (0.4.0): the structure is in place and one engine works end to end.
+"Asidee" (Agent Sandbox IDE) is a working name. This is an early alpha (0.4.0): the structure is in place and one engine works end to end.
 
 ## What it does
 
