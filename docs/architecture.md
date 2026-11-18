@@ -979,7 +979,7 @@ is used by `validSpec` only when a request names neither an image nor a template
 template exclude each other.
 
 `asd create … --gh --claude P… --codex P… --repo OWNER/REPO --t3` (`cli/create-setup.ts`) checks its options before the
-create, then runs `asd extension-run` for GitHub, each login with its setup, the clone and T3, in that order, stopping
+create, then runs `asd extension-run` for GitHub, each login with its setup, the clone, T3 and T3's browser (`--t3-browser`, which implies `--t3`), in that order, stopping
 at the first failure and keeping the sandbox. The logins read this machine's credentials and the extensions reach
 local sandboxes only, so these options are refused with `--host`. `asd claude|codex NAME [PROFILE]` is a session like
 `shell` that selects an imported login with `CLAUDE_CONFIG_DIR` or `CODEX_HOME`.

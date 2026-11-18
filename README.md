@@ -89,7 +89,7 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   the sandbox being prepared.
 - One-step create: `asd create demo --gh --claude PROFILE --codex PROFILE --repo OWNER/REPO --t3` runs the bundled
   extensions after the create: this machine's GitHub login, each login with its setup (repeat `--claude` or `--codex`
-  for several), a clone into `~/workspace`, and T3 Code. The first failure stops the rest and keeps the sandbox. On this machine only.
+  for several), a clone into `~/workspace`, and T3 Code. `--t3-browser` also installs the Chrome T3's browser pane uses. The first failure stops the rest and keeps the sandbox. On this machine only.
 - `asd claude demo [PROFILE]` and `asd codex demo [PROFILE]` open the agent in `~/workspace` with an imported login.
   The dashboard opens the same in a terminal window on the Mac.
 - The daemon, the CLI with `--json`, a web dashboard, and extensions. What the dashboard does to the Mac itself

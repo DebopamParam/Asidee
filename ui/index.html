@@ -640,7 +640,13 @@ function t3Modal(name) {
         el("div", { class: "row" }, button("Set up T3 Code", "t3:setup", async () => {
           const reply = await run("setup"); if (reply.exitCode !== 0) return failed(reply)
           const done = JSON.parse(reply.stdout)
-          return `T3 ${done.version} ${done.runtime === "installed" ? "installed" : "was already installed"}. Logins it found: Claude ${done.claude}, Codex ${done.codex}.`
+          return `T3 ${done.version} ${done.runtime === "installed" ? "installed" : "was already installed"}. Logins it found: Claude ${done.claude}, Codex ${done.codex}.${done.chromeSandboxOff ? " T3 runs as root here, so its browser runs without Chrome's own sandbox; this applies from the next T3 server start." : ""}`
+        }, { class: "small" }))),
+      el("li", {}, el("b", {}, "Browser (optional). "), el("span", { class: "muted" }, "Chrome for T3's browser pane, about 130 MB: the exact build this T3 expects, checked against its checksum, with its libraries and fonts."),
+        el("div", { class: "row" }, button("Install T3's browser", "t3:browser", async () => {
+          const reply = await run("browser"); if (reply.exitCode !== 0) return failed(reply)
+          const done = JSON.parse(reply.stdout)
+          return `Chrome ${done.chrome} ${done.browser === "installed" ? "installed" : "was already installed"}, with its libraries and fonts. Restart the T3 server if its browser pane was already open.`
         }, { class: "small" }))),
       el("li", {}, el("b", {}, "SSH. "), sshReady(name) ? el("span", { class: "ok" }, "Ready.") : access?.error ? el("span", { class: "error" }, access.error)
         : el("span", { class: "muted" }, access ? "Set up SSH in the sandbox and add Asidee's Include line to your ~/.ssh/config." : "Checking…"),
@@ -934,7 +940,7 @@ function render() {
     // Grouped as on a sandbox's card.
     const buckets = [
       ["Agents and logins", logins ? [el("div", {}, el("label", {}, "GitHub"), el("div", { class: "pills" }, pill("setup-gh", "This Mac's login"))), profileSelect("claude", "Claude logins"), profileSelect("codex", "Codex logins")] : []],
-      ["T3 Code", installed("t3") ? [el("div", { class: "pills" }, pill("setup-t3", "Set up T3 Code"))] : []],
+      ["T3 Code", installed("t3") ? [el("div", { class: "pills" }, pill("setup-t3", "Set up T3 Code"), pill("setup-t3-browser", "Install T3's browser (Chrome)"))] : []],
       ["Code and docs", installed("repo") ? [el("div", {}, el("label", { for: "setup-repo" }, "Clone a repository (OWNER/REPO)"), el("input", { id: "setup-repo", placeholder: "none" }))] : []],
     ].filter(([, fields]) => fields.length)
     if (!buckets.length) return
@@ -973,7 +979,10 @@ function setupSteps() {
   }
   const repository = input("repo")?.value.trim()
   if (repository) steps.push({ label: `Clone ${repository}`, flags: ["--repo", repository], extension: "repo", action: "clone", values: { repository } })
-  if (input("t3")?.checked) steps.push({ label: "T3 Code", flags: ["--t3"], extension: "t3", action: "setup", values: {} })
+  // The browser goes into T3's runtime, so it sets T3 up first.
+  const t3Browser = input("t3-browser")?.checked
+  if (input("t3")?.checked || t3Browser) steps.push({ label: "T3 Code", flags: t3Browser ? [] : ["--t3"], extension: "t3", action: "setup", values: {} })
+  if (t3Browser) steps.push({ label: "T3's browser", flags: ["--t3-browser"], extension: "t3", action: "browser", values: {} })
   return steps
 }
 // Only the profile names are taken from the listing's output.

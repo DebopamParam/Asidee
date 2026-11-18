@@ -2,9 +2,9 @@ import { profileName } from "../core/credentials"
 import { BUNDLED_RUN } from "../core/extensions"
 import { AsideeError } from "../core/types"
 
-// `asd create NAME --gh --claude P… --codex P… --repo OWNER/REPO --t3`: after the create, the bundled extensions' own
+// `asd create NAME --gh --claude P… --codex P… --repo OWNER/REPO --t3 --t3-browser`: after the create, the bundled extensions' own
 // commands, in the order each needs the one before (a private clone needs GitHub; T3 finds the logins).
-export type CreateSetup = { gh?: boolean; claude?: string[]; codex?: string[]; repo?: string; t3?: boolean }
+export type CreateSetup = { gh?: boolean; claude?: string[]; codex?: string[]; repo?: string; t3?: boolean; "t3-browser"?: boolean }
 export type SetupStep = { label: string; argv: string[] }
 export type StepResult = { label: string; exitCode: number; output: string }
 const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/
@@ -19,7 +19,9 @@ export function createSteps(name: string, options: CreateSetup): SetupStep[] {
     for (const value of new Set(options[agent] ?? [])) steps.push({ label: `${agent === "claude" ? "Claude" : "Codex"} login ${value}`, argv: ["logins", "import", name, agent, "--profile", profile(agent, value), "--setup"] })
   }
   if (options.repo !== undefined) steps.push({ label: `Clone ${options.repo}`, argv: ["repo", "clone", name, options.repo] })
-  if (options.t3) steps.push({ label: "T3 Code", argv: ["t3", "setup", name] })
+  // The browser goes into T3's runtime, so it sets T3 up first.
+  if (options.t3 || options["t3-browser"]) steps.push({ label: "T3 Code", argv: ["t3", "setup", name] })
+  if (options["t3-browser"]) steps.push({ label: "T3's browser", argv: ["t3", "browser", name] })
   return steps
 }
 

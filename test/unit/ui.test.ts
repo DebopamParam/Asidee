@@ -352,6 +352,9 @@ test("create runs the chosen setup steps after the create, in the CLI's order, a
   form.elements.namedItem("name").value = "fresh"; doc.getElementById("setup-gh").checked = true; doc.getElementById("setup-claude-work").checked = true; doc.getElementById("setup-claude-home").checked = true; doc.getElementById("setup-t3").checked = true
   doc.getElementById("setup-repo").value = "acme/app.git"; form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
   expect(ui.text("#create-command")).toContain("asd create fresh --gh --claude work --claude home --repo acme/app.git --t3")
+  // The browser sets T3 up first, so its one flag stands for both.
+  doc.getElementById("setup-t3-browser").checked = true; form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
+  expect(ui.text("#create-command")).toContain("--repo acme/app.git --t3-browserCopy")
   form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
   expect(ui.text("#create-error")).toBe("Repository takes a GitHub OWNER/REPO.")
   expect(ui.calls.some((call) => call.method === "create")).toBe(false)

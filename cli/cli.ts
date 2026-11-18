@@ -38,9 +38,10 @@ const GROUPS: Array<[string, string[]]> = [
     "asd setup --remove [--accept-plan HASH]   undo it: remove the runtime, restart the engine, delete the download",
     "asd doctor                         engines on this machine and what each one needs",
     "asd create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]",
-    "           [--gh] [--claude PROFILE…] [--codex PROFILE…] [--repo OWNER/REPO] [--t3]   then, with the bundled extensions: this",
-    "           Mac's GitHub login, Claude or Codex logins with their setup (repeat a flag for several), a clone into",
-    "           ~/workspace, T3 Code. Each token is copied into the sandbox, where anything running there can read it.",
+    "           [--gh] [--claude PROFILE…] [--codex PROFILE…] [--repo OWNER/REPO] [--t3] [--t3-browser]   then, with the bundled extensions:",
+    "           this Mac's GitHub login, Claude or Codex logins with their setup (repeat a flag for several), a clone into",
+    "           ~/workspace, T3 Code, T3's browser (Chrome; sets T3 up too). Each token is copied into the sandbox, where",
+    "           anything running there can read it.",
     "asd shell NAME [-- COMMAND…]       a shell, or one command on a terminal, inside the sandbox",
     "asd claude NAME [PROFILE] [-- ARG…]   Claude Code in ~/workspace with an imported login: PROFILE, or the only one",
     "asd codex NAME [PROFILE] [-- ARG…]    the same for Codex",
@@ -608,11 +609,11 @@ async function main(argv: string[]): Promise<void> {
       }
       case "create": {
         const { values, positionals } = parse({ docker: { type: "boolean" }, image: { type: "string" }, template: { type: "string" }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" }, pids: { type: "string" }, engine: { type: "string" },
-          gh: { type: "boolean" }, claude: { type: "string", multiple: true }, codex: { type: "string", multiple: true }, repo: { type: "string" }, t3: { type: "boolean" } })
+          gh: { type: "boolean" }, claude: { type: "string", multiple: true }, codex: { type: "string", multiple: true }, repo: { type: "string" }, t3: { type: "boolean" }, "t3-browser": { type: "boolean" } })
         const name = need(positionals[0], "a name")
         // Checked before anything is made. The logins come from this Mac, and the extensions reach local sandboxes only.
         const steps = createSteps(name, values)
-        if (steps.length && selectedHost && selectedHost !== "local") throw new AsideeError("usage", "--gh, --claude, --codex, --repo and --t3 work for sandboxes on this Mac only.")
+        if (steps.length && selectedHost && selectedHost !== "local") throw new AsideeError("usage", "--gh, --claude, --codex, --repo, --t3 and --t3-browser work for sandboxes on this Mac only.")
         creating = name
         const made = await call<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }> }>("create",
           { name, docker: values.docker, image: values.image, template: values.template, cpus: values.cpus, memoryGb: values.memory, diskGb: values.disk, pids: values.pids, engine: values.engine }, watching(name))

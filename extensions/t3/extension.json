@@ -3,6 +3,7 @@
   "description": "Install this machine's exact T3 runtime, sync guest login providers, and report the core's SSH access for the app.",
   "actions": [
     { "id": "setup", "label": "Set up T3 Code", "scope": "sandbox", "run": ["./t3.ts", "setup"] },
+    { "id": "browser", "label": "Install T3's browser (Chrome)", "scope": "sandbox", "run": ["./t3.ts", "browser"] },
     { "id": "sync", "label": "Refresh T3 login providers", "scope": "sandbox", "run": ["./t3.ts", "sync"] },
     { "id": "ssh", "label": "Show SSH access for T3", "scope": "sandbox", "run": ["./t3.ts", "ssh"] }
   ]

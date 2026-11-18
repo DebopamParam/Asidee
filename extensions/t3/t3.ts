@@ -3,6 +3,9 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { checked, exec, json, object, run, sandboxName, type Runner } from "./client"
 // Embedded, so the extension also runs from inside the asd binary.
+import BROWSER from "./browser.cjs" with { type: "text" }
+import DOWNLOAD from "./download.cjs" with { type: "text" }
+import ENVIRONMENT from "./environment.cjs" with { type: "text" }
 import INSTALL from "./install.cjs" with { type: "text" }
 import PROVIDERS from "./providers.cjs" with { type: "text" }
 
@@ -35,23 +38,44 @@ export async function sshAccess(runner: Runner, name: string): Promise<SshAccess
   return { alias: data.alias, user: data.user, home: data.home, batchReady: data.batchReady, loopbackForwarding: data.loopbackForwarding }
 }
 
-export async function setup(runner: Runner, name: string, home: string): Promise<{ version: string; runtime: "installed" | "present"; claude: number; codex: number; ssh: SshAccess }> {
+export async function setup(runner: Runner, name: string, home: string): Promise<{ version: string; runtime: "installed" | "present"; chromeSandboxOff: boolean; claude: number; codex: number; ssh: SshAccess }> {
   sandboxName(name)
   const version = await hostVersion(runner, home)
-  const runtime = (await exec(runner, name, ["node", "-e", INSTALL, version, RELEASES])).trim()
+  const runtime = (await exec(runner, name, ["node", "-e", DOWNLOAD + INSTALL, version, RELEASES])).trim()
   if (runtime !== "installed" && runtime !== "present") throw new Error("Invalid T3 install response; contents withheld.")
-  return { version, runtime, ...await syncProviders(runner, name), ssh: await sshAccess(runner, name) }
+  // Only a T3 server running as root needs Chrome's sandbox off for its browser.
+  const environment = (await exec(runner, name, ["node", "-e", ENVIRONMENT])).trim()
+  if (environment !== "set" && environment !== "not-root") throw new Error("Invalid T3 environment response; contents withheld.")
+  return { version, runtime, chromeSandboxOff: environment === "set", ...await syncProviders(runner, name), ssh: await sshAccess(runner, name) }
+}
+
+// An error whose message is safe to print.
+export class Shown extends Error {}
+
+// The browser T3 pins (a Chrome for Testing headless shell), checked against T3's own SHA-256, then T3's own setup of
+// its libraries and fonts. On failure only the installer's own message is shown, never other guest output.
+export async function browser(runner: Runner, name: string, home: string): Promise<{ chrome: string; browser: "installed" | "present" }> {
+  sandboxName(name)
+  const version = await hostVersion(runner, home)
+  let result
+  try { result = await runner(["asd", "exec", name, "--", "node", "-e", DOWNLOAD + BROWSER, version]) }
+  catch { throw new Shown("Could not run the T3 browser install.") }
+  if (result.exitCode !== 0) throw new Shown(result.stderr.split("\n").findLast((line) => line.startsWith("t3-browser: "))?.slice(12, 312) || "T3's browser install failed; output withheld.")
+  const value = json(result.stdout)
+  if (!object(value) || typeof value.chrome !== "string" || !/^\d+\.\d+\.\d+\.\d+$/.test(value.chrome) || (value.browser !== "installed" && value.browser !== "present")) throw new Error("Invalid T3 browser response; contents withheld.")
+  return { chrome: value.chrome, browser: value.browser }
 }
 
 export async function main(argv: string[], env = process.env): Promise<void> {
   const [action, direct] = argv, name = direct ?? env.ASIDEE_SANDBOX ?? ""
-  if (!action || action === "--help") { console.log("t3.ts setup|sync|ssh NAME. Requires an already running sandbox with Node and tar. `asd ssh setup NAME` prepares the SSH access the app connects with."); return }
+  if (!action || action === "--help") { console.log("t3.ts setup|browser|sync|ssh NAME. Requires an already running sandbox with Node and tar. `asd ssh setup NAME` prepares the SSH access the app connects with."); return }
   if (argv.length > 2) throw new Error("Unexpected T3 arguments.")
   if (action === "setup") console.log(JSON.stringify(await setup(run, name, homedir())))
+  else if (action === "browser") console.log(JSON.stringify(await browser(run, name, homedir())))
   else if (action === "sync") console.log(JSON.stringify(await syncProviders(run, name)))
   else if (action === "ssh") console.log(JSON.stringify(await sshAccess(run, name)))
-  else throw new Error("Use setup, sync or ssh.")
+  else throw new Error("Use setup, browser, sync or ssh.")
 }
 // The command line, run by Bun directly or from inside the asd binary for an installed extension.
-export const command = (argv: string[]) => main(argv).catch(() => { console.error("T3 operation failed. Check the running sandbox, tools, version, checksums and install/login locks. Subprocess output withheld."); process.exitCode = 1 })
+export const command = (argv: string[]) => main(argv).catch((error) => { console.error(error instanceof Shown ? error.message : "T3 operation failed. Check the running sandbox, tools, version, checksums and install/login locks. Subprocess output withheld."); process.exitCode = 1 })
 if (import.meta.main) command(process.argv.slice(2))

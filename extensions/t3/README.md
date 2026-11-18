@@ -34,6 +34,23 @@ There is still a race between that check and rename; eliminating it requires coo
 No credentials or subprocess diagnostics are printed. The sidecar records both generations before settings
 publication so retries recover ownership after an interrupted update. No extension metadata is added to T3 settings.
 
+## T3's browser
+
+T3's browser pane runs Chrome. `asd ext run t3 browser NAME` (the dashboard's "Install T3's browser", or
+`asd create … --t3-browser`, which sets T3 up first) installs the exact build this T3 pins: the Chrome for Testing
+headless shell whose version, size and SHA-256 are read from the T3 executable itself, downloaded over HTTPS, checked
+against both, listed for unexpected paths and unpacked to `~/.t3/tools/chrome-headless-shell/PLATFORM/VERSION`, where
+T3 looks for it. A copy already there is kept. It then runs T3's own `t3 browser setup`, which installs the browser's
+libraries and fonts with apt, as root or with `sudo -n`; with neither it fails and says so. If a T3 version moves or
+renames its pin, the action fails rather than guess, and T3 still installs the browser on first use. About 130 MB.
+
+Chrome refuses its own sandbox as root. When the guest runs T3 as root, setup puts a marked block at the top of
+`~/.bashrc` that exports `T3CODE_SERVER_BROWSER_SANDBOX=0`, which T3 reads when its server starts. The desktop app
+starts the server with `ssh HOST sh -s`, Asidee's SSH server passes only `PATH`, and bash reads `~/.bashrc` for an SSH
+command only up to its interactive-only guard, hence the top. It needs bash as root's login shell, and a server already
+running keeps its old environment until it restarts. As a normal user Chrome keeps its sandbox, which works under
+gVisor, and nothing is written. Without Chrome's sandbox, the pane should only open pages you trust.
+
 ## SSH access
 
 The core owns it: `asd ssh setup NAME` prepares it, `--write-config` adds its `Include` line to `~/.ssh/config`,
@@ -62,3 +79,9 @@ deleted, kept a user-added instance and top-level key, and refused invalid setti
 Not checked live: a checksum mismatch (unit tests only), provider authentication, the desktop app reusing the runtime,
 and connecting the app over the alias. The alias itself was checked with ssh, scp, SFTP and `ssh -L` (the core's A
 evals), and `t3.ts ssh` printed its access for a sandbox on the default image.
+
+Checked live on 2026-11-18 on the `agent` template (Ubuntu 26.04, arm64): `asd create … --t3-browser` set T3 up and
+installed Chrome 157.0.8103.38 plus its libraries and fonts in 69 s; Chrome rendered a page as the normal user with its
+own sandbox. In a root sandbox, Chrome refused to start without `--no-sandbox`, and after the `~/.bashrc` block an
+`ssh HOST sh -s` session saw `T3CODE_SERVER_BROWSER_SANDBOX=0`; `/etc/environment` did not reach it. Not checked live:
+the desktop app opening the browser pane after a fresh server start.
