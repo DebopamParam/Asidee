@@ -26,7 +26,8 @@ Only instances recorded with their driver and home in the private `~/.t3/userdat
 updated or removed. Other instances and top-level settings are
 preserved, including user-configured built-ins. An unowned ID collision uses `asidee-AGENT-PROFILE`; a second collision
 fails without replacing the settings file. Claude providers override `ANTHROPIC_API_KEY` with an empty value to select
-the imported subscription login. Settings are written atomically with mode 0600 under the logins extension's
+the imported subscription login, and set `IS_SANDBOX=1`: T3 runs Claude with full access, which Claude Code refuses as
+root otherwise ("--dangerously-skip-permissions cannot be used with root/sudo privileges"). Settings are written atomically with mode 0600 under the logins extension's
 `~/.asidee-logins.lock`. Invalid settings are refused. Changes made concurrently by T3 itself are not serialized by
 that lock. Before renaming, sync compares the current settings bytes with the original and aborts if they changed.
 There is still a race between that check and rename; eliminating it requires coordination with T3's own settings writer.

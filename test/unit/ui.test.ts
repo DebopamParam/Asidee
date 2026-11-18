@@ -36,8 +36,11 @@ async function page(replies: Record<string, (body: any) => unknown>, url = "http
   const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((resolve) => setTimeout(resolve, 0)) }
   await settle()
   const text = (selector: string) => (window.document.querySelector(selector)?.textContent ?? "").replace(/\s+/g, " ")
-  const button = (label: string) => [...window.document.querySelectorAll("button")].find((node) => node.textContent === label)!
-  return { window, calls, prompts, settle, text, button }
+  // While a pop-up is open, only its buttons can be clicked.
+  const button = (label: string) => [...(window.document.querySelector("#modal:not([hidden])") ?? window.document).querySelectorAll("button")].find((node) => node.textContent === label)!
+  // Opens the pop-up behind a card on a sandbox.
+  const tile = async (title: string) => { ([...window.document.querySelectorAll("#sandboxes .tile")].find((node) => node.querySelector(".t")!.textContent === title) as any).click(); await settle() }
+  return { window, calls, prompts, settle, text, button, tile }
 }
 
 const base = { configGet: () => ({ defaults: {}, requireProbes: true }), checklist: () => CHECKLIST, engines: () => [{ id: "fake:1", label: "Fake engine", ready: true, problems: [], capabilities: { kernelIsolation: "gvisor", networkGuard: true, diskLimit: "watched" } }], extensions: () => ({ extensions: [extension], errors: [] }) }
@@ -61,21 +64,23 @@ test("the dashboard lists sandboxes, sends the token, and hides it from the addr
   expect(ui.text("#engines")).toContain("Kernel isolation: gvisor")
 })
 
-test("past checks disclose the time even when collapsed and never show historical passes as current", async () => {
+test("past checks show what they measured and when, always as a past result", async () => {
   const ui = await page({ ...base, list: () => [sandbox()] })
-  expect(ui.text("#sandboxes")).toContain(`Last checked ${new Date("2026-11-10T10:00:00Z").toLocaleString()}. Historical only; current checks unknown.`)
-  ui.button("Past checks").click(); await ui.settle()
+  expect(ui.text("#sandboxes")).toContain(`Checked ${new Date("2026-11-10T10:00:00Z").toLocaleString()}: 1 fail · 1 weak · 1 pass (past result; it may have changed since)`)
+  ui.button("Checks…").click(); await ui.settle()
+  expect(ui.text("#modal")).toContain("That is a past result: what holds now is unknown until the next check.")
   const checks = ui.text("ul.checks")
-  expect(checks).toContain("?Cannot reach the host — current property unknownMeasured 2026-11-10T10:00:00Z: fail (probed). A connection reached the host.")
-  expect(checks).toContain("Measured 2026-11-10T10:00:00Z: weak (probed). Watched, not capped.")
-  expect(checks).toContain("Measured 2026-11-10T10:00:00Z: pass (probed). gVisor answers.")
-  for (const repeated of ["Measured", "(probed)"]) expect(checks.split(repeated).length - 1).toBe(3)
-  expect(checks).not.toContain("✓"); expect(checks).not.toContain("Previous")
+  expect(checks).toContain("✗Cannot reach the host — does not hold then, probedA connection reached the host.")
+  expect(checks).toContain("— holds in a weaker form then, probedWatched, not capped.")
+  expect(checks).toContain("— held then, probedgVisor answers.")
+  expect(checks).not.toContain("current"); expect(checks).not.toContain("Previous")
 })
 
 test("verify, stop and remove call the API; remove sends the typed name as the confirmation", async () => {
   const ui = await page({ ...base, list: () => [sandbox()], verify: () => ({}), stop: () => ({}), remove: () => ({}) })
-  ui.button("Verify").click(); await ui.settle()
+  ui.button("Checks…").click(); await ui.settle()
+  ui.button("Check now").click(); await ui.settle()
+  ui.button("Close").click(); await ui.settle()
   ui.button("Stop").click(); await ui.settle()
   ui.button("Remove").click(); await ui.settle()
   expect(ui.prompts[0]).toContain("deletes demo")
@@ -85,12 +90,13 @@ test("verify, stop and remove call the API; remove sends the typed name as the c
 
 test("an extension's action is drawn as a form from its declaration and sends its fields", async () => {
   const ui = await page({ ...base, list: () => [sandbox()], action: () => ({ exitCode: 0, stdout: "installed 1.2\n", stderr: "" }) })
+  await ui.tile("Tools")
   const form = ui.button("Install thing").closest("form") as any
   expect(form.elements.namedItem("version").value).toBe("latest")
   form.elements.namedItem("version").value = "1.2"
   form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
   expect(ui.calls.find((call) => call.method === "action")!.body).toEqual({ extension: "tools", action: "install", sandbox: "demo", values: { version: "1.2", force: "false" } })
-  expect(ui.text("#sandboxes pre")).toBe("installed 1.2")
+  expect(ui.text("#modal pre")).toBe("installed 1.2")
 })
 
 test("a stopped sandbox shows why it stopped, offers Start, and has no extension actions", async () => {
@@ -129,6 +135,7 @@ test("without a token the page says how to open it", async () => {
 
 test("a refresh that changes nothing leaves a half-filled form alone", async () => {
   const ui = await page({ ...base, list: () => [sandbox()] })
+  await ui.tile("Tools")
   const input = (ui.button("Install thing").closest("form") as any).elements.namedItem("version")
   input.value = "typing"
   // The page's own refresh, as its timer would call it.
@@ -176,10 +183,10 @@ test("an unavailable setting cannot be changed and a sandbox with unknown probes
   const ui = await page({ ...base, configGet: () => { throw new Error("config unreadable") }, list: () => [sandbox({ lastVerify: historical({ at: "2026-11-15T00:00:00Z", results: [{ id: "net-host", status: "unknown", evidence: "none", detail: "The control did not answer." }] }) })] })
   expect((ui.window.document.getElementById("require-probes") as any).disabled).toBe(true)
   expect(ui.text("#settings-error")).toContain("config unreadable")
-  expect(ui.text("#sandboxes")).toContain("Not verified")
+  expect(ui.text("#sandboxes")).toContain(": 1 unknown (past result; it may have changed since)")
   expect(ui.text("#sandboxes")).not.toContain("✓")
-  ui.button("Past checks").click()
-  expect(ui.text("ul.checks")).toContain("unknown (none). The control did not answer.")
+  ui.button("Checks…").click(); await ui.settle()
+  expect(ui.text("ul.checks")).toContain("— could not be checked then, noneThe control did not answer.")
 })
 
 
@@ -208,12 +215,14 @@ test("live usage is written in place, so a form being typed in survives it", asy
   let cpuPercent = 37.5
   const ui = await page({ ...base, list: () => [sandbox()], usage: () => [usageOf({ cpuPercent })] })
   expect(ui.text("[data-usage=demo]")).toContain("CPU 37.5% of 200% · memory 512 MB of 4.00 GB · 40 of 4096 tasks · disk 3.00 GB of 20.00 GB")
+  await ui.tile("Resize")
   const input = (ui.button("Resize").closest("form") as any).elements.namedItem("cpus")
   input.value = "3"
   cpuPercent = 180
   await (ui.window as any).asideeRefresh(); await ui.settle()
   expect(ui.text("[data-usage=demo]")).toContain("CPU 180% of 200%")
   expect(ui.window.document.contains(input)).toBe(true)
+  ui.button("Close").click(); await ui.settle()
   ui.button("Usage").click(); await ui.settle()
   const cells = [...ui.window.document.querySelectorAll("#usage tbody td")].map((cell) => cell.textContent)
   expect(cells.slice(0, 5)).toEqual(["demo", "running", "180% of 200%", "512 MB of 4.00 GB", "40 of 4096"])
@@ -229,25 +238,27 @@ test("Terminal asks the daemon to open a window for that sandbox or workspace an
   expect(ui.calls.filter((call) => call.method === "openTerminal").map((call) => call.body)).toEqual([{ name: "demo", kind: "sandbox" }, { name: "notes", kind: "workspace" }])
 })
 
-test("a sandbox's More group resizes, runs a command, adds a forward and a link, and saves a template", async () => {
+test("a sandbox's tool cards resize, runs a command, adds a forward and a link, and saves a template", async () => {
   const ui = await page({ ...base, list: () => [sandbox()], forwardList: () => [], linkList: () => [],
     resize: () => ({ changes: [{ limit: "cpus", from: 2, to: 3, applies: "now" }], checks: [] }), exec: () => ({ exitCode: 0, stdout: "hi\n", stderr: "" }),
     forwardAdd: (body) => ({ id: "f1", name: "demo", localPort: 8080, port: Number(body.port), connections: 0 }), linkAdd: (body) => ({ ...body, address: "other:5432", trust: "trusted" }),
     snapshot: (body) => ({ template: { name: body.as }, contents: "files" }) })
-  const submit = async (label: string, values: Record<string, string>) => {
+  const submit = async (card: string, label: string, values: Record<string, string>) => {
+    await ui.tile(card)
     const form = ui.button(label).closest("form") as any
     for (const [name, value] of Object.entries(values)) form.elements.namedItem(name).value = value
     form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
   }
-  await submit("Resize", { cpus: "3" }); expect(ui.text("#sandboxes pre")).toContain("cpus: 2 → 3, now")
-  await submit("Run", { command: "echo hi" }); expect(ui.text("#sandboxes pre")).toBe("hi")
-  await submit("Add forward", { port: "8080" })
-  await submit("Add link", { to: "other", port: "5432" })
-  await submit("Save", { as: "base" }); expect(ui.text("#sandboxes pre")).toContain("Saved template base.")
+  await submit("Resize", "Resize", { cpus: "3" }); expect(ui.text("#modal pre")).toContain("cpus: 2 → 3, now")
+  await submit("Run a command", "Run", { command: "echo hi" }); expect(ui.text("#modal pre")).toBe("hi")
+  await submit("Ports", "Add forward", { port: "8080" })
+  await submit("Ports", "Add link", { to: "other", port: "5432" })
+  await submit("Save as a template", "Save", { as: "base" }); expect(ui.text("#modal pre")).toContain("Saved template base.")
   const sent = ui.calls.filter((call) => ["resize", "exec", "forwardAdd", "linkAdd", "snapshot"].includes(call.method)).map((call) => [call.method, call.body])
   expect(sent).toEqual([["resize", { name: "demo", cpus: "3" }], ["exec", { name: "demo", argv: ["sh", "-c", "echo hi"] }], ["forwardAdd", { name: "demo", port: "8080" }],
     ["linkAdd", { from: "demo", to: "other", port: "5432" }], ["snapshot", { name: "demo", as: "base" }]])
-  expect(ui.text("#sandboxes")).toContain("asd ssh setup demo --write-config")
+  await ui.tile("SSH and editors")
+  expect(ui.text("#modal")).toContain("asd ssh setup demo --write-config")
 })
 
 test("Settings shows every setting; each saves on its own, and the defaults save together", async () => {
@@ -348,7 +359,7 @@ test("create runs the chosen setup steps after the create, in the CLI's order, a
   form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
   const create = ui.calls.find((call) => call.method === "create")!.body
   expect(Object.keys(create).some((key) => key.startsWith("setup"))).toBe(false)
-  const steps = ui.calls.filter((call) => call.method === "action" && call.body.action !== "profiles").map((call) => call.body)
+  const steps = ui.calls.filter((call) => call.method === "action" && !["profiles", "list"].includes(call.body.action)).map((call) => call.body)
   expect(steps).toEqual([{ extension: "logins", action: "github", sandbox: "fresh", values: {} }, { extension: "logins", action: "import", sandbox: "fresh", values: { agent: "claude", profile: "work", setup: true } },
     { extension: "logins", action: "import", sandbox: "fresh", values: { agent: "claude", profile: "home", setup: true } }, { extension: "repo", action: "clone", sandbox: "fresh", values: { repository: "acme/app" } }])
   const shown = ui.text("#sandboxes pre")
@@ -424,16 +435,44 @@ test("on a machine without the dialog, the buttons say the CLI command is offere
   expect(ui.button("Stop the daemon (asks on the Mac)")).toBeDefined()
 })
 
-test("the T3 group sets T3 up, then gives the SSH host to paste, and shows each result under its button", async () => {
+test("the T3 card sets T3 up, then gives the SSH host to paste, and shows each result in its pop-up", async () => {
   const t3 = { id: "t3", name: "T3 Code", actions: ["setup", "sync", "ssh"].map((id) => ({ id, label: id, scope: "sandbox", fields: [], run: ["./t3.ts", id] })) }
   const ui = await page({ ...base, list: () => [sandbox()], extensions: () => ({ extensions: [t3], errors: [] }), sshAccess: () => ({ alias: "demo.asidee", user: "root", home: "/root", batchReady: false, loopbackForwarding: true }),
     action: (body) => body.action === "setup" ? { exitCode: 0, stdout: JSON.stringify({ version: "1.2.3", runtime: "installed", claude: 2, codex: 1, ssh: {} }), stderr: "" } : { exitCode: 1, stdout: "", stderr: "" } })
-  const doc = ui.window.document as any
-  const group = () => [...doc.querySelectorAll("#sandboxes details")].find((node: any) => node.querySelector("summary").textContent === "T3 Code")
-  group().open = true; group().dispatchEvent(new ui.window.Event("toggle")); await ui.settle()
-  expect(group().textContent).toContain("Set up SSH (asks on the Mac)")
-  expect(group().querySelector(".cmd code").textContent).toBe("demo.asidee")
-  ui.button("1. Set up T3 Code").click(); await ui.settle()
-  expect(group().querySelector("pre").textContent).toBe("T3 1.2.3 installed. Logins it found: Claude 2, Codex 1.")
-  expect(ui.text("#sandboxes > .panel > pre")).toBe("")
+  expect(ui.text("#sandboxes")).toContain("Connect T3 CodeSet up SSH first")
+  await ui.tile("Connect T3 Code")
+  expect(ui.text("#modal")).toContain("Set up SSH (asks on the Mac)")
+  expect(ui.window.document.querySelector("#modal .cmd code")!.textContent).toBe("demo.asidee")
+  ui.button("Set up T3 Code").click(); await ui.settle()
+  expect(ui.text("#modal pre")).toBe("T3 1.2.3 installed. Logins it found: Claude 2, Codex 1.")
+  expect(ui.text("#sandboxes pre")).toBe("")
+})
+
+test("the Logins pop-up lists the sandbox's logins as cards, re-imports or adds one, and tells T3", async () => {
+  const logins = { id: "logins", name: "Agent logins", actions: ["import", "github", "list", "logout"].map((id) => ({ id, label: id, scope: "sandbox", fields: [], run: ["./login.ts", id] })) }
+  const t3 = { id: "t3", name: "T3 Code", actions: [{ id: "sync", label: "sync", scope: "sandbox", fields: [], run: ["./t3.ts", "sync"] }] }
+  let inside = "claude/~ (a@example.com)\nclaude/work (w@example.com)\ngithub/~ (me)\n"
+  const ui = await page({ ...base, list: () => [sandbox()], extensions: () => ({ extensions: [logins, t3], errors: [] }), sshAccess: () => ({ alias: "demo.asidee", batchReady: true }), openTerminal: () => ({ terminal: "default", command: "x" }),
+    action: (body) => body.action === "profiles" ? { exitCode: 0, stdout: JSON.stringify({ agent: body.values.agent, profiles: body.values.agent === "claude" ? ["work", "home"] : [] }), stderr: "" }
+      : body.action === "list" ? { exitCode: 0, stdout: inside, stderr: "" }
+      : body.action === "import" ? (inside += body.values.replace === "true" ? "" : `claude/${body.values.profile} (h@example.com)\n`, { exitCode: 0, stdout: "Imported.\nCopied 0 setup files.", stderr: "" })
+      : { exitCode: 0, stdout: '{"claude":3,"codex":0}', stderr: "" } })
+  expect(ui.text("#sandboxes")).toContain("LoginsClaude: main login, work · GitHub")
+  await ui.tile("Logins")
+  const card = (title: string, section = 0) => [...ui.window.document.querySelectorAll("#modal .cards")[section]!.querySelectorAll(".card")].find((node) => node.querySelector(".t")!.textContent === title) as any
+  expect(card("Claude · work").textContent).toContain("w@example.com")
+  // This Mac's work login is in the sandbox already, so only home is offered to add.
+  expect([...ui.window.document.querySelectorAll("#modal .cards")[1]!.querySelectorAll(".t")].map((node) => node.textContent)).toEqual(["Claude · home"])
+  ;[...card("Claude · work").querySelectorAll("button")].find((node: any) => node.textContent === "Re-import")!.click(); await ui.settle()
+  expect(ui.text("#modal pre")).toBe("Re-imported Claude · work. T3 Code sees it now.")
+  ;[...card("Claude · home", 1).querySelectorAll("button")].find((node: any) => node.textContent === "Add")!.click(); await ui.settle()
+  const sent = ui.calls.filter((call) => call.method === "action" && ["import", "sync"].includes(call.body.action)).map((call) => [call.body.action, call.body.values])
+  expect(sent).toEqual([["import", { agent: "claude", profile: "work", target: "", setup: "false", replace: "true" }], ["sync", {}], ["import", { agent: "claude", profile: "home", target: "", setup: "false", replace: "false" }], ["sync", {}]])
+  expect(card("Claude · home").textContent).toContain("h@example.com")
+  // With named logins, asd claude cannot pick the canonical one, so Open agent offers only the named ones.
+  ui.button("Close").click(); await ui.settle()
+  ui.button("Open agent…").click(); await ui.settle()
+  expect([...ui.window.document.querySelectorAll("#modal .card .t")].map((node) => node.textContent)).toEqual(["Claude · work", "Claude · home"])
+  ;(ui.window.document.querySelector("#modal .card") as any).click(); await ui.settle()
+  expect(ui.calls.find((call) => call.method === "openTerminal")!.body).toEqual({ name: "demo", kind: "claude", profile: "work" })
 })

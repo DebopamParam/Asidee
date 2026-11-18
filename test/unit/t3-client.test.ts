@@ -75,6 +75,7 @@ test("provider sync discovers canonical/named logins and keeps custom providers 
   expect(settings.providerInstances.codex).toEqual(custom); expect(settings.providerInstances.custom).toEqual(custom)
   expect(settings.providerInstances["asidee-codex-canonical"].config.homePath).toBe(join(home, ".codex"))
   expect(settings.providerInstances.claudeAgent.environment).toContainEqual({ name: "ANTHROPIC_API_KEY", value: "", sensitive: false })
+  expect(settings.providerInstances.claudeAgent.environment).toContainEqual({ name: "IS_SANDBOX", value: "1", sensitive: false })
   expect(settings.theme).toBe("light"); expect((await lstat(join(home, ".t3/userdata/settings.json"))).mode & 0o777).toBe(0o600)
   expect(settings.asideeProviderInstances).toBeUndefined()
   expect((await lstat(join(home, ".t3/userdata/asidee-providers.json"))).mode & 0o777).toBe(0o600)

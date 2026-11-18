@@ -59,6 +59,22 @@
   .setting:last-child { border-bottom: none; }
   .setting > label { font-size: 14px; color: var(--ink); }
   @media (max-width: 560px) { .setting { grid-template-columns: 1fr; } }
+  h4.bucket { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 16px 0 6px; font-weight: 600; }
+  .tiles, .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
+  .tile, .card { display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+  .tile .t, .card .t { font-weight: 600; } .tile .s { font-size: 13px; color: var(--muted); }
+  .tile .s.ok, .ok { color: var(--accent); } .tile .s.warn, .muted.warn { color: var(--warn); } .tile .s.bad, .muted.bad { color: var(--bad); }
+  .tile:hover, .card.pick:hover { border-color: var(--accent); }
+  .card .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .card.row { flex-direction: row; margin-bottom: 6px; }
+  #modal { position: fixed; inset: 0; background: rgb(0 0 0 / .45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; overflow-y: auto; z-index: 10; }
+  #modal[hidden] { display: none; }
+  .sheet { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px 20px; width: min(720px, 100%); }
+  .sheet-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; } .sheet-head h3 { margin: 0; font-size: 16px; }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  label.pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 16px; color: var(--ink); font-size: 14px; cursor: pointer; }
+  label.pill:has(input:checked) { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  label.pill input { width: auto; margin: 0; }
 </style>
 </head>
 <body>
@@ -83,8 +99,8 @@
   <form id="create" class="panel">
     <div class="fields">
       <div><label for="f-name">Name</label><input id="f-name" name="name" required pattern="[a-z0-9][a-z0-9-]{0,30}"></div>
-      <div><label for="f-template">Template</label><select id="f-template" name="template"></select></div>
-    </div>
+      </div>
+    <div><label>Template</label><select id="f-template" name="template" hidden></select><div id="template-pills" class="pills" role="radiogroup" aria-label="Template"></div></div>
     <details id="create-advanced"><summary>Image, resources and engine (blank: the defaults)</summary>
     <div class="fields">
       <div><label for="f-image">Image instead of a template</label><input id="f-image" name="image"></div>
@@ -216,6 +232,7 @@
     <div id="about" class="panel"></div>
   </section>
 </main>
+<div id="modal" hidden></div>
 <script>
 // A client of the daemon's API and nothing more. To change this dashboard, copy it to CONFIG/ui/index.html (see the
 // skill): the copy gets the same API and token, and cannot change what the checks report from `asd verify`.
@@ -227,8 +244,8 @@ const WORD = { weak: "holds in a weaker form", fail: "does not hold", unsupporte
 const TABS = { sandboxes: "sandbox-section", usage: "usage-section", workspaces: "workspace-section", templates: "template-section", machines: "machine-section", extensions: "extension-section", settings: "settings-section" }
 // open: sandboxes whose past checks are shown; expanded: groups opened by hand, which the browser keeps open itself.
 let checklist = [], extensions = [], extensionErrors = [], available = [], open = new Set(), expanded = new Set(), busy = new Set(), output = {}, tab = "sandboxes"
-// from: the button each output came from, so it shows under that button; placed: the outputs a form already showed.
-let from = {}, placed = new Set()
+// from: the button each output came from, so it shows under that button and not elsewhere.
+let from = {}
 let sandboxes = [], engines = [], workspaces = [], workspaceProblem = "", forwards = [], links = [], ssh = {}, templates = [], templateProblem = ""
 let usage = [], usageProblem = "", remoteUsage = {}, machines, machineProblem = "", about, settings, savingSettings = false
 // profiles: this Mac's login profiles per agent, as the logins extension lists them; null when the listing failed.
@@ -265,8 +282,8 @@ const asks = () => about && about.platform !== "darwin" ? "This machine has no d
 const askButton = (label, key, what, task, extra = {}) => el("button", { type: "button", ...extra, title: asks(), ...(busy.has(`${key}:${what}`) ? { disabled: "" } : {}), onclick: () => act(key, what, task) },
   busy.has(`${key}:${what}`) ? "Waiting for Allow on the Mac…" : `${label} (asks on the Mac)`)
 // Nothing yet is an empty string, which append() and el() both leave blank (append would print null).
-// With what, only the output of that button, which is then not repeated at the bottom of the card.
-const result = (key, what) => { const value = output[key]; if (value === undefined || what !== undefined && from[key] !== what) return ""; if (what !== undefined) placed.add(key); return typeof value === "string" ? el("pre", {}, value) : el("div", {}, el("pre", {}, value.text), command(value.command)) }
+// With what, only the output of that button.
+const result = (key, what) => { const value = output[key]; if (value === undefined || what !== undefined && from[key] !== what) return ""; return typeof value === "string" ? el("pre", {}, value) : el("div", {}, el("pre", {}, value.text), command(value.command)) }
 // A closed group that stays open across refreshes once opened.
 function group(key, label, ...children) {
   const node = el("details", { ontoggle: () => { node.open ? expanded.add(key) : expanded.delete(key) } }, el("summary", {}, label), ...children)
@@ -385,6 +402,12 @@ function actionForm(extension, action, sandbox) {
   const inputs = el("div", { class: "fields" }), checks = el("div", { class: "row" })
   if (!sandbox && action.scope === "sandbox") inputs.append(el("label", {}, "Sandbox", el("select", { name: "asidee-sandbox" }, ...sandboxes.filter((entry) => entry.status === "running").map((entry) => el("option", {}, entry.name)))))
   for (const field of action.fields) {
+    // A short choice is a row of pills, all visible at once; a long one stays a select.
+    if (field.type === "select" && field.options.length <= 6) {
+      inputs.append(el("div", {}, el("label", {}, field.label), el("div", { class: "pills", role: "radiogroup" }, ...field.options.map((option) =>
+        el("label", { class: "pill" }, el("input", { type: "radio", name: field.id, value: option, ...(option === (field.default ?? field.options[0]) ? { checked: "" } : {}) }), option)))))
+      continue
+    }
     const input = field.type === "select" ? el("select", { name: field.id }, ...field.options.map((option) => el("option", {}, option)))
       : el("input", { name: field.id, type: field.type === "checkbox" ? "checkbox" : field.type })
     if (field.default !== undefined) field.type === "checkbox" ? input.checked = field.default === true : input.value = field.default
@@ -419,124 +442,279 @@ async function sshSetup(name, writeConfig) {
   return done.included ? `Set up. ${login}` : `Set up. Add this line at the top of ${done.config}, or use the button that adds it:\n  ${done.include}\nThen ${login}`
 }
 
+// Buckets: the bundled extensions sorted by what a person is doing, on every page. Others go under Other.
+const BUCKETS = [
+  { id: "agents", name: "Agents and logins", extensions: ["logins"] },
+  { id: "t3", name: "T3 Code", extensions: ["t3", "rotator"] },
+  { id: "code", name: "Code and docs", extensions: ["repo", "env-docs"] },
+]
+const bucketOf = (id) => BUCKETS.find((bucket) => bucket.extensions.includes(id))?.id ?? "other"
+const AGENT = { claude: "Claude", codex: "Codex", github: "GitHub" }
+const profileLabel = (profile) => profile === "~" ? "main login" : profile
+
+// A button for a sandbox's own actions; its output belongs to the sandbox.
+const sandboxButton = (name) => (label, what, task, extra = {}) => {
+  const on = busy.has(`${name}:${what}`)
+  return el("button", { type: "button", ...extra, ...(on ? { disabled: "" } : {}), onclick: () => act(name, what, task) }, on ? "Working…" : label)
+}
+// The output of the buttons whose what starts with prefix, for a pop-up that holds them.
+const resultFrom = (name, prefix) => String(from[name] ?? "").startsWith(prefix) ? result(name) : ""
+// The buttons at the top of a card show their output in the card; everything else shows it in its pop-up.
+const CARD_OUTPUT = new Set(["stop", "start", "terminal", "verify", "remove", "open-agent", "setup"])
+
+// A pop-up over the page. Like a region, it is built again only when what it shows changed.
+let modal = null
+function openModal(title, build) { modal = { title, build }; drawn.modal = undefined; drawModal() }
+function closeModal() { modal = null; drawModal() }
+function drawModal() {
+  const root = document.getElementById("modal")
+  if (!modal) { root.hidden = true; root.replaceChildren(); drawn.modal = undefined; return }
+  const key = JSON.stringify([modal.title, sandboxes, [...busy], output, sandboxLogins, profiles, ssh, forwards, links, extensions])
+  if (drawn.modal === key) return
+  drawn.modal = key
+  const focused = document.activeElement?.id
+  root.hidden = false
+  root.replaceChildren(el("div", { class: "sheet", role: "dialog", "aria-modal": "true", "aria-label": modal.title },
+    el("div", { class: "sheet-head" }, el("h3", {}, modal.title), el("button", { type: "button", onclick: closeModal }, "Close")), ...modal.build()))
+  if (focused && document.getElementById(focused)) document.getElementById(focused).focus()
+}
+// A pop-up for one sandbox; it says so if the sandbox is gone.
+const sandboxModal = (name, title, build) => openModal(title, () => { const sandbox = sandboxes.find((entry) => entry.name === name); return sandbox ? build(sandbox) : [el("p", {}, `${name} is gone.`)] })
+
+// The logins each running sandbox holds, as the logins extension lists them: [{agent, profile, account}], null when unknown.
+let sandboxLogins = {}
+const readingLogins = new Set()
+const LOGIN = /^(claude|codex|github)\/(\S+) \((.*)\)$/
+async function readLogins(name) {
+  readingLogins.add(name)
+  try {
+    const reply = await api("action", { extension: "logins", action: "list", sandbox: name, values: {} })
+    sandboxLogins[name] = reply.exitCode === 0 ? reply.stdout.split("\n").map((line) => LOGIN.exec(line.trim())).filter(Boolean)
+      .map(([, agent, profile, account]) => ({ agent, profile, account: account === "account unknown" ? "" : account })) : null
+  } catch { sandboxLogins[name] = null }
+  readingLogins.delete(name); render()
+}
+const loginSummary = (name) => {
+  const list = sandboxLogins[name]
+  if (list === undefined) return ["Reading…", ""]
+  if (list === null) return ["Could not read the logins", "warn"]
+  if (!list.length) return ["None yet: add one", "warn"]
+  return [["claude", "codex", "github"].map((agent) => [agent, list.filter((login) => login.agent === agent)]).filter(([, found]) => found.length)
+    .map(([agent, found]) => agent === "github" ? "GitHub" : `${AGENT[agent]}: ${found.map((login) => profileLabel(login.profile)).join(", ")}`).join(" · "), "ok"]
+}
+// SSH readiness for the T3 card, asked once per sandbox.
+const checkingSsh = new Set()
+function readSsh(name) {
+  if (ssh[name] !== undefined || checkingSsh.has(name)) return
+  checkingSsh.add(name)
+  api("sshAccess", { name }).then((done) => { ssh[name] = done }, (error) => { ssh[name] = { error: error.message } }).finally(() => { checkingSsh.delete(name); render() })
+}
+const sshReady = (name) => ssh[name]?.batchReady || ssh[name]?.included
+
+// A past check's result, from the detail the daemon keeps with it ("Measured AT: STATUS (method). …"); the daemon
+// reports its current state as unknown, since it may have changed since.
+const MEASURED = /^Measured \S+: (pass|weak|fail|unsupported|unknown|info) \(([^)]*)\)\. ?/
+const measured = (check) => { const found = MEASURED.exec(check.detail); return found ? { status: found[1], method: found[2], detail: check.detail.slice(found[0].length) } : { status: "unknown", method: "", detail: check.detail } }
+function lastCheck(sandbox) {
+  if (!sandbox.lastVerify) return ["Never checked", "warn"]
+  const counts = {}
+  for (const check of sandbox.lastVerify.results) { const { status } = measured(check); counts[status] = (counts[status] ?? 0) + 1 }
+  const order = ["fail", "weak", "unsupported", "unknown", "pass", "info"]
+  return [`Checked ${new Date(sandbox.lastVerify.at).toLocaleString()}: ${order.filter((status) => counts[status]).map((status) => `${counts[status]} ${status}`).join(" · ")}`, counts.fail ? "bad" : counts.weak || counts.unknown ? "warn" : "ok"]
+}
+
+const tile = (title, status, onclick, tone = "") => el("button", { type: "button", class: "tile", onclick }, el("span", { class: "t" }, title), el("span", { class: `s ${tone}` }, status))
+
 function sandboxPanel(sandbox) {
   if (sandbox.status === "damaged") return el("div", { class: "panel" }, el("span", { class: "name" }, sandbox.name), " ", el("span", { class: "badge" }, "damaged"), el("div", { class: "error" }, sandbox.stopReason))
-  const name = sandbox.name
-  placed.delete(name)
-  const is = (key) => busy.has(`${name}:${key}`)
-  const button = (label, key, task, extra = {}) => el("button", { ...extra, ...(is(key) ? { disabled: "" } : {}), onclick: () => act(name, key, task) }, is(key) ? "Working…" : label)
-  const running = sandbox.status === "running"
+  const name = sandbox.name, button = sandboxButton(name), running = sandbox.status === "running"
+  if (running && installed("logins") && !(name in sandboxLogins) && !readingLogins.has(name)) readLogins(name)
+  if (running && installed("t3")) readSsh(name)
   const panel = el("div", { class: "panel" },
-    el("div", { class: "row" },
-      el("div", { class: "grow" }, el("span", { class: "name" }, name), " ", el("span", { class: `badge ${sandbox.status}` }, sandbox.status), " ", el("span", { class: "badge unknown" }, "Not verified"),
-        el("div", { class: "muted" }, `${sandbox.spec.cpus} CPU · ${sandbox.spec.memoryGb} GB memory · ${sandbox.spec.diskGb} GB disk · ${sandbox.engine}`),
-        el("div", { class: "muted usage", "data-usage": name }),
-        sandbox.activity ? el("div", { class: "muted" }, `${sandbox.activity}…`) : null,
-        sandbox.diskWarning ? el("div", { class: "error" }, sandbox.diskWarning.message) : null,
-        sandbox.lastVerify ? el("div", { class: "muted" }, `Last checked ${new Date(sandbox.lastVerify.at).toLocaleString()}. Historical only; current checks unknown.`) : null,
-        sandbox.stopReason ? el("div", { class: "muted" }, sandbox.stopReason) : null)),
+    el("div", {}, el("span", { class: "name" }, name), " ", el("span", { class: `badge ${sandbox.status}` }, sandbox.status),
+      el("div", { class: "muted" }, `${sandbox.spec.cpus} CPU · ${sandbox.spec.memoryGb} GB memory · ${sandbox.spec.diskGb} GB disk · ${sandbox.engine}`),
+      el("div", { class: "muted usage", "data-usage": name }),
+      ((text, tone) => el("div", { class: `muted ${tone}` }, text, sandbox.lastVerify ? " (past result; it may have changed since)" : ""))(...lastCheck(sandbox)),
+      sandbox.activity ? el("div", { class: "muted" }, `${sandbox.activity}…`) : null,
+      sandbox.diskWarning ? el("div", { class: "error" }, sandbox.diskWarning.message) : null,
+      sandbox.stopReason ? el("div", { class: "muted" }, sandbox.stopReason) : null),
     el("div", { class: "row", style: "margin-top:10px" },
-      running ? button("Stop", "stop", () => api("stop", { name })) : button("Start", "start", () => api("start", { name })),
-      running ? button("Terminal", "terminal", () => terminal(name, "sandbox"), { title: "Open a shell in this sandbox in a terminal window on this Mac" }) : null,
-      running ? button("Claude", "claude", () => terminal(name, "claude"), { title: "Open Claude Code in ~/workspace in a terminal window on this Mac, with the imported login (choose another under More)" }) : null,
-      running ? button("Codex", "codex", () => terminal(name, "codex"), { title: "Open Codex in ~/workspace in a terminal window on this Mac, with the imported login (choose another under More)" }) : null,
-      button("Verify", "verify", async () => { open.add(name); await api("verify", { name }) }),
-      el("button", { onclick: () => { open.has(name) ? open.delete(name) : open.add(name); render() } }, sandbox.lastVerify ? "Past checks" : "Not verified"),
-      el("button", { class: "danger", onclick: () => { const typed = prompt(`This deletes ${name} and everything in it. Type its name to confirm.`); if (typed !== null) act(name, "remove", () => api("remove", { name, confirm: typed })) } }, "Remove")))
-  // One closed group per extension, so the card stays short until one is needed.
-  const tools = running ? extensions.map((extension) => [extension, extension.actions.filter((entry) => entry.scope === "sandbox")]).filter(([, actions]) => actions.length) : []
-  if (tools.length) panel.append(el("div", { class: "tools" }, ...tools.map(([extension, actions]) => extension.id === "t3" && actions.some((action) => action.id === "setup") ? t3Group(sandbox, extension, button)
-    : group(`ext:${name}:${extension.id}`, extension.name, ...actions.map((action) => actionForm(extension, action, sandbox))))))
+      running ? el("button", { type: "button", class: "primary", onclick: () => agentModal(name) }, "Open agent…") : null,
+      running ? button("Terminal", "terminal", () => terminal(name, "sandbox"), { title: "A shell in this sandbox, in a terminal window on this Mac" }) : null,
+      running ? button("Stop", "stop", () => api("stop", { name })) : button("Start", "start", () => api("start", { name }), { class: "primary" }),
+      el("button", { type: "button", onclick: () => checksModal(name) }, "Checks…"),
+      el("button", { type: "button", class: "danger", onclick: () => { const typed = prompt(`This deletes ${name} and everything in it. Type its name to confirm.`); if (typed !== null) act(name, "remove", () => api("remove", { name, confirm: typed })) } }, "Remove")))
   if (sandbox.enforcementProblem) panel.append(el("div", { class: "error" }, `Enforcement problem at ${sandbox.enforcementProblem.at}: ${sandbox.enforcementProblem.message}`))
-  if (open.has(name) && sandbox.lastVerify) {
-    panel.append(el("ul", { class: "checks" }, ...sandbox.lastVerify.results.map((check) => el("li", { class: "unknown" },
-      el("span", { class: "mark", title: "unknown" }, MARK.unknown),
-      el("span", {}, title(check.id), el("span", { class: "muted" }, " — current property unknown")),
-      el("span", { class: "detail" }, check.detail))),
-      el("li", { class: "muted" }, el("span"), `Checked ${new Date(sandbox.lastVerify.at).toLocaleString()}.`)))
+  if (output[name] && CARD_OUTPUT.has(from[name])) panel.append(result(name))
+  if (!running) { panel.append(el("p", { class: "muted" }, "Start it to use logins, T3 Code and the other tools.")); return panel }
+
+  // One row of cards per bucket; each card opens a pop-up.
+  const own = extensions.map((extension) => [extension, extension.actions.filter((action) => action.scope === "sandbox")]).filter(([, actions]) => actions.length)
+  const cards = { agents: [], t3: [], code: [], other: [] }
+  for (const [extension, actions] of own) {
+    const bucket = bucketOf(extension.id)
+    if (extension.id === "logins") { const [status, tone] = loginSummary(name); cards.agents.push(tile("Logins", status, () => loginsModal(name), tone)) }
+    else if (extension.id === "t3") cards.t3.push(tile("Connect T3 Code", ssh[name] === undefined ? "Checking…" : sshReady(name) ? `Ready: ${name}.asidee` : "Set up SSH first", () => t3Modal(name), sshReady(name) ? "ok" : "warn"))
+    else cards[bucket].push(tile(extension.name, actions.map((action) => action.label).join(" · "), () => extensionModal(name, extension.id)))
   }
-  const mine = forwards.filter((forward) => forward.name === name)
-  const myLinks = links.filter((link) => link.from === name || link.to === name)
-  const access = ssh[name]
-  const more = group(`more:${name}`, "More: agent login choice, resize, run a command, template, forwards, links, SSH, commands",
-    running ? group(`agents:${name}`, "Claude Code or Codex with a chosen login", el("p", { class: "muted" }, "Opens a terminal window on this Mac running asd claude or asd codex: the agent in ~/workspace with an imported login, the one named, else the only one."),
-      miniForm(name, "agent", "Open Claude Code", [["profile", "Login profile (blank: the only one)"]], (values) => terminal(name, "claude", undefined, values.profile)),
-      miniForm(name, "agent-codex", "Open Codex", [["profile", "Login profile (blank: the only one)"]], (values) => terminal(name, "codex", undefined, values.profile))) : null,
-    group(`resize:${name}`, "Resize", el("p", { class: "muted" }, "Blank keeps a limit as it is. CPUs, memory and tasks change now when the engine allows; the disk limit is the daemon's own and applies at its next measurement."),
-      miniForm(name, "resize", "Resize", [["cpus", "CPUs", "number"], ["memoryGb", "Memory (GB)", "number"], ["pids", "Tasks", "number"], ["diskGb", "Disk (GB)", "number"]], async (values) => {
-        const body = Object.fromEntries(Object.entries(values).filter(([, value]) => value !== ""))
-        const done = await api("resize", { name, ...body })
-        return done.changes.map((change) => `${change.limit}: ${change.from} → ${change.to}, ${change.applies}${change.note ? ` (${change.note})` : ""}`).join("\n") || "Nothing changed."
-      })),
-    running ? group(`exec:${name}`, "Run a command", el("p", { class: "muted" }, "Runs with sh -c inside the sandbox and shows what it printed. For anything interactive, use Terminal."),
-      miniForm(name, "exec", "Run", [["command", "Command"]], (values) => api("exec", { name, argv: ["sh", "-c", values.command] }))) : null,
-    group(`snapshot:${name}`, "Save as a template", el("p", { class: "muted" }, "Saves this sandbox's files, without the usual login files, under a template name. A running sandbox pauses for the copy."),
-      miniForm(name, "snapshot", "Save", [["as", "Template name"]], async (values) => { const done = await api("snapshot", { name, as: values.as }); return `Saved template ${done.template.name}.\n${done.contents}` })),
-    group(`forwards:${name}`, `Forwards (${mine.length})`,
-      el("p", { class: "muted" }, "127.0.0.1 on this machine to a port on the sandbox's loopback. A forward ends when the sandbox or the daemon stops. Any process on this machine can connect to it."),
-      ...mine.map((forward) => el("div", { class: "row" }, el("span", { class: "grow" }, `127.0.0.1:${forward.localPort} → port ${forward.port} inside · ${forward.connections} connections`),
-        button("Remove", `forward-${forward.id}`, () => api("forwardRemove", { id: forward.id }), { class: "small" }))),
-      running ? miniForm(name, "forward", "Add forward", [["port", "Port inside", "number"], ["localPort", "Local port (blank: same)", "number"]], async (values) => {
-        const made = await api("forwardAdd", { name, port: values.port, ...(values.localPort ? { localPort: values.localPort } : {}) })
-        return `Forwarding 127.0.0.1:${made.localPort} to port ${made.port} in ${name}.`
-      }) : el("p", { class: "muted" }, "Start the sandbox to add a forward.")),
-    group(`links:${name}`, `Links (${myLinks.length})`,
-      el("p", { class: "muted" }, "Programs in one sandbox connect to another's port, and nothing else of it. A link comes back after restarts."),
-      ...myLinks.map((link) => el("div", {}, el("div", { class: "row" }, el("span", { class: "grow" }, `${link.from} → ${link.to}:${link.port} · ${link.state}${link.reason ? ` (${link.reason})` : ""} · reach it at ${link.address}`),
-        button("Remove", `link-${link.from}-${link.to}-${link.port}`, () => api("linkRemove", { from: link.from, to: link.to, port: link.port }), { class: "small" })), el("div", { class: "muted" }, link.trust))),
-      miniForm(name, "link", "Add link", [["to", "To sandbox"], ["port", "Port", "number"]], async (values) => {
-        const made = await api("linkAdd", { from: name, to: values.to, port: values.port })
-        return `Linked: programs in ${made.from} reach ${made.to}:${made.port} at ${made.address}. ${made.trust}`
-      })),
-    group(`ssh:${name}`, "SSH and editors",
-      el("p", { class: "muted" }, `An sshd inside the sandbox, reached through the daemon with no open port. Set up writes only Asidee's own SSH files. Adding the Include line to your ~/.ssh/config also changes how ssh reads it. ${asks()}`),
-      access ? el("div", { class: "muted" }, access.error ? access.error : `Alias ${access.alias}, user ${access.user}, home ${access.home}; ${access.batchReady ? "ready" : "not set up yet"}${access.loopbackForwarding ? "; loopback forwarding on" : ""}.`) : null,
-      el("div", { class: "row" }, button(access ? "Check again" : "Check access", "ssh", async () => { try { ssh[name] = await api("sshAccess", { name }) } catch (error) { ssh[name] = { error: error.message } } }, { class: "small" }),
-        running ? button("Set up", "ssh-setup", () => sshSetup(name, false), { class: "small" }) : null,
-        running ? askButton("Set up and add the Include line to ~/.ssh/config", name, "ssh-config", () => sshSetup(name, true), { class: "small" }) : null),
-      command(`asd ssh setup ${name} --write-config`), command(`ssh ${access?.alias ?? `${name}.asidee`}`)),
-    group(`commands:${name}`, "CLI commands",
-      command(`asd shell ${name}`), command(`asd exec ${name} -- uname -a`), command(`asd verify ${name}`), command(`asd remove ${name} --confirm ${name}`)))
-  // Output no form showed (the buttons at the top) goes at the bottom, above More.
-  if (output[name] && !placed.has(name)) panel.append(result(name))
-  panel.append(more)
+  const mine = forwards.filter((forward) => forward.name === name).length, myLinks = links.filter((link) => link.from === name || link.to === name).length
+  const tools = [tile("Resize", `${sandbox.spec.cpus} CPU · ${sandbox.spec.memoryGb} GB · ${sandbox.spec.diskGb} GB disk`, () => toolModal(name, "resize")),
+    tile("Run a command", "One command, its output here", () => toolModal(name, "exec")),
+    tile("Ports", `${mine} forward${mine === 1 ? "" : "s"} · ${myLinks} link${myLinks === 1 ? "" : "s"}`, () => toolModal(name, "ports")),
+    tile("SSH and editors", sshReady(name) ? `ssh ${name}.asidee` : "Not set up", () => toolModal(name, "ssh"), sshReady(name) ? "ok" : ""),
+    tile("Save as a template", "Reuse this sandbox's files", () => toolModal(name, "snapshot")),
+    tile("CLI commands", "The same from a terminal", () => toolModal(name, "commands"))]
+  for (const [bucket, title] of [["agents", "Agents and logins"], ["t3", "T3 Code"], ["code", "Code and docs"], ["other", "Other extensions"], ["tools", "Sandbox tools"]]) {
+    const list = bucket === "tools" ? tools : cards[bucket]
+    if (list.length) panel.append(el("h4", { class: "bucket" }, title), el("div", { class: "tiles" }, ...list))
+  }
   return panel
 }
 
-// The bundled T3 extension: set it up, then connect the app over SSH, with the steps in order.
-function t3Group(sandbox, extension, button) {
-  const name = sandbox.name, key = `ext:${name}:${extension.id}`
-  const run = (action) => api("action", { extension: extension.id, action, sandbox: name, values: {} })
-  const failed = (reply) => `${reply.stdout}${reply.stderr}`.trim() || `Failed (exit ${reply.exitCode}).`
-  const access = ssh[name], ready = access?.batchReady || access?.included
-  const node = group(key, extension.name,
-    el("p", { class: "muted" }, "Set T3 up in the sandbox once, then connect the T3 Code app to it over SSH."),
-    el("div", { class: "row" }, button("1. Set up T3 Code", "t3-setup", async () => {
-      const reply = await run("setup"); if (reply.exitCode !== 0) return failed(reply)
-      const done = JSON.parse(reply.stdout)
-      return `T3 ${done.version} ${done.runtime === "installed" ? "installed" : "was already installed"}. Logins it found: Claude ${done.claude}, Codex ${done.codex}.`
-    }), el("span", { class: "muted grow" }, "Once per sandbox: installs this Mac's T3 version there and gives it the sandbox's Claude and Codex logins.")),
-    result(name, "t3-setup"),
-    el("h4", {}, "2. Connect the T3 Code app"),
-    el("ol", { class: "steps" },
-      el("li", {}, ready ? "SSH is ready." : access?.error ?? (access ? "Set up SSH in the sandbox and add Asidee's Include line to your ~/.ssh/config." : "Checking SSH…"),
-        !ready && access && sandbox.status === "running" ? el("div", { class: "row" }, askButton("Set up SSH", name, "t3-ssh-config", () => sshSetup(name, true), { class: "small" })) : null),
-      el("li", {}, "In T3 Code: Settings → Connections → Machine over SSH. Paste this as the SSH host:", command(`${name}.asidee`))),
-    result(name, "t3-ssh-config"),
-    el("div", { class: "row" }, button("Refresh logins", "t3-sync", async () => {
-      const reply = await run("sync"); if (reply.exitCode !== 0) return failed(reply)
-      const done = JSON.parse(reply.stdout); return `T3 now has Claude ${done.claude} and Codex ${done.codex} logins.`
-    }, { class: "small" }), el("span", { class: "muted grow" }, "After importing or removing a login, so T3 sees it.")),
-    result(name, "t3-sync"))
-  // SSH readiness is asked for once the group is open.
-  const check = () => { if (node.open && ssh[name] === undefined && !checkingSsh.has(name)) {
-    checkingSsh.add(name)
-    api("sshAccess", { name }).then((done) => { ssh[name] = done }, (error) => { ssh[name] = { error: error.message } }).finally(() => { checkingSsh.delete(name); render() })
-  } }
-  node.addEventListener("toggle", check); check()
-  return node
+function agentModal(name) {
+  sandboxModal(name, `Open an agent in ${name}`, () => {
+    // asd claude|codex opens the canonical login only when the agent has no named one.
+    const list = sandboxLogins[name], agents = (list ?? []).filter((login) => login.agent !== "github" && (login.profile !== "~" || !list.some((other) => other.agent === login.agent && other.profile !== "~")))
+    const open = (login) => { closeModal(); act(name, "open-agent", () => terminal(name, login.agent, undefined, login.profile === "~" ? undefined : login.profile)) }
+    return [el("p", { class: "muted" }, "Opens a terminal window on this Mac with the agent in ~/workspace, signed in with the login you pick."),
+      list === undefined ? el("p", {}, "Reading the sandbox's logins…")
+        : list === null ? el("p", { class: "error" }, "Could not read the sandbox's logins.")
+        : agents.length ? el("div", { class: "cards" }, ...agents.map((login) => el("button", { type: "button", class: "card pick", onclick: () => open(login) },
+          el("span", { class: "t" }, `${AGENT[login.agent]} · ${profileLabel(login.profile)}`), el("span", { class: "muted" }, login.account || "account unknown"))))
+        : el("p", {}, "No Claude or Codex login in this sandbox yet."),
+      el("div", { class: "row", style: "margin-top:14px" }, el("button", { type: "button", onclick: () => loginsModal(name) }, "Manage logins…"))]
+  })
 }
-const checkingSsh = new Set()
+
+// Import or log out, then read the list again and let T3 see the change.
+async function changeLogin(name, action, values, done) {
+  const reply = await api("action", { extension: "logins", action, sandbox: name, values })
+  await readLogins(name)
+  if (reply.exitCode !== 0) return `${reply.stdout}${reply.stderr}`.trim() || `Failed (exit ${reply.exitCode}).`
+  const copied = /Copied [1-9]\d* setup files\./.exec(reply.stdout)?.[0]
+  let t3 = ""
+  if (installed("t3") && values.agent !== "github" && action !== "github") try { const synced = await api("action", { extension: "t3", action: "sync", sandbox: name, values: {} }); if (synced.exitCode === 0) t3 = " T3 Code sees it now." } catch { /* T3 may not be set up in this sandbox. */ }
+  return `${done}${copied ? ` ${copied}` : ""}${t3}`
+}
+let copySetup = false
+function loginsModal(name) {
+  sandboxModal(name, `Logins in ${name}`, () => {
+    const button = sandboxButton(name), list = sandboxLogins[name]
+    const has = (agent, profile) => Boolean(list?.some((login) => login.agent === agent && login.profile === profile))
+    const label = (agent, profile) => agent === "github" ? "GitHub" : `${AGENT[agent]} · ${profileLabel(profile)}`
+    const add = (agent, profile) => agent === "github"
+      ? changeLogin(name, "github", { account: "", replace: String(has("github", "~")) }, `${has("github", "~") ? "Re-imported" : "Added"} GitHub.`)
+      : changeLogin(name, "import", { agent, profile, target: "", setup: String(copySetup), replace: String(has(agent, profile)) }, `${has(agent, profile) ? "Re-imported" : "Added"} ${label(agent, profile)}.`)
+    const inside = list === undefined ? [el("p", {}, "Reading…")] : list === null ? [el("p", { class: "error" }, "Could not read the logins."), button("Try again", "login:read", () => readLogins(name))]
+      : !list.length ? [el("p", { class: "muted" }, "None yet. Add one from this Mac below.")]
+      : [el("div", { class: "cards" }, ...list.map((login) => el("div", { class: "card" },
+        el("span", { class: "t" }, label(login.agent, login.profile)), el("span", { class: "muted" }, login.account || "account unknown"),
+        el("div", { class: "actions" },
+          login.agent !== "github" && (login.profile !== "~" || !list.some((other) => other.agent === login.agent && other.profile !== "~")) ? el("button", { type: "button", class: "small", onclick: () => { closeModal(); act(name, "open-agent", () => terminal(name, login.agent, undefined, login.profile === "~" ? undefined : login.profile)) } }, "Open") : null,
+          login.agent === "github" || profiles?.[login.agent]?.includes(login.profile) ? button("Re-import", `login:${login.agent}/${login.profile}`, () => add(login.agent, login.profile), { class: "small" }) : null,
+          button("Log out", `login:${login.agent}/${login.profile}:out`, () => confirm(`Log ${label(login.agent, login.profile)} out of ${name}? This Mac stays logged in.`)
+            ? changeLogin(name, "logout", { agent: login.agent, profile: login.profile }, `Logged ${label(login.agent, login.profile)} out.`) : undefined, { class: "small danger" })))))]
+    // Only what the sandbox lacks; a login it has is re-imported from its own card above.
+    const hostCards = [...["claude", "codex"].flatMap((agent) => (profiles?.[agent] ?? []).map((profile) => [agent, profile])), ["github", "~"]]
+      .filter(([agent, profile]) => !has(agent, profile))
+      .map(([agent, profile]) => el("div", { class: "card" }, el("span", { class: "t" }, agent === "github" ? "GitHub" : `${AGENT[agent]} · ${profile}`),
+        el("span", { class: "muted" }, agent === "github" ? "This Mac's gh login" : "On this Mac"),
+        el("div", { class: "actions" }, button("Add", `login:${agent}/${profile}`, () => add(agent, profile), { class: "small primary" }))))
+    return [el("h4", { class: "bucket" }, "In this sandbox"), ...inside,
+      el("h4", { class: "bucket" }, "Add from this Mac"),
+      el("label", { class: "check", style: "margin-bottom:10px" }, el("input", { type: "checkbox", id: "copy-setup", ...(copySetup ? { checked: "" } : {}), onchange: (event) => { copySetup = event.target.checked } }),
+        " When adding or re-importing a Claude or Codex login, also copy its settings (CLAUDE.md, settings, skills), overwriting matching files in the sandbox"),
+      profiles === undefined ? el("p", {}, "Reading this Mac's profiles…") : hostCards.length ? el("div", { class: "cards" }, ...hostCards) : el("p", { class: "muted" }, "The sandbox has every login this Mac has."),
+      resultFrom(name, "login:"),
+      el("p", { class: "muted", style: "margin-top:12px" }, "A login's token is copied into the sandbox, where anything running there can read it and send it out. Asidee has no secret proxy yet.")]
+  })
+}
+
+function t3Modal(name) {
+  sandboxModal(name, `T3 Code for ${name}`, (sandbox) => {
+    const button = sandboxButton(name), run = (action) => api("action", { extension: "t3", action, sandbox: name, values: {} })
+    const failed = (reply) => `${reply.stdout}${reply.stderr}`.trim() || `Failed (exit ${reply.exitCode}).`
+    const access = ssh[name]
+    return [el("ol", { class: "steps" },
+      el("li", {}, el("b", {}, "Install T3 in the sandbox. "), el("span", { class: "muted" }, "Once per sandbox: this Mac's T3 version, with the sandbox's logins."),
+        el("div", { class: "row" }, button("Set up T3 Code", "t3:setup", async () => {
+          const reply = await run("setup"); if (reply.exitCode !== 0) return failed(reply)
+          const done = JSON.parse(reply.stdout)
+          return `T3 ${done.version} ${done.runtime === "installed" ? "installed" : "was already installed"}. Logins it found: Claude ${done.claude}, Codex ${done.codex}.`
+        }, { class: "small" }))),
+      el("li", {}, el("b", {}, "SSH. "), sshReady(name) ? el("span", { class: "ok" }, "Ready.") : access?.error ? el("span", { class: "error" }, access.error)
+        : el("span", { class: "muted" }, access ? "Set up SSH in the sandbox and add Asidee's Include line to your ~/.ssh/config." : "Checking…"),
+        !sshReady(name) && access ? el("div", { class: "row" }, askButton("Set up SSH", name, "t3:ssh", () => sshSetup(name, true), { class: "small" })) : null),
+      el("li", {}, el("b", {}, "Connect. "), "In T3 Code: Settings → Connections → Machine over SSH. Paste this as the SSH host:", command(`${name}.asidee`))),
+      resultFrom(name, "t3:"),
+      el("p", { class: "muted" }, "Logins added or removed under Logins reach T3 by themselves. ", button("Refresh T3 logins", "t3:sync", async () => {
+        const reply = await run("sync"); if (reply.exitCode !== 0) return failed(reply)
+        const done = JSON.parse(reply.stdout); return `T3 now has Claude ${done.claude} and Codex ${done.codex} logins.`
+      }, { class: "small" }))]
+  })
+}
+
+function extensionModal(name, id) {
+  sandboxModal(name, `${extensions.find((extension) => extension.id === id)?.name ?? id} · ${name}`, (sandbox) => {
+    const extension = extensions.find((entry) => entry.id === id)
+    if (!extension) return [el("p", {}, "This extension is gone.")]
+    return [extension.description ? el("p", { class: "muted" }, extension.description) : null,
+      ...extension.actions.filter((action) => action.scope === "sandbox").map((action) => actionForm(extension, action, sandbox))].filter(Boolean)
+  })
+}
+
+function checksModal(name) {
+  sandboxModal(name, `Checks for ${name}`, (sandbox) => [
+    sandbox.lastVerify ? el("p", { class: "muted" }, `What the checks measured on ${new Date(sandbox.lastVerify.at).toLocaleString()}. That is a past result: what holds now is unknown until the next check.`) : el("p", {}, "Not checked yet."),
+    sandbox.lastVerify ? el("ul", { class: "checks" }, ...sandbox.lastVerify.results.map((check) => { const past = measured(check); return el("li", { class: past.status },
+      el("span", { class: "mark", title: `${past.status} then` }, MARK[past.status] ?? "?"), el("span", {}, title(check.id), el("span", { class: "muted" }, ` — ${past.status === "pass" ? "held" : past.status === "info" ? "for information" : WORD[past.status] ?? past.status} then${past.method ? `, ${past.method}` : ""}`)), el("span", { class: "detail" }, past.detail)) })) : null,
+    el("div", { class: "row", style: "margin-top:12px" }, sandboxButton(name)("Check now", "verify", () => api("verify", { name }), { class: "primary" })),
+    resultFrom(name, "verify")].filter(Boolean))
+}
+
+function toolModal(name, which) {
+  const titles = { resize: "Resize", exec: "Run a command", ports: "Ports", ssh: "SSH and editors", snapshot: "Save as a template", commands: "CLI commands" }
+  sandboxModal(name, `${titles[which]} · ${name}`, (sandbox) => {
+    const button = sandboxButton(name), running = sandbox.status === "running", access = ssh[name]
+    if (which === "resize") return [el("p", { class: "muted" }, "Blank keeps a limit as it is. CPUs, memory and tasks change now when the engine allows; the disk limit is the daemon's own and applies at its next measurement."),
+      miniForm(name, "resize", "Resize", [["cpus", `CPUs (now ${sandbox.spec.cpus})`, "number"], ["memoryGb", `Memory GB (now ${sandbox.spec.memoryGb})`, "number"], ["pids", `Tasks (now ${sandbox.spec.pids})`, "number"], ["diskGb", `Disk GB (now ${sandbox.spec.diskGb})`, "number"]], async (values) => {
+        const body = Object.fromEntries(Object.entries(values).filter(([, value]) => value !== ""))
+        const done = await api("resize", { name, ...body })
+        return done.changes.map((change) => `${change.limit}: ${change.from} → ${change.to}, ${change.applies}${change.note ? ` (${change.note})` : ""}`).join("\n") || "Nothing changed."
+      })]
+    if (which === "exec") return [el("p", { class: "muted" }, "Runs with sh -c inside the sandbox and shows what it printed. For anything interactive, use Terminal."),
+      miniForm(name, "exec", "Run", [["command", "Command"]], (values) => api("exec", { name, argv: ["sh", "-c", values.command] }))]
+    if (which === "snapshot") return [el("p", { class: "muted" }, "Saves this sandbox's files, without the usual login files, under a template name. A running sandbox pauses for the copy."),
+      miniForm(name, "snapshot", "Save", [["as", "Template name"]], async (values) => { const done = await api("snapshot", { name, as: values.as }); return `Saved template ${done.template.name}.\n${done.contents}` })]
+    if (which === "ports") {
+      const mine = forwards.filter((forward) => forward.name === name), myLinks = links.filter((link) => link.from === name || link.to === name)
+      return [el("h4", { class: "bucket" }, "Forwards: this Mac to the sandbox"),
+        el("p", { class: "muted" }, "127.0.0.1 on this Mac to a port on the sandbox's loopback. Any process on this Mac can connect. A forward ends when the sandbox or the daemon stops."),
+        ...mine.map((forward) => el("div", { class: "card row" }, el("span", { class: "grow" }, `127.0.0.1:${forward.localPort} → port ${forward.port} inside · ${forward.connections} connections`),
+          button("Remove", `forward-${forward.id}`, () => api("forwardRemove", { id: forward.id }), { class: "small danger" }))),
+        miniForm(name, "forward", "Add forward", [["port", "Port inside", "number"], ["localPort", "Local port (blank: same)", "number"]], async (values) => {
+          const made = await api("forwardAdd", { name, port: values.port, ...(values.localPort ? { localPort: values.localPort } : {}) })
+          return `Forwarding 127.0.0.1:${made.localPort} to port ${made.port} in ${name}.`
+        }),
+        el("h4", { class: "bucket" }, "Links: another sandbox to this one"),
+        el("p", { class: "muted" }, "Programs in one sandbox connect to another's port, and nothing else of it. A link comes back after restarts."),
+        ...myLinks.map((link) => el("div", { class: "card" }, el("div", { class: "row" }, el("span", { class: "grow" }, `${link.from} → ${link.to}:${link.port} · ${link.state}${link.reason ? ` (${link.reason})` : ""} · reach it at ${link.address}`),
+          button("Remove", `link-${link.from}-${link.to}-${link.port}`, () => api("linkRemove", { from: link.from, to: link.to, port: link.port }), { class: "small danger" })), el("div", { class: "muted" }, link.trust))),
+        miniForm(name, "link", "Add link", [["to", "To sandbox"], ["port", "Port", "number"]], async (values) => {
+          const made = await api("linkAdd", { from: name, to: values.to, port: values.port })
+          return `Linked: programs in ${made.from} reach ${made.to}:${made.port} at ${made.address}. ${made.trust}`
+        }),
+        resultFrom(name, "forward-"), resultFrom(name, "link-")]
+    }
+    if (which === "ssh") return [el("p", { class: "muted" }, `An sshd inside the sandbox, reached through the daemon with no open port. Set up writes only Asidee's own SSH files; adding the Include line also changes how ssh reads your ~/.ssh/config. ${asks()}`),
+      access ? el("p", {}, access.error ? access.error : `${access.batchReady ? "Ready" : "Not ready"}: ${access.alias}, user ${access.user}, home ${access.home}${access.loopbackForwarding ? ", loopback forwarding on" : ""}.`) : el("p", {}, "Checking…"),
+      el("div", { class: "row" }, button("Check again", "ssh", async () => { try { ssh[name] = await api("sshAccess", { name }) } catch (error) { ssh[name] = { error: error.message } } }, { class: "small" }),
+        running ? button("Set up", "ssh-setup", () => sshSetup(name, false), { class: "small" }) : null,
+        running ? askButton("Set up and add the Include line to ~/.ssh/config", name, "ssh-config", () => sshSetup(name, true), { class: "small" }) : null),
+      resultFrom(name, "ssh"), command(`ssh ${access?.alias ?? `${name}.asidee`}`), command(`asd ssh setup ${name} --write-config`)]
+    return [command(`asd shell ${name}`), command(`asd claude ${name} PROFILE`), command(`asd exec ${name} -- uname -a`), command(`asd verify ${name}`), command(`asd remove ${name} --confirm ${name}`)]
+  })
+}
 
 function usageLine(entry, sandbox) {
   if (!entry) return ""
@@ -556,7 +734,7 @@ function region(id, data, build) {
 }
 
 function render() {
-  region("sandboxes", [sandboxes, extensions, forwards, links, ssh, [...open], [...busy], output], (list) => {
+  region("sandboxes", [sandboxes, extensions, forwards, links, ssh, sandboxLogins, [...busy], output], (list) => {
     if (!sandboxes.length) list.append(el("div", { class: "panel muted" }, "No sandboxes yet. Create one below."))
     for (const sandbox of sandboxes) list.append(sandboxPanel(sandbox))
   })
@@ -688,7 +866,11 @@ function render() {
         extensions.some((extension) => extension.id === entry.id) ? null : result(`ext:${entry.id}`))
       list.append(panel)
     }
-    for (const extension of extensions) {
+    // Grouped in the buckets a sandbox's card uses, then the rest.
+    const sorted = [...BUCKETS.map((bucket) => [bucket.name, extensions.filter((extension) => bucketOf(extension.id) === bucket.id)]), ["Other", extensions.filter((extension) => bucketOf(extension.id) === "other")]]
+    for (const extension of sorted.flatMap(([, members]) => members)) {
+      const heading = sorted.find(([, members]) => members[0] === extension)?.[0]
+      if (heading) list.append(el("h4", { class: "bucket" }, heading))
       const key = `ext:${extension.id}`
       // The extension on one line with its Remove; each action a closed group, as on a sandbox's card.
       const panel = el("div", { class: "panel" }, el("div", { class: "row" }, el("div", { class: "grow" }, el("span", { class: "name" }, extension.name), el("span", { class: "muted" }, ` · ${extension.id}`),
@@ -732,23 +914,33 @@ function render() {
   fill(document.getElementById("f-engine"), ready.length ? ready.map((engine) => [engine.id, engine.label]) : [["", "No engine is ready"]], ready.some((engine) => engine.id === settings?.engine) ? settings.engine : ready[0]?.id ?? "")
   fill(document.getElementById("p-engine"), ready.length ? ready.map((engine) => [engine.id, engine.label]) : [["", "No engine is ready"]], ready.some((engine) => engine.id === settings?.engine) ? settings.engine : ready[0]?.id ?? "")
   fill(document.getElementById("default-engine"), [["", "The first ready engine"], ...engines.map((engine) => [engine.id, `${engine.label}${engine.ready ? "" : " (not ready)"}`])], settings?.engine ?? "")
-  fill(document.getElementById("f-template"), [["", settings?.defaults?.template ? `Default (${settings.defaults.template})` : "None"], ...templates.map((template) => [template.name, template.name])], "")
+  const templateSelect = document.getElementById("f-template"), templateOptions = [["", settings?.defaults?.template ? `Default (${settings.defaults.template})` : "None"], ...templates.map((template) => [template.name, template.name])]
+  fill(templateSelect, templateOptions, "")
+  // The select is the form's field; the pills show its options and set it.
+  region("template-pills", templateOptions, (node) => node.append(...templateOptions.map(([value, label]) => el("label", { class: "pill" },
+    el("input", { type: "radio", name: "template-pick", value, onchange: () => { templateSelect.value = value; createCommand() } }), label))))
+  for (const radio of document.querySelectorAll("#template-pills input")) radio.checked = radio.value === templateSelect.value
   // The setup a create can run, for the bundled extensions that are installed. What was chosen survives a rebuild.
   const kept = Object.fromEntries([...document.querySelectorAll("#create-setup input, #create-setup select")].map((input) => [input.id, input.type === "checkbox" ? input.checked : input.value]))
   region("create-setup", [["logins", "repo", "t3"].filter(installed), profiles], (node) => {
     const logins = installed("logins")
     // One box per profile: each becomes its own login in the sandbox, so several of one agent can be chosen.
-    const profileSelect = (agent, label) => el("div", {}, el("label", {}, label), el("div", { class: "row" },
-      ...(profiles?.[agent]?.length ? profiles[agent].map((profile) => el("label", { class: "check" }, el("input", { id: `setup-${agent}-${profile}`, type: "checkbox", "data-agent": agent, "data-profile": profile }), profile))
+    const pill = (id, text, data = {}) => el("label", { class: "pill" }, el("input", { id, type: "checkbox", ...data }), text)
+    const profileSelect = (agent, label) => el("div", {}, el("label", {}, label), el("div", { class: "pills" },
+      ...(profiles?.[agent]?.length ? profiles[agent].map((profile) => pill(`setup-${agent}-${profile}`, profile, { "data-agent": agent, "data-profile": profile }))
         : [el("span", { class: "muted" }, profiles?.[agent] === null ? "Profiles unknown" : "No profiles on this Mac")])))
-    const fields = [logins ? el("label", {}, el("input", { id: "setup-gh", type: "checkbox" }), " GitHub login") : null, logins ? profileSelect("claude", "Claude login") : null, logins ? profileSelect("codex", "Codex login") : null,
-      installed("repo") ? el("div", {}, el("label", { for: "setup-repo" }, "Repository (OWNER/REPO)"), el("input", { id: "setup-repo", placeholder: "none" })) : null,
-      installed("t3") ? el("label", {}, el("input", { id: "setup-t3", type: "checkbox" }), " T3 Code") : null].filter(Boolean)
-    if (!fields.length) return
-    node.append(el("h3", {}, "Then set up"), el("p", { class: "muted" }, `After the create, in this order; the first failure stops the rest and keeps the sandbox.${logins ? " A login's token is copied into the sandbox, where anything running there can read it." : ""}`), el("div", { class: "fields" }, ...fields))
+    // Grouped as on a sandbox's card.
+    const buckets = [
+      ["Agents and logins", logins ? [el("div", {}, el("label", {}, "GitHub"), el("div", { class: "pills" }, pill("setup-gh", "This Mac's login"))), profileSelect("claude", "Claude logins"), profileSelect("codex", "Codex logins")] : []],
+      ["T3 Code", installed("t3") ? [el("div", { class: "pills" }, pill("setup-t3", "Set up T3 Code"))] : []],
+      ["Code and docs", installed("repo") ? [el("div", {}, el("label", { for: "setup-repo" }, "Clone a repository (OWNER/REPO)"), el("input", { id: "setup-repo", placeholder: "none" }))] : []],
+    ].filter(([, fields]) => fields.length)
+    if (!buckets.length) return
+    node.append(el("h3", {}, "Then set up"), el("p", { class: "muted" }, `After the create, in this order; the first failure stops the rest and keeps the sandbox.${logins ? " A login's token is copied into the sandbox, where anything running there can read it." : ""}`),
+      ...buckets.flatMap(([title, fields]) => [el("h4", { class: "bucket" }, title), el("div", { class: "fields" }, ...fields)]))
     for (const input of node.querySelectorAll("input, select")) if (input.id in kept) input.type === "checkbox" ? input.checked = kept[input.id] : input.value = kept[input.id]
   })
-  createCommand(); prepareCommand(); showPreparing()
+  createCommand(); prepareCommand(); showPreparing(); drawModal()
 }
 
 function createCommand() {
@@ -796,7 +988,7 @@ async function readProfiles() {
 // Runs after a create, as output under the new sandbox. The first failure stops the rest; the sandbox is kept.
 async function runSetup(name, steps) {
   const lines = []
-  const show = (...last) => { output[name] = [...lines, ...last].join("\n"); render() }
+  const show = (...last) => { output[name] = [...lines, ...last].join("\n"); from[name] = "setup"; render() }
   for (const step of steps) {
     show(`${step.label}…`)
     let result
@@ -906,6 +1098,9 @@ document.getElementById("create").addEventListener("submit", async (event) => {
   if (made && steps.length) { button.textContent = "Setting up…"; await refresh(); await runSetup(made.sandbox.name, steps) }
   button.disabled = false; button.textContent = "Create and verify"; await refresh()
 })
+
+document.getElementById("modal").addEventListener("click", (event) => { if (event.target.id === "modal") closeModal() })
+document.addEventListener("keydown", (event) => { if (event.key === "Escape" && modal) closeModal() })
 
 ;(async () => {
   try { [checklist, engines, { extensions, errors: extensionErrors = [], available = [] }] = await Promise.all([api("checklist"), api("engines"), api("extensions")]) } catch {}

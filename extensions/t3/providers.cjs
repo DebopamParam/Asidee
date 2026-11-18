@@ -52,7 +52,9 @@ function main() {
       const before = instances[id] || {}
       if (!object(before)) throw new Error()
       instances[id] = { ...before, driver, displayName: (agent === "claude" ? "Claude" : "Codex") + " (" + profile + ")", enabled: true, config: { ...(object(before.config) ? before.config : {}), homePath: dir },
-        ...(agent === "claude" ? { environment: [...(Array.isArray(before.environment) ? before.environment : []).filter(item => item?.name !== "ANTHROPIC_API_KEY"), { name: "ANTHROPIC_API_KEY", value: "", sensitive: false }] } : {}) }
+        // T3 runs Claude with full access, which Claude Code refuses as root unless told it is in a sandbox.
+        ...(agent === "claude" ? { environment: [...(Array.isArray(before.environment) ? before.environment : []).filter(item => !["ANTHROPIC_API_KEY", "IS_SANDBOX"].includes(item?.name)),
+          { name: "ANTHROPIC_API_KEY", value: "", sensitive: false }, { name: "IS_SANDBOX", value: "1", sensitive: false }] } : {}) }
       wanted.push(id); nextRecords.push({ id, driver, homePath: dir }); counts[agent]++
     }
   }
