@@ -35,6 +35,7 @@
   pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; margin: 10px 0 0; }
   code { font: 13px ui-monospace, monospace; }
   .cmd { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+  ol.steps { margin: 4px 0 8px; padding-left: 20px; } ol.steps > li { margin: 6px 0; }
   .cmd code { flex: 1; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; overflow-x: auto; white-space: nowrap; }
   .error { color: var(--bad); margin: 8px 0 0; font-size: 14px; }
   details { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
@@ -226,6 +227,8 @@ const WORD = { weak: "holds in a weaker form", fail: "does not hold", unsupporte
 const TABS = { sandboxes: "sandbox-section", usage: "usage-section", workspaces: "workspace-section", templates: "template-section", machines: "machine-section", extensions: "extension-section", settings: "settings-section" }
 // open: sandboxes whose past checks are shown; expanded: groups opened by hand, which the browser keeps open itself.
 let checklist = [], extensions = [], extensionErrors = [], available = [], open = new Set(), expanded = new Set(), busy = new Set(), output = {}, tab = "sandboxes"
+// from: the button each output came from, so it shows under that button; placed: the outputs a form already showed.
+let from = {}, placed = new Set()
 let sandboxes = [], engines = [], workspaces = [], workspaceProblem = "", forwards = [], links = [], ssh = {}, templates = [], templateProblem = ""
 let usage = [], usageProblem = "", remoteUsage = {}, machines, machineProblem = "", about, settings, savingSettings = false
 // profiles: this Mac's login profiles per agent, as the logins extension lists them; null when the listing failed.
@@ -262,7 +265,8 @@ const asks = () => about && about.platform !== "darwin" ? "This machine has no d
 const askButton = (label, key, what, task, extra = {}) => el("button", { type: "button", ...extra, title: asks(), ...(busy.has(`${key}:${what}`) ? { disabled: "" } : {}), onclick: () => act(key, what, task) },
   busy.has(`${key}:${what}`) ? "Waiting for Allow on the Mac…" : `${label} (asks on the Mac)`)
 // Nothing yet is an empty string, which append() and el() both leave blank (append would print null).
-const result = (key) => { const value = output[key]; return value === undefined ? "" : typeof value === "string" ? el("pre", {}, value) : el("div", {}, el("pre", {}, value.text), command(value.command)) }
+// With what, only the output of that button, which is then not repeated at the bottom of the card.
+const result = (key, what) => { const value = output[key]; if (value === undefined || what !== undefined && from[key] !== what) return ""; if (what !== undefined) placed.add(key); return typeof value === "string" ? el("pre", {}, value) : el("div", {}, el("pre", {}, value.text), command(value.command)) }
 // A closed group that stays open across refreshes once opened.
 function group(key, label, ...children) {
   const node = el("details", { ontoggle: () => { node.open ? expanded.add(key) : expanded.delete(key) } }, el("summary", {}, label), ...children)
@@ -353,13 +357,20 @@ const title = (id) => checklist.find((item) => item.id === id)?.title ?? id
 
 // key: what output and busy state belong to (a sandbox's name, or ext:ID); what: the button that started it.
 async function act(key, what, task) {
-  busy.add(`${key}:${what}`); delete output[key]; render()
+  busy.add(`${key}:${what}`); delete output[key]; from[key] = what; render()
   try {
     const result = await task()
-    if (result && typeof result.exitCode === "number") output[key] = `${result.stdout}${result.stderr}`.trim() || `Done (exit ${result.exitCode}).`
+    if (result && typeof result.exitCode === "number") output[key] = readable(`${result.stdout}${result.stderr}`.trim()) || `Done (exit ${result.exitCode}).`
     else if (typeof result === "string") output[key] = result
   } catch (error) { output[key] = error.details?.approval ? { text: error.message, command: error.details.command } : error.message }
   busy.delete(`${key}:${what}`); await refresh()
+}
+
+// A JSON object printed by an action, as one "key: value" line per field; other text as it is.
+function readable(text) {
+  let value; try { value = JSON.parse(text) } catch { return text }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return text
+  return Object.entries(value).map(([key, field]) => `${key}: ${field && typeof field === "object" ? JSON.stringify(field) : field}`).join("\n")
 }
 
 function actionForm(extension, action, sandbox) {
@@ -381,7 +392,8 @@ function actionForm(extension, action, sandbox) {
   }
   const running = busy.has(`${key}:${extension.id}/${action.id}`)
   form.append(...(inputs.childElementCount ? [inputs] : []), ...(checks.childElementCount ? [checks] : []),
-    el("div", { class: "row" }, el("button", running ? { disabled: "" } : {}, running ? "Running…" : action.label), action.description ? el("span", { class: "muted grow" }, action.description) : null))
+    el("div", { class: "row" }, el("button", running ? { disabled: "" } : {}, running ? "Running…" : action.label), action.description ? el("span", { class: "muted grow" }, action.description) : null),
+    result(key, `${extension.id}/${action.id}`))
   return form
 }
 
@@ -393,7 +405,8 @@ function miniForm(key, what, label, fields, send, ask = false) {
     act(key, what, () => send(values))
   } }, ...fields.map(([name, text, type = "text"]) => el("label", { class: "grow" }, text, el("input", { name, type, ...(type === "number" ? { step: "any" } : {}) }))))
   form.append(el("button", { ...(ask ? { title: asks() } : {}), ...(busy.has(`${key}:${what}`) ? { disabled: "" } : {}) }, busy.has(`${key}:${what}`) ? ask ? "Waiting for Allow on the Mac…" : "Working…" : ask ? `${label} (asks on the Mac)` : label))
-  return form
+  const shown = result(key, what)
+  return shown ? el("div", {}, form, shown) : form
 }
 
 const terminal = (name, kind, machine, profile) => api("openTerminal", { name, kind, ...(machine ? { machine } : {}), ...(profile ? { profile } : {}) })
@@ -409,6 +422,7 @@ async function sshSetup(name, writeConfig) {
 function sandboxPanel(sandbox) {
   if (sandbox.status === "damaged") return el("div", { class: "panel" }, el("span", { class: "name" }, sandbox.name), " ", el("span", { class: "badge" }, "damaged"), el("div", { class: "error" }, sandbox.stopReason))
   const name = sandbox.name
+  placed.delete(name)
   const is = (key) => busy.has(`${name}:${key}`)
   const button = (label, key, task, extra = {}) => el("button", { ...extra, ...(is(key) ? { disabled: "" } : {}), onclick: () => act(name, key, task) }, is(key) ? "Working…" : label)
   const running = sandbox.status === "running"
@@ -431,9 +445,9 @@ function sandboxPanel(sandbox) {
       el("button", { class: "danger", onclick: () => { const typed = prompt(`This deletes ${name} and everything in it. Type its name to confirm.`); if (typed !== null) act(name, "remove", () => api("remove", { name, confirm: typed })) } }, "Remove")))
   // One closed group per extension, so the card stays short until one is needed.
   const tools = running ? extensions.map((extension) => [extension, extension.actions.filter((entry) => entry.scope === "sandbox")]).filter(([, actions]) => actions.length) : []
-  if (tools.length) panel.append(el("div", { class: "tools" }, ...tools.map(([extension, actions]) => group(`ext:${name}:${extension.id}`, extension.name, ...actions.map((action) => actionForm(extension, action, sandbox))))))
+  if (tools.length) panel.append(el("div", { class: "tools" }, ...tools.map(([extension, actions]) => extension.id === "t3" && actions.some((action) => action.id === "setup") ? t3Group(sandbox, extension, button)
+    : group(`ext:${name}:${extension.id}`, extension.name, ...actions.map((action) => actionForm(extension, action, sandbox))))))
   if (sandbox.enforcementProblem) panel.append(el("div", { class: "error" }, `Enforcement problem at ${sandbox.enforcementProblem.at}: ${sandbox.enforcementProblem.message}`))
-  if (output[name]) panel.append(result(name))
   if (open.has(name) && sandbox.lastVerify) {
     panel.append(el("ul", { class: "checks" }, ...sandbox.lastVerify.results.map((check) => el("li", { class: "unknown" },
       el("span", { class: "mark", title: "unknown" }, MARK.unknown),
@@ -444,7 +458,7 @@ function sandboxPanel(sandbox) {
   const mine = forwards.filter((forward) => forward.name === name)
   const myLinks = links.filter((link) => link.from === name || link.to === name)
   const access = ssh[name]
-  panel.append(group(`more:${name}`, "More: agent login choice, resize, run a command, template, forwards, links, SSH, commands",
+  const more = group(`more:${name}`, "More: agent login choice, resize, run a command, template, forwards, links, SSH, commands",
     running ? group(`agents:${name}`, "Claude Code or Codex with a chosen login", el("p", { class: "muted" }, "Opens a terminal window on this Mac running asd claude or asd codex: the agent in ~/workspace with an imported login, the one named, else the only one."),
       miniForm(name, "agent", "Open Claude Code", [["profile", "Login profile (blank: the only one)"]], (values) => terminal(name, "claude", undefined, values.profile)),
       miniForm(name, "agent-codex", "Open Codex", [["profile", "Login profile (blank: the only one)"]], (values) => terminal(name, "codex", undefined, values.profile))) : null,
@@ -482,9 +496,47 @@ function sandboxPanel(sandbox) {
         running ? askButton("Set up and add the Include line to ~/.ssh/config", name, "ssh-config", () => sshSetup(name, true), { class: "small" }) : null),
       command(`asd ssh setup ${name} --write-config`), command(`ssh ${access?.alias ?? `${name}.asidee`}`)),
     group(`commands:${name}`, "CLI commands",
-      command(`asd shell ${name}`), command(`asd exec ${name} -- uname -a`), command(`asd verify ${name}`), command(`asd remove ${name} --confirm ${name}`))))
+      command(`asd shell ${name}`), command(`asd exec ${name} -- uname -a`), command(`asd verify ${name}`), command(`asd remove ${name} --confirm ${name}`)))
+  // Output no form showed (the buttons at the top) goes at the bottom, above More.
+  if (output[name] && !placed.has(name)) panel.append(result(name))
+  panel.append(more)
   return panel
 }
+
+// The bundled T3 extension: set it up, then connect the app over SSH, with the steps in order.
+function t3Group(sandbox, extension, button) {
+  const name = sandbox.name, key = `ext:${name}:${extension.id}`
+  const run = (action) => api("action", { extension: extension.id, action, sandbox: name, values: {} })
+  const failed = (reply) => `${reply.stdout}${reply.stderr}`.trim() || `Failed (exit ${reply.exitCode}).`
+  const access = ssh[name], ready = access?.batchReady || access?.included
+  const node = group(key, extension.name,
+    el("p", { class: "muted" }, "Set T3 up in the sandbox once, then connect the T3 Code app to it over SSH."),
+    el("div", { class: "row" }, button("1. Set up T3 Code", "t3-setup", async () => {
+      const reply = await run("setup"); if (reply.exitCode !== 0) return failed(reply)
+      const done = JSON.parse(reply.stdout)
+      return `T3 ${done.version} ${done.runtime === "installed" ? "installed" : "was already installed"}. Logins it found: Claude ${done.claude}, Codex ${done.codex}.`
+    }), el("span", { class: "muted grow" }, "Once per sandbox: installs this Mac's T3 version there and gives it the sandbox's Claude and Codex logins.")),
+    result(name, "t3-setup"),
+    el("h4", {}, "2. Connect the T3 Code app"),
+    el("ol", { class: "steps" },
+      el("li", {}, ready ? "SSH is ready." : access?.error ?? (access ? "Set up SSH in the sandbox and add Asidee's Include line to your ~/.ssh/config." : "Checking SSH…"),
+        !ready && access && sandbox.status === "running" ? el("div", { class: "row" }, askButton("Set up SSH", name, "t3-ssh-config", () => sshSetup(name, true), { class: "small" })) : null),
+      el("li", {}, "In T3 Code: Settings → Connections → Machine over SSH. Paste this as the SSH host:", command(`${name}.asidee`))),
+    result(name, "t3-ssh-config"),
+    el("div", { class: "row" }, button("Refresh logins", "t3-sync", async () => {
+      const reply = await run("sync"); if (reply.exitCode !== 0) return failed(reply)
+      const done = JSON.parse(reply.stdout); return `T3 now has Claude ${done.claude} and Codex ${done.codex} logins.`
+    }, { class: "small" }), el("span", { class: "muted grow" }, "After importing or removing a login, so T3 sees it.")),
+    result(name, "t3-sync"))
+  // SSH readiness is asked for once the group is open.
+  const check = () => { if (node.open && ssh[name] === undefined && !checkingSsh.has(name)) {
+    checkingSsh.add(name)
+    api("sshAccess", { name }).then((done) => { ssh[name] = done }, (error) => { ssh[name] = { error: error.message } }).finally(() => { checkingSsh.delete(name); render() })
+  } }
+  node.addEventListener("toggle", check); check()
+  return node
+}
+const checkingSsh = new Set()
 
 function usageLine(entry, sandbox) {
   if (!entry) return ""

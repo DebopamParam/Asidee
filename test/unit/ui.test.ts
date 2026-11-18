@@ -423,3 +423,17 @@ test("on a machine without the dialog, the buttons say the CLI command is offere
   expect(ui.text("#about")).toContain("This machine has no dialog to allow it, so it is refused and its CLI command offered.")
   expect(ui.button("Stop the daemon (asks on the Mac)")).toBeDefined()
 })
+
+test("the T3 group sets T3 up, then gives the SSH host to paste, and shows each result under its button", async () => {
+  const t3 = { id: "t3", name: "T3 Code", actions: ["setup", "sync", "ssh"].map((id) => ({ id, label: id, scope: "sandbox", fields: [], run: ["./t3.ts", id] })) }
+  const ui = await page({ ...base, list: () => [sandbox()], extensions: () => ({ extensions: [t3], errors: [] }), sshAccess: () => ({ alias: "demo.asidee", user: "root", home: "/root", batchReady: false, loopbackForwarding: true }),
+    action: (body) => body.action === "setup" ? { exitCode: 0, stdout: JSON.stringify({ version: "1.2.3", runtime: "installed", claude: 2, codex: 1, ssh: {} }), stderr: "" } : { exitCode: 1, stdout: "", stderr: "" } })
+  const doc = ui.window.document as any
+  const group = () => [...doc.querySelectorAll("#sandboxes details")].find((node: any) => node.querySelector("summary").textContent === "T3 Code")
+  group().open = true; group().dispatchEvent(new ui.window.Event("toggle")); await ui.settle()
+  expect(group().textContent).toContain("Set up SSH (asks on the Mac)")
+  expect(group().querySelector(".cmd code").textContent).toBe("demo.asidee")
+  ui.button("1. Set up T3 Code").click(); await ui.settle()
+  expect(group().querySelector("pre").textContent).toBe("T3 1.2.3 installed. Logins it found: Claude 2, Codex 1.")
+  expect(ui.text("#sandboxes > .panel > pre")).toBe("")
+})
