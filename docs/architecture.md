@@ -58,8 +58,10 @@ The sandbox list labels current isolation as **Not verified**; saved checks rema
 The daemon API exposes `configGet` and `configSet`; the latter accepts only `requireProbes` and `experimental`, each a
 boolean, `workspaceFreeSpaceGb` and `diskWatchSeconds`, each a number, `defaults` and `engine` (`null` removes either)
 and `terminal`, and at least one of them. `terminalCommand` is not among them: it runs on the Mac with the user's
-rights, so a page holding the dashboard token could otherwise run anything. Only the socket-only `terminalCommandSet`
+rights, so a page holding the dashboard token could otherwise run anything. Only `terminalCommandSet`
 (`asd config set terminal-command CMD|none`) sets it; setting one chooses `custom`, clearing it goes back to `default`.
+From the dashboard, setting one first needs Allow in a dialog on the Mac ([Approval on the Mac](#approval-on-the-mac));
+clearing it runs nothing and is not asked.
 A settings write atomically replaces `config.json` with mode 0600, preserving defaults, engine selection and other fields.
 Writes are serialized within the daemon, and each create reads the current file without a daemon restart.
 Both methods are available over the user socket and on loopback with the dashboard token and accepted Host header.
@@ -743,8 +745,8 @@ answering, and valid stream and buffered controls still work. M02 measured an un
 seconds (SSH's connect timeout) and a silent daemon after ten (the handshake deadline). M11 stopped the primary in under
 five seconds with one of its SSH processes stopped by SIGSTOP, and its local watched sandbox was stopped.
 
-The typed method catalog in `core/machines.ts` limits routing. The gateway checks socket-only access before SSH is
-opened, and the target validates the ordinary request again. Bootstrap and primary resources are not a generic RPC
+The typed method catalog in `core/machines.ts` limits routing. The gateway checks socket-only access, and asks on the
+Mac for an approvable method, before SSH is opened, and the target validates the ordinary request again. Bootstrap and primary resources are not a generic RPC
 proxy. Remote JSON replies are capped at 8 MiB: past that a read fails as `incompatible` and a mutation is
 `outcome-unknown`, both saying the reply exceeded 8 MiB. Every routed reply is checked against its method's shape
 before it is used: a malformed one is refused (`incompatible` for a read, `outcome-unknown` for a mutation). A sandbox
@@ -870,10 +872,11 @@ functions with their own checklist. A workspace is not a sandbox or a `Provider`
 isolated-kernel, network or resource-limit checks. No sandbox check is skipped or reworded for it.
 
 The `workspaceList`, `workspaceGet`, `workspaceCreate`, `workspaceExec`, `workspaceShell`, `workspaceStop`,
-`workspaceRemove`, `workspaceSet` and `workspaceVerify` methods are all socket-only and local. Shells and streamed exec use the
+`workspaceRemove`, `workspaceSet` and `workspaceVerify` methods are local. Shells and streamed exec use the
 existing stream socket with `kind: "workspace"`; remote routes and a requested user are refused. The dashboard's
-read-only summary carries a separate workspace inventory. Dashboard workspace actions remain unavailable to honor
-socket-only authority; the dashboard shows each as a CLI command to copy. Its one workspace button, Terminal, asks
+summary carries a separate workspace inventory. List, get and verify are open to the dashboard; create, set, exec (each
+run), stop and remove are asked on the Mac first ([Approval on the Mac](#approval-on-the-mac)); `workspaceShell` stays
+socket-only. Its Terminal button asks
 `openTerminal` (see [Dashboard](#dashboard)) for a window that runs `asd workspace shell NAME`, which hands the page
 nothing back. Summary reads manifests and tagged-process counts without identity repair, chmod or tree
 walks. Of the status views, CLI list/get alone request live size measurements. The 30-second sandbox enforcement pass
@@ -989,8 +992,41 @@ SSH access and CLI commands; and the create form, which also shows the same crea
 **Workspaces**, **Templates** (with the Prepare form above), **Machines** (with `experimental` on), **Extensions** (every installed extension's actions;
 a sandbox action asks which sandbox; Install for each bundled extension not installed, Remove for an installed one)
 and **Settings** (every setting above, the engines and what this daemon is).
-Whatever is socket-only (workspace changes, SSH setup, machines, daemon stop) is shown as the command, with a Copy
-button. A unit test fails if the page calls a method that is not open to the dashboard.
+What acts on the Mac itself (workspace changes, SSH setup with `~/.ssh/config`, the custom terminal command, attaching
+and forgetting machines, daemon stop) has buttons labelled "(asks on the Mac)", with a note before the click that a
+dialog will appear there. What stays socket-only (`asd setup`, `host add`, shells and streamed sessions) is shown as the
+command, with a Copy button. A unit test fails if the page calls a method that is not open to the dashboard.
+
+### Approval on the Mac
+
+A token in a page is weaker than the user socket: anything that reads the dashboard link, or a page or extension in the
+same browser, may hold it. So a method that acts on the Mac itself carries an `approve` hook in `core/daemon.ts`. On the
+loopback port, the handler first runs the hook, which validates the request (refusing extra keys, a remote `host`, a
+missing confirmation) and returns the exact action to show, or nothing when the request needs no approval. It then shows a
+native dialog (`core/approval.ts`) and runs the request only on Allow. Over the user socket nothing is asked.
+
+The dialog is `/usr/bin/osascript` with fixed source; the request's text arrives only as arguments of `on run argv`,
+never as AppleScript. Request-supplied strings are shown in quotes as JSON, with controls, invisible and
+direction-changing characters as escapes, so they cannot pass for the dialog's own words. Deny is the default button.
+No answer within 60 seconds denies (`giving up after`, and a kill at 75 seconds). One approval waits at a time; another
+is refused at once as busy (409 `conflict`). Text over 3,000 characters is not asked. A refusal is 403 with
+`details.approval` of `denied`, `timed-out` or `unavailable` and `details.command`, the same action as a CLI command,
+which the page offers to copy. Where no dialog can be shown (Linux, osascript failing), the answer is `unavailable`.
+The daemon is started detached by the CLI and runs in the user's Aqua session (`launchctl managername`), which is
+where the dialog appears; a 5-second test dialog started from it timed out as expected on this Mac.
+
+| Method | From the dashboard | Why |
+|---|---|---|
+| `sshSetup` | open without `writeConfig`; asked with it | Asidee's own SSH files only, or also the user's `~/.ssh/config` Include line |
+| `terminalCommandSet` | asked when setting; open when clearing | the command runs as the user on each Terminal button |
+| `workspaceCreate`, `workspaceSet`, `workspaceExec`, `workspaceStop`, `workspaceRemove` | asked (exec on every run) | workspaces run on the Mac's own kernel as the user |
+| `workspaceList`, `workspaceGet`, `workspaceVerify` | open | reads, and Asidee's own fixed probes |
+| `hostAttach`, `hostRemove` | asked | SSH with the user's keys; ends sessions and forwards |
+| `shutdown` | asked, no options | stops watched sandboxes; keeping them is the CLI's upgrade path |
+| `hello`, `sessionTarget`, `sshPrepare`, `workspaceShell` | socket-only | handshake and sessions; their replies are authority, not results to show |
+| `hostPlan`, `hostApply` | socket-only | enrollment is reviewed as a whole plan and may ask for sudo in a terminal |
+
+`asd setup` is not a daemon method: it edits and restarts the engine after its plan is approved in a terminal.
 
 Three methods exist for it. `usage` gives each sandbox's use against its limits: CPU as the share of one CPU between
 two calls (none on the first; the engine's own CPU-time counter), memory and tasks as the engine reports them, and

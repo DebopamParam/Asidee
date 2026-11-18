@@ -95,12 +95,15 @@ test("routing strips the host, handshakes first and never retries a mutation or 
 test("a dashboard request cannot gain socket authority by routing it", async () => {
   const dirs = await setup(); let connected = 0
   const machines = new Machines(dirs, LOCAL, async () => summary(LOCAL), { connectPeer: () => { connected++; throw new Error("should not connect") } })
-  const table = Object.fromEntries(Object.entries(CATALOG).map(([method, [access]]) => [method, { run: async () => "local", socketOnly: access === "socket" }]))
-  const handle = createHandler(table, "token", dirs.config, machines)
-  for (const method of ["hello", "sshSetup", "shutdown", "hostAttach", "hostRemove"]) {
+  const table = Object.fromEntries(Object.entries(CATALOG).map(([method, [access]]) => [method, { run: async () => "local", socketOnly: access === "socket", ...(access === "approve" ? { approve: () => ({ action: method, cli: method }) } : {}) }]))
+  // Approvable methods are asked on the Mac before any routing; here the person denies.
+  const asked: string[] = []
+  const handle = createHandler(table, "token", dirs.config, machines, async (approval) => { asked.push(approval.cli); return "deny" })
+  for (const method of ["hello", "hostPlan", "hostApply", "sshPrepare", "sshSetup", "shutdown", "hostAttach", "hostRemove", "terminalCommandSet"]) {
     const response = await handle(new Request(`http://127.0.0.1:7717/api/${method}`, { method: "POST", headers: { host: "127.0.0.1:7717", authorization: "Bearer token" }, body: JSON.stringify({ host: "build", name: "demo" }) }), false, 7717)
     expect(response.status).toBe(403)
   }
+  expect(asked).toEqual(["sshSetup", "shutdown", "hostAttach", "hostRemove", "terminalCommandSet"])
   expect(connected).toBe(0)
 })
 

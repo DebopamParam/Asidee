@@ -92,7 +92,9 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   T3 Code. The first failure stops the rest and keeps the sandbox. On this machine only.
 - `asd claude demo [PROFILE]` and `asd codex demo [PROFILE]` open the agent in `~/workspace` with an imported login.
   The dashboard opens the same in a terminal window on the Mac.
-- The daemon, the CLI with `--json`, a web dashboard, and extensions.
+- The daemon, the CLI with `--json`, a web dashboard, and extensions. What the dashboard does to the Mac itself
+  (workspaces, the custom terminal command, `~/.ssh/config`, machines, daemon stop) runs only after Allow in a dialog on
+  the Mac, which denies by itself after 60 seconds; where no dialog can be shown, the page offers the CLI command.
 - Other machines are **experimental and off by default**: they are not yet proven on enough machines. While off, the
   daemon refuses every `host` command, `--host NAME` and `list --all`, contacts no registered machine and leaves the
   registry as it is; `asd config set experimental on` turns them on. A daemon that another machine reaches over
@@ -160,8 +162,9 @@ distinct `port (process)` listeners; `--json` keeps the full detail. When stop, 
 its stderr says why before the session ends. Signal exits use 128 plus the signal number (137 for SIGKILL).
 
 Workspaces require macOS and Bun, without a Docker engine. The separate workspace checklist never weakens the
-sandbox checklist. All workspace methods are socket-only; the dashboard displays them in their own section, with each change as a CLI
-command to copy, and a Terminal button.
+sandbox checklist. The dashboard shows workspaces in their own section. Reading and verifying one are open to it; a
+create, change, command, stop or remove from it first shows a dialog on the Mac that must be allowed (see [Approval on the Mac](docs/architecture.md#approval-on-the-mac)).
+A shell stays with the CLI and the Terminal button.
 See [macOS workspaces](docs/workspaces.md) and [their separate K scorecard](evals/SCORECARD.workspace.md) for controls,
 removal limits and login status. The full sandbox scorecards were not regenerated for this feature.
 

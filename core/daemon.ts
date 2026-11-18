@@ -6,21 +6,24 @@ import { createServer } from "node:net"
 import { join, normalize } from "node:path"
 import { CHECKLIST } from "./checks"
 import { Core } from "./core"
-import { CATALOG, isMethod, machineIdentity, Machines, type Hello } from "./machines"
+import { APPROVAL_SECONDS, approvalText, dialogApprover, literal, word, type Answer, type Approval, type Approver } from "./approval"
+import { CATALOG, hostName, isMethod, machineIdentity, Machines, type Hello } from "./machines"
 import { Hosts } from "./hosts"
-import { PROTOCOL } from "./transport"
+import { absolutePath, PROTOCOL, sshDestination } from "./transport"
 import { Preparations } from "./prepare"
 import { DockerSandboxesProvider } from "./providers/docker-sandboxes"
 import { GvisorProvider } from "./providers/gvisor"
 import { OUTPUT_LIMIT, systemRunner } from "./run"
-import { checkSocketPath, daemonFile, DEFAULT_DISK_WATCH_SECONDS, DEFAULT_SPEC, socketPath, streamSocketPath, type Dirs } from "./state"
+import { includeLine, userConfig } from "./ssh"
+import { checkSocketPath, daemonFile, DEFAULT_DISK_WATCH_SECONDS, DEFAULT_SPEC, socketPath, streamSocketPath, validDiskGb, validName, validTerminalCommand, type Dirs } from "./state"
 import { sourceDigest } from "./source" with { type: "macro" }
 import { serveStream } from "./stream"
 import { openTerminal } from "./terminal"
 import { AsideeError, type ErrorCode } from "./types"
 import builtInUi from "../ui/index.html" with { type: "text" }
 import pkg from "../package.json"
-import { WORKSPACE_WATCH_MS, Workspaces } from "./workspaces"
+import { validArgv, validWorkspaceSpec, WORKSPACE_WATCH_MS, workspaceName, Workspaces } from "./workspaces"
+import { HOST_TEMP_DISCLOSURE } from "./workspace-profile"
 
 // Bun's types describe an .html import as a page bundle; with type "text" it is the file's text.
 const BUILT_IN_UI = builtInUi as unknown as string
@@ -55,42 +58,98 @@ export function execStdin(body: Body): string | Uint8Array | undefined {
   if (Buffer.byteLength(body.stdin) > OUTPUT_LIMIT) throw new AsideeError("usage", limit)
   return body.stdin
 }
-type Method = { run: (body: Body, signal?: AbortSignal) => Promise<unknown>; socketOnly?: boolean }
+// socketOnly: never on the dashboard's port. approve: on that port, what the person at the Mac must allow first
+// (core/approval.ts), or undefined when this request needs no approval; it throws for a request that would be refused.
+type Method = { run: (body: Body, signal?: AbortSignal) => Promise<unknown>; socketOnly?: boolean; approve?: (body: Body) => Approval | undefined | Promise<Approval | undefined> }
 
 // The whole API. The CLI, the UI and extensions all come through this table, so each has exactly these abilities.
 // keepSandboxes: the daemon is being replaced (an upgrade), not stopped, so the sandboxes it watches keep running.
 export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, stopping: () => boolean = () => false, machines?: Machines, hosts = machines ? new Hosts(machines) : undefined, workspaces = new Workspaces(core.dirs)): Record<string, Method> {
+  // Approvals name the request's own values, and refuse a host for what acts only here.
+  const here = (body: Body) => { if (body.host !== undefined && body.host !== "local") throw new AsideeError("usage", "This acts on this machine only; leave out host.") }
+  const remote = (body: Body) => body.host !== undefined && body.host !== "local" ? String(body.host) : undefined
+  const only = (body: Body, keys: string[]) => { const extra = Object.keys(body).filter((key) => !["host", "machineId", ...keys].includes(key)); if (extra.length) throw new AsideeError("usage", keys.length ? `From the dashboard this takes only ${keys.join(", ")}.` : "From the dashboard this takes no options.") }
+  const workspace = (body: Body) => { here(body); return workspaceName(body.name) }
   // A prepare calls this same table, as any client would.
   const preparations = new Preparations((method, body = {}) => table[method]!.run(body as Body) as never, core.dirs, systemRunner)
   const table: Record<string, Method> = {
     version: { run: async () => ({ version: VERSION, build: BUILD, stopping: stopping() }) },
     hello: { run: async () => machines?.hello, socketOnly: true },
     summary: { run: async () => ({ hello: machines?.hello, sandboxes: await core.list(), workspaces: process.platform === "darwin" ? await workspaces.summary() : [], checkedAt: new Date().toISOString() }) },
-    workspaceList: { run: () => workspaces.list(), socketOnly: true },
-    workspaceGet: { run: (body) => workspaces.get(String(body.name), body.withSize !== false), socketOnly: true },
-    workspaceSet: { run: (body) => workspaces.set(String(body.name), body), socketOnly: true },
-    workspaceCreate: { run: (body) => workspaces.create(body), socketOnly: true },
-    workspaceExec: { run: (body, signal) => workspaces.exec(String(body.name), body.argv, execStdin(body), signal), socketOnly: true },
+    // Workspaces run on this Mac, not in a sandbox. Reading them and verifying them (Asidee's own fixed probes) is open, as
+    // for a sandbox; whatever creates, changes, runs or stops something there is asked first. A shell is a session.
+    workspaceList: { run: () => workspaces.list() },
+    workspaceGet: { run: (body) => workspaces.get(String(body.name), body.withSize !== false) },
+    workspaceSet: { run: (body) => workspaces.set(String(body.name), body), approve: (body) => {
+      const name = workspace(body); only(body, ["name", "diskGb", "hostTemp"])
+      if ((body.diskGb === undefined) === (body.hostTemp === undefined)) throw new AsideeError("usage", "Set hostTemp or diskGb, one at a time.")
+      if (body.hostTemp !== undefined && typeof body.hostTemp !== "boolean") throw new AsideeError("usage", "hostTemp must be a boolean.")
+      return body.diskGb !== undefined
+        ? { action: `Change the watched disk limit of the workspace ${literal(name)} on this Mac to ${validDiskGb(body.diskGb, "Disk (GiB)")} GiB.`, cli: `asd workspace set ${name} disk ${validDiskGb(body.diskGb, "Disk (GiB)")}` }
+        : { action: `Turn ${body.hostTemp ? "on" : "off"} the workspace ${literal(name)}'s access to this user's shared temp folder.`, details: body.hostTemp ? [HOST_TEMP_DISCLOSURE] : [], cli: `asd workspace set ${name} host-temp ${body.hostTemp ? "on" : "off"}` }
+    } },
+    workspaceCreate: { run: (body) => workspaces.create(body), approve: (body) => {
+      here(body); only(body, ["name", "copy", "reads", "path", "hostTemp", "diskGb", "logins", "loopback"])
+      const spec = validWorkspaceSpec(body)
+      return { action: `Create the workspace ${literal(spec.name)}: a new folder under ~/Asidee whose commands run on this Mac's own kernel, as you, with the network open. It is not a sandbox.`,
+        details: [spec.copy ? `It copies ${literal(spec.copy)} into it.` : "It starts empty.", ...(spec.reads.length ? [`Its commands may also read ${spec.reads.map(literal).join(", ")}.`] : []),
+          ...(spec.path.length ? [`Their PATH also has ${spec.path.map(literal).join(", ")}.`] : []), ...(spec.hostTemp ? ["It opens this user's shared temp folder to them."] : []), `Its disk use is watched at ${spec.diskGb} GiB.`,
+          spec.logins.kind === "none" ? "No logins are copied in." : `It copies your Claude login profile ${literal(spec.logins.claude)} and Codex login profile ${literal(spec.logins.codex)} into it; reading a Keychain login may ask too.`],
+        cli: ["asd workspace create", spec.name, ...(spec.copy ? ["--copy", word(spec.copy)] : []), ...spec.reads.flatMap((path) => ["--read", word(path)]), ...spec.path.flatMap((path) => ["--path", word(path)]),
+          ...(spec.hostTemp ? ["--host-temp"] : []), "--disk", String(spec.diskGb), ...(spec.logins.kind === "none" ? ["--no-logins"] : ["--claude-profile", spec.logins.claude, "--codex-profile", spec.logins.codex])].join(" ") }
+    } },
+    // Each run is asked: a window of free runs would be exactly what a leaked token needs.
+    workspaceExec: { run: (body, signal) => workspaces.exec(String(body.name), body.argv, execStdin(body), signal), approve: (body) => {
+      const name = workspace(body); only(body, ["name", "argv", "stdin", "stdinBase64"])
+      const argv = validArgv(body.argv); const input = body.stdin !== undefined || body.stdinBase64 !== undefined
+      return { action: `Run a command in the workspace ${literal(name)}, on this Mac as you. It is not a sandbox:`, details: [argv.map(literal).join(" "), ...(input ? ["The request also sends it input."] : [])],
+        cli: `asd workspace exec ${name}${input ? " --stdin" : ""} -- ${argv.map(word).join(" ")}` }
+    } },
     workspaceShell: { run: async (body) => ({ workspace: await workspaces.get(String(body.name), false), stream: "workspace", argv: ["/bin/zsh", "-l"] }), socketOnly: true },
-    workspaceStop: { run: (body) => workspaces.stop(String(body.name)), socketOnly: true },
-    workspaceRemove: { run: (body) => workspaces.remove(String(body.name), body.confirm), socketOnly: true },
-    workspaceVerify: { run: (body) => workspaces.verify(String(body.name)), socketOnly: true },
+    workspaceStop: { run: (body) => workspaces.stop(String(body.name)), approve: (body) => {
+      const name = workspace(body); only(body, ["name"])
+      return { action: `Stop every process of the workspace ${literal(name)} on this Mac.`, cli: `asd workspace stop ${name}` }
+    } },
+    workspaceRemove: { run: (body) => workspaces.remove(String(body.name), body.confirm), approve: async (body) => {
+      const name = workspace(body); only(body, ["name", "confirm"])
+      if (body.confirm !== name) throw new AsideeError("usage", `Removing a workspace deletes its files. Give confirm ${name}.`)
+      return { action: `Delete the workspace ${literal(name)} and its folder ${literal((await workspaces.get(name, false)).folder)}, after stopping its processes.`, cli: `asd workspace remove ${name} --confirm ${name}` }
+    } },
+    workspaceVerify: { run: (body) => workspaces.verify(String(body.name)) },
     hostList: { run: async () => machines?.list() },
     fleet: { run: async (body) => machines?.fleet(body.refresh) },
-    hostAttach: { run: async (body) => machines?.attach(body), socketOnly: true },
+    hostAttach: { run: async (body) => machines?.attach(body), approve: async (body) => {
+      here(body); only(body, ["name", "ssh", "binary", "stateDir"]); await machines?.experimental()
+      const name = hostName(body.name); const ssh = sshDestination(body.ssh); const binary = absolutePath(body.binary); const stateDir = absolutePath(body.stateDir)
+      return { action: `Register the machine ${literal(name)}, reached with ssh ${literal(ssh)}. Asidee connects to it with your SSH configuration and keys whenever it is selected.`,
+        details: [`Its asd: ${literal(binary)}`, `Its state folder: ${literal(stateDir)}`], cli: `asd host attach ${name} --ssh ${word(ssh)} --binary ${word(binary)} --state-dir ${word(stateDir)}` }
+    } },
+    // Enrollment is reviewed as a whole plan (privileged commands, file diffs, a Docker restart) and may ask for sudo in a
+    // terminal; a dialog cannot show that, so it stays with the CLI.
     hostPlan: { run: async (body) => hosts?.plan(body), socketOnly: true },
     hostApply: { run: async (body) => hosts?.apply(body), socketOnly: true },
-    hostRemove: { run: async (body) => machines?.remove(body), socketOnly: true },
+    hostRemove: { run: async (body) => machines?.remove(body), approve: async (body) => {
+      here(body); only(body, ["name", "confirm"]); await machines?.experimental()
+      const name = hostName(body.name)
+      if (body.confirm !== name) throw new AsideeError("usage", "Confirm removal with confirm NAME. A prepared daemon and all remote data are retained.")
+      return { action: `Forget the machine ${literal(name)} and end its open sessions and forwards. Its Asidee files and service there stay.`, cli: `asd host remove ${name} --confirm ${name}` }
+    } },
     sessionTarget: { run: (body) => core.sessionTarget(body.name), socketOnly: true },
     sshPrepare: { run: (body) => core.sshSetup(String(body.name), false, typeof body.publicKey === "string" ? body.publicKey : ""), socketOnly: true },
     configGet: { run: () => core.configGet() },
     configSet: { run: async (body) => { const config = await core.configSet(body); if (!config.experimental) machines?.suspend(); return config } },
-    // The custom terminal command runs on this Mac as the user, so only the CLI sets it (core/terminal.ts).
-    terminalCommandSet: { run: async (body) => {
+    // The custom terminal command runs on this Mac as the user (core/terminal.ts), so the dashboard sets one only once the
+    // person at the Mac allows it. Clearing it runs nothing.
+    terminalCommandSet: { approve: (body) => {
+      here(body)
+      if (typeof body.terminalCommand !== "string") return undefined
+      const command = validTerminalCommand(body.terminalCommand)
+      return { action: "Set the command the dashboard's Terminal buttons run. It runs on this Mac as you, each time one is used, with {command} replaced by a script's path:", details: [literal(command)], cli: `asd config set terminal-command ${word(command)}` }
+    }, run: async (body) => {
       // Setting a command chooses it; clearing it goes back to the default terminal if it was chosen.
       const clear = typeof body.terminalCommand !== "string"
       return core.configSet({ terminalCommand: clear ? null : body.terminalCommand, ...(!clear ? { terminal: "custom" } : (await core.configGet()).terminal === "custom" ? { terminal: "default" } : {}) }, true)
-    }, socketOnly: true },
+    } },
     about: { run: async () => ({ version: VERSION, build: BUILD, platform: process.platform, arch: process.arch, pid: process.pid, startedAt: STARTED, stopping: stopping(), stateDir: core.dirs.state, configDir: core.dirs.config, cli: join(core.cliDir, "asd"), builtInDefaults: DEFAULT_SPEC }) },
     usage: { run: () => core.usage() },
     openTerminal: { run: (body) => openTerminal(core.dirs, core.cliDir, systemRunner, { name: String(body.name), kind: body.kind === undefined ? "sandbox" : body.kind as "sandbox", ...(typeof body.machine === "string" ? { machine: body.machine } : {}), ...(body.profile !== undefined ? { profile: body.profile as string } : {}) }) },
@@ -123,9 +182,21 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     linkList: { run: (body) => core.links.list(body.name) },
     linkRemove: { run: (body) => core.links.remove(body.from, body.to, body.port) },
     sshAccess: { run: (body) => core.sshAccess(String(body.name)) },
-    // It writes to the user's SSH configuration, so a web page cannot ask for it.
-    sshSetup: { run: (body) => core.sshSetup(String(body.name), body.writeConfig === true), socketOnly: true },
-    shutdown: { run: async (body) => { setTimeout(() => shutdown(body.keepSandboxes === true), 50); return { stopping: true } }, socketOnly: true },
+    // Without writeConfig it writes only Asidee's own SSH files; with it, a line in the user's SSH configuration, which is asked.
+    sshSetup: { run: (body) => core.sshSetup(String(body.name), body.writeConfig === true), approve: (body) => {
+      if (body.writeConfig !== true) return undefined
+      only(body, ["name", "writeConfig"])
+      const name = validName(body.name); const host = remote(body)
+      return { action: `Set up SSH for the sandbox ${literal(name)}${host ? ` on the machine ${literal(host)}` : ""}, and add this line at the top of your SSH configuration, ${literal(userConfig())}, unless it is there already:`,
+        details: [literal(includeLine(core.dirs))], cli: `asd${host ? ` --host ${word(host)}` : ""} ssh setup ${name} --write-config` }
+    } },
+    shutdown: { run: async (body) => { setTimeout(() => shutdown(body.keepSandboxes === true), 50); return { stopping: true } }, approve: async (body) => {
+      // Keeping sandboxes is the CLI's upgrade path, over the socket only; the page gets what asd daemon stop does.
+      here(body); only(body, [])
+      const running = (await core.list()).filter((sandbox) => sandbox.status === "running").map((sandbox) => literal(sandbox.name))
+      return { action: "Stop the Asidee daemon on this Mac. The dashboard stops answering until an asd command starts it again.",
+        details: [`It stops the running sandboxes whose disk limit it watches. Running now: ${running.join(", ") || "none"}.`], cli: "asd daemon stop" }
+    } },
   }
   return table
 }
@@ -133,11 +204,24 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
 const STATUS: Record<ErrorCode, number> = { usage: 400, "not-found": 404, conflict: 409, dependency: 424, "check-failed": 422, "probes-required": 422, runtime: 500, offline: 503, incompatible: 409, "identity-changed": 409, "outcome-unknown": 504 }
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
 const refuse = (status: number, message: string) => json(status, { ok: false, error: { code: "usage", message } })
+// approval says why an approvable request did not run, for the page to tell apart; command is the CLI's way to do it.
+const APPROVAL: Record<Exclude<Answer, "allow"> | "busy", [number, ErrorCode, string]> = {
+  deny: [403, "usage", "Denied on this Mac. Nothing was done."],
+  timeout: [403, "usage", `Nobody answered the dialog on this Mac within ${APPROVAL_SECONDS} seconds, so it was denied. Nothing was done.`],
+  unavailable: [403, "usage", "This daemon cannot ask on this machine's screen (that needs macOS and a logged-in desktop session), so only the CLI can do this. Nothing was done."],
+  busy: [409, "conflict", "Another request is waiting for an answer on this Mac. Nothing was done; answer that dialog first."],
+}
+const notApproved = (answer: keyof typeof APPROVAL, approval: Approval) => {
+  const [status, code, message] = APPROVAL[answer]
+  return json(status, { ok: false, error: { code, message: `${message} From the CLI: ${approval.cli}`, details: { approval: answer === "deny" ? "denied" : answer === "timeout" ? "timed-out" : answer, command: approval.cli } } })
+}
 
 // viaSocket: the request came over the Unix socket, which only this user can open. Otherwise it came over loopback TCP,
 // where any local process or web page can try, so it must carry the token and name this server as its Host (a page on
-// another site that resolves its own name to 127.0.0.1 does not).
-export function createHandler(table: Record<string, Method>, token: string, configDir: string, machines?: Machines) {
+// another site that resolves its own name to 127.0.0.1 does not). There a method with approve runs only once the person
+// at the Mac allows it, one dialog at a time, so a token holder cannot stack them up.
+export function createHandler(table: Record<string, Method>, token: string, configDir: string, machines?: Machines, approver: Approver = dialogApprover(systemRunner)) {
+  let asking = false
   return async (request: Request, viaSocket: boolean, port: number): Promise<Response> => {
     let url: URL; let pathname: string
     try {
@@ -166,12 +250,26 @@ export function createHandler(table: Record<string, Method>, token: string, conf
           if (expected && (request.headers.get("x-asidee-protocol") !== String(PROTOCOL) || request.headers.get("x-asidee-version") !== VERSION || request.headers.get("x-asidee-build") !== machines.hello.sourceDigest))
             throw new AsideeError("incompatible", `This daemon is Asidee ${VERSION}, protocol ${PROTOCOL}, built from source ${machines.hello.sourceDigest.slice(0, 12)}; the gateway's request differs. Nothing was done.`)
           const name = url.pathname.slice(5)
-          if (isMethod(name) && !viaSocket && CATALOG[name][0] !== "dashboard") return refuse(403, "This method is only available to the CLI.")
+          if (isMethod(name) && !viaSocket && CATALOG[name][0] === "socket") return refuse(403, "This method is only available to the CLI.")
+          if ((payload.host === undefined || payload.host === "local") && payload.machineId !== undefined && payload.machineId !== machines.hello.machineId) throw new AsideeError("identity-changed", "The request names another machine identity.")
+        }
+        if (!viaSocket && method.approve) {
+          const approval = await method.approve(payload)
+          if (approval) {
+            approvalText(approval)
+            if (asking) return notApproved("busy", approval)
+            asking = true
+            let answer: Answer
+            try { answer = await approver(approval) } catch { answer = "unavailable" } finally { asking = false }
+            if (answer !== "allow") return notApproved(answer, approval)
+          }
+        }
+        if (machines) {
+          const name = url.pathname.slice(5)
           if (payload.host !== undefined && payload.host !== "local") {
             if (!isMethod(name)) throw new AsideeError("usage", "This method cannot be routed.")
             return json(200, { ok: true, data: await machines.route(name, payload, request.signal) })
           }
-          if (payload.machineId !== undefined && payload.machineId !== machines.hello.machineId) throw new AsideeError("identity-changed", "The request names another machine identity.")
         } else if (payload.host !== undefined && payload.host !== "local") throw new AsideeError("dependency", "Machine routing is unavailable.")
         const { host: _host, machineId: _identity, ...local } = payload
         return json(200, { ok: true, data: await method.run(local, request.signal) })

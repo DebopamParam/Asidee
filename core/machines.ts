@@ -11,6 +11,7 @@ import { addInclude, alias, editorKey, included, includeLine, parseSshSetup, rem
 import { absolutePath, bounded, enrolledKeyHelp, hostPublicKey, HttpPeer, keyFingerprint, KILL_GRACE_MS, MUTATION_DEADLINE_MS, object, PROTOCOL, RemoteSession, sshDestination, sshIdentity, type Endpoint } from "./transport"
 import { AsideeError, type CheckResult } from "./types"
 
+// Each method's access on the dashboard's port (open, asked first on this Mac, or never) and its routing.
 export const CATALOG = {
   version: ["dashboard", "read"], hello: ["socket", "read"], checklist: ["dashboard", "read"], summary: ["dashboard", "read"],
   configGet: ["dashboard", "read"], configSet: ["dashboard", "write"],
@@ -21,11 +22,11 @@ export const CATALOG = {
   exec: ["dashboard", "write"], extensions: ["dashboard", "read"], action: ["dashboard", "write"], extensionInstall: ["dashboard", "write"], extensionRemove: ["dashboard", "write"],
   forwardAdd: ["dashboard", "primary"], forwardList: ["dashboard", "primary"], forwardRemove: ["dashboard", "primary"],
   linkAdd: ["dashboard", "primary"], linkList: ["dashboard", "primary"], linkRemove: ["dashboard", "primary"],
-  sshAccess: ["dashboard", "primary"], sshSetup: ["socket", "primary"], shutdown: ["socket", "write"],
-  hostList: ["dashboard", "primary"], fleet: ["dashboard", "primary"], hostAttach: ["socket", "primary"], hostPlan: ["socket", "primary"], hostApply: ["socket", "primary"], hostRemove: ["socket", "primary"],
+  sshAccess: ["dashboard", "primary"], sshSetup: ["approve", "primary"], shutdown: ["approve", "write"],
+  hostList: ["dashboard", "primary"], fleet: ["dashboard", "primary"], hostAttach: ["approve", "primary"], hostPlan: ["socket", "primary"], hostApply: ["socket", "primary"], hostRemove: ["approve", "primary"],
   sessionTarget: ["socket", "read"],
   sshPrepare: ["socket", "write"],
-  terminalCommandSet: ["socket", "primary"], about: ["dashboard", "primary"], usage: ["dashboard", "read"], openTerminal: ["dashboard", "primary"],
+  terminalCommandSet: ["approve", "primary"], about: ["dashboard", "primary"], usage: ["dashboard", "read"], openTerminal: ["dashboard", "primary"],
 } as const
 export type MethodName = keyof typeof CATALOG
 export const EXPERIMENTAL_OFF = "Other machines are experimental and off on this machine: they are not yet proven on enough machines. To turn them on: asd config set experimental on"

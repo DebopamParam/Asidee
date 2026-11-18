@@ -39,7 +39,8 @@ revision and each result.
    `finally`. This check does not claim Metal compute coverage and never runs before exec or shell. K06 separately
    verifies Metal compute, hardware encoding and the product's probed media result. K26 exercises a failing encoder.
 
-All workspace APIs remain socket-only and local. The dashboard remains read-only. Process selection still requires
+All workspace APIs remain socket-only and local. The dashboard remains read-only. (Later, the dashboard's workspace
+changes became available behind a dialog on the Mac; see the architecture's Approval on the Mac.) Process selection still requires
 both allowed folder access and denied tag-file access, and rechecks the full criterion before every signal. K15
 continues to run first. No process-selection guard was relaxed.
 

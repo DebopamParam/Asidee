@@ -100,7 +100,6 @@
     <div id="workspaces"></div>
     <h2>Workspace commands</h2>
     <div class="panel">
-      <p class="muted">Workspaces are managed from the CLI only: their methods are not open to web pages. Copy a command into a terminal.</p>
       <div id="workspace-commands"></div>
     </div>
   </section>
@@ -137,7 +136,6 @@
     <div id="machines"></div>
     <h2>Machine commands</h2>
     <div class="panel">
-      <p class="muted">Adding and removing machines changes SSH access and installs software, so it is done from the CLI only.</p>
       <div id="machine-commands"></div>
     </div>
   </section>
@@ -244,6 +242,13 @@ function command(text) {
   } }, "Copy")
   return el("div", { class: "cmd" }, el("code", {}, text), button)
 }
+// Requests the daemon asks about on the Mac (core/approval.ts): a dialog there names the action, and only Allow runs it.
+// Each button says so before the click. A refusal keeps its message and the CLI command to copy.
+const asks = () => about && about.platform !== "darwin" ? "This machine has no dialog to allow it, so it is refused and its CLI command offered."
+  : "A dialog on this Mac asks you to allow it first; no answer in 60 seconds denies it."
+const askButton = (label, key, what, task, extra = {}) => el("button", { type: "button", ...extra, title: asks(), ...(busy.has(`${key}:${what}`) ? { disabled: "" } : {}), onclick: () => act(key, what, task) },
+  busy.has(`${key}:${what}`) ? "Waiting for Allow on the Mac…" : `${label} (asks on the Mac)`)
+const result = (key) => { const value = output[key]; return value === undefined ? null : typeof value === "string" ? el("pre", {}, value) : el("div", {}, el("pre", {}, value.text), command(value.command)) }
 // A closed group that stays open across refreshes once opened.
 function group(key, label, ...children) {
   const node = el("details", { ontoggle: () => { node.open ? expanded.add(key) : expanded.delete(key) } }, el("summary", {}, label), ...children)
@@ -275,10 +280,6 @@ function showSettings() {
     else control.value = String(settings[key] ?? "")
   }
   if (settings) controls.terminal.querySelector("option[value=custom]").disabled = !settings.terminalCommand
-  const custom = document.getElementById("terminal-custom"); custom.replaceChildren()
-  if (settings?.terminalCommand) custom.append(el("p", { class: "muted" }, "Custom command, set from the CLI:"), command(settings.terminalCommand))
-  custom.append(el("p", { class: "muted" }, "Another terminal: a custom command opens it, with {command} where the script to run goes. It runs on this Mac, so only the CLI can set it:"),
-    command("asd config set terminal-command 'kitty sh -c {command}'"))
   if (settings && !defaultsDirty) {
     const builtIn = about?.builtInDefaults ?? {}
     for (const [key, id] of Object.entries(defaultFields)) {
@@ -343,7 +344,7 @@ async function act(key, what, task) {
     const result = await task()
     if (result && typeof result.exitCode === "number") output[key] = `${result.stdout}${result.stderr}`.trim() || `Done (exit ${result.exitCode}).`
     else if (typeof result === "string") output[key] = result
-  } catch (error) { output[key] = error.message }
+  } catch (error) { output[key] = error.details?.approval ? { text: error.message, command: error.details.command } : error.message }
   busy.delete(`${key}:${what}`); await refresh()
 }
 
@@ -368,18 +369,25 @@ function actionForm(extension, action, sandbox) {
 }
 
 // A small form whose fields go to one API call. fields: [name, label, type?]
-function miniForm(key, what, label, fields, send) {
+function miniForm(key, what, label, fields, send, ask = false) {
   const form = el("form", { class: "row", onsubmit: (event) => {
     event.preventDefault()
     const values = Object.fromEntries(fields.map(([name]) => [name, form.elements[name].value.trim()]))
     act(key, what, () => send(values))
   } }, ...fields.map(([name, text, type = "text"]) => el("label", { class: "grow" }, text, el("input", { name, type, ...(type === "number" ? { step: "any" } : {}) }))))
-  form.append(el("button", busy.has(`${key}:${what}`) ? { disabled: "" } : {}, busy.has(`${key}:${what}`) ? "Working…" : label))
+  form.append(el("button", { ...(ask ? { title: asks() } : {}), ...(busy.has(`${key}:${what}`) ? { disabled: "" } : {}) }, busy.has(`${key}:${what}`) ? ask ? "Waiting for Allow on the Mac…" : "Working…" : ask ? `${label} (asks on the Mac)` : label))
   return form
 }
 
 const terminal = (name, kind, machine, profile) => api("openTerminal", { name, kind, ...(machine ? { machine } : {}), ...(profile ? { profile } : {}) })
   .then((done) => `Opened in ${done.terminal === "default" ? "the default terminal" : done.terminal}. If no window appeared, run: ${done.command}`)
+
+async function sshSetup(name, writeConfig) {
+  const done = await api("sshSetup", { name, writeConfig })
+  ssh[name] = done
+  const login = `ssh ${done.alias} logs in as ${done.user} with the key ${done.editorKey}.`
+  return done.included ? `Set up. ${login}` : `Set up. Add this line at the top of ${done.config}, or use the button that adds it:\n  ${done.include}\nThen ${login}`
+}
 
 function sandboxPanel(sandbox) {
   if (sandbox.status === "damaged") return el("div", { class: "panel" }, el("span", { class: "name" }, sandbox.name), " ", el("span", { class: "badge" }, "damaged"), el("div", { class: "error" }, sandbox.stopReason))
@@ -403,7 +411,7 @@ function sandboxPanel(sandbox) {
       el("button", { class: "danger", onclick: () => { const typed = prompt(`This deletes ${name} and everything in it. Type its name to confirm.`); if (typed !== null) act(name, "remove", () => api("remove", { name, confirm: typed })) } }, "Remove")))
   if (running) for (const extension of extensions) for (const action of extension.actions.filter((entry) => entry.scope === "sandbox")) panel.append(el("div", { style: "margin-top:10px" }, actionForm(extension, action, sandbox)))
   if (sandbox.enforcementProblem) panel.append(el("div", { class: "error" }, `Enforcement problem at ${sandbox.enforcementProblem.at}: ${sandbox.enforcementProblem.message}`))
-  if (output[name]) panel.append(el("pre", {}, output[name]))
+  if (output[name]) panel.append(result(name))
   if (open.has(name) && sandbox.lastVerify) {
     panel.append(el("ul", { class: "checks" }, ...sandbox.lastVerify.results.map((check) => el("li", { class: "unknown" },
       el("span", { class: "mark", title: "unknown" }, MARK.unknown),
@@ -445,9 +453,11 @@ function sandboxPanel(sandbox) {
         return `Linked: programs in ${made.from} reach ${made.to}:${made.port} at ${made.address}. ${made.trust}`
       })),
     group(`ssh:${name}`, "SSH and editors",
-      el("p", { class: "muted" }, "An sshd inside the sandbox, reached through the daemon with no open port. Setting it up writes to your SSH configuration, so it is done from the CLI."),
+      el("p", { class: "muted" }, `An sshd inside the sandbox, reached through the daemon with no open port. Set up writes only Asidee's own SSH files. Adding the Include line to your ~/.ssh/config also changes how ssh reads it. ${asks()}`),
       access ? el("div", { class: "muted" }, access.error ? access.error : `Alias ${access.alias}, user ${access.user}, home ${access.home}; ${access.batchReady ? "ready" : "not set up yet"}${access.loopbackForwarding ? "; loopback forwarding on" : ""}.`) : null,
-      el("div", { class: "row" }, button(access ? "Check again" : "Check access", "ssh", async () => { try { ssh[name] = await api("sshAccess", { name }) } catch (error) { ssh[name] = { error: error.message } } }, { class: "small" })),
+      el("div", { class: "row" }, button(access ? "Check again" : "Check access", "ssh", async () => { try { ssh[name] = await api("sshAccess", { name }) } catch (error) { ssh[name] = { error: error.message } } }, { class: "small" }),
+        running ? button("Set up", "ssh-setup", () => sshSetup(name, false), { class: "small" }) : null,
+        running ? askButton("Set up and add the Include line to ~/.ssh/config", name, "ssh-config", () => sshSetup(name, true), { class: "small" }) : null),
       command(`asd ssh setup ${name} --write-config`), command(`ssh ${access?.alias ?? `${name}.asidee`}`)),
     group(`commands:${name}`, "CLI commands",
       command(`asd shell ${name}`), command(`asd exec ${name} -- uname -a`), command(`asd verify ${name}`), command(`asd remove ${name} --confirm ${name}`))))
@@ -504,13 +514,55 @@ function render() {
         workspace.stopReason ? el("div", { class: "error" }, workspace.stopReason) : null,
         workspace.enforcementProblem ? el("div", { class: "error" }, `Disk watch unknown at ${workspace.enforcementProblem.at}: ${workspace.enforcementProblem.message}`) : null,
         el("div", { class: "muted" }, workspace.disclosure),
-        output[key] ? el("pre", {}, output[key]) : null,
-        group(`ws-commands:${workspace.name}`, "Stop, verify, change or remove (CLI)",
+        result(key),
+        group(`ws-actions:${workspace.name}`, "Verify, stop, change, run a command or remove",
+          el("p", { class: "muted" }, `Verify runs Asidee's own checks. The rest acts on this Mac as you. ${asks()}`),
+          el("div", { class: "row" },
+            el("button", { type: "button", class: "small", ...(busy.has(`${key}:verify`) ? { disabled: "" } : {}), onclick: () => act(key, "verify", async () => {
+              const report = await api("workspaceVerify", { name: workspace.name }); return report.checks.map((check) => `${MARK[check.status] ?? "?"} ${check.id}: ${check.detail}`).join("\n")
+            }) }, busy.has(`${key}:verify`) ? "Working…" : "Verify"),
+            askButton("Stop", key, "stop", () => api("workspaceStop", { name: workspace.name }).then(() => `Stopped ${workspace.name}.`), { class: "small" }),
+            workspace.spec ? askButton(`Turn host-temp ${workspace.spec.hostTemp ? "off" : "on"}`, key, "host-temp", () => api("workspaceSet", { name: workspace.name, hostTemp: !workspace.spec.hostTemp }).then((view) => `host-temp is ${view.spec.hostTemp ? "on" : "off"}.`), { class: "small" }) : null,
+            el("button", { type: "button", class: "small danger", title: asks(), ...(busy.has(`${key}:remove`) ? { disabled: "" } : {}), onclick: () => {
+              const typed = prompt(`This deletes the workspace ${workspace.name} and its folder ${workspace.folder}. Type its name to confirm.`)
+              if (typed !== null) act(key, "remove", () => api("workspaceRemove", { name: workspace.name, confirm: typed }).then((done) => `Removed ${done.removed}.${done.notRemoved.length ? ` Not removed: ${done.notRemoved.join(", ")}.` : ""}`))
+            } }, busy.has(`${key}:remove`) ? "Waiting for Allow on the Mac…" : "Remove (asks on the Mac)")),
+          miniForm(key, "disk", "Set disk limit", [["diskGb", "Disk limit (GiB)", "number"]], (values) => api("workspaceSet", { name: workspace.name, diskGb: Number(values.diskGb) }).then((view) => `Disk limit ${view.spec.diskGb} GiB (watched).`), true),
+          miniForm(key, "exec", "Run", [["command", "Command, run with sh -c"]], (values) => api("workspaceExec", { name: workspace.name, argv: ["sh", "-c", values.command] }), true)),
+        group(`ws-commands:${workspace.name}`, "CLI commands",
           ...[`asd workspace get ${workspace.name}`, `asd workspace verify ${workspace.name}`, `asd workspace stop ${workspace.name}`, `asd workspace set ${workspace.name} disk 20`,
             `asd workspace set ${workspace.name} host-temp off`, `asd workspace exec ${workspace.name} -- pwd`, `asd workspace remove ${workspace.name} --confirm ${workspace.name}`].map(command))))
     }
     if (workspaceProblem) list.append(el("div", { class: "panel error" }, `Workspaces unknown: ${workspaceProblem}`))
     else if (!workspaces.length) list.append(el("div", { class: "panel muted" }, "No workspaces. A workspace is not a sandbox."))
+  })
+
+  region("terminal-custom", [settings?.terminalCommand, about?.platform, [...busy].filter((entry) => entry.startsWith("terminal-command:")), output["terminal-command"]], (custom) => {
+    if (settings?.terminalCommand) custom.append(el("p", { class: "muted" }, "Custom command:"), command(settings.terminalCommand), el("div", { class: "row" },
+      el("button", { type: "button", class: "small", ...(busy.has("terminal-command:clear") ? { disabled: "" } : {}), onclick: () => act("terminal-command", "clear", () => api("terminalCommandSet", { terminalCommand: null }).then(() => "Cleared. Terminal buttons use the default terminal.")) }, "Clear it")))
+    custom.append(el("p", { class: "muted" }, `Another terminal: a custom command opens it, with {command} where the script to run goes. It runs on this Mac as you each time a Terminal button is used. ${asks()}`),
+      miniForm("terminal-command", "set", "Set", [["command", "Command, e.g. kitty sh -c {command}"]], (values) => api("terminalCommandSet", { terminalCommand: values.command }).then((config) => `Set. Terminal buttons run: ${config.terminalCommand}`), true),
+      result("terminal-command"), command("asd config set terminal-command 'kitty sh -c {command}'"))
+  })
+
+  region("workspace-commands", [about?.platform, [...busy].filter((entry) => entry.startsWith("workspace:new:")), output["workspace:new"]], (node) => {
+    node.append(el("p", { class: "muted" }, `A workspace is a folder under ~/Asidee whose commands run on this Mac's own kernel, as you, with the network open. It is not a sandbox. ${asks()}`),
+      miniForm("workspace:new", "create", "Create workspace", [["name", "Name"], ["copy", "Copy this folder in (blank: empty)"], ["diskGb", "Disk limit (GiB, blank: default)", "number"], ["claude", "Claude login profile (blank: none)"], ["codex", "Codex login profile (blank: none)"]], (values) => {
+        const logins = values.claude || values.codex ? { kind: "profiles", claude: values.claude, codex: values.codex } : { kind: "none" }
+        return api("workspaceCreate", { name: values.name, ...(values.copy ? { copy: values.copy } : {}), ...(values.diskGb ? { diskGb: Number(values.diskGb) } : {}), logins })
+          .then((report) => [`Created ${report.workspace.name} in ${report.workspace.folder}.`, ...report.checks.map((check) => `${MARK[check.status] ?? "?"} ${check.id}: ${check.detail}`)].join("\n"))
+      }, true),
+      result("workspace:new"),
+      el("p", { class: "muted" }, "Extra readable folders, PATH entries and host-temp at create are CLI options:"), command("asd workspace create NAME --copy DIR --read DIR --path DIR --host-temp --no-logins"))
+  })
+
+  region("machine-commands", [settings?.experimental, about?.platform, [...busy].filter((entry) => entry.startsWith("machine:attach:")), output["machine:attach"]], (node) => {
+    node.append(el("p", { class: "muted" }, "Adding a machine installs Asidee there from a plan you review in a terminal, where sudo may ask, so it is done from the CLI:"), command("asd host add NAME --ssh DEST --artifact PATH --sha256 HASH"))
+    if (!settings?.experimental) return
+    node.append(el("p", { class: "muted" }, `Attach a machine whose daemon is already prepared: Asidee connects to it with your SSH configuration and keys whenever it is selected. ${asks()}`),
+      miniForm("machine:attach", "attach", "Attach", [["name", "Name"], ["ssh", "SSH destination"], ["binary", "Its asd (absolute path)"], ["stateDir", "Its state folder (absolute path)"]],
+        (values) => api("hostAttach", values).then((host) => `Attached ${values.name}: SSH user ${host.sshUser}, host key ${host.hostKey}.`), true),
+      result("machine:attach"))
   })
 
   region("templates", [templates, templateProblem, [...busy], output], (list) => {
@@ -519,7 +571,7 @@ function render() {
         el("div", { class: "muted" }, `Engine ${template.engine}. Used by: ${template.dependants.length ? template.dependants.join(", ") : "no sandbox"}. Login files left out: ${template.loginsRemoved.length ? template.loginsRemoved.join(", ") : "none found"}.`)),
         el("button", { onclick: () => { document.getElementById("f-template").value = template.name; document.getElementById("f-image").value = ""; section("sandboxes"); document.getElementById("f-name").focus() } }, "New sandbox from it"),
         el("button", { class: "danger", ...(busy.has(`template:${template.name}:remove`) ? { disabled: "" } : {}), onclick: () => act(`template:${template.name}`, "remove", async () => { const done = await api("templateRemove", { name: template.name, engine: template.engine }); return done.note }) }, "Remove")),
-      output[`template:${template.name}`] ? el("pre", {}, output[`template:${template.name}`]) : null))
+      result(`template:${template.name}`)))
     if (templateProblem) list.append(el("div", { class: "panel error" }, `Templates unknown: ${templateProblem}`))
     else if (!templates.length) list.append(el("div", { class: "panel muted" }, "No templates yet."))
   })
@@ -538,9 +590,14 @@ function render() {
           sandbox.status === "running" ? button("Stop", "stop", () => api("stop", { name: sandbox.name, host: remote })) : button("Start", "start", () => api("start", { name: sandbox.name, host: remote })),
           sandbox.status === "running" ? button("Terminal", "terminal", () => terminal(sandbox.name, "sandbox", remote)) : null,
           button("Verify", "verify", async () => { const done = await api("verify", { name: sandbox.name, host: remote }); return done.checks.map((check) => `${MARK[check.status] ?? "?"} ${title(check.id)}: ${check.detail}`).join("\n") })),
-          output[key] ? el("pre", {}, output[key]) : null)
+          result(key))
       }
-      if (remote) panel.append(group(`machine-commands:${remote}`, "CLI commands", command(`asd --host ${remote} list`), command(`asd --host ${remote} create NAME`), command(`asd host remove ${remote} --confirm ${remote}`)))
+      if (remote) panel.append(el("div", { class: "row", style: "margin-top:8px" }, el("span", { class: "grow muted" }, `Forgetting it ends its sessions and forwards; its Asidee files and service stay. ${asks()}`),
+        el("button", { type: "button", class: "small danger", title: asks(), ...(busy.has(`machine:${remote}:remove`) ? { disabled: "" } : {}), onclick: () => {
+          const typed = prompt(`Forget the machine ${remote}? Type its name to confirm.`)
+          if (typed !== null) act(`machine:${remote}`, "remove", () => api("hostRemove", { name: remote, confirm: typed }).then(() => `Forgot ${remote}.`))
+        } }, busy.has(`machine:${remote}:remove`) ? "Waiting for Allow on the Mac…" : "Forget (asks on the Mac)")), result(`machine:${remote}`),
+        group(`machine-commands:${remote}`, "CLI commands", command(`asd --host ${remote} list`), command(`asd --host ${remote} create NAME`), command(`asd host remove ${remote} --confirm ${remote}`)))
       list.append(panel)
     }
   })
@@ -554,7 +611,7 @@ function render() {
       for (const entry of installable) panel.append(el("div", { class: "row", style: "margin-top:8px" },
         el("span", { class: "grow" }, el("span", { class: "name" }, entry.name), el("span", { class: "muted" }, ` · ${entry.id}`), entry.description ? el("div", { class: "muted" }, entry.description) : null),
         button("Install", `ext:${entry.id}`, "install", () => api("extensionInstall", { id: entry.id }).then(() => `Installed ${entry.name}.`))),
-        output[`ext:${entry.id}`] && !extensions.some((extension) => extension.id === entry.id) ? el("pre", {}, output[`ext:${entry.id}`]) : null)
+        extensions.some((extension) => extension.id === entry.id) ? null : result(`ext:${entry.id}`))
       list.append(panel)
     }
     for (const extension of extensions) {
@@ -566,7 +623,7 @@ function render() {
       for (const action of extension.actions) panel.append(el("h3", {}, `${action.label}${action.scope === "sandbox" ? " (on a sandbox)" : ""}`),
         action.description ? el("div", { class: "muted" }, action.description) : null, el("div", { class: "muted" }, `Runs: ${action.run.join(" ")}`), actionForm(extension, action))
       if (!extension.actions.length) panel.append(el("div", { class: "muted" }, "No actions."))
-      if (output[key]) panel.append(el("pre", {}, output[key]))
+      if (output[key]) panel.append(result(key))
       panel.append(command(`asd ext run ${extension.id} ACTION [SANDBOX] --set FIELD=VALUE`))
       if (extension.bundled) panel.append(button("Remove", key, "remove", () => api("extensionRemove", { id: extension.id }).then(() => `Removed ${extension.name}.`)))
       list.append(panel)
@@ -585,11 +642,13 @@ function render() {
       command("asd setup"), command("asd setup --docker"), command("asd setup --remove")))
   })
 
-  region("about", [about], (node) => {
+  region("about", [about, [...busy].filter((entry) => entry.startsWith("daemon:")), output.daemon], (node) => {
     if (!about) { node.append(el("p", { class: "muted" }, "Unknown.")); return }
     node.append(el("table", {}, el("tbody", {}, ...[["Version", about.build], ["Daemon", `${about.stopping ? "stopping" : "running"}, process ${about.pid}, since ${new Date(about.startedAt).toLocaleString()}`],
       ["Platform", `${about.platform} ${about.arch}`], ["The asd command", about.cli], ["State folder", about.stateDir], ["Settings folder", about.configDir]].map(([label, value]) => el("tr", {}, el("th", {}, label), el("td", {}, el("code", {}, value)))))),
-      el("h3", {}, "Daemon"), el("p", { class: "muted" }, "Stopping the daemon stops the sandboxes it watches. It is done from the CLI."), command("asd daemon stop"), command("asd doctor"), command("asd ui"))
+      el("h3", {}, "Daemon"), el("p", { class: "muted" }, `Stopping the daemon stops the sandboxes whose disk limit it watches, and this page stops answering until an asd command starts it again. ${asks()}`),
+      el("div", { class: "row" }, askButton("Stop the daemon", "daemon", "stop", () => api("shutdown").then(() => "Stopping. This page stops answering until an asd command starts the daemon again."), { class: "danger" })),
+      result("daemon"), command("asd daemon stop"), command("asd doctor"), command("asd ui"))
   })
 
   // Selects whose options come from the daemon keep what was chosen.

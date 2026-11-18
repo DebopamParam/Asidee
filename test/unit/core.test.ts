@@ -846,16 +846,19 @@ test("settings persist across core and daemon instances, preserve other config a
 
 test("settings require a boolean and loopback writes require both token and trusted Host", async () => {
   const { provider } = fakeProvider(); const asidee = await core(provider)
-  const answer = createHandler(methods(asidee, () => {}), "secret", asidee.dirs.config)
+  const asked: string[] = []
+  const answer = createHandler(methods(asidee, () => {}), "secret", asidee.dirs.config, undefined, async (approval) => { asked.push(approval.cli); return "deny" })
   const post = (body: object, headers: Record<string, string> = {}) => new Request("http://127.0.0.1:7717/api/configSet", { method: "POST", headers: { host: "127.0.0.1:7717", authorization: "Bearer secret", ...headers }, body: JSON.stringify(body) })
   for (const value of ["off", 0, null, [], {}, undefined]) {
     expect((await answer(post({ requireProbes: value }), false, 7717)).status).toBe(400)
   }
-  // A custom terminal command runs on the Mac, so a page with the token cannot set it, alone or beside another setting.
+  // A custom terminal command runs on the Mac, so a page with the token cannot set it beside another setting, and alone
+  // only when the person at the Mac allows it.
   for (const body of [{ requireProbes: false, terminalCommand: "sh -c {command}" }, { terminalCommand: "sh -c {command}" }, { terminal: "custom" }, { terminal: "xterm" }, { engine: "Bad Engine" }, { engine: 5 },
     { defaults: { privileged: true } }, { defaults: { cpus: "lots" } }, { defaults: { image: "--privileged" } }, { defaults: [] }]) expect((await answer(post(body), false, 7717)).status).toBe(400)
   const viaPage = await answer(new Request("http://127.0.0.1:7717/api/terminalCommandSet", { method: "POST", headers: { host: "127.0.0.1:7717", authorization: "Bearer secret" }, body: JSON.stringify({ terminalCommand: "sh -c {command}" }) }), false, 7717)
-  expect(viaPage.status).toBe(403)
+  expect([viaPage.status, (await viaPage.json() as any).error.details]).toEqual([403, { approval: "denied", command: "asd config set terminal-command 'sh -c {command}'" }])
+  expect(asked).toEqual(["asd config set terminal-command 'sh -c {command}'"])
   expect((await asidee.configGet()).terminalCommand).toBeUndefined()
   for (const value of ["on", 1, null]) expect((await answer(post({ experimental: value }), false, 7717)).status).toBe(400)
   for (const value of ["5", -1, 100_001, null, true]) expect((await answer(post({ workspaceFreeSpaceGb: value }), false, 7717)).status).toBe(400)
@@ -1008,4 +1011,25 @@ test("usage gives each sandbox's CPU share between two calls, memory and tasks a
   expect((await asidee.usage())[0]).toMatchObject({ running: false, problem: "engine away" })
   await asidee.stop("demo"); await asidee.remove("demo", "demo")
   expect(await asidee.usage()).toEqual([])
+})
+
+test("exactly the listed methods ask on the Mac; the rest stay socket-only and are refused without asking", async () => {
+  const { provider } = fakeProvider(); const asidee = await core(provider)
+  const table = methods(asidee, () => {})
+  const approvable = Object.keys(table).filter((name) => table[name]!.approve).sort()
+  expect(approvable).toEqual(["hostAttach", "hostRemove", "shutdown", "sshSetup", "terminalCommandSet", "workspaceCreate", "workspaceExec", "workspaceRemove", "workspaceSet", "workspaceStop"])
+  for (const [name, [access]] of Object.entries(CATALOG)) expect([name, access === "approve"]).toEqual([name, Boolean(table[name]?.approve)])
+  const asked: string[] = []
+  const answer = createHandler(table, "secret", asidee.dirs.config, undefined, async (approval) => { asked.push(approval.cli); return "allow" })
+  const viaPage = (method: string, body: object = {}) => answer(new Request(`http://127.0.0.1:7717/api/${method}`, { method: "POST", headers: { host: "127.0.0.1:7717", authorization: "Bearer secret" }, body: JSON.stringify(body) }), false, 7717)
+  for (const method of ["hello", "sessionTarget", "sshPrepare", "hostPlan", "hostApply", "workspaceShell"]) {
+    expect([method, table[method]!.approve, (await viaPage(method, { name: "demo" })).status]).toEqual([method, undefined, 403])
+  }
+  // Clearing the terminal command and setting up SSH without touching ~/.ssh/config need no dialog.
+  expect((await viaPage("terminalCommandSet", { terminalCommand: null })).status).toBe(200)
+  expect(await table.sshSetup!.approve!({ name: "demo" })).toBeUndefined()
+  // Approval cannot widen a request: the dashboard's shutdown takes no options, and extra keys are refused before asking.
+  expect((await viaPage("shutdown", { keepSandboxes: true })).status).toBe(400)
+  expect((await viaPage("workspaceStop", { name: "demo", force: true })).status).toBe(400)
+  expect(asked).toEqual([])
 })

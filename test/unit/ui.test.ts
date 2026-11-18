@@ -27,7 +27,7 @@ async function page(replies: Record<string, (body: any) => unknown>, url = "http
     const method = path.slice(5); const body = JSON.parse(init.body)
     calls.push({ method, body, authorization: init.headers.authorization ?? null })
     try { return { json: async () => ({ ok: true, data: await (replies[method] ?? (() => { throw new Error(`no reply for ${method}`) }))(body) }) } }
-    catch (error) { return { json: async () => ({ ok: false, error: { message: (error as Error).message, code: (error as { code?: string }).code } }) } }
+    catch (error) { return { json: async () => ({ ok: false, error: { message: (error as Error).message, code: (error as { code?: string }).code, details: (error as { details?: unknown }).details } }) } }
   }
   const prompts: string[] = []
   const globals = { window, document: window.document, location: window.location, history: window.history, sessionStorage: window.sessionStorage, fetch,
@@ -183,15 +183,15 @@ test("an unavailable setting cannot be changed and a sandbox with unknown probes
 })
 
 
-test("a workspace row shows why the daemon stopped it and a disk watch it could not make; its only controls open a terminal or copy a command", async () => {
+test("a workspace row shows why the daemon stopped it and a disk watch it could not make; every control that acts on the Mac says it asks there", async () => {
   const stopReason = "Stopped by the daemon at 2026-11-16T10:00:00Z: render uses 2.00 GB of its 1 GB disk limit. Free space in /w/render, or raise the limit: asd workspace set render disk N"
   const ui = await page({ ...base, list: () => [], summary: () => ({ workspaces: [{ name: "render", status: "idle", processes: 0, folder: "/w/render", spec: { hostTemp: false, diskGb: 1 }, disclosure: workspaceDisclosure(false), stopReason,
     enforcementProblem: { at: "2026-11-16T10:00:30Z", message: "Its size could not be measured." } }] }) })
   const row = ui.window.document.querySelector("#workspaces .panel")!
   expect(row.textContent).toContain(stopReason)
   expect(row.textContent).toContain("Disk watch unknown at 2026-11-16T10:00:30Z: Its size could not be measured.")
-  expect(row.querySelectorAll("input, select")).toHaveLength(0)
-  expect([...new Set([...row.querySelectorAll("button")].map((node) => node.textContent))]).toEqual(["Terminal", "Copy"])
+  expect([...row.querySelectorAll("button")].map((node) => node.textContent).filter((label) => !["Terminal", "Verify", "Copy"].includes(label!) && !label!.endsWith(" (asks on the Mac)"))).toEqual([])
+  expect([...row.querySelectorAll("form")].every((form) => form.querySelector("button")!.textContent!.endsWith(" (asks on the Mac)"))).toBe(true)
   expect(row.textContent).toContain("asd workspace stop render")
 })
 
@@ -385,4 +385,41 @@ test("the Prepare form starts from this machine's versions and sends one templat
   form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
   expect(ui.calls.filter((call) => call.method === "templatePrepare").at(-1)!.body).toMatchObject({ script: "echo hi" })
   expect(ui.calls.filter((call) => call.method === "templatePrepare").at(-1)!.body).not.toHaveProperty("scriptFile")
+})
+
+test("actions asked on the Mac say so before the click, show the wait, and offer the CLI command when refused", async () => {
+  let answer!: (value: unknown) => void
+  const refusal = Object.assign(new Error("No dialog can be shown on this Mac, so only the CLI can do this. From the CLI: asd config set terminal-command 'kitty sh -c {command}'"),
+    { code: "forbidden", details: { approval: "unavailable", command: "asd config set terminal-command 'kitty sh -c {command}'" } })
+  const workspace = { name: "render", status: "idle", processes: 0, folder: "/fixture/render", disclosure: "Not a sandbox.", spec: { hostTemp: false, diskGb: 20 } }
+  const ui = await page({ ...base, list: () => [sandbox()], summary: () => ({ workspaces: [workspace] }), usage: () => [], forwardList: () => [], linkList: () => [], templateList: () => [], about: () => ({ platform: "darwin" }),
+    terminalCommandSet: () => new Promise((resolve, reject) => { answer = (value) => value instanceof Error ? reject(value) : resolve(value) }),
+    workspaceStop: () => ({}), workspaceRemove: (body) => ({ removed: body.name, notRemoved: [] }), workspaceExec: () => ({ exitCode: 0, stdout: "hi", stderr: "" }) })
+  ui.button("Settings").click(); await ui.settle()
+  expect(ui.text("#terminal-custom")).toContain("A dialog on this Mac asks you to allow it first; no answer in 60 seconds denies it.")
+  const form = ui.window.document.querySelector("#terminal-custom form") as any
+  form.elements.namedItem("command").value = "kitty sh -c {command}"
+  form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  expect(ui.text("#terminal-custom")).toContain("Waiting for Allow on the Mac…")
+  expect(ui.calls.find((call) => call.method === "terminalCommandSet")!.body).toEqual({ terminalCommand: "kitty sh -c {command}" })
+  answer(refusal); await ui.settle()
+  expect(ui.text("#terminal-custom pre")).toContain("only the CLI can do this")
+  expect([...ui.window.document.querySelectorAll("#terminal-custom code")].map((node) => node.textContent)).toContain("asd config set terminal-command 'kitty sh -c {command}'")
+  expect(ui.button("Set (asks on the Mac)")).toBeDefined()
+  // Workspaces: each changing action is labelled, and remove sends the typed name.
+  ui.button("Workspaces").click(); await ui.settle()
+  expect(ui.text("#workspaces")).toContain("A dialog on this Mac asks you")
+  ui.button("Stop (asks on the Mac)").click(); await ui.settle()
+  ui.button("Remove (asks on the Mac)").click(); await ui.settle()
+  expect(ui.calls.filter((call) => call.method.startsWith("workspace")).map((call) => [call.method, call.body])).toEqual([["workspaceStop", { name: "render" }], ["workspaceRemove", { name: "render", confirm: "demo" }]])
+  expect(ui.prompts.at(-1)).toContain("/fixture/render")
+  expect(ui.text("#workspace-commands")).toContain("It is not a sandbox.")
+  expect(ui.button("Create workspace (asks on the Mac)")).toBeDefined()
+})
+
+test("on a machine without the dialog, the buttons say the CLI command is offered instead", async () => {
+  const ui = await page({ ...base, list: () => [], summary: () => ({ workspaces: [] }), usage: () => [], forwardList: () => [], linkList: () => [], templateList: () => [], about: () => ({ platform: "linux" }) })
+  ui.button("Settings").click(); await ui.settle()
+  expect(ui.text("#about")).toContain("This machine has no dialog to allow it, so it is refused and its CLI command offered.")
+  expect(ui.button("Stop the daemon (asks on the Mac)")).toBeDefined()
 })

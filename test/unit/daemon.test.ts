@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { approvalText, dialogApprover, literal, word, type Answer, type Approval, type Approver } from "../../core/approval"
 import { createHandler } from "../../core/daemon"
 import { AsideeError } from "../../core/types"
 
@@ -67,4 +68,102 @@ test("the dashboard is served without a token, a custom one replaces it, and pat
   expect(await (await get("/")).text()).toBe("<p>mine</p>")
   expect(await (await get("/app.js")).text()).toBe("1")
   expect((await get("/..%2Fsecret.txt")).status).toBe(404)
+})
+
+// The approval gate, with a fake approver standing in for the dialog on the Mac.
+async function gated(answers: Array<Answer | Promise<Answer> | Error>) {
+  const config = await mkdtemp(join(tmpdir(), "asidee-approve-"))
+  const asked: Approval[] = []; const ran: Array<Record<string, unknown>> = []
+  const table = {
+    sensitive: { run: async (body: Record<string, unknown>) => { ran.push(body); return { done: true } }, approve: (body: Record<string, unknown>) => {
+      if (body.bad) throw new AsideeError("usage", "Refused before asking.")
+      return body.harmless ? undefined : { action: `Do ${literal(String(body.what))} on this Mac.`, cli: `asd do ${String(body.what)}`, ...(body.long ? { details: ["x".repeat(4000)] } : {}) }
+    } },
+    hello: { run: async () => ({ hello: true }), socketOnly: true },
+  }
+  const approver: Approver = async (approval) => { asked.push(approval); const next = answers.shift() ?? "deny"; if (next instanceof Error) throw next; return next }
+  return { asked, ran, handle: createHandler(table, TOKEN, config, undefined, approver) }
+}
+const ask = (body: object) => post("sensitive", auth, JSON.stringify(body))
+const reply = async (response: Response): Promise<Record<string, any>> => ({ status: response.status, ...await response.json() as Record<string, any> })
+
+test("an approvable request on the loopback port runs only when the person at the Mac allows it", async () => {
+  const { asked, ran, handle } = await gated(["allow"])
+  expect(await reply(await handle(ask({ what: "it" }), false, 7717))).toEqual({ status: 200, ok: true, data: { done: true } })
+  expect(asked).toEqual([{ action: 'Do "it" on this Mac.', cli: "asd do it" }])
+  expect(ran).toEqual([{ what: "it" }])
+})
+
+test("denied, timed out and unavailable are distinct refusals that run nothing and carry the CLI command", async () => {
+  const { ran, handle } = await gated(["deny", "timeout", "unavailable", new Error("osascript vanished")])
+  const results = []
+  for (let i = 0; i < 4; i++) results.push(await reply(await handle(ask({ what: "it" }), false, 7717)))
+  expect(results.map((result) => [result.status, result.error.details])).toEqual([
+    [403, { approval: "denied", command: "asd do it" }], [403, { approval: "timed-out", command: "asd do it" }],
+    [403, { approval: "unavailable", command: "asd do it" }], [403, { approval: "unavailable", command: "asd do it" }]])
+  expect(results[0]!.error.message).toStartWith("Denied on this Mac.")
+  expect(results[1]!.error.message).toContain("within 60 seconds")
+  expect(results[2]!.error.message).toContain("only the CLI can do this")
+  expect(ran).toEqual([])
+})
+
+test("only one approval waits at a time; others are refused at once", async () => {
+  let answer!: (value: Answer) => void
+  const { asked, ran, handle } = await gated([new Promise<Answer>((resolve) => { answer = resolve }), "allow"])
+  const first = handle(ask({ what: "first" }), false, 7717)
+  await Bun.sleep(5)
+  const second = await reply(await handle(ask({ what: "second" }), false, 7717))
+  expect([second.status, second.error.code, second.error.details.approval]).toEqual([409, "conflict", "busy"])
+  answer("allow")
+  expect((await first).status).toBe(200)
+  expect((await handle(ask({ what: "third" }), false, 7717)).status).toBe(200)
+  expect(asked.map((approval) => approval.cli)).toEqual(["asd do first", "asd do third"])
+  expect(ran.map((body) => body.what)).toEqual(["first", "third"])
+})
+
+test("the socket never asks; requests that need no approval, or would be refused, or are too long, are not asked", async () => {
+  const { asked, ran, handle } = await gated([])
+  expect((await handle(post("sensitive", {}, JSON.stringify({ what: "cli" })), true, 0)).status).toBe(200)
+  expect((await handle(ask({ harmless: true }), false, 7717)).status).toBe(200)
+  expect(await reply(await handle(ask({ bad: true }), false, 7717))).toMatchObject({ status: 400, error: { message: "Refused before asking." } })
+  expect(await reply(await handle(ask({ what: "it", long: true }), false, 7717))).toMatchObject({ status: 400, error: { message: expect.stringContaining("Run it from the CLI: asd do it") } })
+  expect((await handle(ask({ what: "it" }), false, 7717)).status).toBe(403)
+  expect(asked.length).toBe(1)
+  expect(ran.map((body) => body.what ?? "harmless")).toEqual(["cli", "harmless"])
+})
+
+test("socket-only methods are refused on the loopback port without asking", async () => {
+  const { asked, handle } = await gated(["allow"])
+  expect(await reply(await handle(post("hello", auth), false, 7717))).toMatchObject({ status: 403, error: { message: "This method is only available to the CLI." } })
+  expect((await handle(post("sensitive", { authorization: "Bearer wrong" }, "{}"), false, 7717)).status).toBe(401)
+  expect(asked).toEqual([])
+})
+
+test("the dialog gets its text only as arguments, Deny by default, and maps every outcome", async () => {
+  const runs: string[][] = []
+  const approver = (stdout: string, exitCode = 0, platform = "darwin") => dialogApprover(async (argv) => { runs.push([...argv]); return { exitCode, stdout, stderr: "" } }, 60, platform)
+  const approval = { action: `Set "x" to ${literal('a"b\nend tell‮')}`, cli: "asd x" }
+  expect(await approver("Allow\n")(approval)).toBe("allow")
+  const argv = runs[0]!
+  expect(argv[0]).toBe("/usr/bin/osascript")
+  const source = argv.filter((_, index) => argv[index - 1] === "-e")
+  expect(source.join("\n")).toContain('default button "Deny"')
+  expect(source.join("\n")).toContain("giving up after ((item 3 of argv) as integer)")
+  expect(source.join("\n")).not.toContain("end tell")
+  expect(argv.slice(-3)).toEqual(["Asidee: allow this?", approvalText(approval), "60"])
+  expect(argv.at(-2)).toContain('"a\\"b\\nend tell\\u202e"')
+  expect(await approver("Deny")(approval)).toBe("deny")
+  expect(await approver("timeout")(approval)).toBe("timeout")
+  expect(await approver("", 124)(approval)).toBe("timeout")
+  expect(await approver("", 1)(approval)).toBe("unavailable")
+  runs.length = 0
+  expect(await approver("Allow", 0, "linux")(approval)).toBe("unavailable")
+  expect(runs).toEqual([])
+})
+
+test("request text is shown literally, and CLI words are quoted only when needed", () => {
+  expect(literal("kitty sh -c {command}")).toBe('"kitty sh -c {command}"')
+  expect(literal("a\nb​c⁦d\u{e0041}")).toBe('"a\\nb\\u200bc\\u2066d\\u{e0041}"')
+  expect(word("/opt/asd")).toBe("/opt/asd")
+  expect(word("it's here")).toBe(`'it'\\''s here'`)
 })

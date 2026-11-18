@@ -226,8 +226,9 @@ created workspace folders excluded, measured by K24; existing backups and other 
 ## Implementation and verification
 
 Workspaces have a separate spec, manifest directory and fixed checklist; they are not providers. All nine
-`workspace*` API methods are socket-only and local. The dashboard displays a separate **Workspaces: not sandboxes**
-section through the read-only summary. Its actions stay in the CLI. Non-macOS commands refuse before starting a daemon.
+`workspace*` API methods are local. The dashboard displays a separate **Workspaces: not sandboxes**
+section through the summary. List, get and verify are open to it; create, set, exec, stop and remove each first need
+Allow in a dialog on the Mac, and the shell stays with the CLI (see the architecture's Approval on the Mac). Non-macOS commands refuse before starting a daemon.
 Summary reads manifests and counts tagged processes, without repairing identity, changing modes or walking the tree.
 An unavailable folder/tag stays unknown. Of the status lines, only list and get measure size with `du`; the lines
 create, verify, set and stop print leave size out, and `size unknown` means a measurement was tried and failed. The
