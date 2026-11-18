@@ -63,7 +63,7 @@ test("the dashboard lists sandboxes, sends the token, and hides it from the addr
 
 test("past checks disclose the time even when collapsed and never show historical passes as current", async () => {
   const ui = await page({ ...base, list: () => [sandbox()] })
-  expect(ui.text("#sandboxes")).toContain("Last measured 2026-11-10T10:00:00Z. Historical only; current checks unknown.")
+  expect(ui.text("#sandboxes")).toContain(`Last checked ${new Date("2026-11-10T10:00:00Z").toLocaleString()}. Historical only; current checks unknown.`)
   ui.button("Past checks").click(); await ui.settle()
   const checks = ui.text("ul.checks")
   expect(checks).toContain("?Cannot reach the host — current property unknownMeasured 2026-11-10T10:00:00Z: fail (probed). A connection reached the host.")

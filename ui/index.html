@@ -40,6 +40,15 @@
   details { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
   details > summary { cursor: pointer; color: var(--muted); font-size: 14px; }
   details details { border-top: none; margin-left: 4px; }
+  details[open] > summary { margin-bottom: 8px; }
+  details > :not(summary) { margin-left: 14px; }
+  .panel > details > summary, .tools > details > summary, form > details > summary { color: var(--ink); }
+  .tools { margin-top: 12px; }
+  .tools > details { margin-top: 0; padding: 8px 0; }
+  .action { padding: 10px 0; border-top: 1px dashed var(--line); }
+  .action:first-of-type { border-top: none; padding-top: 0; }
+  .action > .fields { margin-bottom: 6px; } .action > .row + .row { margin-top: 6px; }
+  label.check { display: inline-flex; gap: 6px; align-items: center; }
   .usage { font-variant-numeric: tabular-nums; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
@@ -73,8 +82,11 @@
   <form id="create" class="panel">
     <div class="fields">
       <div><label for="f-name">Name</label><input id="f-name" name="name" required pattern="[a-z0-9][a-z0-9-]{0,30}"></div>
-      <div><label for="f-image">Image (blank: default)</label><input id="f-image" name="image"></div>
-      <div><label for="f-template">Or a template</label><select id="f-template" name="template"></select></div>
+      <div><label for="f-template">Template</label><select id="f-template" name="template"></select></div>
+    </div>
+    <details id="create-advanced"><summary>Image, resources and engine (blank: the defaults)</summary>
+    <div class="fields">
+      <div><label for="f-image">Image instead of a template</label><input id="f-image" name="image"></div>
       <div><label for="f-cpus">CPUs</label><input id="f-cpus" name="cpus" type="number" step="0.25"></div>
       <div><label for="f-memory">Memory (GB)</label><input id="f-memory" name="memoryGb" type="number" step="0.25"></div>
       <div><label for="f-pids">Tasks</label><input id="f-pids" name="pids" type="number" step="1"></div>
@@ -82,6 +94,7 @@
       <div><label for="f-engine">Engine</label><select id="f-engine" name="engine"></select></div>
       <div><label for="f-docker">Docker inside</label><select id="f-docker" name="dockerInside"><option value="">Default</option><option value="true">On</option><option value="false">Off</option></select></div>
     </div>
+    </details>
     <div id="create-setup"></div>
     <button class="primary">Create and verify</button>
     <div class="error" id="create-error"></div>
@@ -248,7 +261,8 @@ const asks = () => about && about.platform !== "darwin" ? "This machine has no d
   : "A dialog on this Mac asks you to allow it first; no answer in 60 seconds denies it."
 const askButton = (label, key, what, task, extra = {}) => el("button", { type: "button", ...extra, title: asks(), ...(busy.has(`${key}:${what}`) ? { disabled: "" } : {}), onclick: () => act(key, what, task) },
   busy.has(`${key}:${what}`) ? "Waiting for Allow on the Mac…" : `${label} (asks on the Mac)`)
-const result = (key) => { const value = output[key]; return value === undefined ? null : typeof value === "string" ? el("pre", {}, value) : el("div", {}, el("pre", {}, value.text), command(value.command)) }
+// Nothing yet is an empty string, which append() and el() both leave blank (append would print null).
+const result = (key) => { const value = output[key]; return value === undefined ? "" : typeof value === "string" ? el("pre", {}, value) : el("div", {}, el("pre", {}, value.text), command(value.command)) }
 // A closed group that stays open across refreshes once opened.
 function group(key, label, ...children) {
   const node = el("details", { ontoggle: () => { node.open ? expanded.add(key) : expanded.delete(key) } }, el("summary", {}, label), ...children)
@@ -350,21 +364,24 @@ async function act(key, what, task) {
 
 function actionForm(extension, action, sandbox) {
   const key = sandbox ? sandbox.name : `ext:${extension.id}`
-  const form = el("form", { class: "row", onsubmit: (event) => {
+  const form = el("form", { class: "action", onsubmit: (event) => {
     event.preventDefault()
     const values = Object.fromEntries(action.fields.map((field) => [field.id, field.type === "checkbox" ? String(form.elements[field.id].checked) : form.elements[field.id].value]))
     const target = sandbox ? sandbox.name : form.elements["asidee-sandbox"]?.value
     act(key, `${extension.id}/${action.id}`, () => api("action", { extension: extension.id, action: action.id, ...(action.scope === "sandbox" ? { sandbox: target } : {}), values }))
   } })
-  if (!sandbox && action.scope === "sandbox") form.append(el("label", { class: "grow" }, "Sandbox", el("select", { name: "asidee-sandbox" }, ...sandboxes.filter((entry) => entry.status === "running").map((entry) => el("option", {}, entry.name)))))
+  // Each field is labelled above it; checkboxes go on a line of their own, and the button closes the action.
+  const inputs = el("div", { class: "fields" }), checks = el("div", { class: "row" })
+  if (!sandbox && action.scope === "sandbox") inputs.append(el("label", {}, "Sandbox", el("select", { name: "asidee-sandbox" }, ...sandboxes.filter((entry) => entry.status === "running").map((entry) => el("option", {}, entry.name)))))
   for (const field of action.fields) {
     const input = field.type === "select" ? el("select", { name: field.id }, ...field.options.map((option) => el("option", {}, option)))
-      : el("input", { name: field.id, type: field.type === "checkbox" ? "checkbox" : field.type, "aria-label": field.label, placeholder: field.label })
+      : el("input", { name: field.id, type: field.type === "checkbox" ? "checkbox" : field.type })
     if (field.default !== undefined) field.type === "checkbox" ? input.checked = field.default === true : input.value = field.default
-    form.append(el("label", { class: field.type === "checkbox" ? "" : "grow" }, field.type === "checkbox" ? field.label + " " : "", input))
+    field.type === "checkbox" ? checks.append(el("label", { class: "check" }, input, ` ${field.label}`)) : inputs.append(el("label", {}, field.label, input))
   }
   const running = busy.has(`${key}:${extension.id}/${action.id}`)
-  form.append(el("button", running ? { disabled: "" } : { title: action.description ?? "" }, running ? "Running…" : action.label))
+  form.append(...(inputs.childElementCount ? [inputs] : []), ...(checks.childElementCount ? [checks] : []),
+    el("div", { class: "row" }, el("button", running ? { disabled: "" } : {}, running ? "Running…" : action.label), action.description ? el("span", { class: "muted grow" }, action.description) : null))
   return form
 }
 
@@ -402,14 +419,19 @@ function sandboxPanel(sandbox) {
         el("div", { class: "muted usage", "data-usage": name }),
         sandbox.activity ? el("div", { class: "muted" }, `${sandbox.activity}…`) : null,
         sandbox.diskWarning ? el("div", { class: "error" }, sandbox.diskWarning.message) : null,
-        sandbox.lastVerify ? el("div", { class: "muted" }, `Last measured ${sandbox.lastVerify.at}. Historical only; current checks unknown.`) : null,
-        sandbox.stopReason ? el("div", { class: "muted" }, sandbox.stopReason) : null),
+        sandbox.lastVerify ? el("div", { class: "muted" }, `Last checked ${new Date(sandbox.lastVerify.at).toLocaleString()}. Historical only; current checks unknown.`) : null,
+        sandbox.stopReason ? el("div", { class: "muted" }, sandbox.stopReason) : null)),
+    el("div", { class: "row", style: "margin-top:10px" },
       running ? button("Stop", "stop", () => api("stop", { name })) : button("Start", "start", () => api("start", { name })),
       running ? button("Terminal", "terminal", () => terminal(name, "sandbox"), { title: "Open a shell in this sandbox in a terminal window on this Mac" }) : null,
+      running ? button("Claude", "claude", () => terminal(name, "claude"), { title: "Open Claude Code in ~/workspace in a terminal window on this Mac, with the imported login (choose another under More)" }) : null,
+      running ? button("Codex", "codex", () => terminal(name, "codex"), { title: "Open Codex in ~/workspace in a terminal window on this Mac, with the imported login (choose another under More)" }) : null,
       button("Verify", "verify", async () => { open.add(name); await api("verify", { name }) }),
       el("button", { onclick: () => { open.has(name) ? open.delete(name) : open.add(name); render() } }, sandbox.lastVerify ? "Past checks" : "Not verified"),
       el("button", { class: "danger", onclick: () => { const typed = prompt(`This deletes ${name} and everything in it. Type its name to confirm.`); if (typed !== null) act(name, "remove", () => api("remove", { name, confirm: typed })) } }, "Remove")))
-  if (running) for (const extension of extensions) for (const action of extension.actions.filter((entry) => entry.scope === "sandbox")) panel.append(el("div", { style: "margin-top:10px" }, actionForm(extension, action, sandbox)))
+  // One closed group per extension, so the card stays short until one is needed.
+  const tools = running ? extensions.map((extension) => [extension, extension.actions.filter((entry) => entry.scope === "sandbox")]).filter(([, actions]) => actions.length) : []
+  if (tools.length) panel.append(el("div", { class: "tools" }, ...tools.map(([extension, actions]) => group(`ext:${name}:${extension.id}`, extension.name, ...actions.map((action) => actionForm(extension, action, sandbox))))))
   if (sandbox.enforcementProblem) panel.append(el("div", { class: "error" }, `Enforcement problem at ${sandbox.enforcementProblem.at}: ${sandbox.enforcementProblem.message}`))
   if (output[name]) panel.append(result(name))
   if (open.has(name) && sandbox.lastVerify) {
@@ -422,8 +444,8 @@ function sandboxPanel(sandbox) {
   const mine = forwards.filter((forward) => forward.name === name)
   const myLinks = links.filter((link) => link.from === name || link.to === name)
   const access = ssh[name]
-  panel.append(group(`more:${name}`, "More: agents, resize, run a command, template, forwards, links, SSH, commands",
-    running ? group(`agents:${name}`, "Claude Code or Codex in a terminal", el("p", { class: "muted" }, "Opens a terminal window on this Mac running asd claude or asd codex: the agent in ~/workspace with an imported login, the one named, else the only one."),
+  panel.append(group(`more:${name}`, "More: agent login choice, resize, run a command, template, forwards, links, SSH, commands",
+    running ? group(`agents:${name}`, "Claude Code or Codex with a chosen login", el("p", { class: "muted" }, "Opens a terminal window on this Mac running asd claude or asd codex: the agent in ~/workspace with an imported login, the one named, else the only one."),
       miniForm(name, "agent", "Open Claude Code", [["profile", "Login profile (blank: the only one)"]], (values) => terminal(name, "claude", undefined, values.profile)),
       miniForm(name, "agent-codex", "Open Codex", [["profile", "Login profile (blank: the only one)"]], (values) => terminal(name, "codex", undefined, values.profile))) : null,
     group(`resize:${name}`, "Resize", el("p", { class: "muted" }, "Blank keeps a limit as it is. CPUs, memory and tasks change now when the engine allows; the disk limit is the daemon's own and applies at its next measurement."),
@@ -616,16 +638,17 @@ function render() {
     }
     for (const extension of extensions) {
       const key = `ext:${extension.id}`
-      const panel = el("div", { class: "panel" }, el("div", {}, el("span", { class: "name" }, extension.name), el("span", { class: "muted" }, ` · ${extension.id}`)),
+      // The extension on one line with its Remove; each action a closed group, as on a sandbox's card.
+      const panel = el("div", { class: "panel" }, el("div", { class: "row" }, el("div", { class: "grow" }, el("span", { class: "name" }, extension.name), el("span", { class: "muted" }, ` · ${extension.id}`),
         extension.description ? el("div", { class: "muted" }, extension.description) : null,
         extension.dir ? el("div", { class: "muted" }, `In ${extension.dir}`) : null,
-        extension.hooks?.postCreate ? el("div", { class: "muted" }, `After each create it runs: ${extension.hooks.postCreate.join(" ")}`) : null)
-      for (const action of extension.actions) panel.append(el("h3", {}, `${action.label}${action.scope === "sandbox" ? " (on a sandbox)" : ""}`),
-        action.description ? el("div", { class: "muted" }, action.description) : null, el("div", { class: "muted" }, `Runs: ${action.run.join(" ")}`), actionForm(extension, action))
-      if (!extension.actions.length) panel.append(el("div", { class: "muted" }, "No actions."))
+        extension.hooks?.postCreate ? el("div", { class: "muted" }, `After each create it runs: ${extension.hooks.postCreate.join(" ")}`) : null),
+        extension.bundled ? button("Remove", key, "remove", () => api("extensionRemove", { id: extension.id }).then(() => `Removed ${extension.name}.`)) : null))
+      if (extension.actions.length) panel.append(el("div", { class: "tools" }, ...extension.actions.map((action) => group(`ext-action:${extension.id}:${action.id}`, `${action.label}${action.scope === "sandbox" ? " (on a sandbox)" : ""}`,
+        el("div", { class: "muted" }, `Runs: ${action.run.join(" ")}`), actionForm(extension, action)))))
+      else panel.append(el("div", { class: "muted" }, "No actions."))
       if (output[key]) panel.append(result(key))
-      panel.append(command(`asd ext run ${extension.id} ACTION [SANDBOX] --set FIELD=VALUE`))
-      if (extension.bundled) panel.append(button("Remove", key, "remove", () => api("extensionRemove", { id: extension.id }).then(() => `Removed ${extension.name}.`)))
+      panel.append(group(`ext-cli:${extension.id}`, "The same from the CLI", command(`asd ext run ${extension.id} ACTION [SANDBOX] --set FIELD=VALUE`)))
       list.append(panel)
     }
     if (!extensions.length && !extensionErrors.length) list.append(el("div", { class: "panel muted" }, "No extensions installed."))
@@ -668,7 +691,7 @@ function render() {
       installed("repo") ? el("div", {}, el("label", { for: "setup-repo" }, "Repository (OWNER/REPO)"), el("input", { id: "setup-repo", placeholder: "none" })) : null,
       installed("t3") ? el("label", {}, el("input", { id: "setup-t3", type: "checkbox" }), " T3 Code") : null].filter(Boolean)
     if (!fields.length) return
-    node.append(el("p", { class: "muted" }, `After the create, in this order; the first failure stops the rest and keeps the sandbox.${logins ? " A login's token is copied into the sandbox, where anything running there can read it." : ""}`), el("div", { class: "fields" }, ...fields))
+    node.append(el("h3", {}, "Then set up"), el("p", { class: "muted" }, `After the create, in this order; the first failure stops the rest and keeps the sandbox.${logins ? " A login's token is copied into the sandbox, where anything running there can read it." : ""}`), el("div", { class: "fields" }, ...fields))
     for (const input of node.querySelectorAll("input, select")) if (input.id in kept) input.type === "checkbox" ? input.checked = kept[input.id] : input.value = kept[input.id]
   })
   createCommand(); prepareCommand(); showPreparing()
