@@ -7,7 +7,7 @@ import { homedir } from "node:os"
 import { resolve, dirname, join } from "node:path"
 import { createInterface } from "node:readline/promises"
 import { parseArgs } from "node:util"
-import { CHECKLIST, WORKSPACE_CHECKLIST } from "../core/checks"
+import { CHECKLIST, checklistFor, GPU_KIND, GPU_WARNING, WORKSPACE_CHECKLIST } from "../core/checks"
 import type { WorkspaceReport, WorkspaceView, WorkspaceRemoval } from "../core/workspaces"
 import { HOST_TEMP_DISCLOSURE, WORKSPACE_DISCLOSURE } from "../core/workspace-profile"
 import type { ResizeChange, SandboxView } from "../core/core"
@@ -37,7 +37,8 @@ const GROUPS: Array<[string, string[]]> = [
     "asd setup [--engine orbstack|docker-desktop] [--docker] [--accept-plan HASH]   give your engine gVisor after one plan you approve, then prove it with a test sandbox",
     "asd setup --remove [--accept-plan HASH]   undo it: remove the runtime, restart the engine, delete the download",
     "asd doctor                         engines on this machine and what each one needs",
-    "asd create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]",
+    "asd create NAME [--docker | --gpu] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]",
+    "           --gpu makes a GPU container, not a sandbox: runc on the host's own Linux kernel with its NVIDIA GPU, as uid 1000",
     "           [--gh] [--claude PROFILE…] [--codex PROFILE…] [--repo OWNER/REPO] [--skills DIR] [--t3] [--t3-browser]",
     "           then, with the bundled extensions: this Mac's GitHub login, Claude or Codex logins with their setup (repeat",
     "           a flag for several), a clone into ~/workspace, DIR's skills and plugins into ~/workspace, T3 Code, T3's",
@@ -45,7 +46,8 @@ const GROUPS: Array<[string, string[]]> = [
     "asd shell NAME [-- COMMAND…]       a shell, or one command on a terminal, inside the sandbox",
     "asd claude NAME [PROFILE] [-- ARG…]   Claude Code in ~/workspace with an imported login: PROFILE, or the only one",
     "asd codex NAME [PROFILE] [-- ARG…]    the same for Codex",
-    "asd list                           your sandboxes",
+    "asd list                           your sandboxes and GPU containers",
+    "asd get NAME                       one of them: its kind, state, sizes and engine",
     "asd list --all                     machines, including unavailable ones and unknown cached sandboxes (experimental)",
   ]],
   ["Use a sandbox", [
@@ -394,7 +396,7 @@ function printChecks(checks: CheckResult[], checklist = CHECKLIST, full: string 
 }
 
 function printSandbox(view: SandboxView): void {
-  console.log(`${displayName(view.name)}: ${shown(view.status)} on ${shown(view.engine)}${view.stopReason ? `\n  ${shown(view.stopReason)}` : ""}`)
+  console.log(`${displayName(view.name)}: ${view.spec?.gpu ? `${GPU_KIND}, ` : ""}${shown(view.status)} on ${shown(view.engine)}${view.stopReason ? `\n  ${shown(view.stopReason)}` : ""}`)
   if (view.diskWarning) console.log(`  ${shown(view.diskWarning.message)}`)
   if (view.enforcementProblem) console.log(`  Enforcement problem at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}`)
 }
@@ -433,8 +435,8 @@ async function main(argv: string[]): Promise<void> {
     try { return parseArgs({ args, options, allowPositionals: true }) }
     catch (error) { throw argumentError(error, args === rest ? command! : `${command} ${rest[0]}`) }
   }
-  // The sandbox a create was making, for the next steps of a refusal.
-  let creating: string | undefined
+  // The sandbox a create was making, for the next steps of a refusal; and whether it was a GPU container.
+  let creating: string | undefined, creatingGpu = false
   const helpWords = [command, ...(["workspace", "host", "forward", "link", "template", "config", "ssh", "ext", "daemon"].includes(command ?? "") ? [rest[0]] : [])].filter(Boolean).join(" ")
   const need = (value: string | boolean | undefined, what: string) => { if (typeof value !== "string" || !value) throw new AsideeError("usage", `Missing ${what}. See \`asd ${helpWords} --help\`.`); return value }
 
@@ -608,17 +610,18 @@ async function main(argv: string[]): Promise<void> {
         return
       }
       case "create": {
-        const { values, positionals } = parse({ docker: { type: "boolean" }, image: { type: "string" }, template: { type: "string" }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" }, pids: { type: "string" }, engine: { type: "string" },
+        const { values, positionals } = parse({ docker: { type: "boolean" }, gpu: { type: "boolean" }, image: { type: "string" }, template: { type: "string" }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" }, pids: { type: "string" }, engine: { type: "string" },
           gh: { type: "boolean" }, claude: { type: "string", multiple: true }, codex: { type: "string", multiple: true }, repo: { type: "string" }, skills: { type: "string" }, t3: { type: "boolean" }, "t3-browser": { type: "boolean" } })
         const name = need(positionals[0], "a name")
         // Checked before anything is made. The logins come from this Mac, and the extensions reach local sandboxes only.
         const steps = createSteps(name, values)
         if (steps.length && selectedHost && selectedHost !== "local") throw new AsideeError("usage", "--gh, --claude, --codex, --repo, --skills, --t3 and --t3-browser work for sandboxes on this Mac only.")
-        creating = name
-        const made = await call<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }> }>("create",
-          { name, docker: values.docker, image: values.image, template: values.template, cpus: values.cpus, memoryGb: values.memory, diskGb: values.disk, pids: values.pids, engine: values.engine }, watching(name))
+        creating = name; creatingGpu = Boolean(values.gpu)
+        if (values.gpu && !asJson) console.error(`asd: ${GPU_WARNING}`)
+        const made = await call<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }>; warning?: string }>("create",
+          { name, docker: values.docker, ...(values.gpu ? { gpu: true } : {}), image: values.image, template: values.template, cpus: values.cpus, memoryGb: values.memory, diskGb: values.disk, pids: values.pids, engine: values.engine }, watching(name))
         if (!asJson) {
-          printSandbox(made.sandbox); printChecks(made.checks, CHECKLIST, next("verify", name))
+          printSandbox(made.sandbox); printChecks(made.checks, checklistFor(made.sandbox.spec), next("verify", name))
           for (const hook of made.hooks) console.log(`\n  ${shown(hook.extension)} (after create): ${hook.exitCode === 0 ? "done" : `failed with exit ${hook.exitCode}`}${hook.output ? `\n${shown(hook.output, true)}` : ""}`)
           if (steps.length) console.log("")
         }
@@ -640,7 +643,7 @@ async function main(argv: string[]): Promise<void> {
           return out(fleet, () => {
             for (const row of fleet.machines) {
               console.log(`${shown(row.machine.host.name)}: ${shown(row.machine.state)}${"error" in row.machine && row.machine.error ? ` (${shown(row.machine.error)})` : ""}${row.stale ? "; sandboxes unknown" : ""}`)
-              for (const sandbox of row.cached?.sandboxes ?? []) console.log(`  ${shown(row.machine.host.name)}/${shown(sandbox.name)}: ${shown(sandbox.status)}${row.stale ? ` (last checked ${shown(row.cached?.checkedAt)})` : ""}${sandbox.status === "damaged" ? `\n    ${shown(sandbox.stopReason)}` : ""}${sandbox.enforcementProblem ? `\n    Enforcement unknown at ${shown(sandbox.enforcementProblem.at)}: ${shown(sandbox.enforcementProblem.message)}` : ""}`)
+              for (const sandbox of row.cached?.sandboxes ?? []) console.log(`  ${shown(row.machine.host.name)}/${shown(sandbox.name)}: ${sandbox.spec?.gpu ? `${GPU_KIND}, ` : ""}${shown(sandbox.status)}${row.stale ? ` (last checked ${shown(row.cached?.checkedAt)})` : ""}${sandbox.status === "damaged" ? `\n    ${shown(sandbox.stopReason)}` : ""}${sandbox.enforcementProblem ? `\n    Enforcement unknown at ${shown(sandbox.enforcementProblem.at)}: ${shown(sandbox.enforcementProblem.message)}` : ""}`)
             }
           })
         }
@@ -651,10 +654,18 @@ async function main(argv: string[]): Promise<void> {
             const minutes = view.lastVerify ? Math.max(0, Math.floor((Date.now() - Date.parse(view.lastVerify.at)) / 60000)) : 0
             const verified = view.lastVerify ? `verified ${minutes < 120 ? `${minutes} min` : minutes < 2880 ? `${Math.floor(minutes / 60)} h` : `${Math.floor(minutes / 1440)} d`} ago` : "never verified"
             if (view.status === "damaged") { console.log(`${displayName(view.name).padEnd(24)} damaged\n    ${shown(view.stopReason)}`); continue }
-            console.log(`${displayName(view.name).padEnd(24)} ${shown(view.status).padEnd(8)} ${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  disk limit ${view.spec.diskGb} GB  ${shown(view.engine)}${view.template ? `  template ${shown(view.template.name)}` : ""}  (${verified})${view.stopReason ? `\n    ${shown(view.stopReason)}` : ""}`)
+            console.log(`${displayName(view.name).padEnd(24)} ${shown(view.status).padEnd(8)} ${view.spec.gpu ? `${GPU_KIND}  ` : ""}${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  disk limit ${view.spec.diskGb} GB  ${shown(view.engine)}${view.template ? `  template ${shown(view.template.name)}` : ""}  (${verified})${view.stopReason ? `\n    ${shown(view.stopReason)}` : ""}`)
             if (view.enforcementProblem) console.log(`    Enforcement problem at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}`)
           }
           if (list.some((view) => view.lastVerify)) console.log("Verification is historical only; current checks are unknown.")
+        })
+      }
+      case "get": {
+        const view = await call<SandboxView>("get", { name: need(rest[0], "a name") })
+        return out(view, () => {
+          printSandbox(view)
+          console.log(`  ${view.spec.gpu ? `${shown(GPU_WARNING)}\n  ` : ""}${view.spec.cpus} CPU, ${view.spec.memoryGb} GB memory, ${view.spec.pids} tasks, disk limit ${view.spec.diskGb} GB; ${view.template ? `template ${shown(view.template.name)}` : `image ${shown(view.spec.image)}`}${view.spec.docker ? "; Docker inside" : ""}`)
+          console.log(`  ${view.lastVerify ? `Last verified ${utc(view.lastVerify.at)}; that result is history, not current.` : "Never verified."} To check it now: ${next("verify", view.name)}`)
         })
       }
       case "start": case "stop": {
@@ -666,7 +677,7 @@ async function main(argv: string[]): Promise<void> {
       }
       case "verify": {
         const report = await call<{ sandbox: SandboxView; checks: CheckResult[]; ok: boolean; configurationOnly: boolean }>("verify", { name: need(rest[0], "a name") }, watching(rest[0]!))
-        out(report, () => { if (report.configurationOnly) console.log(`${shown(report.sandbox.name)} is stopped; only its configuration was checked. Run \`${next("start", report.sandbox.name)}\`, then \`${next("verify", report.sandbox.name)}\` to check the rest.`); printSandbox(report.sandbox); printChecks(report.checks) })
+        out(report, () => { if (report.configurationOnly) console.log(`${shown(report.sandbox.name)} is stopped; only its configuration was checked. Run \`${next("start", report.sandbox.name)}\`, then \`${next("verify", report.sandbox.name)}\` to check the rest.`); printSandbox(report.sandbox); printChecks(report.checks, checklistFor(report.sandbox.spec)) })
         if (!report.ok) process.exit(EXIT["check-failed"])
         return
       }
@@ -677,7 +688,7 @@ async function main(argv: string[]): Promise<void> {
         return out(resized, () => {
           printSandbox(resized.sandbox)
           for (const change of resized.changes) console.log(`  ${LIMIT[change.limit]}: ${change.from === change.to ? change.to : `${change.from} -> ${change.to}`}, ${APPLIES[change.applies]}${change.note ? `\n      ${shown(change.note)}` : ""}`)
-          console.log(""); printChecks(resized.checks, CHECKLIST, next("verify", name))
+          console.log(""); printChecks(resized.checks, checklistFor(resized.sandbox.spec), next("verify", name))
         })
       }
       case "snapshot": {
@@ -969,7 +980,9 @@ async function main(argv: string[]): Promise<void> {
     }
     else if (code === "check-failed" && error instanceof AsideeError && Array.isArray(error.details)) {
       // Workspaces have their own checklist; some ids (credentials) are in both with different titles.
-      const checklist = command === "workspace" ? WORKSPACE_CHECKLIST : CHECKLIST
+      // A GPU container's has other titles for some ids (kernel, hardening); a refused start or resize asks which it is.
+      const gpu = creatingGpu || (command !== "workspace" && rest[0] ? Boolean((await request<SandboxView>("get", { name: rest[0], host: selectedHost }).catch(() => undefined))?.spec.gpu) : false)
+      const checklist = command === "workspace" ? WORKSPACE_CHECKLIST : checklistFor({ gpu })
       console.error(`asd: ${shown(message.split(": ")[0]!.replace(/\.$/, ""))}. These checks did not hold:`)
       for (const check of error.details as CheckResult[]) console.error(`  ${MARK[check.status] ?? "?"} ${checklist.find((entry) => entry.id === check.id)?.title ?? shown(check.id)}\n      ${shown(check.detail)}`)
       if (creating) console.error(`Remove it: ${next("remove", creating, "--confirm", creating)}`)

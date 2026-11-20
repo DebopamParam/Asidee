@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { CHECKLIST, WORKSPACE_CHECKLIST } from "../../core/checks"
+import { CHECKLIST, GPU_KIND, GPU_WARNING, WORKSPACE_CHECKLIST } from "../../core/checks"
 import { VERSION } from "../../core/daemon"
 import { enrollmentOptions, GVISOR, GVISOR_FILES, GVISOR_RELEASE, installationPlan, type HostProbe } from "../../core/hosts"
 import { socketPath, streamSocketPath } from "../../core/state"
@@ -85,6 +85,30 @@ test("list describes saved verification as dated history with current checks unk
   expect(out.split("historical only")).toHaveLength(2)
   expect(out).toContain("disk limit 20 GB")
   expect(out).not.toContain("0 failed")
+})
+
+test("a GPU container is labelled as one in create, list, get and verify, and never as a sandbox's isolated kernel", async () => {
+  const gpu = { name: "gpu", status: "running", engine: "Fake", kind: GPU_KIND, spec: { cpus: 2, memoryGb: 4, pids: 4096, diskGb: 20, image: "ubuntu:24.04", gpu: true } }
+  const box = { name: "box", status: "running", engine: "Fake", spec: { cpus: 2, memoryGb: 4, pids: 4096, diskGb: 20, image: "ubuntu:24.04" } }
+  const checks = [{ id: "kernel", status: "info", evidence: "probed", detail: "Not isolated: runc runs it on the host's own Linux kernel." }]
+  const bodies: unknown[] = []
+  const asidee = await daemon({ create: (body: unknown) => { bodies.push(body); return { ok: true, data: { sandbox: gpu, checks, hooks: [], warning: GPU_WARNING } } },
+    list: { ok: true, data: [gpu, box] }, get: { ok: true, data: gpu }, verify: { ok: true, data: { sandbox: gpu, checks, ok: true } } })
+  const made = await asidee("create", "gpu", "--gpu")
+  expect(made.code).toBe(0); expect(bodies).toEqual([expect.objectContaining({ name: "gpu", gpu: true })])
+  expect(made.err).toContain(GPU_WARNING); expect(made.out).toContain(GPU_KIND)
+  expect(made.out).toContain("Runs on the host's Linux kernel (runc)")
+  const listed = (await asidee("list")).out.split("\n")
+  expect(listed.find((line) => line.includes("gpu"))).toContain(GPU_KIND)
+  expect(listed.find((line) => line.includes("box"))).not.toContain(GPU_KIND)
+  const got = await asidee("get", "gpu")
+  expect(got.out).toContain(GPU_KIND); expect(got.out).toContain("is not a sandbox")
+  const verified = (await asidee("verify", "gpu")).out
+  expect(verified).toContain(GPU_KIND); expect(verified).not.toContain("isolated kernel")
+  expect((await asidee("--json", "get", "gpu")).out).toContain(`"kind":"${GPU_KIND}"`)
+  // The daemon refuses --gpu with --docker; the CLI passes both on.
+  await asidee("create", "x", "--gpu", "--docker")
+  expect(bodies[1]).toMatchObject({ gpu: true, docker: true })
 })
 
 test("workspace create and verify print the disclosure once, also when no check carried it", async () => {
