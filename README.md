@@ -143,7 +143,9 @@ Not built yet:
 
 `asd workspace create render --copy /absolute/project` makes a disposable `~/Asidee/render` folder. Commands
 started through `asd workspace shell render` or `workspace exec render -- COMMAND` inherit a Seatbelt profile.
-They run directly on the Mac; K06 measured Metal compute and hardware-only HEVC VideoToolbox encoding on Apple M5.
+They run directly on the Mac and can use its GPU; K06 measured Metal compute and hardware-only HEVC VideoToolbox
+encoding on Apple M5. Chrome's own sandbox cannot start inside a workspace, so Chrome-based tools need `--no-sandbox`
+(workspaces tell HyperFrames so).
 `workspace stop` ends processes identified by their kernel profile. `workspace remove render --confirm render` stops
 them and deletes the folder, leaving the original project alone. Asidee never copies with hard links.
 

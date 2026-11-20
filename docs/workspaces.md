@@ -220,6 +220,10 @@ created workspace folders excluded, measured by K24; existing backups and other 
   HEVC VideoToolbox encode when ffmpeg is on the workspace PATH. A nonempty movie and exit zero pass that check; an
   encode failure fails it. No available executable or a probe that cannot run is unknown with a reason. This check
   does not claim Metal compute coverage, and does not run before exec or shell.
+- Chrome's own sandbox cannot start inside a workspace's: Chrome exits with signal 5 (exit 133), even with
+  `--disable-gpu`. With `--no-sandbox`, headless Chrome's WebGL reported ANGLE Metal on Apple M5. Workspaces set
+  `HYPERFRAMES_CHROME_SANDBOX=0`, so HyperFrames starts Chrome that way; it then probed hardware GPU and rendered with
+  it (measured 2026-11-21). Other Chrome-based tools need `--no-sandbox` from their own settings.
 - `sandbox-exec`, Seatbelt policy and `sandbox_check` are deprecated or private interfaces. Their continued behavior
   is a measurement on the scorecard's macOS version, not a promise about future macOS versions. Re-run K after updates.
 

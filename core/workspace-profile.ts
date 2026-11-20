@@ -3,7 +3,7 @@ import { dirname, join } from "node:path"
 import type { WorkspaceManifest } from "./types"
 import base from "./workspace.sb" with { type: "text" }
 
-export const WORKSPACE_DISCLOSURE = "Workspace, not a sandbox. Same Mac kernel and user; no CPU, memory, GPU or process limits; disk use is watched, not capped. Use workspace shell/exec; entering the folder alone does not confine programs. Internet, LAN, tailnet and loopback are open, including services started later. Reads outside home are open. Outside command lines are visible. Inner sandboxes may fail; Asidee passes no agent flags. Homebrew and nix daemon installs outside the folder are refused. Remote effects, unified logs and backups can survive removal. Apple events, TCC services, camera, microphone, Keychain additions, other IOKit devices, Bluetooth and Spotlight retention are not covered. Hard links placed from outside can share changes. Unnamed daemon channels are not covered."
+export const WORKSPACE_DISCLOSURE = "Workspace, not a sandbox. Same Mac kernel and user; no CPU, memory, GPU or process limits; disk use is watched, not capped. Use workspace shell/exec; entering the folder alone does not confine programs. Internet, LAN, tailnet and loopback are open, including services started later. Reads outside home are open. Outside command lines are visible. The Mac's GPU (Metal) is open. Inner sandboxes may fail, and Chrome's own cannot start: Chrome-based tools need --no-sandbox (HyperFrames is told so); Asidee passes no agent flags. Homebrew and nix daemon installs outside the folder are refused. Remote effects, unified logs and backups can survive removal. Apple events, TCC services, camera, microphone, Keychain additions, other IOKit devices, Bluetooth and Spotlight retention are not covered. Hard links placed from outside can share changes. Unnamed daemon channels are not covered."
 
 export const HOST_TEMP_DISCLOSURE = "Shared host temp is open to files by this workspace's host-temp setting. Other programs' temp files there are readable and writable by this workspace, which can also delete their socket files and create listening sockets there that outside programs can connect to. Connecting to Unix sockets there stays refused. The folder that contains it shows its own attributes, not its contents. Other workspaces with host-temp on share it. Files left there are not removed by workspace remove and are not counted in its size."
 export const workspaceDisclosure = (hostTemp: boolean) => hostTemp ? `${WORKSPACE_DISCLOSURE} ${HOST_TEMP_DISCLOSURE}` : WORKSPACE_DISCLOSURE
@@ -44,6 +44,9 @@ export function workspaceEnvironment(manifest: Pick<WorkspaceManifest, "folder" 
     XDG_CONFIG_HOME: join(home, ".config"), XDG_CACHE_HOME: join(home, ".cache"), XDG_DATA_HOME: join(home, ".local/share"), XDG_STATE_HOME: join(home, ".local/state"),
     NPM_CONFIG_PREFIX: join(home, ".local"),
     CLAUDE_CONFIG_DIR: join(home, ".claude"), CODEX_HOME: join(home, ".codex"),
+    // Chrome's own sandbox cannot start inside the workspace's, and on macOS HyperFrames neither skips it nor falls back,
+    // so its GPU probe crashed and it rendered on the CPU. Without it, Chrome draws on the Mac's GPU (measured: ANGLE Metal).
+    HYPERFRAMES_CHROME_SANDBOX: "0",
     PATH: [join(home, ".local/bin"), join(home, ".cargo/bin"), join(home, ".bun/bin"), ...manifest.spec.path, "/opt/homebrew/bin", "/opt/homebrew/sbin", "/run/current-system/sw/bin", `/etc/profiles/per-user/${inherited.USER ?? ""}/bin`, "/nix/var/nix/profiles/default/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":"),
   }
   for (const key of ["USER", "LOGNAME", "SHELL", "TERM", "LANG"]) if (inherited[key]) env[key] = inherited[key]

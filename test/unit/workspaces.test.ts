@@ -88,7 +88,8 @@ test("profile parameters contain paths and tag denies follow every read allowanc
   const env = workspaceEnvironment(manifest, { USER: "me", TERM: "xterm", TOKEN: "secret", SSH_AUTH_SOCK: "/outside", DYLD_INSERT_LIBRARIES: "/evil" })
   expect(env.HOME).toBe(`${folder}/home`); expect(env.TMPDIR).toBe(`${folder}/tmp/`)
   expect(env.TOKEN).toBeUndefined(); expect(env.SSH_AUTH_SOCK).toBeUndefined(); expect(env.DYLD_INSERT_LIBRARIES).toBeUndefined()
-  expect(WORKSPACE_DISCLOSURE).toContain("not a sandbox")
+  expect(env.HYPERFRAMES_CHROME_SANDBOX).toBe("0")
+  expect(WORKSPACE_DISCLOSURE).toContain("not a sandbox"); expect(WORKSPACE_DISCLOSURE).toContain("--no-sandbox")
 })
 
 test("read allowances cannot expose SSH, home, workspace ancestors or state", () => {
