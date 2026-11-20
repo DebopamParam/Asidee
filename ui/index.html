@@ -466,7 +466,7 @@ const sandboxButton = (name) => (label, what, task, extra = {}) => {
 // The output of the buttons whose what starts with prefix, for a pop-up that holds them.
 const resultFrom = (name, prefix) => String(from[name] ?? "").startsWith(prefix) ? result(name) : ""
 // The buttons at the top of a card show their output in the card; everything else shows it in its pop-up.
-const CARD_OUTPUT = new Set(["stop", "start", "terminal", "verify", "remove", "open-agent", "setup"])
+const CARD_OUTPUT = new Set(["stop", "start", "terminal", "verify", "remove", "open-agent", "setup", "retry", "keep"])
 
 // A pop-up over the page. Like a region, it is built again only when what it shows changed.
 let modal = null
@@ -552,6 +552,9 @@ function sandboxPanel(sandbox) {
       el("button", { type: "button", onclick: () => checksModal(name) }, "Checks…"),
       el("button", { type: "button", class: "danger", onclick: () => { const typed = prompt(`This deletes ${name} and everything in it. Type its name to confirm.`); if (typed !== null) act(name, "remove", () => api("remove", { name, confirm: typed })) } }, "Remove")))
   if (sandbox.enforcementProblem) panel.append(el("div", { class: "error" }, `Enforcement problem at ${sandbox.enforcementProblem.at}: ${sandbox.enforcementProblem.message}`))
+  // A create that did not finish is removed at its time unless it is retried until it does, or kept as it is.
+  if (sandbox.unfinished) panel.append(el("div", { class: "error" }, `${sandbox.unfinished.stage === "checks" ? "Its create did not finish" : "Its setup did not finish"}: ${sandbox.unfinished.reason} It is removed at ${new Date(sandbox.unfinished.removeAt).toLocaleString()} unless it is retried until it finishes, or kept as it is.`),
+    el("div", { class: "row" }, button("Retry", "retry", () => retryCreate(name), { class: "primary" }), button("Keep as it is", "keep", async () => { await api("createKeep", { name }); return `${name} is kept as it is. The setup steps that did not run will not run.` })))
   if (output[name] && CARD_OUTPUT.has(from[name])) panel.append(result(name))
   if (!running) { panel.append(el("p", { class: "muted" }, "Start it to use logins, T3 Code and the other tools.")); return panel }
 
@@ -969,7 +972,7 @@ function createCommand() {
   if (value("template")) parts.push("--template", value("template")); else if (value("image")) parts.push("--image", value("image"))
   for (const [field, flag] of [["cpus", "--cpus"], ["memoryGb", "--memory"], ["pids", "--pids"], ["diskGb", "--disk"]]) if (value(field)) parts.push(flag, value(field))
   if (value("engine") && value("engine") !== (settings?.engine ?? engines.find((engine) => engine.ready)?.id)) parts.push("--engine", value("engine"))
-  for (const step of setupSteps()) parts.push(...step.flags)
+  for (const step of setupSteps(formSetup())) parts.push(...step.flags)
   const text = parts.join(" ")
   const node = document.getElementById("create-command")
   if (node.textContent !== `${text}Copy`) node.replaceChildren(command(text))
@@ -978,26 +981,35 @@ document.getElementById("create").addEventListener("input", createCommand)
 
 const installed = (id) => extensions.some((extension) => extension.id === id)
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/, REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/
-// The CLI's `asd create NAME --gh --claude P --codex P --repo OWNER/REPO --t3`: the bundled extensions' actions, in the
-// order each needs the one before (a private clone needs GitHub; T3 finds the logins).
-function setupSteps() {
+// The setup the form asks for, as the CLI's flags: { gh, claude: [profiles], codex: [profiles], repo, skills, t3, "t3-browser" }.
+function formSetup() {
   const input = (id) => document.getElementById(`setup-${id}`)
+  const profilesOf = (agent) => [...document.querySelectorAll(`#create-setup input[data-agent="${agent}"]:checked`)].map((box) => box.dataset.profile)
+  return { gh: Boolean(input("gh")?.checked), claude: profilesOf("claude"), codex: profilesOf("codex"), repo: input("repo")?.value.trim() || undefined,
+    skills: input("skills")?.value.trim() || undefined, t3: Boolean(input("t3")?.checked), "t3-browser": Boolean(input("t3-browser")?.checked) }
+}
+// The CLI's `asd create NAME --gh --claude P --codex P --repo OWNER/REPO --t3`: the bundled extensions' actions, in the
+// order each needs the one before (a private clone needs GitHub; T3 finds the logins). The labels are the CLI's, which
+// the daemon knows each step by.
+function setupSteps(setup) {
   const steps = []
-  if (input("gh")?.checked) steps.push({ label: "GitHub login", flags: ["--gh"], extension: "logins", action: "github", values: {} })
-  for (const agent of ["claude", "codex"]) for (const box of document.querySelectorAll(`#create-setup input[data-agent="${agent}"]:checked`)) {
-    const profile = box.dataset.profile
+  if (setup.gh) steps.push({ label: "GitHub login", flags: ["--gh"], extension: "logins", action: "github", values: {} })
+  for (const agent of ["claude", "codex"]) for (const profile of new Set(setup[agent] ?? []))
     steps.push({ label: `${agent === "claude" ? "Claude" : "Codex"} login ${profile}`, flags: [`--${agent}`, profile], extension: "logins", action: "import", values: { agent, profile, setup: true } })
-  }
-  const repository = input("repo")?.value.trim()
-  if (repository) steps.push({ label: `Clone ${repository}`, flags: ["--repo", repository], extension: "repo", action: "clone", values: { repository } })
+  if (setup.repo) steps.push({ label: `Clone ${setup.repo}`, flags: ["--repo", setup.repo], extension: "repo", action: "clone", values: { repository: setup.repo } })
   // After the clone, which needs an empty ~/workspace.
-  const skills = input("skills")?.value.trim()
-  if (skills) steps.push({ label: `Skills and plugins from ${skills}`, flags: ["--skills", skills], extension: "skills", action: "import", values: { source: skills } })
+  if (setup.skills) steps.push({ label: `Skills and plugins from ${setup.skills}`, flags: ["--skills", setup.skills], extension: "skills", action: "import", values: { source: setup.skills } })
   // The browser goes into T3's runtime, so it sets T3 up first.
-  const t3Browser = input("t3-browser")?.checked
-  if (input("t3")?.checked || t3Browser) steps.push({ label: "T3 Code", flags: t3Browser ? [] : ["--t3"], extension: "t3", action: "setup", values: {} })
-  if (t3Browser) steps.push({ label: "T3's browser", flags: ["--t3-browser"], extension: "t3", action: "browser", values: {} })
+  if (setup.t3 || setup["t3-browser"]) steps.push({ label: "T3 Code", flags: setup["t3-browser"] ? [] : ["--t3"], extension: "t3", action: "setup", values: {} })
+  if (setup["t3-browser"]) steps.push({ label: "T3's browser", flags: ["--t3-browser"], extension: "t3", action: "browser", values: {} })
   return steps
+}
+// Finishes a create that did not: the daemon repeats its checks if they failed, and the steps left run here.
+async function retryCreate(name) {
+  const retried = await api("createRetry", { name })
+  const steps = retried.setup ? setupSteps(retried.setup).filter((step) => retried.remaining.includes(step.label)) : []
+  if (steps.length) await runSetup(name, steps)
+  else return `${name} is created and passed its checks.`
 }
 // Only the profile names are taken from the listing's output.
 async function readProfiles() {
@@ -1010,7 +1022,8 @@ async function readProfiles() {
     } catch { profiles[agent] = null }
   }
 }
-// Runs after a create, as output under the new sandbox. The first failure stops the rest; the sandbox is kept.
+// Runs after a create, as output under the new sandbox, telling the daemon each result. The first failure stops the
+// rest; the sandbox is kept for a retry until the daemon's time for it is up.
 async function runSetup(name, steps) {
   const lines = []
   const show = (...last) => { output[name] = [...lines, ...last].join("\n"); from[name] = "setup"; render() }
@@ -1020,7 +1033,12 @@ async function runSetup(name, steps) {
     try { result = await api("action", { extension: step.extension, action: step.action, sandbox: name, values: step.values }) } catch (failure) { result = { stdout: failure.message } }
     const text = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim()
     lines.push(`${step.label}: ${result.exitCode === 0 ? "done" : typeof result.exitCode === "number" ? `failed with exit ${result.exitCode}` : "failed"}`, ...(text ? [text.replace(/^/gm, "  ")] : []))
-    if (result.exitCode !== 0) { lines.push("", `${step.label} failed; the steps after it did not run. ${name} is kept.`); break }
+    let view
+    try { view = await api("createStep", { name, step: step.label, ok: result.exitCode === 0 }) } catch (failure) { lines.push(`The daemon did not record it: ${failure.message}`) }
+    if (result.exitCode !== 0) {
+      const at = view?.unfinished ? ` It is removed at ${new Date(view.unfinished.removeAt).toLocaleString()} unless Retry finishes it; Keep as it is stops that.` : ""
+      lines.push("", `${step.label} failed; the steps after it did not run. ${name} is kept.${at}`); break
+    }
   }
   show()
 }
@@ -1108,13 +1126,14 @@ prepareForm.addEventListener("submit", async (event) => {
 document.getElementById("create").addEventListener("submit", async (event) => {
   event.preventDefault()
   const form = event.target; const button = form.querySelector("button.primary"); const error = document.getElementById("create-error")
-  const steps = setupSteps(); const repository = steps.find((step) => step.action === "clone")?.values.repository
+  const setup = formSetup(); const steps = setupSteps(setup); const repository = setup.repo
   if (repository !== undefined && (!REPOSITORY.test(repository) || repository.endsWith(".git"))) { error.textContent = "Repository takes a GitHub OWNER/REPO."; return }
   button.disabled = true; button.textContent = "Creating…"; error.textContent = ""
   const { dockerInside, gpu, ...body } = Object.fromEntries(new FormData(form))
   if (dockerInside) body.docker = dockerInside === "true"
   if (gpu) body.gpu = true
   if (!body.template) delete body.template
+  if (steps.length) body.setup = setup
   let made
   try { made = await api("create", body); open.add(made.sandbox.name); form.reset() }
   catch (failure) {

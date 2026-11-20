@@ -342,6 +342,7 @@ test("create sends Docker inside only when chosen, and shows the same create as 
 test("create runs the chosen setup steps after the create, in the CLI's order, and stops at the first failure", async () => {
   const bundled = ["logins", "repo", "skills", "t3"].map((id) => ({ id, name: id, actions: [] }))
   const ui = await page({ ...base, list: () => [sandbox({ name: "fresh" })], extensions: () => ({ extensions: bundled, errors: [] }), create: (body) => ({ sandbox: { name: body.name } }),
+    createStep: (body) => sandbox({ name: "fresh", ...(body.ok ? {} : { unfinished: { stage: "setup", reason: "x", removeAt: "2026-11-21T10:00:00Z", done: [] } }) }),
     action: (body) => body.action === "profiles" ? { exitCode: 0, stdout: `noise <b>\n${JSON.stringify({ agent: body.values.agent, profiles: ["work", "home", "../x", "<b>"], token: "s3cret" })}\n`, stderr: "" }
       : body.action === "clone" ? { exitCode: 2, stdout: "<i>no access</i>", stderr: "" } : { exitCode: 0, stdout: `${body.action} ok`, stderr: "" } })
   const doc = ui.window.document as any
@@ -364,16 +365,34 @@ test("create runs the chosen setup steps after the create, in the CLI's order, a
   expect(ui.calls.some((call) => call.method === "create")).toBe(false)
   doc.getElementById("setup-repo").value = "acme/app"
   form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  // The setup goes with the create, as the CLI's flags, so the daemon can keep it for a retry.
   const create = ui.calls.find((call) => call.method === "create")!.body
-  expect(Object.keys(create).some((key) => key.startsWith("setup"))).toBe(false)
+  expect(create.setup).toEqual({ gh: true, claude: ["work", "home"], codex: [], repo: "acme/app", t3: true, "t3-browser": true })
+  expect(ui.calls.filter((call) => call.method === "createStep").map((call) => call.body)).toEqual([{ name: "fresh", step: "GitHub login", ok: true },
+    { name: "fresh", step: "Claude login work", ok: true }, { name: "fresh", step: "Claude login home", ok: true }, { name: "fresh", step: "Clone acme/app", ok: false }])
   const steps = ui.calls.filter((call) => call.method === "action" && !["profiles", "list"].includes(call.body.action)).map((call) => call.body)
   expect(steps).toEqual([{ extension: "logins", action: "github", sandbox: "fresh", values: {} }, { extension: "logins", action: "import", sandbox: "fresh", values: { agent: "claude", profile: "work", setup: true } },
     { extension: "logins", action: "import", sandbox: "fresh", values: { agent: "claude", profile: "home", setup: true } }, { extension: "repo", action: "clone", sandbox: "fresh", values: { repository: "acme/app" } }])
   const shown = ui.text("#sandboxes pre")
   expect(shown).toContain("GitHub login: done"); expect(shown).toContain("Claude login work: done")
   expect(shown).toContain("Clone acme/app: failed with exit 2 <i>no access</i>")
-  expect(shown).toContain("Clone acme/app failed; the steps after it did not run. fresh is kept.")
+  expect(shown).toContain("Clone acme/app failed; the steps after it did not run. fresh is kept. It is removed at ")
+  expect(shown).toContain("unless Retry finishes it; Keep as it is stops that.")
   expect(doc.querySelector("#sandboxes pre i")).toBe(null)
+})
+
+test("a sandbox whose create did not finish says when it goes, and Retry runs the steps left from where it stopped", async () => {
+  const unfinished = { stage: "setup", reason: "Its setup step Clone acme/app failed.", removeAt: "2026-11-21T10:00:00Z", setup: { gh: true, repo: "acme/app", t3: true }, done: ["GitHub login"], failed: "Clone acme/app" }
+  const bundled = ["logins", "repo", "t3"].map((id) => ({ id, name: id, actions: [] }))
+  const ui = await page({ ...base, list: () => [sandbox({ unfinished })], extensions: () => ({ extensions: bundled, errors: [] }),
+    action: (body) => body.action === "profiles" || body.action === "list" ? { exitCode: 0, stdout: "", stderr: "" } : { exitCode: 0, stdout: `${body.action} ok`, stderr: "" },
+    createRetry: () => ({ sandbox: sandbox(), setup: unfinished.setup, remaining: ["Clone acme/app", "T3 Code"] }), createStep: () => sandbox(), createKeep: () => sandbox() })
+  expect(ui.text("#sandboxes")).toContain("Its setup did not finish: Its setup step Clone acme/app failed. It is removed at ")
+  ui.button("Retry").click(); await ui.settle()
+  expect(ui.calls.filter((call) => call.method === "action" && !["profiles", "list"].includes(call.body.action)).map((call) => call.body.action)).toEqual(["clone", "setup"])
+  expect(ui.calls.filter((call) => call.method === "createStep").map((call) => call.body.step)).toEqual(["Clone acme/app", "T3 Code"])
+  ui.button("Keep as it is").click(); await ui.settle()
+  expect(ui.calls.find((call) => call.method === "createKeep")!.body).toEqual({ name: "demo" })
 })
 
 test("setup inputs appear only for installed extensions", async () => {
