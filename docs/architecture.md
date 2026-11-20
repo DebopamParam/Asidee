@@ -14,7 +14,8 @@
 - **The API cannot express an unsafe sandbox.** A spec is a name, an image or one of Asidee's templates, four sizes
   and a boolean `docker` option (`validSpec` in `core/state.ts`); unknown fields are dropped. There is no field for a
   mount, a capability, a runtime or a port. Each engine reports whether it supports `docker`; create refuses an
-  unsupported request.
+  unsupported request. The one other field, the boolean `gpu`, makes a GPU container, which is not a sandbox (see
+  [GPU containers](#gpu-containers-are-a-separate-weaker-kind)).
 
 A create failure before a container exists rolls back that attempt's labeled network and inner Docker data volume,
 verifies their removal and the absent container, then removes the record. Its error says nothing was kept for that
@@ -920,6 +921,41 @@ confined connection to a real listener in `T` beside an unconfined control, repo
 `confstr` tests in `test/unit/workspaces.test.ts` measure temp-path, metadata and socket access, not PyTorch/MPS or
 CoreML workloads. ONNX Runtime's CoreML provider running an ML Program on the GPU with the metadata rule was measured
 by hand outside the test suite, with a profile that still allowed Unix socket connections in `T`. See [shared temp configuration](workspaces.md#allow-the-shared-per-user-temp-folder).
+
+## GPU containers are a separate, weaker kind
+
+`asd create NAME --gpu` makes a GPU container: a container on Docker's `runc`, on the host's own Linux kernel, with the
+host's NVIDIA GPU. gVisor's GPU layer (nvproxy) does not support the measured machine's driver. A GPU container is
+never called a sandbox: `asd list`, `asd get`, `--json` (`kind`, `spec.gpu`), the checklist and the dashboard label
+it "GPU container · host kernel", and create prints its warning first. Only a request sets `gpu`, never `defaults`.
+
+**What it claims.** It runs as uid 1000 with every capability dropped, `no-new-privileges`, Docker's default seccomp
+filter and, where the engine's host has AppArmor, `docker-default`. The GPU arrives only as Docker's device request
+(`--gpus all`). Everything else is a sandbox's: its own `asd*` network under the same guard, no host folders, no
+published ports, no privileged mode or host namespaces, the same CPU, memory and task limits, and the disk watch.
+
+**What is checked.** `GPU_CHECKLIST` in `core/checks.ts` is the sandbox's checklist with these changes. The kernel item
+is a disclosure (`info`), never a pass; it fails on any runtime but `runc`, or a kernel inside that says gVisor. A
+blocking confinement check reads the engine's configuration and `/proc` inside, for a command and for the main
+process: uid and gid 1000, empty effective, permitted and bounding capability sets, `NoNewPrivs` 1, `Seccomp` 2 and,
+where required, the AppArmor label. The hardening check allows exactly one device request, every NVIDIA GPU with the
+`gpu` capability, and only for a GPU container; a sandbox with any device request still fails. A blocking GPU check
+runs `nvidia-smi -L` as uid 1000. A disclosure lists, from the mount table inside, the host's driver files and device
+nodes that NVIDIA's hook mounts, which `docker inspect` does not show. The probes join the container's network on
+`runc`. The checks run again on the 30-second enforcement pass.
+
+**What is refused.** An engine reports `gpu` only when Docker lists an `nvidia.com/gpu` CDI device or an `nvidia`
+runtime; elsewhere (the Mac) create is refused. Also refused: `--gpu` with `--docker`, a template made from a GPU
+container, links to or from one, SSH setup (sshd cannot switch users without capabilities), and `exec`, `shell` or a
+stream with any user but uid 1000. Asidee's own steps inside run as uid 0 without capabilities (the DNS fallback, the
+credentials disclosure), or as uid 1000 (the relay, forwards).
+
+**Where the guarantee ends.** The kernel is the host's. A bug in it, or in the NVIDIA driver that the container
+reaches through the device nodes, is a way out of the container onto the host, which gVisor would have stood in front
+of. Seccomp and AppArmor narrow what the container can ask of the kernel; they are not a kernel of its own. The driver
+files come from the host, so the host's driver version is the container's. Package managers that need root do not
+work inside. Measurements of a live GPU container (each check passing, the probes on `runc`, the disk watch) are
+pending on the Linux machine it was made for.
 
 ## Adding a provider
 
