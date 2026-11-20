@@ -107,6 +107,7 @@ export class Links {
   }
 
   private support(manifest: Manifest): LinkSupport {
+    if (manifest.spec.gpu) throw new AsideeError("usage", `${manifest.name} is a GPU container, and links to or from one are refused for now: a link's listener runs as root, which has no capabilities there, and the link checks were measured on sandboxes only.`)
     const support = this.providerOf(manifest).links
     if (!support || manifest.engine.capabilities?.loopbackRelay === false || manifest.engine.capabilities?.execStream === false) throw new AsideeError("dependency", `${manifest.engine.label} cannot link ${manifest.name} to another sandbox.`)
     return support
@@ -134,6 +135,8 @@ export class Links {
       const { records, manifests } = await this.current()
       const fromManifest = manifests.get(from); const toManifest = manifests.get(to)
       if (!fromManifest || !toManifest) throw new AsideeError("not-found", `There is no sandbox named ${!fromManifest ? from : to}.`)
+      // A GPU container is refused first, whichever end it is.
+      for (const manifest of [fromManifest, toManifest]) if (manifest.spec.gpu) this.support(manifest)
       this.support(fromManifest); this.support(toManifest)
       const existing = records.find((link) => link.from.sandboxId === fromManifest.id && link.to.sandboxId === toManifest.id && link.port === port)
       const others = records.filter((link) => link !== existing)

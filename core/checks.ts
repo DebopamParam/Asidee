@@ -70,4 +70,22 @@ export const WORKSPACE_CHECKLIST: readonly ChecklistItem[] = [
   { id: "not-covered", title: "Workspace, not a sandbox", stage: "config", blocking: false },
 ]
 
-export const titleOf = (id: CheckId) => CHECKLIST.find((item) => item.id === id)?.title ?? id
+// A GPU container's checklist. It runs on the host's kernel, so its kernel item is a disclosure that never passes as
+// isolated, and confinement and the GPU are checked instead; everything else is the sandbox's checklist unchanged.
+export const GPU_CHECKLIST: readonly ChecklistItem[] = CHECKLIST.filter((item) => item.id !== "docker").flatMap((item): ChecklistItem[] =>
+  item.id === "kernel" ? [
+    { id: "kernel", title: "Runs on the host's Linux kernel (runc), not an isolated one", stage: "runtime", blocking: true },
+    { id: "confinement", title: "Runs as uid 1000 with no capabilities, no new privileges, seccomp and AppArmor", stage: "runtime", blocking: true },
+    { id: "gpu", title: "The NVIDIA GPU answers inside, as uid 1000", stage: "runtime", blocking: true },
+  ]
+  : item.id === "hardening" ? [{ ...item, title: "No privileged mode, host namespaces, capabilities or devices beyond the one GPU request" }]
+  : item.id === "mounts" ? [item, { id: "host-driver", title: "The host's NVIDIA driver files mounted by NVIDIA's hook", stage: "runtime", blocking: false }]
+  : [item])
+export const checklistFor = (spec: { gpu?: boolean } | undefined) => spec?.gpu ? GPU_CHECKLIST : CHECKLIST
+// The only user anything a client runs in a GPU container runs as.
+export const GPU_USER = "1000:1000"
+// How every output names a GPU container, and what it says before one is made.
+export const GPU_KIND = "GPU container · host kernel"
+export const GPU_WARNING = "A GPU container is not a sandbox. It runs on its machine's own Linux kernel through runc, not gVisor, so a bug in that kernel or in the NVIDIA driver is a way onto the machine. It runs as uid 1000 with no capabilities, and has a sandbox's network guard, limits and disk watch."
+
+export const titleOf = (id: CheckId, checklist = CHECKLIST) => checklist.find((item) => item.id === id)?.title ?? id

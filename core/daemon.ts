@@ -4,7 +4,7 @@ import { hostname } from "node:os"
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:net"
 import { join, normalize } from "node:path"
-import { CHECKLIST } from "./checks"
+import { CHECKLIST, GPU_CHECKLIST } from "./checks"
 import { Core } from "./core"
 import { APPROVAL_SECONDS, approvalText, dialogApprover, literal, word, type Answer, type Approval, type Approver } from "./approval"
 import { CATALOG, hostName, isMethod, machineIdentity, Machines, type Hello } from "./machines"
@@ -156,7 +156,8 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     about: { run: async () => ({ version: VERSION, build: BUILD, platform: process.platform, arch: process.arch, pid: process.pid, startedAt: STARTED, stopping: stopping(), stateDir: core.dirs.state, configDir: core.dirs.config, cli: join(core.cliDir, "asd"), builtInDefaults: DEFAULT_SPEC }) },
     usage: { run: () => core.usage() },
     openTerminal: { run: (body) => openTerminal(core.dirs, core.cliDir, systemRunner, { name: String(body.name), kind: body.kind === undefined ? "sandbox" : body.kind as "sandbox", ...(typeof body.machine === "string" ? { machine: body.machine } : {}), ...(body.profile !== undefined ? { profile: body.profile as string } : {}) }) },
-    checklist: { run: async () => CHECKLIST },
+    // kind "gpu": a GPU container's checklist.
+    checklist: { run: async (body) => body.kind === "gpu" ? GPU_CHECKLIST : CHECKLIST },
     engines: { run: () => core.engines() },
     list: { run: () => core.list() },
     get: { run: (body) => core.get(String(body.name)) },

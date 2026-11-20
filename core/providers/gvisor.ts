@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { connect, type Socket } from "node:net"
+import { GPU_USER } from "../checks"
 import { must } from "../run"
 import { AsideeError, type CheckResult, type Engine, type Limits, type LinkSupport, type Manifest, type Provider, type RunOptions, type RunResult, type Runner, type Session, type Stage, type Template } from "../types"
 import { probeCleanupScript, WAIT_FOR_PROBE_ROUTES } from "./probe"
@@ -90,6 +91,14 @@ const seesWrites = (args: readonly string[] = []) => args.includes("--overlay2=n
 const hasRawNetwork = (args: readonly string[] = []) => args.filter((arg) => /^--?net-raw(?:=(?:true|false))?$/.test(arg)).at(-1)?.endsWith("false") === false
 // The runtime `asd host add` registers: a pinned, checksum-verified gVisor that enrollment's smoke sandbox ran on.
 export const MANAGED_RUNTIME = "asidee-runsc"
+// A GPU container runs on the host's kernel through runc, confined as a sandbox's container is not: uid 1000, every
+// capability dropped, no new privileges, Docker's default seccomp and, where the host has it, AppArmor. The GPU comes in
+// only as Docker's device request, which NVIDIA's hook turns into the device nodes and the host's driver files.
+export const GPU_RUNTIME = "runc"
+export const gpuOptions = (engine: Engine) => ["--user", GPU_USER, "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+  ...(engine.data.apparmor ? ["--security-opt", "apparmor=docker-default"] : []), "--gpus", "all"]
+// The runtime a sandbox's container, and each probe standing in for it, runs on.
+export const runtimeOf = (manifest: Manifest) => manifest.spec.gpu ? GPU_RUNTIME : manifest.engine.data.runtime!
 const PROBE_REPLY = "asidee-probe"
 const PROBE_PORT = "7777"
 // One unused address in each private range and in the tailnet range. For a probe, the helper gives each to a listener in
@@ -197,7 +206,9 @@ type Inspect = {
   // The ID of the image the container runs.
   Image?: string
   State: { Running: boolean; OOMKilled?: boolean; ExitCode?: number; StartedAt?: string; FinishedAt?: string }
-  Config: { Labels: Record<string, string> | null }
+  Config: { Labels: Record<string, string> | null; User?: string }
+  // The AppArmor profile the engine started it under; empty where the host has none.
+  AppArmorProfile?: string
   HostConfig: {
     Runtime: string; Privileged: boolean; CapAdd: string[] | null; CapDrop?: string[] | null; Devices: unknown[] | null; PidMode: string; IpcMode: string
     Binds?: string[] | null; VolumesFrom?: string[] | null; DeviceRequests?: unknown[] | null; Annotations?: Record<string, string> | null
@@ -230,15 +241,17 @@ export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardS
     !capsMatch && `added capabilities (${actual.join(", ") || "none"}) instead of exactly ${expected.join(", ") || "none"}`,
     manifest.spec.docker && (host.CapDrop ?? []).length > 0 && "dropped capabilities, changing Docker's declared capability set",
     (host.Devices ?? []).length > 0 && "host devices",
-    (host.DeviceRequests ?? []).length > 0 && "device requests (a GPU, for example)",
+    manifest.spec.gpu ? gpuRequestProblem(host.DeviceRequests) : (host.DeviceRequests ?? []).length > 0 && "device requests (a GPU, for example)",
     (host.VolumesFrom ?? []).length > 0 && "another container's volumes",
     Object.keys(host.Annotations ?? {}).length > 0 && "runtime annotations",
-    host.Runtime !== manifest.engine.data.runtime && `the runtime ${host.Runtime} instead of ${manifest.engine.data.runtime}`,
+    host.Runtime !== runtimeOf(manifest) && `the runtime ${host.Runtime} instead of ${runtimeOf(manifest)}`,
     ...(["PidMode", "IpcMode", "UTSMode", "UsernsMode"] as const).map((key) => host[key] === "host" && `the host's ${key.replace("Mode", "").toLowerCase()} namespace`),
     (host.SecurityOpt ?? []).some((option) => option.includes("unconfined")) && "an unconfined security profile",
+    manifest.spec.gpu && (host.SecurityOpt ?? []).some((option) => !GPU_SECURITY_OPTIONS.includes(option)) && `security options other than no-new-privileges and AppArmor's docker-default (${(host.SecurityOpt ?? []).join(", ")})`,
   ].filter(Boolean)
   out.push(loose.length ? result("hardening", "fail", "inspected", `The container has ${loose.join(", ")}.`) : result("hardening", "pass", "inspected", manifest.spec.docker
-    ? `Docker requested: exactly ${expected.join(", ")} are added to Docker's default capabilities inside gVisor. No privileged mode, host namespaces or devices.` : "None of them are set."))
+    ? `Docker requested: exactly ${expected.join(", ")} are added to Docker's default capabilities inside gVisor. No privileged mode, host namespaces or devices.`
+    : manifest.spec.gpu ? "No privileged mode, host namespaces, added capabilities or host devices. One device request: every NVIDIA GPU, with the gpu capability only." : "None of them are set."))
 
   // Volumes the image declares live in the engine, not in a host folder.
   const binds = [...(inspect.Mounts ?? []).filter((mount) => mount.Type !== "volume" && mount.Type !== "tmpfs"), ...(host.Binds ?? []).map((bind) => ({ Source: bind.split(":")[0]!, Destination: bind.split(":")[1] ?? "" }))]
@@ -251,7 +264,8 @@ export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardS
     : manifest.spec.docker && !privateDocker ? result("mounts", "fail", "inspected", "Docker's data is not on this sandbox's private writable engine volume at /var/lib/docker.")
     : unsafeVolumes && unsafeVolumes.length ? result("mounts", "fail", "inspected", `Unsafe engine volumes: ${unsafeVolumes.map((volume) => volume.Name).join(", ")}. Docker sandboxes require local volumes without mount options (including host-folder binds), and matching ownership labels on the Docker data volume.`)
     : manifest.spec.docker && !volumesRead ? result("mounts", "unknown", "none", "The sandbox's engine volumes could not all be inspected; host-folder-backed volumes cannot be ruled out.")
-    : result("mounts", "pass", "inspected", manifest.spec.docker ? "No host folders. /var/lib/docker is a private engine volume, counted by the disk watch and removed with the sandbox." : "No host folders."))
+    : result("mounts", "pass", "inspected", manifest.spec.docker ? "No host folders. /var/lib/docker is a private engine volume, counted by the disk watch and removed with the sandbox."
+      : manifest.spec.gpu ? "No host folders in the engine's configuration. NVIDIA's hook adds the host's driver files, which it does not list; see that check." : "No host folders."))
 
   const networks = Object.keys(inspect.NetworkSettings.Networks ?? {})
   const own = network(name)
@@ -283,7 +297,7 @@ export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardS
   ].filter(Boolean)
   out.push(unlimited.length ? result("limits", "fail", "inspected", `No limit on ${unlimited.join(", ")}.`)
     : differ.length ? result("limits", "fail", "inspected", `The engine's limits are not the ones Asidee set: ${differ.join("; ")}.`)
-    : result("limits", "pass", "inspected", `${host.Memory / 1024 ** 3} GB memory, ${host.PidsLimit} tasks (gVisor's own threads count, so fewer processes than that fit), ${host.NanoCpus / 1e9} ${host.NanoCpus === 1e9 ? "CPU" : "CPUs"}. A sandbox that passes its memory or task limit is killed. What its main process prints${manifest.spec.docker ? " (dockerd's log)" : ""} is kept on the engine's host, outside the watched disk limit, in two files of at most 10 MiB.`))
+    : result("limits", "pass", "inspected", `${host.Memory / 1024 ** 3} GB memory, ${host.PidsLimit} tasks${manifest.spec.gpu ? "" : " (gVisor's own threads count, so fewer processes than that fit)"}, ${host.NanoCpus / 1e9} ${host.NanoCpus === 1e9 ? "CPU" : "CPUs"}. A ${manifest.spec.gpu ? "container" : "sandbox"} that passes its memory or task limit is killed. What its main process prints${manifest.spec.docker ? " (dockerd's log)" : ""} is kept on the engine's host, outside the watched disk limit, in two files of at most 10 MiB.`))
 
   const disk = manifest.engine.capabilities?.diskLimit
   out.push(disk === "hard" ? result("disk", "pass", "inspected", `${manifest.spec.diskGb} GB; writes fail at the limit.`)
@@ -303,6 +317,82 @@ export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardS
 
 // The engine's values for a spec's limits, as create and resize set them.
 export const engineLimits = (spec: Limits) => ({ memory: Math.round(spec.memoryGb * 1024) * 1024 ** 2, pids: spec.pids, nanoCpus: Math.round(spec.cpus * 1e9) })
+
+// How the engine records a GPU container's security options (the CLI's spellings of no-new-privileges, and AppArmor).
+const GPU_SECURITY_OPTIONS = ["no-new-privileges", "no-new-privileges:true", "no-new-privileges=true", "apparmor=docker-default", "apparmor:docker-default"]
+type DeviceRequest = { Driver?: string; Count?: number; DeviceIDs?: string[] | null; Capabilities?: string[][] | null; Options?: Record<string, string> | null }
+// A GPU container has exactly the request `--gpus all` makes: every GPU, the gpu capability alone, no options. The
+// driver is nvidia, or empty, which the engine resolves to nvidia by that capability.
+export function gpuRequestProblem(requests: readonly unknown[] | null | undefined): string | false {
+  const list = (requests ?? []) as DeviceRequest[]; const request = list[0]
+  if (list.length !== 1 || !request) return `${list.length} device requests instead of the one GPU request`
+  const capabilities = JSON.stringify(request.Capabilities ?? [])
+  const fits = (request.Driver ?? "") === "" || request.Driver === "nvidia"
+  return fits && request.Count === -1 && !(request.DeviceIDs ?? []).length && capabilities === '[["gpu"]]' && !Object.keys(request.Options ?? {}).length ? false
+    : `a device request other than every NVIDIA GPU with the gpu capability (${JSON.stringify(request)})`
+}
+
+// What a GPU container's checks read inside it, in one exec as its user, with Asidee's busybox ($0): its own status and
+// that of its main process, their AppArmor labels, the kernel's version and the mount table.
+export const GPU_INSIDE = `B=$0
+for p in self 1; do echo "== status $p"; $B cat /proc/$p/status; echo "== apparmor $p"; $B cat /proc/$p/attr/current 2>/dev/null; echo; done
+echo "== version"; $B cat /proc/version
+echo "== mounts"; $B cat /proc/self/mountinfo`
+export const insideSections = (text: string) => Object.fromEntries(text.split(/^== /m).filter(Boolean).map((part) => { const at = part.indexOf("\n"); return [part.slice(0, at).trim(), part.slice(at + 1)] }))
+
+// The kernel item of a GPU container: a disclosure, never a pass. It fails on any runtime but runc.
+export function hostKernel(runtime: string, version: string | undefined): CheckResult {
+  if (runtime !== GPU_RUNTIME) return result("kernel", "fail", "inspected", `A GPU container must run on runc, and this one runs on ${runtime}.`)
+  if (version === undefined) return result("kernel", "unknown", "inspected", "The runtime is runc, on the host's kernel, but the kernel could not be read from inside.")
+  if (/gvisor/i.test(version)) return result("kernel", "fail", "probed", "The engine reports runc, but the kernel inside identifies as gVisor.")
+  return result("kernel", "info", "probed", `Not isolated: runc runs it on the host's own Linux kernel (${version.trim().split(" ").slice(0, 3).join(" ")}), not on gVisor. A bug in that kernel or in the NVIDIA driver is a way onto the host.`)
+}
+
+// The GPU container's confinement, from the engine's configuration and from inside, for its user's processes and its
+// main process. AppArmor is required where the engine's host had it when the container was made.
+export function confinement(inspect: Inspect, manifest: Manifest, inside: Record<string, string> | undefined): CheckResult {
+  const host = inspect.HostConfig; const security = host.SecurityOpt ?? []
+  const apparmor = Boolean(manifest.engine.data.apparmor)
+  const problems = [
+    inspect.Config.User !== GPU_USER && `the engine runs it as ${inspect.Config.User || "the image's user"}, not ${GPU_USER}`,
+    !(host.CapDrop ?? []).some((cap) => cap.toUpperCase() === "ALL") && "the engine does not drop every capability",
+    (host.CapAdd ?? []).length > 0 && `the engine adds ${(host.CapAdd ?? []).join(", ")}`,
+    !security.some((option) => option.startsWith("no-new-privileges") && !/false$/.test(option)) && "the engine does not set no-new-privileges",
+    apparmor && inspect.AppArmorProfile !== "docker-default" && `its AppArmor profile is ${inspect.AppArmorProfile || "none"}, not docker-default`,
+  ].filter(Boolean) as string[]
+  if (inside) for (const which of ["self", "1"] as const) {
+    const status = inside[`status ${which}`] ?? ""; const who = which === "self" ? "a command" : "its main process"
+    const field = (name: string) => new RegExp(`^${name}:\\s*(.*)$`, "m").exec(status)?.[1]?.trim().split(/\s+/)
+    if (!status) { problems.push(`the status of ${who} could not be read`); continue }
+    if (!field("Uid")?.every((id) => id === "1000") || !field("Gid")?.every((id) => id === "1000")) problems.push(`${who} runs as uid ${field("Uid")?.join("/")} gid ${field("Gid")?.join("/")}`)
+    for (const set of ["CapEff", "CapPrm", "CapBnd"]) if (!/^0+$/.test(field(set)?.[0] ?? "")) problems.push(`${who} has capabilities (${set} ${field(set)?.[0] ?? "unreadable"})`)
+    if (field("NoNewPrivs")?.[0] !== "1") problems.push(`${who} may gain privileges (NoNewPrivs ${field("NoNewPrivs")?.[0] ?? "unreadable"})`)
+    if (field("Seccomp")?.[0] !== "2") problems.push(`${who} is not under a seccomp filter (Seccomp ${field("Seccomp")?.[0] ?? "unreadable"})`)
+    const label = (inside[`apparmor ${which}`] ?? "").trim()
+    if (apparmor && !label.startsWith("docker-default")) problems.push(`${who} is not confined by AppArmor (${label || "no label"})`)
+  }
+  if (problems.length) return result("confinement", "fail", inside ? "probed" : "inspected", `Not confined as a GPU container must be: ${problems.join("; ")}.`)
+  if (!inside) return result("confinement", "unknown", "inspected", "The engine's configuration holds, but it could not be read from inside.")
+  return result("confinement", "pass", "probed", `uid and gid 1000, no capabilities (effective, permitted and bounding sets empty), NoNewPrivs 1 and seccomp filter mode 2, for a command and for the main process${apparmor ? ", each under AppArmor's docker-default" : "; the engine's host has no AppArmor, so there is none"}. Read from the engine and from /proc inside. This is the confinement of a container on the host's kernel: it narrows what the kernel lets the container ask, it does not replace a kernel of its own.`)
+}
+
+// The GPU check: `nvidia-smi -L` as uid 1000 must list one.
+export function gpuListing(run: RunResult): CheckResult {
+  const gpus = run.stdout.split("\n").filter((line) => /^GPU \d+: /.test(line))
+  return run.exitCode === 0 && gpus.length ? result("gpu", "pass", "probed", `nvidia-smi -L as uid 1000 lists ${gpus.map((line) => line.replace(/\s*\(UUID:.*\)$/, "")).join("; ")}.`)
+    : result("gpu", "fail", "probed", `nvidia-smi -L as uid 1000 listed no GPU (exit ${run.exitCode}): ${(run.stderr || run.stdout).trim().slice(0, 300) || "no output"}`)
+}
+
+// The host's driver files NVIDIA's hook mounts, read from the mount table inside: docker inspect does not show them.
+export function hostDriver(mountinfo: string | undefined): CheckResult {
+  if (mountinfo === undefined) return result("host-driver", "unknown", "none", "The mount table inside could not be read. NVIDIA's hook mounts the host's driver files, which docker inspect does not show.")
+  const mounts = mountinfo.split("\n").map((line) => line.split(" ")).filter((fields) => fields.length > 5 && /nvidia|libcuda|cuda/i.test(fields[4]!)).map((fields) => ({ path: fields[4]!, writable: fields[5]!.split(",").includes("rw") }))
+  const files = mounts.filter((mount) => !mount.path.startsWith("/dev/")); const devices = mounts.filter((mount) => mount.path.startsWith("/dev/"))
+  if (!mounts.length) return result("host-driver", "unknown", "probed", "No NVIDIA mounts were seen inside. NVIDIA's hook normally mounts the host's driver files, which docker inspect does not show.")
+  const writable = files.filter((mount) => mount.writable)
+  const listed = (entries: typeof mounts) => `${entries.slice(0, 6).map((mount) => mount.path).join(", ")}${entries.length > 6 ? ` and ${entries.length - 6} more` : ""}`
+  return result("host-driver", writable.length ? "weak" : "info", "probed", `NVIDIA's hook mounted ${files.length} of the host's driver files${writable.length ? `, ${writable.length} of them writable (${listed(writable)})` : ", all read-only"}: ${listed(files)}${devices.length ? `; and the device nodes ${listed(devices)}` : ""}. docker inspect does not show these mounts. They are the host's NVIDIA driver, used by the container on the host's kernel.`)
+}
 
 export class GvisorProvider implements Provider {
   readonly id = "gvisor"
@@ -375,7 +465,7 @@ export class GvisorProvider implements Provider {
       // Remote engines (ssh://, tcp://) are not handled yet: the probes assume the engine's host is this machine or its VM.
       if (!/^(unix|npipe):\/\//.test(context.DockerEndpoint)) continue
       const info = await this.run(["docker", "--context", context.Name, "info", "--format", "{{json .}}"], { timeoutMs: 10_000 })
-      let parsed: { ID?: string; OperatingSystem?: string; ServerVersion?: string; Architecture?: string; Runtimes?: Record<string, RuntimeEntry> } = {}
+      let parsed: { ID?: string; OperatingSystem?: string; ServerVersion?: string; Architecture?: string; Runtimes?: Record<string, RuntimeEntry>; DiscoveredDevices?: Array<{ Source?: string; ID?: string }> | null; SecurityOptions?: string[] | null } = {}
       try { parsed = JSON.parse(info.stdout) } catch {}
       if (info.exitCode !== 0 || !parsed.ServerVersion) {
         engines.push({ ...base, label: `Docker context ${context.Name}`, ready: false, problems: ["The Docker engine does not answer."], fix: "Start the engine (OrbStack, Docker Desktop, or `systemctl start docker`)." })
@@ -399,12 +489,15 @@ export class GvisorProvider implements Provider {
         continue
       }
       const measurable = seesWrites(chosen[1].runtimeArgs)
-      engines.push({ ...base, label, ready: true, data: { context: context.Name, runtime: chosen[0] },
+      // Docker can hand a runc container an NVIDIA GPU when it lists one by CDI or has NVIDIA's runtime registered.
+      const gpu = (parsed.DiscoveredDevices ?? []).some((device) => device.Source === "cdi" && /^nvidia\.com\/gpu=/.test(device.ID ?? "")) || Object.hasOwn(parsed.Runtimes ?? {}, "nvidia")
+      const apparmor = (parsed.SecurityOptions ?? []).some((option) => /^name=apparmor(,|$)/.test(option))
+      engines.push({ ...base, label, ready: true, data: { context: context.Name, runtime: chosen[0], ...(gpu && apparmor ? { apparmor: "docker-default" } : {}) },
         problems: measurable ? [] : [`Sandboxes here have no disk limit: the runtime ${chosen[0]} lacks --overlay2=none, without which Asidee cannot measure what a sandbox writes.`],
         capabilities: { kernelIsolation: "gvisor", diskLimit: measurable ? "watched" : "none", networkGuard: true, docker: measurable && hasRawNetwork(chosen[1].runtimeArgs), execStream: true, loopbackRelay: true,
           // docker update changes a running gVisor sandbox's cgroup at once (measured on OrbStack), and resize reads it
           // back. A commit sees a sandbox's files only when they reach the engine's layer, which needs --overlay2=none.
-          resize: "live", snapshot: measurable } })
+          resize: "live", snapshot: measurable, ...(gpu ? { gpu: true } : {}) } })
     }
     return engines
   }
@@ -452,11 +545,11 @@ export class GvisorProvider implements Provider {
     // The reaper exits with dockerd. No restart policy may bypass the guard and checks.
     const made = await this.docker(engine, [
       "create", "--name", container(name), "--hostname", name, "--label", `${LABEL_NAME}=${name}`, "--label", `${LABEL_ID}=${manifest.id}`,
-      "--runtime", engine.data.runtime!, "--network", network(name), "--restart", "no",
+      "--runtime", runtimeOf(manifest), "--network", network(name), "--restart", "no",
       "--cpus", String(spec.cpus), "--memory", memory, "--memory-swap", memory, "--pids-limit", String(spec.pids),
       "--log-driver", "json-file", ...Object.entries(LOG_LIMIT).flatMap(([key, value]) => ["--log-opt", `${key}=${value}`]),
       ...(spec.docker ? [...DOCKER_CAPABILITIES.flatMap((cap) => ["--cap-add", cap]), "--mount", `type=volume,src=${dockerVolume(manifest)},dst=/var/lib/docker,volume-nocopy`, "--user", "0", "--entrypoint", RELAY, spec.image, "sh", "-c", DOCKER_REAPER]
-        : ["--entrypoint", RELAY, spec.image, "sh", "-c", REAPER]),
+        : [...(spec.gpu ? gpuOptions(engine) : []), "--entrypoint", RELAY, spec.image, "sh", "-c", REAPER]),
     ], { timeoutMs: 1_800_000 })
     if (made.exitCode !== 0 && /Unable to find image|No such image|pull access denied|manifest unknown|image.*not found|failed to resolve|failed to pull|pulling.*failed/i.test(made.stderr)) {
       const reason = made.stderr.trim().split("\n").find((line) => /Error response from daemon:/.test(line)) ?? made.stderr.trim().split("\n").at(-1) ?? "image unavailable"
@@ -492,7 +585,7 @@ export class GvisorProvider implements Provider {
     if (manifest.spec.docker) return `Docker ended at ${at} (exit code ${state.ExitCode}). Start the sandbox to run it again; memory and task limits can also end it.`
     // docker stop ends it with 137 or 143; anything else is the sandbox's own doing.
     if (state.ExitCode === 137 || state.ExitCode === 143 || state.ExitCode === 0) return undefined
-    return `Ended on its own at ${at} (exit code ${state.ExitCode}). A gVisor sandbox that runs out of its task limit of ${manifest.spec.pids} ends this way.`
+    return `Ended on its own at ${at} (exit code ${state.ExitCode}).${manifest.spec.gpu ? "" : ` A gVisor sandbox that runs out of its task limit of ${manifest.spec.pids} ends this way.`}`
   }
 
   async start(manifest: Manifest): Promise<void> {
@@ -839,6 +932,7 @@ export class GvisorProvider implements Provider {
       if (described?.exitCode === 0) { try { image = (JSON.parse(described.stdout) as ImageInspect[])[0] } catch {} }
       return configChecks(inspect, manifest, await this.guardState(engine), bridgeName.exitCode === 0 ? bridgeName.stdout.trim() : undefined, volumes, image, this.owner)
     }
+    if (stage === "runtime" && manifest.spec.gpu) return this.gpuChecks(manifest, inspect)
     if (stage === "runtime") {
       const kernel = await this.kernelCheck(manifest, inspect)
       const dns = kernel.status === "pass" ? await this.dnsCheck(manifest) : result("dns", "unknown", "none", "DNS was not set or read because the isolated kernel check did not pass.")
@@ -852,6 +946,19 @@ export class GvisorProvider implements Provider {
     return next
   }
 
+  // A GPU container's runtime checks: what the engine and the kernel inside say, the GPU, and DNS as for a sandbox.
+  private async gpuChecks(manifest: Manifest, inspect: Inspect): Promise<CheckResult[]> {
+    const read = await this.docker(manifest.engine, ["exec", "-u", GPU_USER, container(manifest.name), RELAY, "sh", "-c", GPU_INSIDE, RELAY], { timeoutMs: 30_000 })
+    const inside = read.exitCode === 0 ? insideSections(read.stdout) : undefined
+    const kernel = hostKernel(inspect.HostConfig.Runtime, inside?.version)
+    const confined = confinement(inspect, manifest, inside)
+    const held = kernel.status === "info" && confined.status === "pass"
+    const gpu = held ? gpuListing(await this.docker(manifest.engine, ["exec", "-u", GPU_USER, container(manifest.name), "nvidia-smi", "-L"], { timeoutMs: 30_000 }))
+      : result("gpu", "unknown", "none", "The GPU was not tried, because the kernel or confinement check did not hold.")
+    const dns = held ? await this.dnsCheck(manifest) : result("dns", "unknown", "none", "DNS was not set or read, because the kernel or confinement check did not hold.")
+    return [kernel, confined, gpu, dns, hostDriver(inside?.mounts)]
+  }
+
   private dockerInfo(manifest: Manifest): Promise<RunResult> {
     return this.docker(manifest.engine, ["exec", "-u", "0", container(manifest.name), "docker", "--host", "unix:///var/run/docker.sock", "info", "--format", "{{.DockerRootDir}} {{.Driver}}"], { timeoutMs: 10_000 })
   }
@@ -859,7 +966,8 @@ export class GvisorProvider implements Provider {
   // Read first and write only a file that differs, so a pass every 30 seconds does not rewrite it. Docker may reset this
   // engine-owned file across a restart, even with the container still running.
   private async dnsCheck(manifest: Manifest): Promise<CheckResult> {
-    const scope = "Under gVisor the engine's per-network resolver at 127.0.0.11 refuses queries. This checks configuration, not a live lookup or existing inner containers' resolver state; no isolation check depends on it."
+    const scope = manifest.spec.gpu ? "A GPU container gets the same fallback as a sandbox. This checks configuration, not a live lookup; no isolation check depends on it."
+      : "Under gVisor the engine's per-network resolver at 127.0.0.11 refuses queries. This checks configuration, not a live lookup or existing inner containers' resolver state; no isolation check depends on it."
     try {
       const found = await this.docker(manifest.engine, ["exec", "-u", "0", container(manifest.name), "cat", "/etc/resolv.conf"])
       if (found.exitCode === 0 && found.stdout === SANDBOX_DNS)
@@ -953,7 +1061,7 @@ export class GvisorProvider implements Provider {
       must(await this.docker(engine, ["network", "create", "--label", `com.asidee.probe=${this.owner}`, "-o", `com.docker.network.bridge.name=${BRIDGE_PREFIX}x${tag}`, peerNet]), "Creating the probe network")
       must(await runHelper(hostC, "runc", "host", ["sh", "-c", hostProbeScript(tag, gateway, hostPort)], true), "Starting the host listener")
       must(await runHelper(peerC, "runc", peerNet, listen(PROBE_PORT)), "Starting the peer listener")
-      must(await runHelper(probeC, engine.data.runtime!, network(name), listen(PROBE_PORT)), "Starting the probe")
+      must(await runHelper(probeC, runtimeOf(manifest), network(name), listen(PROBE_PORT)), "Starting the probe")
       const [peerIp, probeIp] = [await address(peerC), await address(probeC)]
       const hostLog = async () => (await this.docker(engine, ["logs", hostC])).stdout
       // Past the wait for another probe's teardown, which the host listener does first.
@@ -1020,8 +1128,13 @@ export class GvisorProvider implements Provider {
     if (teardownFailure) throw new AsideeError("runtime", teardownFailure)
 
     const script = `for home in /root /home/*; do for file in ${CREDENTIAL_FILES.map((file) => `"$home"/${file}`).join(" ")}; do [ -e "$file" ] && echo "$file"; done; done; true`
-    const found = await this.docker(engine, ["exec", "-u", "0", container(name), "sh", "-c", script])
-    const files = found.stdout.split("\n").filter(Boolean)
+    // In a GPU container root has no capabilities, so it cannot look in uid 1000's private folders; that user looks too.
+    let found = await this.docker(engine, ["exec", "-u", "0", container(name), "sh", "-c", script])
+    if (manifest.spec.gpu && found.exitCode === 0) {
+      const own = await this.docker(engine, ["exec", "-u", GPU_USER, container(name), "sh", "-c", script])
+      found = own.exitCode === 0 ? { ...found, stdout: `${found.stdout}${own.stdout}` } : own
+    }
+    const files = [...new Set(found.stdout.split("\n").filter(Boolean))]
     out.push(found.exitCode !== 0 ? result("credentials", "unknown", "none", `Could not look: ${found.stderr.trim()}`)
       : files.length ? result("credentials", "info", "probed", `Found ${files.join(", ")}. An agent in the sandbox can read these and send them out.`)
       : result("credentials", "info", "probed", `None of the usual login files (Claude, Codex, GitHub, git, SSH keys, AWS, netrc) are present, as seen with ${OWN}; a disclosure, not a guarantee.`))

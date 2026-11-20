@@ -1,5 +1,6 @@
 // The vocabulary of the core. Everything a client (CLI, UI, extension) can ask for is expressed in these types, and none
-// of them can express a host mount, a privileged container, a runtime choice or a non-loopback port.
+// of them can express a host mount, a privileged container, a runtime choice or a non-loopback port. The one exception
+// is the boolean gpu, which makes a GPU container on the host's kernel: a weaker kind, never called a sandbox.
 
 export type SandboxSpec = {
   name: string
@@ -10,6 +11,8 @@ export type SandboxSpec = {
   // The sandbox may use this much disk. How strictly that holds depends on the engine: see Capabilities.diskLimit.
   diskGb: number
   docker: boolean
+  // A GPU container: runc on the host's Linux kernel with the NVIDIA GPU, not gVisor. Absent means false.
+  gpu?: boolean
   // The name of an Asidee template (an image made from a sandbox) to start from instead of an image; the core resolves it
   // to the template's image ID before anything is created.
   template?: string
@@ -30,6 +33,8 @@ export type Capabilities = {
   resize: "live" | "restart" | "none"
   // An image can be made from a sandbox's files (a template).
   snapshot: boolean
+  // Docker can pass an NVIDIA GPU to a runc container (a GPU container). Absent means false.
+  gpu?: boolean
 }
 
 export type Limits = { cpus: number; memoryGb: number; pids: number }
@@ -62,6 +67,7 @@ export type Engine = {
 export type CheckId =
   | "kernel" | "hardening" | "mounts" | "network-guard" | "inbound" | "forwards" | "ssh" | "links" | "limits" | "disk" | "docker" | "dns"
   | "template" | "net-host" | "net-peers" | "link-scope" | "net-private" | "egress" | "credentials"
+  | "confinement" | "host-driver"
   | "seatbelt" | "writes" | "home-closed" | "daemons" | "user-data" | "processes" | "gpu" | "network" | "loopback" | "not-covered" | "hard-links" | "free-space"
 
 export type WorkspaceLogins = { kind: "none" } | { kind: "profiles"; claude: string; codex: string }

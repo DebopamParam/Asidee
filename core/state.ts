@@ -62,9 +62,14 @@ export function validSpec(input: Record<string, unknown>, defaults: Defaults = {
   if (typeof image !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$/.test(image)) throw new AsideeError("usage", "The image must be an image reference such as ubuntu:24.04.")
   // A template is used by its name, so the sandbox records it and its checklist says so.
   if (/^asidee-(template|snapshot)-/.test(image)) throw new AsideeError("usage", `${image} is one of Asidee's templates. Use --template with its name instead (see \`asd template list\`).`)
-  const docker = input.docker === undefined ? base.docker : input.docker
+  // Only a request makes a GPU container, never a default: it is the weaker kind.
+  const gpu = input.gpu === undefined ? false : input.gpu
+  if (typeof gpu !== "boolean") throw new AsideeError("usage", "gpu must be a boolean (true or false).")
+  if (gpu && input.docker === true) throw new AsideeError("usage", "A GPU container cannot run Docker inside: that has not been measured. Leave out --docker.")
+  // Docker inside from the defaults does not apply to a GPU container.
+  const docker = input.docker === undefined ? !gpu && base.docker : input.docker
   if (typeof docker !== "boolean") throw new AsideeError("usage", "docker must be a boolean (true or false).")
-  return { name: validName(input.name), image, docker, ...validSizes(input, base), ...(template ? { template } : {}) }
+  return { name: validName(input.name), image, docker, ...validSizes(input, base), ...(template ? { template } : {}), ...(gpu ? { gpu } : {}) }
 }
 
 const manifestDir = (dirs: Dirs) => join(dirs.state, "sandboxes")

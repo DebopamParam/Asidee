@@ -4,6 +4,7 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { Server } from "node:net"
 import type { SandboxView } from "./core"
+import { GPU_KIND } from "./checks"
 import { boundPort, LEASE_RENEW_MS, LEASE_TTL_MS, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
 import { readConfig, validName, validSpec, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
@@ -187,7 +188,7 @@ export function parseRow(entry: unknown, hello: Hello, index = 0): SandboxView {
     }
     const spec = entry.status === "damaged" ? damagedSpec(name) : validSpec(entry.spec.template ? { ...entry.spec, image: undefined } : entry.spec)
     if (entry.status !== "damaged" && entry.spec.template && typeof entry.spec.image === "string") spec.image = entry.spec.image
-    return { name, status: entry.status as SandboxView["status"], machineId: hello.machineId, ...(id(entry.sandboxId) ? { sandboxId: entry.sandboxId } : {}), engine: entry.engine, createdAt: entry.createdAt, spec,
+    return { name, status: entry.status as SandboxView["status"], machineId: hello.machineId, ...(id(entry.sandboxId) ? { sandboxId: entry.sandboxId } : {}), engine: entry.engine, createdAt: entry.createdAt, spec, ...(spec.gpu ? { kind: GPU_KIND } : {}),
       lastVerify, enforcementProblem, ...(diskWarning ? { diskWarning } : {}), ...(typeof entry.stopReason === "string" ? { stopReason: entry.stopReason } : {}), ...(typeof entry.activity === "string" ? { activity: entry.activity } : {}) }
   } catch (error) {
     return { name, status: "damaged", machineId: hello.machineId, ...(id(entry.sandboxId) ? { sandboxId: entry.sandboxId } : {}), engine: typeof entry.engine === "string" ? entry.engine : "", createdAt: "", spec: damagedSpec(name),

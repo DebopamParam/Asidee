@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
 import type { Server } from "node:net"
-import { blockers, CHECKLIST, complete, failures, historical, titleOf } from "./checks"
+import { blockers, checklistFor, complete, failures, GPU_KIND, GPU_USER, GPU_WARNING, historical, titleOf } from "./checks"
 import { availableExtensions, fieldValues, installExtension, loadExtensions, removeExtension, runCommand } from "./extensions"
 import { boundPort, FORWARD_REACH, LEASE_TTL_MS, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
 import { Links } from "./links"
@@ -33,10 +33,19 @@ export type SandboxView = {
   // What a long operation on it is doing right now.
   activity?: string
   template?: Manifest["template"]
+  // Set only for the weaker kind, a GPU container (GPU_KIND); a sandbox has none.
+  kind?: string
 }
 
 export type SandboxUsage = { name: string; running: boolean; cpus: number; memoryLimitBytes: number; pidsLimit: number; diskLimitBytes: number; cpuPercent?: number; memoryBytes?: number
   tasks?: number; diskBytes?: number; diskMeasuredAt?: string; problem?: string }
+
+// In a GPU container, commands run as uid 1000; a request for any other user, root included, is refused. Asidee's own
+// steps inside it (the DNS fallback, the relay) do not come through here.
+function gpuUser(manifest: Manifest, user: string | undefined): void {
+  if (manifest.spec.gpu && user !== undefined && user !== "1000" && user !== GPU_USER)
+    throw new AsideeError("usage", `${manifest.name} is a GPU container, where commands run as uid 1000 only; --user ${user} is refused. Root is not offered there, since the container runs on its machine's own kernel.`)
+}
 
 const overDisk = (manifest: Manifest, used: number) => `Stopped by the disk watch: it used ${(used / 1024 ** 3).toFixed(1)} GB of its ${manifest.spec.diskGb} GB. Free space inside it after a start, or it is stopped again.`
 
@@ -125,7 +134,7 @@ export class Core {
     return { name: manifest.name, machineId: this.machineId, sandboxId: manifest.id, status, engine: manifest.engine.label, spec: manifest.spec, createdAt: manifest.createdAt, capabilities: manifest.engine.capabilities,
       lastVerify: historical(manifest.lastVerify),
       enforcementProblem: this.enforcementProblems.get(manifest.name) ?? manifest.enforcementProblem,
-      stopReason, activity: this.activity.get(manifest.name), template: manifest.template }
+      stopReason, activity: this.activity.get(manifest.name), template: manifest.template, ...(manifest.spec.gpu ? { kind: GPU_KIND } : {}) }
   }
 
   async list(): Promise<SandboxView[]> {
@@ -148,11 +157,11 @@ export class Core {
       }
     }
     if (stages.includes("config")) results.push(this.forwardCheck(manifest), this.sshCheck(manifest), await this.links.check(manifest))
-    return complete(results, stages, running ? undefined : "Not checked: the sandbox is not running.")
+    return complete(results, stages, running ? undefined : `Not checked: the ${manifest.spec.gpu ? "GPU container" : "sandbox"} is not running.`, checklistFor(manifest.spec))
   }
 
-  private refuse(name: string, failed: CheckResult[], consequence: string): never {
-    throw new AsideeError("check-failed", `${name} ${consequence}: ${failed.map((entry) => `${titleOf(entry.id)} (${entry.detail})`).join("; ")}`, failed)
+  private refuse(manifest: Manifest, failed: CheckResult[], consequence: string): never {
+    throw new AsideeError("check-failed", `${manifest.name} ${consequence}: ${failed.map((entry) => `${titleOf(entry.id, checklistFor(manifest.spec))} (${entry.detail})`).join("; ")}`, failed)
   }
 
   // Before the engine stops it, so each client is told why its session ended.
@@ -177,15 +186,16 @@ export class Core {
     this.activity.set(name, "Loading the network guard")
     await provider.prepare(manifest)
     this.activity.set(name, "Checking the configuration")
-    const before = blockers(await this.stage(manifest, ["config"], false))
-    if (before.length) this.refuse(name, before, "was not started")
+    const checklist = checklistFor(manifest.spec)
+    const before = blockers(await this.stage(manifest, ["config"], false), checklist)
+    if (before.length) this.refuse(manifest, before, "was not started")
     this.activity.set(name, "Starting")
     manifest.checksPending = new Date().toISOString(); await writeManifest(this.dirs, manifest)
     // Whatever goes wrong from here, the sandbox is not left running unchecked.
     try {
       await provider.start(manifest)
-      const after = blockers(await this.stage(manifest, ["runtime"], true))
-      if (after.length) this.refuse(name, after, "was stopped again")
+      const after = blockers(await this.stage(manifest, ["runtime"], true), checklist)
+      if (after.length) this.refuse(manifest, after, "was stopped again")
     } catch (error) {
       await provider.stop(manifest).catch(() => {})
       throw error
@@ -201,23 +211,26 @@ export class Core {
     const checks = await this.stage(manifest, ["config", "runtime", "probe"], running)
     manifest.lastVerify = { at: new Date().toISOString(), results: checks }; delete manifest.checksPending
     // A stopped sandbox is judged on its configuration alone: the rest was not checked, which is not a failure.
-    const failed = running ? blockers(checks, CHECKLIST, requireProbes) : blockers(checks).filter((entry) => entry.status === "fail")
-    if (failed.length && running) await this.stopBecause(manifest, `Stopped by verify: ${failed.map((entry) => titleOf(entry.id)).join("; ")}`)
+    const checklist = checklistFor(manifest.spec)
+    const failed = running ? blockers(checks, checklist, requireProbes) : blockers(checks, checklist).filter((entry) => entry.status === "fail")
+    if (failed.length && running) await this.stopBecause(manifest, `Stopped by verify: ${failed.map((entry) => titleOf(entry.id, checklist)).join("; ")}`)
     else await writeManifest(this.dirs, manifest)
     return { checks, failed, configurationOnly: !running }
   }
 
-  async create(input: Record<string, unknown>): Promise<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }> }> {
+  // warning: said with every GPU container made (GPU_WARNING).
+  async create(input: Record<string, unknown>): Promise<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }>; warning?: string }> {
     const config = await readConfig(this.dirs)
     const spec = validSpec(input, config.defaults)
     const { manifest, checks } = await this.exclusive(spec.name, async () => {
       if ((await listManifests(this.dirs)).some((entry) => entry.name === spec.name)) throw new AsideeError("conflict", `A sandbox named ${spec.name} already exists.`)
       const engines = await this.engines()
       const wanted = typeof input.engine === "string" && input.engine ? input.engine : config.engine
-      const engine = wanted ? engines.find((entry) => entry.id === wanted) : engines.find((entry) => entry.ready)
+      const engine = wanted ? engines.find((entry) => entry.id === wanted) : engines.find((entry) => entry.ready && (!spec.gpu || entry.capabilities?.gpu)) ?? engines.find((entry) => entry.ready)
       if (!engine) throw new AsideeError("dependency", wanted ? `There is no engine ${wanted}. Run \`asd doctor\`.` : "No engine is ready for sandboxes. Run `asd doctor` to see what each one needs.")
       if (!engine.ready) throw new AsideeError("dependency", `${engine.label} is not ready: ${engine.problems.join(" ")} ${engine.fix ?? ""}`.trim())
       if (spec.docker && !engine.capabilities?.docker) throw new AsideeError("dependency", `${engine.label} cannot run Docker inside a sandbox. Choose an engine with the docker capability (gVisor needs --net-raw and --overlay2=none).`)
+      if (spec.gpu && !engine.capabilities?.gpu) throw new AsideeError("dependency", `${engine.label} cannot make a GPU container: Docker there lists no NVIDIA GPU (no nvidia.com/gpu CDI device and no nvidia runtime). It needs Linux with an NVIDIA GPU and the NVIDIA Container Toolkit.`)
       // Written before the engine is touched, so a half-made sandbox can always be removed.
       const manifest: Manifest = { version: 1, name: spec.name, id: randomBytes(16).toString("hex"), engine, spec, createdAt: new Date().toISOString() }
       const provider = this.provider(manifest)
@@ -266,9 +279,10 @@ export class Core {
       const { checks, failed } = verified
       if (failed.length) {
         // Only when turning the requirement off would let this create through: a failure beside an unknown probe is a failed check.
-        const unknown = failed.every((check) => check.status === "unknown" && CHECKLIST.find((item) => item.id === check.id)?.stage === "probe")
-        if (unknown) throw new AsideeError("probes-required", `${spec.name} was created but stopped, and is kept for diagnosis: ${failed.map((check) => `${titleOf(check.id)} (${check.detail})`).join("; ")}. Required isolation probes could not run. To try again: \`asd remove ${spec.name} --confirm ${spec.name}\`, then create it again. Only to allow creation without them: run \`asd config set require-probes off\` on this machine, or turn off Require isolation probes in Settings.`, failed)
-        this.refuse(spec.name, failed, "was created but stopped, and is kept for diagnosis")
+        const checklist = checklistFor(spec)
+        const unknown = failed.every((check) => check.status === "unknown" && checklist.find((item) => item.id === check.id)?.stage === "probe")
+        if (unknown) throw new AsideeError("probes-required", `${spec.name} was created but stopped, and is kept for diagnosis: ${failed.map((check) => `${titleOf(check.id, checklist)} (${check.detail})`).join("; ")}. Required isolation probes could not run. To try again: \`asd remove ${spec.name} --confirm ${spec.name}\`, then create it again. Only to allow creation without them: run \`asd config set require-probes off\` on this machine, or turn off Require isolation probes in Settings.`, failed)
+        this.refuse(manifest, failed, "was created but stopped, and is kept for diagnosis")
       }
       return { manifest, checks }
     })
@@ -280,7 +294,7 @@ export class Core {
       const output = await runCommand(this.run, extension, extension.hooks.postCreate, { ASIDEE_SANDBOX: spec.name }, this.cliDir).finally(() => this.activity.delete(spec.name))
       hooks.push({ extension: extension.id, exitCode: output.exitCode, output: `${output.stdout}${output.stderr}`.trim() })
     }
-    return { sandbox: await this.get(spec.name).catch(() => this.view(manifest)), checks, hooks }
+    return { sandbox: await this.get(spec.name).catch(() => this.view(manifest)), checks, hooks, ...(spec.gpu ? { warning: GPU_WARNING } : {}) }
   }
 
   // Its links open once it runs, outside its lock: opening one touches the sandbox at its other end too.
@@ -377,9 +391,10 @@ export class Core {
         if (live && same(limit, live[limit], next[limit])) return { ...change, applies: "now", note: "Read back from the engine's host. Inside, /proc/meminfo keeps the memory gVisor started with and nproc does not follow the CPU limit; the engine's host enforces the new one." }
         return { ...change, applies: "next start", note: `The engine accepted it, but the running sandbox could not be confirmed to have it${live ? ` (its host reports ${live[limit]})` : ""}. It applies at the next start.` }
       })
-      const checks = (await this.stage(manifest, ["config"], status === "running")).filter((check) => CHECKLIST.find((item) => item.id === check.id)?.stage === "config")
-      const failed = blockers(checks)
-      if (failed.length && status === "running") await this.stopBecause(manifest, `Stopped after a resize: ${failed.map((entry) => `${titleOf(entry.id)} (${entry.detail})`).join("; ")}`)
+      const checklist = checklistFor(manifest.spec)
+      const checks = (await this.stage(manifest, ["config"], status === "running")).filter((check) => checklist.find((item) => item.id === check.id)?.stage === "config")
+      const failed = blockers(checks, checklist)
+      if (failed.length && status === "running") await this.stopBecause(manifest, `Stopped after a resize: ${failed.map((entry) => `${titleOf(entry.id, checklist)} (${entry.detail})`).join("; ")}`)
       return { sandbox: await this.view(manifest), changes, checks }
     })
   }
@@ -389,6 +404,7 @@ export class Core {
     const templateName = validTemplateName(as)
     return this.exclusive(validName(name), async () => {
       const manifest = await readManifest(this.dirs, name); const provider = this.provider(manifest)
+      if (manifest.spec.gpu) throw new AsideeError("usage", `${name} is a GPU container, and templates are made from sandboxes only for now: a template from a GPU container's files has not been measured.`)
       if (manifest.engine.capabilities?.snapshot === false) throw new AsideeError("dependency", `${manifest.engine.label} cannot make templates: its gVisor runtime lacks --overlay2=none, so the engine does not see a sandbox's files.`)
       if ((await provider.status(manifest)) === "missing") throw new AsideeError("not-found", `${name} has no container on ${manifest.engine.label}.`)
       return this.exclusive(`template:${templateName}`, async () => {
@@ -440,6 +456,7 @@ export class Core {
     if (!Array.isArray(argv) || argv.length === 0 || !argv.every((part) => typeof part === "string")) throw new AsideeError("usage", "exec needs a command.")
     if (options.user !== undefined && !/^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}$/.test(options.user)) throw new AsideeError("usage", "The user must be a user name or id.")
     const manifest = await readManifest(this.dirs, name)
+    gpuUser(manifest, options.user)
     const result = await this.provider(manifest).exec(manifest, argv as string[], options)
     if (result.overflow) throw new AsideeError("runtime", `The command printed more than ${OUTPUT_LIMIT / 1024 ** 2} MiB on ${result.overflow}, the most one exec may return, so Asidee stopped reading and discarded its output. ${result.stderr} Write large output to a file inside the sandbox and read it in parts.`.replace(/  +/g, " "))
     return result
@@ -486,6 +503,7 @@ export class Core {
     }
     // sshd in inetd mode serves this one connection; -e sends its complaints to the client's stderr.
     if (request.kind === "ssh" && !manifest.ssh) throw new AsideeError("conflict", `SSH is not set up for ${request.name}. Run \`asd ssh setup ${request.name}\`.`)
+    if (request.kind === "exec") gpuUser(manifest, request.user)
     const session = request.kind === "ssh" ? await provider.openExec(manifest, [manifest.ssh!.sshd, "-i", "-e", "-f", `${GUEST_SSH}/sshd_config`], { user: "0", tty: false })
       : await provider.openExec(manifest, request.argv, request)
     this.trackSession(request.name, session)
@@ -580,6 +598,7 @@ export class Core {
   sshSetup(name: string, writeConfig = false, publicKey?: string): Promise<SshAccess & { config: string; include: string; included: boolean; editorKey: string; keyFile: string; sandboxId: string; setup: SshSetup }> {
     return this.exclusive(validName(name), async () => {
       const manifest = await readManifest(this.dirs, name); const provider = this.provider(manifest)
+      if (manifest.spec.gpu) throw new AsideeError("usage", `${name} is a GPU container, where sshd cannot switch to its user: no process there has the capabilities to. Use \`asd shell ${name}\`.`)
       if (manifest.engine.capabilities?.execStream === false) throw new AsideeError("dependency", `${manifest.engine.label} cannot relay a session's bytes, which SSH needs.`)
       if ((await provider.status(manifest)) !== "running") throw new AsideeError("conflict", `${name} is not running. Start it with \`asd start ${name}\`, then set up SSH.`)
       if (publicKey !== undefined && !validPublicKey(publicKey)) throw new AsideeError("usage", "SSH preparation needs an Ed25519 public key.")
@@ -655,15 +674,16 @@ export class Core {
             this.unchecked.delete(manifest.name); return
           }
           const results = await this.stage(manifest, ["config", "runtime"], true)
-          const describe = (entries: CheckResult[]) => entries.map((entry) => `${titleOf(entry.id)} (${entry.detail})`).join("; ")
-          const failed = failures(results)
+          const checklist = checklistFor(manifest.spec)
+          const describe = (entries: CheckResult[]) => entries.map((entry) => `${titleOf(entry.id, checklist)} (${entry.detail})`).join("; ")
+          const failed = failures(results, checklist)
           if (failed.length) {
             stoppingFor = `Blocking checks did not hold: ${describe(failed)}`
             await this.recordEnforcement(manifest, stoppingFor)
             await this.stopBecause(manifest, `Stopped by the daemon at ${new Date().toISOString()}: ${describe(failed)}`)
             this.unchecked.delete(manifest.name); return
           }
-          const blind = blockers(results); const problems = blind.length ? [`Could not check ${describe(blind)}`] : []
+          const blind = blockers(results, checklist); const problems = blind.length ? [`Could not check ${describe(blind)}`] : []
           if (manifest.engine.capabilities?.diskLimit === "watched") {
             const used = await this.measureDisk(manifest)
             if (used === undefined) problems.push("Disk use could not be measured; the watched disk limit is unknown.")
