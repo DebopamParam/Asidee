@@ -368,8 +368,8 @@ separately measure the shared Keychain reader and Claude recognition. Extension 
 against temporary homes; core sandbox evals do not cover extensions. Missing setup commands are named
 only for settings sent, with bounded printable names and credential values withheld.
 
-The engine measurements are in `evals/SCORECARD.md` and `evals/SCORECARD.linux.md`. Docker Desktop, Colima, Windows
-execution, a hard disk cap and reboot recovery remain unmeasured or unbuilt as those files state. Enrollment is measured
+The engine measurements are in `evals/SCORECARD.md` and `evals/SCORECARD.linux.md`. A hard disk cap and reboot
+recovery remain unmeasured or unbuilt as those files state. Enrollment is measured
 only on the disposable Linux combinations named by the N evals.
 
 ## What you cannot do, by design

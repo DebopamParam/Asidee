@@ -20,8 +20,10 @@ Asidee's one promise: **it never claims a property it cannot show.** Concretely:
 
 - Sandboxes are gVisor **containers** ("a mini-VM rented from a cloud provider"): they cannot reach the host, each
   other, or the LAN; they have limits; they can run Docker inside, and inner containers have internet.
-- Docker Sandboxes microVMs are **deferred**. Do not build them, but every new option must be an engine *capability*
-  (`Capabilities` in `core/types.ts`) so a future provider can answer "not available here".
+- What ships is OrbStack with gVisor on a Mac (`asd setup`) and experimental Linux machines. Nothing a user reads
+  (CLI, dashboard, README, docs, skill) names another engine or platform, not even as "not supported yet". Every new
+  option is still an engine *capability* (`Capabilities` in `core/types.ts`), so an engine can answer "not available
+  here".
 - One dashboard: the web one. No terminal dashboard.
 - Ports: a forwarded port appears only on the loopback of the machine the person sits at. No LAN publishing, and no
   engine-level port publishing (`-p`) ever.

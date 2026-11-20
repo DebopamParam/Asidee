@@ -10,13 +10,7 @@ import { AsideeError, type Engine, type Runner } from "./types"
 // so no dashboard or extension can change the engine. Like host enrollment it shows one plan, applies only that plan,
 // and calls the engine ready only after a test sandbox passes the checklist (the CLI does that through the daemon).
 
-export const SETUP_ENGINES = ["orbstack", "docker-desktop"] as const
-export type SetupEngine = typeof SETUP_ENGINES[number]
-export const SETUP_ENGINE_NAMES: Record<SetupEngine, string> = { orbstack: "OrbStack", "docker-desktop": "Docker Desktop" }
-export const SETUP_DOWNLOADS: Record<SetupEngine, string> = { orbstack: "https://orbstack.dev/download", "docker-desktop": "https://www.docker.com/products/docker-desktop/" }
-// Docker Desktop runs gVisor inside its own VM, and where that VM can run it from (and whether it survives an update)
-// has not been measured. Until it is, setup says so instead of editing the engine on a guess.
-export const DOCKER_DESKTOP_UNSUPPORTED = "asd setup cannot set up Docker Desktop yet: where Docker Desktop's VM can run gVisor from has not been measured. Use OrbStack (recommended), or follow the steps `asd doctor` prints for your engine."
+export const ORBSTACK_DOWNLOAD = "https://orbstack.dev/download"
 
 export type SetupContext = {
   home: string
@@ -51,13 +45,9 @@ const exists = (path: string) => stat(path).then(() => true, () => false)
 export const gvisorRoot = (home: string) => join(home, ".local", "share", "asidee", "gvisor")
 const orbstackConfig = (home: string) => join(home, ".orbstack", "config", "docker.json")
 
-export async function installedEngines(context: SetupContext): Promise<SetupEngine[]> {
+export async function orbstackInstalled(context: SetupContext): Promise<boolean> {
   const folders = context.applications ?? ["/Applications", join(context.home, "Applications")]
-  const app = async (name: string) => (await Promise.all(folders.map((folder) => exists(join(folder, name))))).some(Boolean)
-  const found: SetupEngine[] = []
-  if (await app("OrbStack.app")) found.push("orbstack")
-  if (await app("Docker.app")) found.push("docker-desktop")
-  return found
+  return (await Promise.all(folders.map((folder) => exists(join(folder, "OrbStack.app"))))).some(Boolean)
 }
 
 // The engine the daemon sees through OrbStack's context, which may be listed under another context naming the same engine.

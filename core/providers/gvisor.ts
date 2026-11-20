@@ -470,7 +470,7 @@ export class GvisorProvider implements Provider {
       let parsed: { ID?: string; OperatingSystem?: string; ServerVersion?: string; Architecture?: string; Runtimes?: Record<string, RuntimeEntry>; DiscoveredDevices?: Array<{ Source?: string; ID?: string }> | null; SecurityOptions?: string[] | null } = {}
       try { parsed = JSON.parse(info.stdout) } catch {}
       if (info.exitCode !== 0 || !parsed.ServerVersion) {
-        engines.push({ ...base, label: `Docker context ${context.Name}`, ready: false, problems: ["The Docker engine does not answer."], fix: "Start the engine (OrbStack, Docker Desktop, or `systemctl start docker`)." })
+        engines.push({ ...base, label: `Docker context ${context.Name}`, ready: false, problems: ["The Docker engine does not answer."], fix: "Start the engine: open OrbStack on a Mac, or run `systemctl start docker` on Linux." })
         continue
       }
       // Two contexts can name one engine (OrbStack also owns /var/run/docker.sock).

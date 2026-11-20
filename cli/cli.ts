@@ -24,7 +24,7 @@ import { included, userConfig, type SshAccess } from "../core/ssh"
 import { systemRunner } from "../core/run"
 import { createSteps, runCreateSteps } from "./create-setup"
 import { hostVersion, validVersion, type Prepared, type Preparing } from "../core/prepare"
-import { applySetup, DOCKER_DESKTOP_UNSUPPORTED, installedEngines, orbstackEngine, planSetup, SETUP_DOWNLOADS, SETUP_ENGINE_NAMES, SETUP_ENGINES, setupChanges, setupPlanLines, type SetupEngine } from "../core/setup"
+import { applySetup, ORBSTACK_DOWNLOAD, orbstackEngine, orbstackInstalled, planSetup, setupChanges, setupPlanLines } from "../core/setup"
 import { checkSocketPath, DEFAULT_SPEC, defaultDirs, socketPath, streamSocketPath, validTemplateName, type Config, type Defaults } from "../core/state"
 import { dataFrames, frame, FrameReader, type OpenRequest, type EnrollmentRequest } from "../core/stream"
 import { AsideeError, type CheckResult, type DiskWarning, type Engine, type ErrorCode, type RunResult, type Template } from "../core/types"
@@ -34,7 +34,7 @@ import { AsideeError, type CheckResult, type DiskWarning, type Engine, type Erro
 // The help, grouped by task. `asd COMMAND --help` prints the lines for that command.
 const GROUPS: Array<[string, string[]]> = [
   ["Start here", [
-    "asd setup [--engine orbstack|docker-desktop] [--docker] [--accept-plan HASH]   give your engine gVisor after one plan you approve, then prove it with a test sandbox",
+    "asd setup [--docker] [--accept-plan HASH]   give OrbStack gVisor after one plan you approve, then prove it with a test sandbox",
     "asd setup --remove [--accept-plan HASH]   undo it: remove the runtime, restart the engine, delete the download",
     "asd doctor                         engines on this machine and what each one needs",
     "asd create NAME [--docker | --gpu] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]",
@@ -545,25 +545,10 @@ async function main(argv: string[]): Promise<void> {
       case "version": case "--version": return out({ version: VERSION }, () => console.log(VERSION))
       case "setup": {
         if (selectedHost && selectedHost !== "local") throw new AsideeError("usage", "asd setup changes the engine on this Mac only. For another machine, use asd host add.")
-        const { values } = parse({ engine: { type: "string" }, docker: { type: "boolean" }, remove: { type: "boolean" }, "accept-plan": { type: "string" } })
+        const { values } = parse({ docker: { type: "boolean" }, remove: { type: "boolean" }, "accept-plan": { type: "string" } })
         if (process.platform !== "darwin") throw new AsideeError("dependency", "asd setup is for macOS. On Linux, enroll the machine from a Mac with asd host add, or follow the steps asd doctor prints.")
-        if (values.engine !== undefined && !(SETUP_ENGINES as readonly unknown[]).includes(values.engine)) throw new AsideeError("usage", "--engine must be orbstack or docker-desktop.")
         const context = { home: homedir(), run: systemRunner }
-        const installed = await installedEngines(context)
-        let engine = values.engine as SetupEngine | undefined
-        if (values.remove) engine ??= "orbstack"
-        if (engine === undefined) {
-          if (!installed.length) throw new AsideeError("dependency", `No engine is installed. Install one, open it once, then run asd setup again:\n  OrbStack (recommended: Asidee is measured on it): ${SETUP_DOWNLOADS.orbstack}\n  Docker Desktop: ${SETUP_DOWNLOADS["docker-desktop"]}`)
-          if (installed.length === 1) engine = installed[0]
-          else if (process.stdin.isTTY && !asJson) {
-            const terminal = createInterface({ input: process.stdin, output: process.stdout })
-            let answer: string
-            try { answer = (await terminal.question("Which engine should run your sandboxes?\n  1. OrbStack (recommended: Asidee is measured on it)\n  2. Docker Desktop\nEnter 1 or 2 [1]: ")).trim() } finally { terminal.close() }
-            if (answer !== "" && answer !== "1" && answer !== "2") throw new AsideeError("usage", "Enter 1 or 2. Nothing was changed.")
-            engine = answer === "2" ? "docker-desktop" : "orbstack"
-          } else throw new AsideeError("usage", "OrbStack and Docker Desktop are both installed. Choose one: --engine orbstack (recommended) or --engine docker-desktop.")
-        } else if (!values.remove && !installed.includes(engine)) throw new AsideeError("dependency", `${SETUP_ENGINE_NAMES[engine]} is not installed. Download it from ${SETUP_DOWNLOADS[engine]}, open it once, then run asd setup again.`)
-        if (engine === "docker-desktop") throw new AsideeError("dependency", DOCKER_DESKTOP_UNSUPPORTED)
+        if (!values.remove && !await orbstackInstalled(context)) throw new AsideeError("dependency", `Asidee runs sandboxes on OrbStack, which is not installed. Download it from ${ORBSTACK_DOWNLOAD}, open it once, then run asd setup again.`)
         const plan = await planSetup(context, { docker: Boolean(values.docker), remove: Boolean(values.remove), engine: orbstackEngine(await call<Engine[]>("engines")) })
         if (asJson && values["accept-plan"] === undefined) return out(plan, () => {})
         if (!asJson) console.log(setupPlanLines(plan, context.home).join("\n"))
@@ -597,7 +582,7 @@ async function main(argv: string[]): Promise<void> {
       case "doctor": case "init": {
         const engines = await call<Engine[]>("engines")
         out(engines, () => {
-          if (!engines.length) console.log(`No engine found. Asidee needs Docker (OrbStack, a Linux host, Colima, …) with a gVisor runtime.${process.platform === "darwin" ? " Run asd setup." : ""}`)
+          if (!engines.length) console.log(`No engine found. Asidee needs Docker with a gVisor runtime.${process.platform === "darwin" ? " Run asd setup: it sets up OrbStack." : ""}`)
           for (const engine of engines) {
             console.log(`${engine.ready ? "✓" : "✗"} ${shown(engine.label)}  [${shown(engine.id)}]`)
             if (engine.capabilities) console.log(`    kernel isolation: ${shown(engine.capabilities.kernelIsolation)}; network guard: ${engine.capabilities.networkGuard ? "yes" : "no"}; disk limit: ${shown(engine.capabilities.diskLimit)}; inner Docker: ${engine.capabilities.docker ? "yes" : "no"}`)

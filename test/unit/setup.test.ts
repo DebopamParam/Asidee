@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { GVISOR_RELEASE } from "../../core/hosts"
 import { systemRunner } from "../../core/run"
-import { applySetup, gvisorRoot, installedEngines, planSetup, setupChanges, setupPlanLines, withoutRuntime, type SetupContext } from "../../core/setup"
+import { applySetup, gvisorRoot, orbstackInstalled, planSetup, setupChanges, setupPlanLines, withoutRuntime, type SetupContext } from "../../core/setup"
 import type { Engine, RunResult } from "../../core/types"
 
 const ok = (stdout = ""): RunResult => ({ exitCode: 0, stdout, stderr: "" })
@@ -165,11 +165,11 @@ test("a configuration laid out differently is not rewritten, and the engine not 
   expect(registered.restart).toBeUndefined()
 })
 
-test("installed engines are found by their applications", async () => {
+test("OrbStack is found by its application, and no other application counts", async () => {
   const root = await home()
-  expect(await installedEngines(fakeEngine(root).context)).toEqual([])
+  expect(await orbstackInstalled(fakeEngine(root).context)).toBe(false)
   await mkdir(join(root, "Applications", "Docker.app"), { recursive: true })
-  expect(await installedEngines(fakeEngine(root).context)).toEqual(["docker-desktop"])
+  expect(await orbstackInstalled(fakeEngine(root).context)).toBe(false)
   await mkdir(join(root, "Applications", "OrbStack.app"), { recursive: true })
-  expect(await installedEngines(fakeEngine(root).context)).toEqual(["orbstack", "docker-desktop"])
+  expect(await orbstackInstalled(fakeEngine(root).context)).toBe(true)
 })

@@ -8,7 +8,6 @@ import { createHandler, methods } from "../../core/daemon"
 import { Core, UNCHECKED_PASSES } from "../../core/core"
 import { CATALOG, Machines, type Hello } from "../../core/machines"
 import { object, parseReply } from "../../core/transport"
-import { DockerSandboxesProvider } from "../../core/providers/docker-sandboxes"
 import { fieldValues, loadExtensions, parseExtension } from "../../core/extensions"
 import { configChecks, DOCKER_CAPABILITIES, dockerVolume, GvisorProvider, gvisorSetup, network, unsafeRuntimeArgs, type GuardState } from "../../core/providers/gvisor"
 import { OUTPUT_LIMIT, systemRunner } from "../../core/run"
@@ -145,16 +144,6 @@ test("unsupported blocking properties refuse creation and name the missing promi
     expect(state.running).toBe(false)
   }
   expect(blockers([{ id: "disk", status: "unsupported", evidence: "none", detail: "No disk cap." }])).toEqual([])
-})
-
-test("Docker Sandboxes is detection-only and refuses create without touching an engine", async () => {
-  const calls: string[][] = []
-  const provider = new DockerSandboxesProvider(async (argv) => { calls.push([...argv]); return { exitCode: 0, stdout: "1.0", stderr: "" } })
-  const asidee = await core(provider)
-  expect((await provider.detect())[0]?.ready).toBe(false)
-  await expect(asidee.create({ name: "demo", engine: "docker-sandboxes" })).rejects.toThrow("does not support Docker Sandboxes yet")
-  expect(calls.every((argv) => argv.join(" ") === "sbx version")).toBe(true)
-  expect(await asidee.list()).toEqual([])
 })
 
 test("a spec keeps only known fields and refuses option-like images", () => {

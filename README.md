@@ -1,6 +1,6 @@
 # Asidee
 
-Sandboxes for coding agents, on the engine you already have, that are checked instead of assumed.
+Sandboxes for coding agents that are checked instead of assumed.
 
 "Asidee" (Agent Sandbox IDE) is a working name. This is an early alpha (0.4.0): the structure is in place and one engine works end to end.
 
@@ -131,16 +131,7 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
 
 Not built yet:
 
-- Docker Sandboxes (microVM) support. It is detected and reported as not supported.
-- Apple `container` support (a VM per sandbox; Apple silicon, macOS 26). It could become the macOS default once it
-  passes the same checklist. Open questions first: a network guard the sandbox cannot switch off, without admin rights;
-  the disk limit; whether freed memory returns to macOS; exec streams and loopback relay.
-- `asd setup` for Docker Desktop. It can be chosen, and says it cannot set it up yet: where Docker Desktop's VM can run
-  `runsc` from has not been measured. Setting up OrbStack is built; its apply step (config edit and engine restart) is
-  covered by unit tests only, since the development Mac's engine must not be restarted.
-- A hard disk cap, Windows execution, a desktop app, and a signed release installer. The remote dashboard
-  is later.
-- Docker Desktop and Colima measurements. Native Linux Docker and OrbStack have separate scorecards.
+- A hard disk cap, a desktop app, and a signed release installer. The remote dashboard is later.
 - A license. Nothing here is published.
 
 ## macOS workspaces are not sandboxes
@@ -178,15 +169,16 @@ removal limits and login status. The full sandbox scorecards were not regenerate
 ## Try it
 
 For sandboxes, you need [Bun](https://bun.sh) and Docker with a gVisor runtime. `nix develop` gives you Bun if you use Nix.
-On a Mac, `asd setup` gives your engine gVisor: you choose OrbStack (recommended) or Docker Desktop, approve one plan
-(download the pinned gVisor release into `~/.local/share/asidee/gvisor`, add an `asidee-runsc` runtime to
-`~/.orbstack/config/docker.json`, restart the engine, naming the containers that stop), and setup is done only after a
-test sandbox passes the checks. `asd setup --remove` undoes it.
+On a Mac, Asidee runs sandboxes on [OrbStack](https://orbstack.dev) with gVisor. `asd setup` gives OrbStack gVisor:
+you approve one plan (download the pinned gVisor release into `~/.local/share/asidee/gvisor`, add an `asidee-runsc`
+runtime to `~/.orbstack/config/docker.json`, restart the engine, naming the containers that stop), and setup is done
+only after a test sandbox passes the checks. Its apply step (the config edit and the engine restart) is covered by unit
+tests only, since the development Mac's engine must not be restarted. `asd setup --remove` undoes it.
 
 ```sh
 bun install
 bin/asd setup                  # once, on a Mac: give the engine gVisor and prove it
-bin/asd doctor                 # which engines are ready, and what the others need
+bin/asd doctor                 # whether the engine is ready, and what it needs if not
 bin/asd create demo --image ubuntu:24.04
 bin/asd exec demo -- uname -a
 bin/asd shell demo

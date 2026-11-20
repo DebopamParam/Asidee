@@ -76,8 +76,8 @@ Its `ok` means no blocking failure was found, not that unknown probes passed. St
 four-pass budget is unchanged. These paths and the HTTP and CLI behavior are covered by unit fixtures; engine behavior
 and browser appearance have not been measured for this change.
 
-The gVisor provider must satisfy the whole blocking checklist. Docker Sandboxes is detection-only and not ready in this build; create is refused before any sandbox is made. No gVisor-specific check
-is waived for it. A future microVM provider needs reviewed evidence or an explicit checklist decision before becoming ready.
+The gVisor provider must satisfy the whole blocking checklist. Any other provider needs reviewed evidence or an
+explicit checklist decision before it may report an engine ready.
 
 | Check | Blocking | When | How the gVisor provider checks it |
 |---|---|---|---|
@@ -593,7 +593,7 @@ uses is deleted at once (C05, C07). A stopped sandbox can be saved without start
 - **Two Asidees on one engine share the guard.** Each sweeps only its own probe helpers, but a guard changed for one
   is changed for both.
 - **Measurements belong to an engine and OS.** See `evals/SCORECARD.md` for OrbStack on Apple Silicon and
-  `evals/SCORECARD.linux.md` for native Linux Docker. Docker Desktop, Colima, and Windows execution remain unmeasured.
+  `evals/SCORECARD.linux.md` for native Linux Docker.
   Native Docker may still drop inter-bridge traffic with Asidee's guard removed. A Tailscale host may drop a synthetic
   tailnet control. Neither result establishes a controlled live probe for that target.
 
@@ -608,8 +608,7 @@ hash with `--accept-plan`. Applying checks the archive, refuses any entry the pl
 the configuration if it changed since the plan. Then the CLI asks the daemon to create a test sandbox on the engine; it
 counts as set up only when that create passes, and the test sandbox is removed. An engine the daemon already finds
 ready changes nothing and gets only the test sandbox. `--remove` takes the runtime out, restarts and deletes the
-download, and refuses while any container still runs on `asidee-runsc`. Docker Desktop can be chosen but is refused:
-where its VM can run `runsc` from has not been measured.
+download, and refuses while any container still runs on `asidee-runsc`.
 
 ## The daemon
 
@@ -961,7 +960,7 @@ pending on the Linux machine it was made for.
 
 Implement `Provider` in `core/types.ts` and add it to the list in `core/daemon.ts`. `detect()` reports each engine with
 its `capabilities`, and `checks()` must give honest evidence for every checklist item of the stage it is asked for.
-`core/providers/docker-sandboxes.ts` is the stub to fill in next.
+Nothing a user reads names an engine before it is offered.
 
 ## Bundled clients
 

@@ -11,7 +11,6 @@ import { CATALOG, hostName, isMethod, machineIdentity, Machines, type Hello } fr
 import { Hosts } from "./hosts"
 import { absolutePath, PROTOCOL, sshDestination } from "./transport"
 import { Preparations } from "./prepare"
-import { DockerSandboxesProvider } from "./providers/docker-sandboxes"
 import { GvisorProvider } from "./providers/gvisor"
 import { OUTPUT_LIMIT, systemRunner } from "./run"
 import { includeLine, userConfig } from "./ssh"
@@ -303,7 +302,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   const identity = await machineIdentity(dirs)
   const digest = new Bun.CryptoHasher("sha256")
   for await (const bytes of Bun.file(Bun.main.startsWith("/$bunfs/") ? process.execPath : Bun.main).stream()) digest.update(bytes)
-  const providers = process.env.ASIDEE_WORKSPACE_ONLY === "1" ? [] : [new GvisorProvider(systemRunner, createHash("sha256").update(`${hostname()}\0${dirs.state}`).digest("hex").slice(0, 10)), new DockerSandboxesProvider(systemRunner)]
+  const providers = process.env.ASIDEE_WORKSPACE_ONLY === "1" ? [] : [new GvisorProvider(systemRunner, createHash("sha256").update(`${hostname()}\0${dirs.state}`).digest("hex").slice(0, 10))]
   const core = new Core(providers, dirs, systemRunner, cliDir, identity)
   const workspaces = new Workspaces(dirs)
   // service: systemd sets INVOCATION_ID for each unit it starts; a daemon started by hand or by the CLI has none.
