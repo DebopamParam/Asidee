@@ -96,7 +96,12 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
 - One-step create: `asd create demo --gh --claude PROFILE --codex PROFILE --repo OWNER/REPO --t3` runs the bundled
   extensions after the create: this machine's GitHub login, each login with its setup (repeat `--claude` or `--codex`
   for several), a clone into `~/workspace`, `--skills DIR` (that folder's agent skills and plugins into
-  `~/workspace`) and T3 Code. `--t3-browser` also installs the Chrome T3's browser pane uses. The first failure stops the rest and keeps the sandbox. On this machine only.
+  `~/workspace`) and T3 Code. `--t3-browser` also installs the Chrome T3's browser pane uses. On this machine only.
+- A create that does not finish leaves nothing behind for long. If the sandbox itself cannot be made, nothing is kept.
+  If its checks fail, or a setup step fails (the first failure stops the rest), the sandbox is kept for one hour after
+  its last progress and then removed by the daemon (not while a shell or forward is open in it). `asd create --retry
+  NAME` finishes it: the checks again if they failed, then the steps left, from the one that failed. `asd create --keep
+  NAME` keeps it as it is. `asd list`, `asd get` and the dashboard (Retry, Keep as it is) show when it goes.
 - `asd claude demo [PROFILE]` and `asd codex demo [PROFILE]` open the agent in `~/workspace` with an imported login.
   The dashboard opens the same in a terminal window on the Mac.
 - The daemon, the CLI with `--json`, a web dashboard, and extensions. What the dashboard does to the Mac itself

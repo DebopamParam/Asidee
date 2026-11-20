@@ -18,6 +18,8 @@ asd setup [--docker]                    # macOS, once: give OrbStack gVisor afte
 asd doctor                              # whether an engine is ready, and what it needs
 asd create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--pids N] [--disk GB]
 asd create NAME --gh --claude PROFILE --codex PROFILE --repo OWNER/REPO --t3  # then logins, clone, T3; this Mac only
+asd create --retry NAME                 # finish a create whose checks or a setup step failed; unfinished ones go after an hour
+asd create --keep NAME                  # keep an unfinished create as it is instead
 asd claude NAME [PROFILE] [-- ARG…]   # Claude Code in ~/workspace with an imported login; also asd codex
 asd list
 asd config get                         # effective settings on the selected machine
@@ -315,7 +317,7 @@ README in `extensions/NAME/` lists its actions and what they need.
 Copy the built-in page (`ui/index.html` in the Asidee source) to `~/.config/asidee/ui/index.html` and edit the copy.
 Other files in that folder are served next to it. The page calls `POST /api/METHOD` with a JSON body and the header
 `Authorization: Bearer TOKEN`; it reads the token from the `#token=` part of the link `asd ui` prints. Methods:
-`checklist`, `engines`, `list`, `get`, `create`, `start`, `stop`, `remove`, `verify`, `resize`, `snapshot`, `templateList`,
+`checklist`, `engines`, `list`, `get`, `create`, `createRetry`, `createStep`, `createKeep`, `start`, `stop`, `remove`, `verify`, `resize`, `snapshot`, `templateList`,
 `templateRemove`, `templatePrepare`, `templatePreparing`, `templatePrepareInfo`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `linkAdd`, `linkList`, `linkRemove`, `sshAccess`, `extensions`, `extensionInstall`, `extensionRemove`, `action`, `summary`,
 `hostList`, `fleet`, `configGet`, `configSet`, `usage`, `about`, `openTerminal`. `linkAdd` and `linkRemove` take `from`, `to` and `port`; `linkList` takes an optional `name`. `configGet` returns this machine's effective configuration. `configSet`
 accepts only `requireProbes` and `experimental`, each a boolean, `workspaceFreeSpaceGb` and `diskWatchSeconds`, each a number, `defaults` and `engine` (`null` removes either) and `terminal`, saves them to `config.json` and returns the new
@@ -323,6 +325,10 @@ effective configuration. `terminalCommandSet`, the `workspace*` changes, `sshSet
 but each request first shows a dialog on the Mac and runs only when the person there clicks Allow; a refusal is 403 (409 when another is waiting) with
 `details.approval` (`denied`, `timed-out`, `unavailable` or `busy`) and `details.command`, the CLI command to suggest instead. Do not retry a denial. `usage` returns each sandbox's CPU, memory, tasks and last disk measurement against its limits;
 `openTerminal` with `name` and `kind` (`sandbox`, `workspace`, `claude` or `codex`, the last two with an optional `profile`) opens a shell or the agent in a terminal window on this Mac.
+`create` takes an optional `setup` (the CLI's setup flags: `gh`, `claude`, `codex`, `repo`, `skills`, `t3`,
+`t3-browser`); the page then runs each step and reports it with `createStep` (`name`, `step` as the step's label, `ok`).
+A sandbox's `unfinished` says when it is removed; `createRetry` (`name`) returns the `setup` and the labels `remaining`
+to run, and `createKeep` (`name`) keeps it as it is.
 `templatePrepare` takes `name`, `engine`, `claude`, `codex`, `script` or `scriptFile: true`, `replace` and `default` and
 answers when the template is saved (a minute or two); `templatePreparing` lists the progress lines meanwhile, and
 `templatePrepareInfo` gives this machine's versions and whether `~/.config/asidee/agent-template.sh` exists. `requireProbes` affects later creates, not running sandboxes. With `experimental` off,

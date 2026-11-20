@@ -24,7 +24,8 @@ plain words before the engine's error. If cleanup cannot be verified, the record
 remaining or uncertain objects with `asd remove NAME --confirm NAME`. Objects labeled for another attempt are
 left alone. A container that was created and then failed a required check stays stopped for inspection. So does one whose first
 checks could not finish (a probe that threw, for example): create reports it stopped and kept for diagnosis, whatever
-`requireProbes` says, since turning that off accepts an unknown probe, not a run with no checks at all. Every start is
+`requireProbes` says, since turning that off accepts an unknown probe, not a run with no checks at all. Either is kept
+for a bounded time only (see [Unfinished creates](#unfinished-creates)). Every start is
 recorded in the sandbox's state file before the engine starts it, and cleared once its checks finish (for a create,
 its first verify). A daemon that finds a running sandbox still marked, because the daemon that started it ended in
 between, stops it on its next pass instead of checking it then, since a check can fail to finish too (H16).
@@ -1015,11 +1016,33 @@ engine only with `--replace`, snapshots, and removes the sandbox whatever happen
 is used by `validSpec` only when a request names neither an image nor a template; a default image and a default
 template exclude each other.
 
-`asd create … --gh --claude P… --codex P… --repo OWNER/REPO --t3` (`cli/create-setup.ts`) checks its options before the
+`asd create … --gh --claude P… --codex P… --repo OWNER/REPO --t3` (`core/create-setup.ts`) checks its options before the
 create, then runs `asd extension-run` for GitHub, each login with its setup, the clone, the skills import (after the clone, which needs an empty
 `~/workspace`), T3 and T3's browser (`--t3-browser`, which implies `--t3`), in that order, stopping
-at the first failure and keeping the sandbox. The logins read this machine's credentials and the extensions reach
-local sandboxes only, so these options are refused with `--host`. `asd claude|codex NAME [PROFILE]` is a session like
+at the first failure and keeping the sandbox for a retry. The logins read this machine's credentials and the extensions reach
+local sandboxes only, so these options are refused with `--host`.
+
+### Unfinished creates
+
+A failed create must not hold disk for long, and must be easy to try again. The record of a create carries
+`unfinished` from the moment it is written, before the engine is touched, until the create is done:
+
+- stage `checks` until the first start and verify pass. If the container cannot be made, nothing is kept (the
+  roll-back above). If the checks fail or cannot finish, the sandbox stays stopped with the reason.
+- stage `setup`, when the create was given setup flags (sent as `setup`, the CLI's flags), until each step has run.
+  The client runs the steps and reports each with `createStep`; the record holds the labels done and the one that
+  failed.
+
+Each change sets `removeAt` to an hour later (`UNFINISHED_KEEP_MS`). The enforcement pass removes a sandbox whose
+`removeAt` has passed, as `asd remove` would, unless a session or forward is open in it; it is then removed on the
+first pass after they close. An hour is long enough to fix what failed (a login, a repository name, the network)
+and retry, and short enough that a forgotten attempt does not keep its disk. One left by a daemon that ended
+mid-create goes the same way. Removal needs the daemon, which any `asd` command starts.
+
+`createRetry` (`asd create --retry NAME`, the dashboard's Retry) repeats the start and full verify for stage `checks`,
+or starts a stopped sandbox in stage `setup`, and returns the setup and the steps left, from the failed one; the
+client runs them. `createKeep` (`asd create --keep NAME`, Keep as it is) drops the record: the sandbox stays as it is
+and is not removed. A step that runs for over an hour without a report can see its sandbox removed under it. `asd claude|codex NAME [PROFILE]` is a session like
 `shell` that selects an imported login with `CLAUDE_CONFIG_DIR` or `CODEX_HOME`.
 
 ## Dashboard
