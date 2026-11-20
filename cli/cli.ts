@@ -549,7 +549,7 @@ async function main(argv: string[]): Promise<void> {
         if (process.platform !== "darwin") throw new AsideeError("dependency", "asd setup is for macOS. On Linux, enroll the machine from a Mac with asd host add, or follow the steps asd doctor prints.")
         const context = { home: homedir(), run: systemRunner }
         if (!values.remove && !await orbstackInstalled(context)) throw new AsideeError("dependency", `Asidee runs sandboxes on OrbStack, which is not installed. Download it from ${ORBSTACK_DOWNLOAD}, open it once, then run asd setup again.`)
-        const plan = await planSetup(context, { docker: Boolean(values.docker), remove: Boolean(values.remove), engine: orbstackEngine(await call<Engine[]>("engines")) })
+        const plan = await planSetup(context, { docker: Boolean(values.docker), remove: Boolean(values.remove), engine: orbstackEngine(await call<Engine[]>("engines")), defaultEngine: (await call<Config>("configGet")).engine })
         if (asJson && values["accept-plan"] === undefined) return out(plan, () => {})
         if (!asJson) console.log(setupPlanLines(plan, context.home).join("\n"))
         if (values["accept-plan"] !== undefined && values["accept-plan"] !== plan.hash) throw new AsideeError("conflict", "The plan changed since that hash. Review the plan and accept its new hash. Nothing was changed.", { plan })
@@ -573,9 +573,10 @@ async function main(argv: string[]): Promise<void> {
           const made = await call<{ checks: CheckResult[] }>("create", { name, engine: ready.id, docker: plan.docker }, watching(name))
           await call("remove", { name, confirm: name })
           checks = made.checks
+          if (plan.defaultEngine && !plan.defaultEngine.kept) await call("configSet", { engine: plan.defaultEngine.id })
         }
         return out({ plan, checks }, () => {
-          if (checks) { printChecks(checks); console.log(`\nSetup is done: OrbStack runs Asidee sandboxes under gVisor, and the test sandbox passed every check a create requires. It was removed.\nNext: asd create NAME`) }
+          if (checks) { printChecks(checks); console.log(`\nSetup is done: OrbStack runs Asidee sandboxes under gVisor, and the test sandbox passed every check a create requires. It was removed.${plan.defaultEngine && !plan.defaultEngine.kept ? ` New sandboxes use OrbStack by default (engine ${plan.defaultEngine.id}).` : ""}\nNext: asd create NAME`) }
           else if (setupChanges(plan)) console.log("Asidee's runtime is removed from OrbStack.")
         })
       }

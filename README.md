@@ -172,7 +172,8 @@ For sandboxes, you need [Bun](https://bun.sh) and Docker with a gVisor runtime. 
 On a Mac, Asidee runs sandboxes on [OrbStack](https://orbstack.dev) with gVisor. `asd setup` gives OrbStack gVisor:
 you approve one plan (download the pinned gVisor release into `~/.local/share/asidee/gvisor`, add an `asidee-runsc`
 runtime to `~/.orbstack/config/docker.json`, restart the engine, naming the containers that stop), and setup is done
-only after a test sandbox passes the checks. Its apply step (the config edit and the engine restart) is covered by unit
+only after a test sandbox passes the checks. When no default engine is set, setup then makes OrbStack the default. Its
+apply step (the config edit and the engine restart) is covered by unit
 tests only, since the development Mac's engine must not be restarted. `asd setup --remove` undoes it.
 
 ```sh

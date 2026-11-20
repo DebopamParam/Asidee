@@ -32,6 +32,9 @@ export type SetupPlan = {
   config?: { path: string; beforeSha256: string | null; sha256: string; after: string; diff: string }
   restart?: { argv: string[]; stops: string[] }
   removeFolder?: string
+  // Setup only: the engine new sandboxes use. kept: a default was already set, and id is it; otherwise setup saves id
+  // once the test sandbox passed.
+  defaultEngine?: { id: string; kept: boolean }
   // Why the plan cannot be applied. Nothing is changed while there is one.
   blockers: string[]
   // A test sandbox is made, checked and removed after the changes.
@@ -92,7 +95,8 @@ async function dockerInfo(context: SetupContext): Promise<Record<string, unknown
 const names = (output: string) => output.split("\n").map((line) => line.trim().replace(/^\//, "")).filter(Boolean)
 
 // What setup (or, with remove, undoing it) would do on OrbStack now. Reads only: nothing is changed.
-export async function planSetup(context: SetupContext, options: { docker: boolean; remove: boolean; engine?: Engine }): Promise<SetupPlan> {
+// defaultEngine: the engine Asidee's config names now, if any.
+export async function planSetup(context: SetupContext, options: { docker: boolean; remove: boolean; engine?: Engine; defaultEngine?: string }): Promise<SetupPlan> {
   const info = await dockerInfo(context)
   const architecture = String(info.Architecture ?? "")
   const arch = /^(aarch64|arm64)$/.test(architecture) ? "aarch64" as const : /^(x86_64|amd64)$/.test(architecture) ? "x86_64" as const : undefined
@@ -130,7 +134,8 @@ export async function planSetup(context: SetupContext, options: { docker: boolea
       ...(await exists(root) ? { removeFolder: root } : {}) })
   }
 
-  if (options.engine?.ready && (!options.docker || options.engine.capabilities?.docker)) return finish({ action: "setup", ...base, check: true })
+  const defaultEngine = options.defaultEngine ? { id: options.defaultEngine, kept: true } : { id: options.engine?.id ?? `gvisor:${ORBSTACK_CONTEXT}`, kept: false }
+  if (options.engine?.ready && (!options.docker || options.engine.capabilities?.docker)) return finish({ action: "setup", ...base, defaultEngine, check: true })
   const files: Record<string, string> = { ...GVISOR[arch].files }
   const download = await intact(folder, files) ? undefined
     : { url: `https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE}/${arch}/gvisor.tar.bz2`, sha512: GVISOR[arch].archive, folder, files }
@@ -138,7 +143,7 @@ export async function planSetup(context: SetupContext, options: { docker: boolea
   const same = (value: unknown) => object(value) && value.path === runtime.path && JSON.stringify(value.runtimeArgs ?? []) === JSON.stringify(runtime.runtimeArgs)
   const config = same(entry) ? undefined : parse(() => change(mergeRuntime(before, runtime.path, options.docker)))
   const current = same(registered)
-  return finish({ action: "setup", ...base, check: true,
+  return finish({ action: "setup", ...base, defaultEngine, check: true,
     ...(download ? { download } : {}),
     ...(config ? { config } : {}),
     ...(config || !current ? { restart: { argv: ["orb", "restart", "docker"], stops: await running() } } : {}) })
@@ -150,7 +155,8 @@ export function setupPlanLines(plan: SetupPlan, home: string): string[] {
   const lines = [plan.action === "remove" ? "Plan to undo asd setup on OrbStack" : "Setup plan for OrbStack"]
   if (plan.action === "setup") lines.push(
     `  Runtime: gVisor ${plan.runtime.release} for ${plan.arch}, registered as ${plan.runtime.name}: ${tilde(plan.runtime.path)} ${plan.runtime.runtimeArgs.join(" ")}`,
-    `  Docker inside sandboxes: ${plan.docker ? "offered (--docker)" : "not offered (asd setup --docker offers it)"}`)
+    `  Docker inside sandboxes: ${plan.docker ? "offered (--docker)" : "not offered (asd setup --docker offers it)"}`,
+    ...(plan.defaultEngine?.kept ? [`  Default engine for new sandboxes: ${plan.defaultEngine.id}, as set already (kept)`] : []))
   lines.push("")
   let step = 0
   const add = (...text: string[]) => { lines.push(`  ${++step}. ${text[0]}`, ...text.slice(1).map((line) => `     ${line}`)) }
@@ -161,6 +167,7 @@ export function setupPlanLines(plan: SetupPlan, home: string): string[] {
     plan.restart.stops.length ? `These running containers stop: ${plan.restart.stops.join(", ")}. Asidee sandboxes among them are started again with asd start NAME.` : "No container is running, so none stops.")
   if (plan.removeFolder) add(`Delete ${tilde(plan.removeFolder)}`)
   if (plan.check) add("Create a test sandbox, run every check on it, and remove it. Setup is done only if every blocking check holds.")
+  if (plan.defaultEngine && !plan.defaultEngine.kept) add(`Make OrbStack the default engine for new sandboxes: engine ${plan.defaultEngine.id} in Asidee's config.`)
   if (!step) lines.push("  Nothing to do: Asidee's runtime is not on this engine.")
   for (const blocker of plan.blockers) lines.push("", `Cannot apply: ${blocker}`)
   lines.push("", `Plan hash: ${plan.hash}`)
@@ -168,7 +175,7 @@ export function setupPlanLines(plan: SetupPlan, home: string): string[] {
 }
 
 // Whether the plan changes anything; one that only checks needs no consent.
-export const setupChanges = (plan: SetupPlan) => Boolean(plan.download || plan.config || plan.restart || plan.removeFolder)
+export const setupChanges = (plan: SetupPlan) => Boolean(plan.download || plan.config || plan.restart || plan.removeFolder || plan.defaultEngine && !plan.defaultEngine.kept)
 
 const fetchBytes = async (url: string) => {
   const response = await fetch(url)

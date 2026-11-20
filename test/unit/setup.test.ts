@@ -71,11 +71,32 @@ test("an engine the daemon already finds ready changes nothing and only gets the
   const root = await home("{}\n")
   const { context } = fakeEngine(root)
   const engine = { id: "gvisor:orbstack", provider: "gvisor", label: "OrbStack 29", ready: true, problems: [], data: { context: "orbstack" }, capabilities: { docker: false } } as unknown as Engine
-  const ready = await planSetup(context, { docker: false, remove: false, engine })
+  const ready = await planSetup(context, { docker: false, remove: false, engine, defaultEngine: "gvisor:orbstack" })
   expect(setupChanges(ready)).toBe(false)
   expect(ready.check).toBe(true)
   expect(setupPlanLines(ready, root).join("\n")).toContain("Create a test sandbox")
-  expect(setupChanges(await planSetup(context, { docker: true, remove: false, engine }))).toBe(true)
+  expect(setupChanges(await planSetup(context, { docker: true, remove: false, engine, defaultEngine: "gvisor:orbstack" }))).toBe(true)
+})
+
+test("setup saves OrbStack as the default engine only when none is set, and otherwise shows the one kept", async () => {
+  const root = await home("{}\n")
+  const { context } = fakeEngine(root)
+  const engine = { id: "gvisor:orbstack", provider: "gvisor", label: "OrbStack 29", ready: true, problems: [], data: { context: "orbstack" }, capabilities: { docker: false } } as unknown as Engine
+  const unset = await planSetup(context, { docker: false, remove: false, engine })
+  expect(unset.defaultEngine).toEqual({ id: "gvisor:orbstack", kept: false })
+  expect(setupChanges(unset)).toBe(true)
+  const lines = setupPlanLines(unset, root)
+  expect(lines.at(-3)).toBe("  2. Make OrbStack the default engine for new sandboxes: engine gvisor:orbstack in Asidee's config.")
+  // OrbStack stopped: the daemon does not list it yet, and its context's id is the one saved.
+  expect((await planSetup(context, { docker: false, remove: false })).defaultEngine).toEqual({ id: "gvisor:orbstack", kept: false })
+  const kept = await planSetup(context, { docker: false, remove: false, engine, defaultEngine: "gvisor:linux" })
+  expect(kept.defaultEngine).toEqual({ id: "gvisor:linux", kept: true })
+  expect(setupChanges(kept)).toBe(false)
+  expect(kept.hash).not.toBe(unset.hash)
+  const text = setupPlanLines(kept, root).join("\n")
+  expect(text).toContain("Default engine for new sandboxes: gvisor:linux, as set already (kept)")
+  expect(text).not.toContain("Make OrbStack the default")
+  expect((await planSetup(context, { docker: false, remove: true })).defaultEngine).toBeUndefined()
 })
 
 test("setup refuses an engine that does not answer and a configuration it cannot edit, changing nothing", async () => {
