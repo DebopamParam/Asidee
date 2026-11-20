@@ -162,6 +162,10 @@ const failing = (value: ReturnType<typeof inspect>, manifest = gpuManifest) => c
 test("hardening allows exactly the one GPU request, and only for a GPU container", () => {
   expect(failing(inspect())).toEqual([])
   expect(configChecks(inspect(), gpuManifest, "intact", "asd123").find((entry) => entry.id === "mounts")!.detail).toContain("NVIDIA's hook")
+  for (const diskLimit of ["watched", undefined] as const) {
+    const disk = configChecks(inspect(), { ...gpuManifest, engine: { ...engine, capabilities: { ...capabilities, diskLimit } as never } }, "intact", "asd123").find((entry) => entry.id === "disk")!.detail
+    expect(disk).toContain("GPU container"); expect(disk).not.toContain("sandbox")
+  }
   expect(failing(inspect((value) => { value.HostConfig.DeviceRequests = [{ ...GPU_REQUEST, Driver: "nvidia" }] }))).toEqual([])
   for (const requests of [[], [GPU_REQUEST, GPU_REQUEST], [{ ...GPU_REQUEST, Driver: "cdi" }], [{ ...GPU_REQUEST, Count: 1 }], [{ ...GPU_REQUEST, DeviceIDs: ["0"] }],
     [{ ...GPU_REQUEST, Capabilities: [["gpu", "compute"]] }], [{ ...GPU_REQUEST, Options: { x: "y" } }]])

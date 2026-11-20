@@ -95,6 +95,8 @@ export const MANAGED_RUNTIME = "asidee-runsc"
 // capability dropped, no new privileges, Docker's default seccomp and, where the host has it, AppArmor. The GPU comes in
 // only as Docker's device request, which NVIDIA's hook turns into the device nodes and the host's driver files.
 export const GPU_RUNTIME = "runc"
+// What a check calls the box it describes.
+const kindOf = (manifest: Manifest) => manifest.spec.gpu ? "GPU container" : "sandbox"
 export const gpuOptions = (engine: Engine) => ["--user", GPU_USER, "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
   ...(engine.data.apparmor ? ["--security-opt", "apparmor=docker-default"] : []), "--gpus", "all"]
 // The runtime a sandbox's container, and each probe standing in for it, runs on.
@@ -301,8 +303,8 @@ export function configChecks(inspect: Inspect, manifest: Manifest, guard: GuardS
 
   const disk = manifest.engine.capabilities?.diskLimit
   out.push(disk === "hard" ? result("disk", "pass", "inspected", `${manifest.spec.diskGb} GB; writes fail at the limit.`)
-    : disk === "watched" ? result("disk", "weak", "inspected", `Watched, not capped: the daemon stops the sandbox within about 30 seconds of it passing ${manifest.spec.diskGb} GB, so it can overshoot. Stopping the daemon stops the sandbox; if the daemon crashes, nothing watches until it runs again.`)
-    : result("disk", "unsupported", "none", "Nothing limits this sandbox's disk use: the engine has no cap, and its gVisor runtime lacks --overlay2=none, without which Asidee cannot measure what the sandbox writes."))
+    : disk === "watched" ? result("disk", "weak", "inspected", `Watched, not capped: the daemon stops the ${kindOf(manifest)} within about 30 seconds of it passing ${manifest.spec.diskGb} GB, so it can overshoot. Stopping the daemon stops the ${kindOf(manifest)}; if the daemon crashes, nothing watches until it runs again.`)
+    : result("disk", "unsupported", "none", `Nothing limits this ${kindOf(manifest)}'s disk use: the engine has no cap, and its gVisor runtime lacks --overlay2=none, without which Asidee cannot measure what the ${kindOf(manifest)} writes.`))
 
   const recorded = manifest.template; const labels = image?.Config?.Labels ?? {}
   const short = (id = "") => id.replace(/^sha256:/, "").slice(0, 12)
@@ -1079,7 +1081,7 @@ export class GvisorProvider implements Provider {
       const peerListening = probeAlive && innerOnline && await retry(() => reaches(hostC, peerIp, PROBE_PORT))
       const anyReaches = async (ip: string, port: string) => await reaches(probeC, ip, port) || Boolean(manifest.spec.docker && (await inner(ip, port)).stdout.includes(PROBE_REPLY))
       // The attempt from the sandbox's network is the helper's own; the inner container is started by the sandbox's Docker.
-      const where = manifest.spec.docker ? `the sandbox's network (by Asidee's helper) and an inner Docker container (started through the sandbox's own Docker, which its root could replace)` : "the sandbox's network"
+      const where = manifest.spec.docker ? `the sandbox's network (by Asidee's helper) and an inner Docker container (started through the sandbox's own Docker, which its root could replace)` : `the ${kindOf(manifest)}'s network`
       const noControl = (what: string) => `Not checked: ${!innerOnline ? "the inner container did not reach the internet control" : `${what} did not answer a control connection`}, so a blocked attempt would prove nothing.`
 
       out.push(!hostListening ? result("net-host", "unknown", "none", noControl(probeAlive ? "the listener on the host" : "the probe"))
@@ -1098,10 +1100,10 @@ export class GvisorProvider implements Provider {
         tried.push(ip)
         if (await anyReaches(ip, PROBE_PORT)) reached.push(ip)
       }
-      out.push(netPrivate({ guard, reached, metadata, innerOnline, probeAlive, far, tried, failedControls, where, noControl }))
+      out.push(netPrivate({ guard, reached, metadata, innerOnline, probeAlive, far, tried, failedControls, where, noControl, kind: kindOf(manifest) }))
 
       out.push(!probeAlive ? result("egress", "unknown", "none", noControl("the probe"))
-        : innerOnline && await connects(probeC, "1.1.1.1", "443") ? result("egress", "info", "probed", `Open: ${manifest.spec.docker ? "the sandbox and an inner Docker container can" : "the sandbox can"} reach the internet, so anything inside it can be sent out.`)
+        : innerOnline && await connects(probeC, "1.1.1.1", "443") ? result("egress", "info", "probed", `Open: ${manifest.spec.docker ? "the sandbox and an inner Docker container can" : `the ${kindOf(manifest)} can`} reach the internet, so anything inside it can be sent out.`)
         : result("egress", "info", "probed", "The internet did not answer (this machine may be offline)."))
     } catch (error) {
       for (const id of ["net-host", "net-peers", "net-private", "egress"] as const)
@@ -1136,7 +1138,7 @@ export class GvisorProvider implements Provider {
     }
     const files = [...new Set(found.stdout.split("\n").filter(Boolean))]
     out.push(found.exitCode !== 0 ? result("credentials", "unknown", "none", `Could not look: ${found.stderr.trim()}`)
-      : files.length ? result("credentials", "info", "probed", `Found ${files.join(", ")}. An agent in the sandbox can read these and send them out.`)
+      : files.length ? result("credentials", "info", "probed", `Found ${files.join(", ")}. An agent in the ${kindOf(manifest)} can read these and send them out.`)
       : result("credentials", "info", "probed", `None of the usual login files (Claude, Codex, GitHub, git, SSH keys, AWS, netrc) are present, as seen with ${OWN}; a disclosure, not a guarantee.`))
     return out
   }
@@ -1266,8 +1268,8 @@ class EngineSession extends EventEmitter implements Session {
 
 // net-private from the probe's attempts. Pass needs every stand-in range probed; a range not probed rests on the loaded
 // rules alone, which the result says, as weak.
-export function netPrivate(seen: { guard: GuardState; reached: string[]; metadata: boolean; innerOnline: boolean; probeAlive: boolean; far: string[]; tried: string[]; failedControls: string[]; where: string; noControl: (what: string) => string }): CheckResult {
-  const { guard, reached, metadata, innerOnline, probeAlive, far, tried, failedControls, where, noControl } = seen
+export function netPrivate(seen: { guard: GuardState; reached: string[]; metadata: boolean; innerOnline: boolean; probeAlive: boolean; far: string[]; tried: string[]; failedControls: string[]; where: string; noControl: (what: string) => string; kind?: string }): CheckResult {
+  const { guard, reached, metadata, innerOnline, probeAlive, far, tried, failedControls, where, noControl, kind = "sandbox" } = seen
   const rangeOf = (ip: string) => FAR_RANGES.find(([address]) => ip.startsWith(address))![1]
   const untried = FAR_RANGES.filter(([address]) => !far.some((ip) => ip.startsWith(address))).map(([, range]) => range)
   const rest = `${untried.length ? ` Not probed, because the engine's host already uses the stand-in address: ${untried.join("; ")}.` : ""}${failedControls.length ? ` Not probed, because the host control did not answer (not an address collision): ${failedControls.map((ip) => `${ip} (in ${rangeOf(ip)})`).join(", ")}.` : ""} The metadata address did not answer. IPv6 is dropped by the same rules and was not probed. No device on your own LAN or tailnet was contacted.`
@@ -1275,8 +1277,8 @@ export function netPrivate(seen: { guard: GuardState; reached: string[]; metadat
   const someUnprobed = untried.length > 0 || failedControls.length > 0
   const probed = `Stand-in listeners at ${tried.map((ip) => `${ip} (in ${rangeOf(ip)})`).join(", ")} answered the host and were unreachable from ${where}.`
   return guard === "missing" || guard === "changed" ? result("net-private", "fail", "inspected", `The guard rules on the engine's host are ${guard}, so nothing is known to drop these destinations.`)
-    : reached.length ? result("net-private", "fail", "probed", `A connection from the sandbox's network reached ${reached.map((ip) => `${ip} (in ${rangeOf(ip)})`).join(", ")}.`)
-    : metadata ? result("net-private", "fail", "probed", "The cloud metadata address answered from the sandbox's network.")
+    : reached.length ? result("net-private", "fail", "probed", `A connection from the ${kind}'s network reached ${reached.map((ip) => `${ip} (in ${rangeOf(ip)})`).join(", ")}.`)
+    : metadata ? result("net-private", "fail", "probed", `The cloud metadata address answered from the ${kind}'s network.`)
     : guard === "unknown" ? result("net-private", "unknown", "none", "The guard rules on the engine's host could not be read.")
     : !innerOnline ? result("net-private", "unknown", "none", "The inner container did not reach the internet control, so its blocked attempts would prove nothing.")
     : !probeAlive || (far.length > 0 && !tried.length) ? result("net-private", "unknown", "none", noControl("the stand-in listeners") + rest)
