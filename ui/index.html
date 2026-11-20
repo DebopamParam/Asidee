@@ -20,6 +20,7 @@
   .name { font-weight: 600; } .muted { color: var(--muted); font-size: 13px; }
   .badge { font-size: 12px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--line); }
   .badge.running, .badge.online, .badge.ready { color: var(--accent); border-color: var(--accent); }
+  .badge.gpu { color: var(--warn); border-color: var(--warn); }
   button { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
   button:hover { border-color: var(--accent); } button:disabled { opacity: .5; cursor: default; }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
@@ -112,6 +113,8 @@
       <div><label for="f-docker">Docker inside</label><select id="f-docker" name="dockerInside"><option value="">Default</option><option value="true">On</option><option value="false">Off</option></select></div>
     </div>
     </details>
+    <div id="create-gpu" hidden><label><input type="checkbox" id="f-gpu" name="gpu" value="true"> GPU container (host kernel)</label>
+      <p class="muted">Not a sandbox: it runs on this engine's own Linux kernel through runc, not gVisor, so a bug in that kernel or in the NVIDIA driver is a way onto the host. It runs as uid 1000 with no capabilities and gets the NVIDIA GPU; the network guard, limits and disk watch are a sandbox's. No Docker inside, templates, links or SSH.</p></div>
     <div id="create-setup"></div>
     <button class="primary">Create and verify</button>
     <div class="error" id="create-error"></div>
@@ -243,7 +246,7 @@ const MARK = { pass: "✓", weak: "~", fail: "✗", unsupported: "–", unknown:
 const WORD = { weak: "holds in a weaker form", fail: "does not hold", unsupported: "not available on this engine", unknown: "could not be checked" }
 const TABS = { sandboxes: "sandbox-section", usage: "usage-section", workspaces: "workspace-section", templates: "template-section", machines: "machine-section", extensions: "extension-section", settings: "settings-section" }
 // open: sandboxes whose past checks are shown; expanded: groups opened by hand, which the browser keeps open itself.
-let checklist = [], extensions = [], extensionErrors = [], available = [], open = new Set(), expanded = new Set(), busy = new Set(), output = {}, tab = "sandboxes"
+let checklist = [], gpuChecklist = [], extensions = [], extensionErrors = [], available = [], open = new Set(), expanded = new Set(), busy = new Set(), output = {}, tab = "sandboxes"
 // from: the button each output came from, so it shows under that button and not elsewhere.
 let from = {}
 let sandboxes = [], engines = [], workspaces = [], workspaceProblem = "", forwards = [], links = [], ssh = {}, templates = [], templateProblem = ""
@@ -370,7 +373,10 @@ defaultsForm.addEventListener("submit", async (event) => {
   catch (failure) { error.textContent = failure.message }
 })
 
-const title = (id) => checklist.find((item) => item.id === id)?.title ?? id
+// A GPU container's checklist names some checks differently (kernel, hardening) and has its own.
+const GPU_KIND = "GPU container · host kernel"
+const title = (id, sandbox) => (sandbox?.spec?.gpu ? gpuChecklist : checklist).find((item) => item.id === id)?.title ?? id
+const kindBadge = (sandbox) => sandbox.spec?.gpu ? [" ", el("span", { class: "badge gpu", title: "Not a sandbox: runc on the host's own Linux kernel, with its NVIDIA GPU" }, GPU_KIND)] : []
 
 // key: what output and busy state belong to (a sandbox's name, or ext:ID); what: the button that started it.
 async function act(key, what, task) {
@@ -531,7 +537,8 @@ function sandboxPanel(sandbox) {
   if (running && installed("logins") && !(name in sandboxLogins) && !readingLogins.has(name)) readLogins(name)
   if (running && installed("t3")) readSsh(name)
   const panel = el("div", { class: "panel" },
-    el("div", {}, el("span", { class: "name" }, name), " ", el("span", { class: `badge ${sandbox.status}` }, sandbox.status),
+    el("div", {}, el("span", { class: "name" }, name), " ", el("span", { class: `badge ${sandbox.status}` }, sandbox.status), ...kindBadge(sandbox),
+      sandbox.spec.gpu ? el("div", { class: "muted warn" }, "Not a sandbox: it runs on the host's own Linux kernel (runc), not gVisor, so a kernel or NVIDIA driver bug is a way onto the host.") : null,
       el("div", { class: "muted" }, `${sandbox.spec.cpus} CPU · ${sandbox.spec.memoryGb} GB memory · ${sandbox.spec.diskGb} GB disk · ${sandbox.engine}`),
       el("div", { class: "muted usage", "data-usage": name }),
       ((text, tone) => el("div", { class: `muted ${tone}` }, text, sandbox.lastVerify ? " (past result; it may have changed since)" : ""))(...lastCheck(sandbox)),
@@ -673,7 +680,7 @@ function checksModal(name) {
   sandboxModal(name, `Checks for ${name}`, (sandbox) => [
     sandbox.lastVerify ? el("p", { class: "muted" }, `What the checks measured on ${new Date(sandbox.lastVerify.at).toLocaleString()}. That is a past result: what holds now is unknown until the next check.`) : el("p", {}, "Not checked yet."),
     sandbox.lastVerify ? el("ul", { class: "checks" }, ...sandbox.lastVerify.results.map((check) => { const past = measured(check); return el("li", { class: past.status },
-      el("span", { class: "mark", title: `${past.status} then` }, MARK[past.status] ?? "?"), el("span", {}, title(check.id), el("span", { class: "muted" }, ` — ${past.status === "pass" ? "held" : past.status === "info" ? "for information" : WORD[past.status] ?? past.status} then${past.method ? `, ${past.method}` : ""}`)), el("span", { class: "detail" }, past.detail)) })) : null,
+      el("span", { class: "mark", title: `${past.status} then` }, MARK[past.status] ?? "?"), el("span", {}, title(check.id, sandbox), el("span", { class: "muted" }, ` — ${past.status === "pass" ? "held" : past.status === "info" ? "for information" : WORD[past.status] ?? past.status} then${past.method ? `, ${past.method}` : ""}`)), el("span", { class: "detail" }, past.detail)) })) : null,
     el("div", { class: "row", style: "margin-top:12px" }, sandboxButton(name)("Check now", "verify", () => api("verify", { name }), { class: "primary" })),
     resultFrom(name, "verify")].filter(Boolean))
 }
@@ -844,10 +851,10 @@ function render() {
       for (const sandbox of remote ? cached?.sandboxes ?? [] : []) {
         const key = `${remote}/${sandbox.name}`
         const button = (label, what, task) => el("button", { class: "small", ...(busy.has(`${key}:${what}`) ? { disabled: "" } : {}), onclick: () => act(key, what, task) }, busy.has(`${key}:${what}`) ? "Working…" : label)
-        panel.append(el("div", { class: "row", style: "margin-top:8px" }, el("span", { class: "grow" }, el("span", { class: "name" }, sandbox.name), " ", el("span", { class: `badge ${sandbox.status}` }, sandbox.status), ` · ${sandbox.spec.cpus} CPU · ${sandbox.spec.memoryGb} GB · ${sandbox.spec.diskGb} GB disk`),
+        panel.append(el("div", { class: "row", style: "margin-top:8px" }, el("span", { class: "grow" }, el("span", { class: "name" }, sandbox.name), " ", el("span", { class: `badge ${sandbox.status}` }, sandbox.status), ...kindBadge(sandbox), ` · ${sandbox.spec.cpus} CPU · ${sandbox.spec.memoryGb} GB · ${sandbox.spec.diskGb} GB disk`),
           sandbox.status === "running" ? button("Stop", "stop", () => api("stop", { name: sandbox.name, host: remote })) : button("Start", "start", () => api("start", { name: sandbox.name, host: remote })),
           sandbox.status === "running" ? button("Terminal", "terminal", () => terminal(sandbox.name, "sandbox", remote)) : null,
-          button("Verify", "verify", async () => { const done = await api("verify", { name: sandbox.name, host: remote }); return done.checks.map((check) => `${MARK[check.status] ?? "?"} ${title(check.id)}: ${check.detail}`).join("\n") })),
+          button("Verify", "verify", async () => { const done = await api("verify", { name: sandbox.name, host: remote }); return done.checks.map((check) => `${MARK[check.status] ?? "?"} ${title(check.id, sandbox)}: ${check.detail}`).join("\n") })),
           result(key))
       }
       if (remote) panel.append(el("div", { class: "row", style: "margin-top:8px" }, el("span", { class: "grow muted" }, `Forgetting it ends its sessions and forwards; its Asidee files and service stay. ${asks()}`),
@@ -917,6 +924,8 @@ function render() {
   // Selects whose options come from the daemon keep what was chosen.
   const ready = engines.filter((engine) => engine.ready)
   const fill = (select, options, fallback) => { const chosen = select.value; select.replaceChildren(...options.map(([value, label]) => el("option", { value }, label))); select.value = options.some(([value]) => value === chosen) ? chosen : fallback }
+  // Shown only where an engine can make a GPU container.
+  document.getElementById("create-gpu").hidden = !ready.some((engine) => engine.capabilities?.gpu)
   fill(document.getElementById("f-engine"), ready.length ? ready.map((engine) => [engine.id, engine.label]) : [["", "No engine is ready"]], ready.some((engine) => engine.id === settings?.engine) ? settings.engine : ready[0]?.id ?? "")
   fill(document.getElementById("p-engine"), ready.length ? ready.map((engine) => [engine.id, engine.label]) : [["", "No engine is ready"]], ready.some((engine) => engine.id === settings?.engine) ? settings.engine : ready[0]?.id ?? "")
   fill(document.getElementById("default-engine"), [["", "The first ready engine"], ...engines.map((engine) => [engine.id, `${engine.label}${engine.ready ? "" : " (not ready)"}`])], settings?.engine ?? "")
@@ -956,6 +965,7 @@ function createCommand() {
   const form = document.getElementById("create"); const value = (name) => form.elements[name].value.trim()
   const parts = ["asd create", value("name") || "NAME"]
   if (value("dockerInside") === "true") parts.push("--docker")
+  if (form.elements.gpu.checked) parts.push("--gpu")
   if (value("template")) parts.push("--template", value("template")); else if (value("image")) parts.push("--image", value("image"))
   for (const [field, flag] of [["cpus", "--cpus"], ["memoryGb", "--memory"], ["pids", "--pids"], ["diskGb", "--disk"]]) if (value(field)) parts.push(flag, value(field))
   if (value("engine") && value("engine") !== (settings?.engine ?? engines.find((engine) => engine.ready)?.id)) parts.push("--engine", value("engine"))
@@ -1101,8 +1111,9 @@ document.getElementById("create").addEventListener("submit", async (event) => {
   const steps = setupSteps(); const repository = steps.find((step) => step.action === "clone")?.values.repository
   if (repository !== undefined && (!REPOSITORY.test(repository) || repository.endsWith(".git"))) { error.textContent = "Repository takes a GitHub OWNER/REPO."; return }
   button.disabled = true; button.textContent = "Creating…"; error.textContent = ""
-  const { dockerInside, ...body } = Object.fromEntries(new FormData(form))
+  const { dockerInside, gpu, ...body } = Object.fromEntries(new FormData(form))
   if (dockerInside) body.docker = dockerInside === "true"
+  if (gpu) body.gpu = true
   if (!body.template) delete body.template
   let made
   try { made = await api("create", body); open.add(made.sandbox.name); form.reset() }
@@ -1118,7 +1129,7 @@ document.getElementById("modal").addEventListener("click", (event) => { if (even
 document.addEventListener("keydown", (event) => { if (event.key === "Escape" && modal) closeModal() })
 
 ;(async () => {
-  try { [checklist, engines, { extensions, errors: extensionErrors = [], available = [] }] = await Promise.all([api("checklist"), api("engines"), api("extensions")]) } catch {}
+  try { [checklist, gpuChecklist, engines, { extensions, errors: extensionErrors = [], available = [] }] = await Promise.all([api("checklist"), api("checklist", { kind: "gpu" }), api("engines"), api("extensions")]) } catch {}
   await refresh(); setInterval(refresh, 3000)
   window.asideeRefresh = refresh
 })()
