@@ -472,9 +472,12 @@ test("a sandbox whose setup did not finish is removed once its time is up, unles
 
 test("a create a daemon never finished is unfinished from the start, so it does not stay for long", async () => {
   const { provider, state } = fakeProvider(); const asidee = await core(provider)
-  provider.start = async () => new Promise(() => {})
+  // The create stops for good at its start, as when its daemon ends there.
+  let started!: () => void
+  const atStart = new Promise<void>((resolve) => { started = resolve })
+  provider.start = async () => { started(); return new Promise(() => {}) }
   void asidee.create({ name: "demo" })
-  for (let tries = 0; tries < 50 && !state.exists; tries++) await Bun.sleep(5)
+  await atStart
   const left = await readManifest(asidee.dirs, "demo")
   expect(left.unfinished).toMatchObject({ stage: "checks", reason: "It was being created." })
   // The next daemon, with this one gone: past its time, the record and its container go.
