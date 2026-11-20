@@ -21,7 +21,7 @@ const CORE_CHECKS = new Set<CheckResult["id"]>(["forwards", "ssh", "links", "lin
 export const SHRINK_HEADROOM = 0.9
 // How long a create that did not finish is kept after its last progress, for a retry: long enough to fix a login or a
 // repository name and run `asd create --retry`, short enough that a forgotten one does not hold its disk for long.
-export const UNFINISHED_KEEP_MS = 60 * 60_000
+export const UNFINISHED_KEEP_MS = 30 * 60_000
 // Said with every template, since a template is shared on purpose.
 export const TEMPLATE_CONTENTS = "A template holds every file in the sandbox's own filesystem, home folders included, as it was at one moment: shell history, .env files, package-manager tokens and any login not in Asidee's list are inside. Removed before saving: the usual login files (Claude, Codex, GitHub, git, SSH keys, AWS, netrc) under /root and /home/*, and Asidee's own relay and SSH host key. Not in it: running processes and memory, /dev/shm and any other folder gVisor keeps in memory (it does so for /tmp when the image's /tmp is empty; /proc/mounts inside shows them as tmpfs), volumes (inner Docker's /var/lib/docker, so no inner images or containers, and any volume the image declares), and the engine's /etc/hosts, /etc/hostname and /etc/resolv.conf."
 

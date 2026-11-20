@@ -44,7 +44,7 @@ const GROUPS: Array<[string, string[]]> = [
     "           a flag for several), a clone into ~/workspace, DIR's skills and plugins into ~/workspace, T3 Code, T3's",
     "           browser (Chrome; sets T3 up too). Each token is copied into the sandbox, where anything running there can read it.",
     "asd create --retry NAME            finish a create that did not: its checks again if they failed, then the setup steps left",
-    "asd create --keep NAME             keep a sandbox whose create did not finish as it is; otherwise it is removed an hour after it stopped",
+    "asd create --keep NAME             keep a sandbox whose create did not finish as it is; otherwise it is removed 30 minutes after it stopped",
     "asd shell NAME [-- COMMAND…]       a shell, or one command on a terminal, inside the sandbox",
     "asd claude NAME [PROFILE] [-- ARG…]   Claude Code in ~/workspace with an imported login: PROFILE, or the only one",
     "asd codex NAME [PROFILE] [-- ARG…]    the same for Codex",

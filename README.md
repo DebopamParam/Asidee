@@ -98,7 +98,7 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   for several), a clone into `~/workspace`, `--skills DIR` (that folder's agent skills and plugins into
   `~/workspace`) and T3 Code. `--t3-browser` also installs the Chrome T3's browser pane uses. On this machine only.
 - A create that does not finish leaves nothing behind for long. If the sandbox itself cannot be made, nothing is kept.
-  If its checks fail, or a setup step fails (the first failure stops the rest), the sandbox is kept for one hour after
+  If its checks fail, or a setup step fails (the first failure stops the rest), the sandbox is kept for 30 minutes after
   its last progress and then removed by the daemon (not while a shell or forward is open in it). `asd create --retry
   NAME` finishes it: the checks again if they failed, then the steps left, from the one that failed. `asd create --keep
   NAME` keeps it as it is. `asd list`, `asd get` and the dashboard (Retry, Keep as it is) show when it goes.

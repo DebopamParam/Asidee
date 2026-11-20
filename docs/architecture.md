@@ -1020,7 +1020,8 @@ template exclude each other.
 create, then runs `asd extension-run` for GitHub, each login with its setup, the clone, the skills import (after the clone, which needs an empty
 `~/workspace`), T3 and T3's browser (`--t3-browser`, which implies `--t3`), in that order, stopping
 at the first failure and keeping the sandbox for a retry. The logins read this machine's credentials and the extensions reach
-local sandboxes only, so these options are refused with `--host`.
+local sandboxes only, so these options are refused with `--host`. `asd claude|codex NAME [PROFILE]` is a session like
+`shell` that selects an imported login with `CLAUDE_CONFIG_DIR` or `CODEX_HOME`.
 
 ### Unfinished creates
 
@@ -1033,17 +1034,16 @@ A failed create must not hold disk for long, and must be easy to try again. The 
   The client runs the steps and reports each with `createStep`; the record holds the labels done and the one that
   failed.
 
-Each change sets `removeAt` to an hour later (`UNFINISHED_KEEP_MS`). The enforcement pass removes a sandbox whose
+Each change sets `removeAt` to 30 minutes later (`UNFINISHED_KEEP_MS`). The enforcement pass removes a sandbox whose
 `removeAt` has passed, as `asd remove` would, unless a session or forward is open in it; it is then removed on the
-first pass after they close. An hour is long enough to fix what failed (a login, a repository name, the network)
+first pass after they close. Thirty minutes is long enough to fix what failed (a login, a repository name, the network)
 and retry, and short enough that a forgotten attempt does not keep its disk. One left by a daemon that ended
 mid-create goes the same way. Removal needs the daemon, which any `asd` command starts.
 
 `createRetry` (`asd create --retry NAME`, the dashboard's Retry) repeats the start and full verify for stage `checks`,
 or starts a stopped sandbox in stage `setup`, and returns the setup and the steps left, from the failed one; the
 client runs them. `createKeep` (`asd create --keep NAME`, Keep as it is) drops the record: the sandbox stays as it is
-and is not removed. A step that runs for over an hour without a report can see its sandbox removed under it. `asd claude|codex NAME [PROFILE]` is a session like
-`shell` that selects an imported login with `CLAUDE_CONFIG_DIR` or `CODEX_HOME`.
+and is not removed. A step that runs for over 30 minutes without a report can see its sandbox removed under it.
 
 ## Dashboard
 

@@ -405,7 +405,9 @@ test("a create whose checks fail is kept stopped for a bounded time, can be retr
   expect(state.running).toBe(false)
   const kept = (await asidee.get("demo")).unfinished!
   expect(kept).toMatchObject({ stage: "checks", done: [] })
-  expect(Date.parse(kept.removeAt) - Date.now()).toBeGreaterThan(59 * 60_000)
+  const left = Date.parse(kept.removeAt) - Date.now()
+  expect(left).toBeGreaterThan(29 * 60_000)
+  expect(left).toBeLessThanOrEqual(30 * 60_000)
   // A retry that fails again keeps it, for as long again.
   await expect(asidee.createRetry("demo")).rejects.toThrow("To try again: `asd create --retry demo`")
   // Before its time it stays; after, the enforcement pass removes it.

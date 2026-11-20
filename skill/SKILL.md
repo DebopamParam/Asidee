@@ -18,7 +18,7 @@ asd setup [--docker]                    # macOS, once: give OrbStack gVisor afte
 asd doctor                              # whether an engine is ready, and what it needs
 asd create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--pids N] [--disk GB]
 asd create NAME --gh --claude PROFILE --codex PROFILE --repo OWNER/REPO --t3  # then logins, clone, T3; this Mac only
-asd create --retry NAME                 # finish a create whose checks or a setup step failed; unfinished ones go after an hour
+asd create --retry NAME                 # finish a create whose checks or a setup step failed; unfinished ones go after 30 minutes
 asd create --keep NAME                  # keep an unfinished create as it is instead
 asd claude NAME [PROFILE] [-- ARG…]   # Claude Code in ~/workspace with an imported login; also asd codex
 asd list
