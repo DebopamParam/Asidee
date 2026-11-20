@@ -174,7 +174,7 @@ test("templatePrepare and its progress are open to the dashboard and can be rout
 })
 
 test("a create's --gh, --claude, --codex, --repo, --skills, --t3 and --t3-browser become extension runs in dependency order, checked first", async () => {
-  const { createSteps, runCreateSteps } = await import("../../cli/create-setup")
+  const { createSteps, runCreateSteps } = await import("../../core/create-setup")
   expect(createSteps("demo", {})).toEqual([])
   expect(createSteps("demo", { t3: true, repo: "o/r", codex: ["work"], claude: ["deb", "work", "deb"], gh: true }).map((step) => step.argv)).toEqual([
     ["logins", "github", "demo", "--gh"],
@@ -189,7 +189,13 @@ test("a create's --gh, --claude, --codex, --repo, --skills, --t3 and --t3-browse
   expect(createSteps("demo", { t3: true, "t3-browser": true }).map((step) => step.argv)).toEqual([["t3", "setup", "demo"], ["t3", "browser", "demo"]])
   for (const repo of ["o", "o/r.git", "-o/r", "o/r/x", "https://github.com/o/r"]) expect(() => createSteps("demo", { repo })).toThrow("--repo")
   for (const claude of ["", "../x", "--setup", "a b"]) expect(() => createSteps("demo", { claude: ["deb", claude] })).toThrow("--claude")
-  // The first failure stops the rest.
-  const ran = await runCreateSteps(["sh", "-c", 'echo "$3"; [ "$3" != import ]', "sh"], {}, createSteps("demo", { gh: true, claude: ["deb"], t3: true }), () => {})
+  // The first failure stops the rest, and each result is reported before the next step starts.
+  const reported: string[] = []
+  const ran = await runCreateSteps(["sh", "-c", 'echo "$3"; [ "$3" != import ]', "sh"], {}, createSteps("demo", { gh: true, claude: ["deb"], t3: true }), () => {}, async (step) => { reported.push(`${step.label} ${step.exitCode}`) })
   expect(ran.map((step) => [step.label, step.exitCode, step.output])).toEqual([["GitHub login", 0, "github"], ["Claude login deb", 1, "import"]])
+  expect(reported).toEqual(["GitHub login 0", "Claude login deb 1"])
+  // A retry runs what is left of the steps, from the one that failed.
+  const { remainingSteps } = await import("../../core/create-setup")
+  expect(remainingSteps("demo", { gh: true, claude: ["deb"], t3: true }, ["GitHub login"]).map((step) => step.label)).toEqual(["Claude login deb", "T3 Code"])
+  expect(remainingSteps("demo", undefined, [])).toEqual([])
 })

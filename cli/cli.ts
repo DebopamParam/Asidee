@@ -22,7 +22,7 @@ import { hostOption, type FleetView, type HostView } from "../core/machines"
 import { bounded, PROTOCOL, transportStdio } from "../core/transport"
 import { included, userConfig, type SshAccess } from "../core/ssh"
 import { systemRunner } from "../core/run"
-import { createSteps, runCreateSteps } from "./create-setup"
+import { createSteps, runCreateSteps, type CreateSetup, type SetupStep } from "../core/create-setup"
 import { hostVersion, validVersion, type Prepared, type Preparing } from "../core/prepare"
 import { applySetup, ORBSTACK_DOWNLOAD, orbstackEngine, orbstackInstalled, planSetup, setupChanges, setupPlanLines } from "../core/setup"
 import { checkSocketPath, DEFAULT_SPEC, defaultDirs, socketPath, streamSocketPath, validTemplateName, type Config, type Defaults } from "../core/state"
@@ -43,6 +43,8 @@ const GROUPS: Array<[string, string[]]> = [
     "           then, with the bundled extensions: this Mac's GitHub login, Claude or Codex logins with their setup (repeat",
     "           a flag for several), a clone into ~/workspace, DIR's skills and plugins into ~/workspace, T3 Code, T3's",
     "           browser (Chrome; sets T3 up too). Each token is copied into the sandbox, where anything running there can read it.",
+    "asd create --retry NAME            finish a create that did not: its checks again if they failed, then the setup steps left",
+    "asd create --keep NAME             keep a sandbox whose create did not finish as it is; otherwise it is removed an hour after it stopped",
     "asd shell NAME [-- COMMAND…]       a shell, or one command on a terminal, inside the sandbox",
     "asd claude NAME [PROFILE] [-- ARG…]   Claude Code in ~/workspace with an imported login: PROFILE, or the only one",
     "asd codex NAME [PROFILE] [-- ARG…]    the same for Codex",
@@ -399,6 +401,13 @@ function printSandbox(view: SandboxView): void {
   console.log(`${displayName(view.name)}: ${view.spec?.gpu ? `${GPU_KIND}, ` : ""}${shown(view.status)} on ${shown(view.engine)}${view.stopReason ? `\n  ${shown(view.stopReason)}` : ""}`)
   if (view.diskWarning) console.log(`  ${shown(view.diskWarning.message)}`)
   if (view.enforcementProblem) console.log(`  Enforcement problem at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}`)
+  for (const line of unfinishedLines(view.name, view.unfinished)) console.log(`  ${line}`)
+}
+// A create that did not finish: when it goes, and the commands that finish, keep or remove it.
+function unfinishedLines(name: string, unfinished: SandboxView["unfinished"]): string[] {
+  if (!unfinished) return []
+  return [`${unfinished.stage === "checks" ? "Its create did not finish" : "Its setup did not finish"}: ${shown(unfinished.reason)} It is removed at ${utc(unfinished.removeAt)} unless that is done: ${next("create", "--retry", name)}`,
+    `To keep it as it is: ${next("create", "--keep", name)}. To remove it now: ${next("remove", name, "--confirm", name)}`]
 }
 const displayName = (name: string) => shown(selectedHost && selectedHost !== "local" ? `${selectedHost}/${name}` : name)
 // A command to run next, on the machine this one addressed.
@@ -597,29 +606,48 @@ async function main(argv: string[]): Promise<void> {
       }
       case "create": {
         const { values, positionals } = parse({ docker: { type: "boolean" }, gpu: { type: "boolean" }, image: { type: "string" }, template: { type: "string" }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" }, pids: { type: "string" }, engine: { type: "string" },
-          gh: { type: "boolean" }, claude: { type: "string", multiple: true }, codex: { type: "string", multiple: true }, repo: { type: "string" }, skills: { type: "string" }, t3: { type: "boolean" }, "t3-browser": { type: "boolean" } })
+          gh: { type: "boolean" }, claude: { type: "string", multiple: true }, codex: { type: "string", multiple: true }, repo: { type: "string" }, skills: { type: "string" }, t3: { type: "boolean" }, "t3-browser": { type: "boolean" },
+          retry: { type: "boolean" }, keep: { type: "boolean" } })
         const name = need(positionals[0], "a name")
+        // Runs the setup steps one by one, telling the daemon each result, so a failure is kept with the step it stopped at.
+        const setUp = async (steps: SetupStep[], made: object) => {
+          if (steps.length && !asJson) console.log("")
+          let last: SandboxView | undefined
+          const ran = await runCreateSteps(self, { ...process.env, PATH: `${cliDir}:${process.env.PATH ?? ""}` }, steps, (line) => { if (!asJson) console.log(line) },
+            async (step) => { last = await call<SandboxView>("createStep", { name, step: step.label, ok: step.exitCode === 0 }) })
+          const failed = ran.find((step) => step.exitCode !== 0)
+          out({ ...made, ...(steps.length ? { setup: ran } : {}), ...(last?.unfinished ? { unfinished: last.unfinished } : {}) }, () => {
+            for (const step of ran) if (step.output) console.log(shown(step.output, true).replace(/^/gm, "  "))
+            if (failed) console.log(`\n${shown(failed.label)} failed with exit ${failed.exitCode}; the steps after it did not run.\n${unfinishedLines(name, last?.unfinished).join("\n")}`)
+            else console.log(`\nNext: ${next("shell", name)}`)
+          })
+          if (failed) process.exit(1)
+        }
+        if (values.retry || values.keep) {
+          if ((values.retry && values.keep) || Object.entries(values).some(([key, value]) => key !== "retry" && key !== "keep" && value !== undefined)) throw new AsideeError("usage", "--retry and --keep take only the sandbox's name.")
+          if (values.keep) {
+            const kept = await call<SandboxView>("createKeep", { name })
+            return out(kept, () => console.log(`${displayName(name)} is kept as it is. The setup steps that did not run will not run; it is not removed.`))
+          }
+          const retried = await call<{ sandbox: SandboxView; checks?: CheckResult[]; setup?: CreateSetup; remaining: string[] }>("createRetry", { name }, watching(name))
+          const steps = retried.setup ? createSteps(name, retried.setup).filter((step) => retried.remaining.includes(step.label)) : []
+          if (steps.length && selectedHost && selectedHost !== "local") throw new AsideeError("usage", "A create's setup steps run for sandboxes on this Mac only.")
+          if (!asJson) { printSandbox(retried.sandbox); if (retried.checks) printChecks(retried.checks, checklistFor(retried.sandbox.spec), next("verify", name)) }
+          return await setUp(steps, retried)
+        }
         // Checked before anything is made. The logins come from this Mac, and the extensions reach local sandboxes only.
         const steps = createSteps(name, values)
         if (steps.length && selectedHost && selectedHost !== "local") throw new AsideeError("usage", "--gh, --claude, --codex, --repo, --skills, --t3 and --t3-browser work for sandboxes on this Mac only.")
         creating = name; creatingGpu = Boolean(values.gpu)
         if (values.gpu && !asJson) console.error(`asd: ${GPU_WARNING}`)
+        const setup = { gh: values.gh, claude: values.claude, codex: values.codex, repo: values.repo, skills: values.skills, t3: values.t3, "t3-browser": values["t3-browser"] }
         const made = await call<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }>; warning?: string }>("create",
-          { name, docker: values.docker, ...(values.gpu ? { gpu: true } : {}), image: values.image, template: values.template, cpus: values.cpus, memoryGb: values.memory, diskGb: values.disk, pids: values.pids, engine: values.engine }, watching(name))
+          { name, docker: values.docker, ...(values.gpu ? { gpu: true } : {}), image: values.image, template: values.template, cpus: values.cpus, memoryGb: values.memory, diskGb: values.disk, pids: values.pids, engine: values.engine, ...(steps.length ? { setup } : {}) }, watching(name))
         if (!asJson) {
           printSandbox(made.sandbox); printChecks(made.checks, checklistFor(made.sandbox.spec), next("verify", name))
           for (const hook of made.hooks) console.log(`\n  ${shown(hook.extension)} (after create): ${hook.exitCode === 0 ? "done" : `failed with exit ${hook.exitCode}`}${hook.output ? `\n${shown(hook.output, true)}` : ""}`)
-          if (steps.length) console.log("")
         }
-        const ran = await runCreateSteps(self, { ...process.env, PATH: `${cliDir}:${process.env.PATH ?? ""}` }, steps, (line) => { if (!asJson) console.log(line) })
-        const failed = ran.find((step) => step.exitCode !== 0)
-        out({ ...made, ...(steps.length ? { setup: ran } : {}) }, () => {
-          for (const step of ran) if (step.output) console.log(shown(step.output, true).replace(/^/gm, "  "))
-          if (failed) console.log(`\n${shown(failed.label)} failed with exit ${failed.exitCode}; the steps after it did not run. ${name} is kept.`)
-          console.log(`\nNext: ${next("shell", name)}`)
-        })
-        if (failed) process.exit(1)
-        return
+        return await setUp(steps, made)
       }
       case "list": case "ls": {
         const { values } = parse({ all: { type: "boolean" } })
@@ -642,6 +670,7 @@ async function main(argv: string[]): Promise<void> {
             if (view.status === "damaged") { console.log(`${displayName(view.name).padEnd(24)} damaged\n    ${shown(view.stopReason)}`); continue }
             console.log(`${displayName(view.name).padEnd(24)} ${shown(view.status).padEnd(8)} ${view.spec.gpu ? `${GPU_KIND}  ` : ""}${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  disk limit ${view.spec.diskGb} GB  ${shown(view.engine)}${view.template ? `  template ${shown(view.template.name)}` : ""}  (${verified})${view.stopReason ? `\n    ${shown(view.stopReason)}` : ""}`)
             if (view.enforcementProblem) console.log(`    Enforcement problem at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}`)
+            if (view.unfinished) console.log(`    Unfinished create, removed at ${utc(view.unfinished.removeAt)}: ${shown(view.unfinished.reason)} To finish it: ${next("create", "--retry", view.name)}`)
           }
           if (list.some((view) => view.lastVerify)) console.log("Verification is historical only; current checks are unknown.")
         })
@@ -971,7 +1000,9 @@ async function main(argv: string[]): Promise<void> {
       const checklist = command === "workspace" ? WORKSPACE_CHECKLIST : checklistFor({ gpu })
       console.error(`asd: ${shown(message.split(": ")[0]!.replace(/\.$/, ""))}. These checks did not hold:`)
       for (const check of error.details as CheckResult[]) console.error(`  ${MARK[check.status] ?? "?"} ${checklist.find((entry) => entry.id === check.id)?.title ?? shown(check.id)}\n      ${shown(check.detail)}`)
-      if (creating) console.error(`Remove it: ${next("remove", creating, "--confirm", creating)}`)
+      const kept = /It is kept for diagnosis until .*$/.exec(message)?.[0]
+      if (kept) console.error(shown(kept))
+      else if (creating) console.error(`Remove it: ${next("remove", creating, "--confirm", creating)}`)
     } else console.error(`asd: ${shown(message)}`)
     process.exit(EXIT[code])
   }

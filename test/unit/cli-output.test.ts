@@ -442,6 +442,35 @@ test("a refused create names the command that removes what it kept", async () =>
   expect(refused.err.trimEnd().endsWith("Remove it: asd remove demo --confirm demo")).toBe(true)
 })
 
+test("a create that did not finish says when it is removed and how to retry, keep or remove it", async () => {
+  const unfinished = { stage: "setup", reason: "Its setup step Clone o/r failed.", removeAt: "2026-11-21T10:00:00.000Z", setup: { repo: "o/r" }, done: [], failed: "Clone o/r" }
+  const view = { name: "demo", status: "running", engine: "Fake", spec: { cpus: 2, memoryGb: 4, pids: 4096, diskGb: 20, image: "ubuntu:24.04" }, unfinished }
+  const calls: unknown[] = []
+  const asidee = await daemon({ get: { ok: true, data: view }, list: { ok: true, data: [view] },
+    createKeep: (body: unknown) => { calls.push(["createKeep", body]); return { ok: true, data: { ...view, unfinished: undefined } } },
+    createRetry: (body: unknown) => { calls.push(["createRetry", body]); return { ok: true, data: { sandbox: { ...view, unfinished: undefined }, checks: [], remaining: [] } } } })
+  const got = await asidee("get", "demo")
+  expect(got.out).toContain("Its setup did not finish: Its setup step Clone o/r failed. It is removed at 2026-11-21 10:00 UTC unless that is done: asd create --retry demo")
+  expect(got.out).toContain("To keep it as it is: asd create --keep demo. To remove it now: asd remove demo --confirm demo")
+  expect((await asidee("list")).out).toContain("Unfinished create, removed at 2026-11-21 10:00 UTC: Its setup step Clone o/r failed. To finish it: asd create --retry demo")
+  const kept = await asidee("create", "--keep", "demo")
+  expect([kept.code, kept.out.trim()]).toEqual([0, "demo is kept as it is. The setup steps that did not run will not run; it is not removed."])
+  const retried = await asidee("create", "--retry", "demo")
+  expect(retried.code).toBe(0)
+  expect(retried.out).toContain("Next: asd shell demo")
+  for (const args of [["--retry", "--keep"], ["--retry", "--docker"], ["--keep", "--repo", "o/r"]]) expect((await asidee("create", "demo", ...args)).code).toBe(2)
+  expect(calls).toEqual([["createKeep", { name: "demo" }], ["createRetry", { name: "demo" }]])
+})
+
+test("a create refused by its checks prints how long it is kept and how to retry", async () => {
+  const failed = [{ id: "net-host", status: "fail", evidence: "probed", detail: "A connection reached the host." }]
+  const note = "It is kept for diagnosis until 2026-11-21 10:00 UTC, then removed. To try again: `asd create --retry demo`. To remove it now: `asd remove demo --confirm demo`."
+  const asidee = await daemon({ create: { ok: false, error: { code: "check-failed", message: `demo was created but stopped: Cannot reach the host (A connection reached the host.). ${note}`, details: failed } } })
+  const refused = await asidee("create", "demo")
+  expect(refused.code).toBe(6)
+  expect(refused.err.trimEnd().endsWith(note)).toBe(true)
+})
+
 test("template and forward times are shown in UTC whatever offset the engine reported", async () => {
   const template = { name: "tpl", engine: "Fake", imageId: "sha256:t", source: "a", sourceImage: "img", createdAt: "2026-11-16T01:46:52+05:30", sizeBytes: 0, loginsRemoved: [], dependants: [] }
   const forward = { id: "f1", name: "demo", sandboxId: "s", generation: "g", localAddress: "127.0.0.1", localPort: 5000, port: 3000, connections: 0, createdAt: "2026-11-15T20:16:00.000Z" }

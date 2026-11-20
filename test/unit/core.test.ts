@@ -389,11 +389,103 @@ for (const requireProbes of [true, false]) test(`a create whose first verify thr
   const { provider, state } = fakeProvider(); const asidee = await core(provider)
   await asidee.configSet({ requireProbes })
   provider.checks = async (_manifest, stage) => { if (stage === "probe") throw new AsideeError("runtime", "A previous Asidee probe has not finished tearing down its routes."); return allPass(stage) }
-  await expect(asidee.create({ name: "demo" })).rejects.toThrow("demo was created but stopped, and is kept for diagnosis: its first checks could not finish. A previous Asidee probe")
+  await expect(asidee.create({ name: "demo" })).rejects.toThrow("demo was created but stopped: its first checks could not finish. A previous Asidee probe")
   expect(state.running).toBe(false)
   const saved = await readManifest(asidee.dirs, "demo")
   expect(saved.stopReason).toContain("its first checks could not finish")
   expect(saved.checksPending).toBeUndefined()
+})
+
+test("a create whose checks fail is kept stopped for a bounded time, can be retried, and is removed once its time is up", async () => {
+  const { provider, state } = fakeProvider({ runtime: [{ id: "kernel", status: "fail", evidence: "probed", detail: "runc" }] }); const asidee = await core(provider)
+  let message = ""
+  try { await asidee.create({ name: "demo" }) } catch (error) { message = (error as Error).message }
+  expect(message).toContain("demo was stopped again: Runs on an isolated kernel")
+  expect(message).toMatch(/It is kept for diagnosis until \d{4}-\d\d-\d\d \d\d:\d\d UTC, then removed\. To try again: `asd create --retry demo`\. To remove it now: `asd remove demo --confirm demo`\./)
+  expect(state.running).toBe(false)
+  const kept = (await asidee.get("demo")).unfinished!
+  expect(kept).toMatchObject({ stage: "checks", done: [] })
+  expect(Date.parse(kept.removeAt) - Date.now()).toBeGreaterThan(59 * 60_000)
+  // A retry that fails again keeps it, for as long again.
+  await expect(asidee.createRetry("demo")).rejects.toThrow("To try again: `asd create --retry demo`")
+  // Before its time it stays; after, the enforcement pass removes it.
+  await asidee.enforce()
+  expect(state.exists).toBe(true)
+  asidee.unfinishedKeepMs = -1
+  await expect(asidee.createRetry("demo")).rejects.toThrow("was stopped again")
+  await asidee.enforce()
+  expect(state.exists).toBe(false)
+  expect(await asidee.list()).toEqual([])
+})
+
+test("a retry that passes the checks finishes a create, and a sandbox already finished has nothing to retry", async () => {
+  const { provider, state } = fakeProvider({ runtime: [{ id: "kernel", status: "fail", evidence: "probed", detail: "runc" }] }); const asidee = await core(provider)
+  await expect(asidee.create({ name: "demo" })).rejects.toThrow("asd create --retry demo")
+  delete state.overrides.runtime
+  const retried = await asidee.createRetry("demo")
+  expect(retried.checks?.find((check) => check.id === "kernel")?.status).toBe("pass")
+  expect(retried.remaining).toEqual([])
+  expect(retried.sandbox.unfinished).toBeUndefined()
+  expect(state.running).toBe(true)
+  await expect(asidee.createRetry("demo")).rejects.toThrow("there is nothing to retry")
+  await expect(asidee.createKeep("demo")).rejects.toThrow("kept already")
+})
+
+test("a create's setup steps are recorded: a failed one is retried from where it stopped, and the last one done ends the record", async () => {
+  const { provider, state } = fakeProvider(); const asidee = await core(provider)
+  await expect(asidee.create({ name: "bad", setup: { repo: "not a repo" } })).rejects.toThrow("--repo")
+  await expect(asidee.create({ name: "bad", setup: { shell: true } })).rejects.toThrow("not shell")
+  expect(state.created).toEqual([])
+  expect((await asidee.create({ name: "plain", setup: { gh: false, claude: [] } })).sandbox.unfinished).toBeUndefined()
+  const made = await asidee.create({ name: "demo", setup: { gh: true, repo: "o/r", t3: true } })
+  expect(made.sandbox.unfinished).toMatchObject({ stage: "setup", done: [], setup: { gh: true, repo: "o/r", t3: true } })
+  await asidee.createStep("demo", "GitHub login", true)
+  await expect(asidee.createStep("demo", "GitHub login", true)).rejects.toThrow("no step")
+  const failed = (await asidee.createStep("demo", "Clone o/r", false)).unfinished!
+  expect(failed).toMatchObject({ failed: "Clone o/r", done: ["GitHub login"], reason: "Its setup step Clone o/r failed." })
+  await asidee.stop("demo")
+  const retry = await asidee.createRetry("demo")
+  expect(retry.remaining).toEqual(["Clone o/r", "T3 Code"])
+  expect(retry.checks).toBeUndefined()
+  expect(state.running).toBe(true)
+  await asidee.createStep("demo", "Clone o/r", true)
+  expect((await asidee.createStep("demo", "T3 Code", true)).unfinished).toBeUndefined()
+  await expect(asidee.createStep("demo", "T3 Code", true)).rejects.toThrow("no setup waiting")
+})
+
+test("a sandbox whose setup did not finish is removed once its time is up, unless kept, and not while a shell is open in it", async () => {
+  const { provider } = fakeProvider(); const asidee = await core(provider)
+  await asidee.create({ name: "demo", setup: { t3: true } })
+  await asidee.create({ name: "keep", setup: { t3: true } })
+  await asidee.createStep("keep", "T3 Code", false)
+  expect((await asidee.createKeep("keep")).unfinished).toBeUndefined()
+  asidee.unfinishedKeepMs = -1
+  await asidee.createStep("demo", "T3 Code", false)
+  const sessions = (asidee as unknown as { sessions: Map<string, Set<unknown>> }).sessions
+  sessions.set("demo", new Set([{}]))
+  await asidee.enforce()
+  expect((await asidee.list()).map((view) => view.name).sort()).toEqual(["demo", "keep"])
+  sessions.delete("demo")
+  await asidee.enforce()
+  expect((await asidee.list()).map((view) => view.name)).toEqual(["keep"])
+})
+
+test("a create a daemon never finished is unfinished from the start, so it does not stay for long", async () => {
+  const { provider, state } = fakeProvider(); const asidee = await core(provider)
+  provider.start = async () => new Promise(() => {})
+  void asidee.create({ name: "demo" })
+  for (let tries = 0; tries < 50 && !state.exists; tries++) await Bun.sleep(5)
+  const left = await readManifest(asidee.dirs, "demo")
+  expect(left.unfinished).toMatchObject({ stage: "checks", reason: "It was being created." })
+  // The next daemon, with this one gone: past its time, the record and its container go.
+  const next = new Core([provider], asidee.dirs, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere")
+  await next.enforce()
+  expect(state.exists).toBe(true)
+  const { writeManifest } = await import("../../core/state")
+  await writeManifest(asidee.dirs, { ...left, unfinished: { ...left.unfinished!, removeAt: new Date(0).toISOString() } })
+  await next.enforce()
+  expect(state.exists).toBe(false)
+  expect(await next.list()).toEqual([])
 })
 
 test("a sandbox a crashed daemon started but never finished checking is stopped by the next daemon", async () => {

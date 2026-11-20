@@ -17,6 +17,7 @@ export const CATALOG = {
   version: ["dashboard", "read"], hello: ["socket", "read"], checklist: ["dashboard", "read"], summary: ["dashboard", "read"],
   configGet: ["dashboard", "read"], configSet: ["dashboard", "write"],
   engines: ["dashboard", "read"], list: ["dashboard", "read"], get: ["dashboard", "read"], create: ["dashboard", "write"],
+  createRetry: ["dashboard", "write"], createStep: ["dashboard", "write"], createKeep: ["dashboard", "write"],
   start: ["dashboard", "write"], stop: ["dashboard", "write"], remove: ["dashboard", "write"], verify: ["dashboard", "write"],
   resize: ["dashboard", "write"], snapshot: ["dashboard", "write"], templateList: ["dashboard", "read"], templateRemove: ["dashboard", "write"],
   templatePrepare: ["dashboard", "write"], templatePreparing: ["dashboard", "read"], templatePrepareInfo: ["dashboard", "primary"],

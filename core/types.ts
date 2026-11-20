@@ -112,7 +112,13 @@ export type Manifest = {
   ssh?: SshSetup
   // The template it was made from, as resolved at creation. spec.image is then imageId.
   template?: { name: string; imageId: string; source: string; createdAt: string }
+  // A create that has not finished: stage "checks" until its first checks pass, then "setup" until every setup step it
+  // was asked for (core/create-setup.ts) has run. The daemon removes it at removeAt, which each step's report moves on,
+  // unless `asd create --retry` finishes it or `asd create --keep` keeps it as it is. failed: the step that failed last.
+  unfinished?: { stage: "checks" | "setup"; reason: string; removeAt: string; setup?: CreateSetup; done: string[]; failed?: string }
 }
+// The create's setup flags, as `asd create` takes them.
+export type CreateSetup = { gh?: boolean; claude?: string[]; codex?: string[]; repo?: string; skills?: string; t3?: boolean; "t3-browser"?: boolean }
 // user and home: the login, the same as exec's. unlocked: its locked password was replaced by * (still no password),
 // since sshd refuses a locked account even with a key. hostKey: the public half of the key made inside. editorKey: the
 // fingerprint of the key this machine's editors log in with.

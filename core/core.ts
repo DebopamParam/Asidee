@@ -3,13 +3,14 @@ import { EventEmitter } from "node:events"
 import type { Server } from "node:net"
 import { blockers, checklistFor, complete, failures, GPU_KIND, GPU_USER, GPU_WARNING, historical, titleOf } from "./checks"
 import { availableExtensions, fieldValues, installExtension, loadExtensions, removeExtension, runCommand } from "./extensions"
+import { remainingSteps, validSetup } from "./create-setup"
 import { boundPort, FORWARD_REACH, LEASE_TTL_MS, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
 import { Links } from "./links"
 import { OUTPUT_LIMIT } from "./run"
 import { addInclude, alias, editorKey, GUEST_SETUP, GUEST_SSH, includeLine, included, keyFingerprint, parseGuestSetup, userConfig, validPublicKey, writeClientFiles, type SshAccess } from "./ssh"
 import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSizes, validSpec, validTemplateName, writeManifest, writeConfig, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
-import { AsideeError, type CheckResult, type DiskWarning, type Engine, type Limits, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage, type Template, type SshSetup } from "./types"
+import { AsideeError, type CheckResult, type CreateSetup, type DiskWarning, type Engine, type Limits, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage, type Template, type SshSetup } from "./types"
 
 // A running sandbox is stopped when a blocking check could not be made this many timer passes in a row.
 export const UNCHECKED_PASSES = 4
@@ -18,6 +19,9 @@ const CORE_CHECKS = new Set<CheckResult["id"]>(["forwards", "ssh", "links", "lin
 // A running sandbox's memory or task limit is not lowered to within this share of what it uses now: the engine kills a
 // sandbox that passes either (measured: one using 351 MB was killed within seconds of a 256 MB limit).
 export const SHRINK_HEADROOM = 0.9
+// How long a create that did not finish is kept after its last progress, for a retry: long enough to fix a login or a
+// repository name and run `asd create --retry`, short enough that a forgotten one does not hold its disk for long.
+export const UNFINISHED_KEEP_MS = 60 * 60_000
 // Said with every template, since a template is shared on purpose.
 export const TEMPLATE_CONTENTS = "A template holds every file in the sandbox's own filesystem, home folders included, as it was at one moment: shell history, .env files, package-manager tokens and any login not in Asidee's list are inside. Removed before saving: the usual login files (Claude, Codex, GitHub, git, SSH keys, AWS, netrc) under /root and /home/*, and Asidee's own relay and SSH host key. Not in it: running processes and memory, /dev/shm and any other folder gVisor keeps in memory (it does so for /tmp when the image's /tmp is empty; /proc/mounts inside shows them as tmpfs), volumes (inner Docker's /var/lib/docker, so no inner images or containers, and any volume the image declares), and the engine's /etc/hosts, /etc/hostname and /etc/resolv.conf."
 
@@ -33,6 +37,7 @@ export type SandboxView = {
   // What a long operation on it is doing right now.
   activity?: string
   template?: Manifest["template"]
+  unfinished?: Manifest["unfinished"]
   // Set only for the weaker kind, a GPU container (GPU_KIND); a sandbox has none.
   kind?: string
 }
@@ -67,6 +72,7 @@ export class Core {
   // stopped for its disk use, so there is time to free space; the disk watch ends that early once it measures under.
   private readonly startedOver = new Map<string, number>()
   diskRecoveryMs = 30_000
+  unfinishedKeepMs = UNFINISHED_KEEP_MS
   private recovering(name: string): boolean { return Date.now() - (this.startedOver.get(name) ?? -Infinity) < this.diskRecoveryMs }
   // The last disk measurement of each sandbox and when it was made, for the dashboard's usage view; and the CPU time
   // each had used at the previous usage call, to give the share of a CPU between two calls.
@@ -134,7 +140,7 @@ export class Core {
     return { name: manifest.name, machineId: this.machineId, sandboxId: manifest.id, status, engine: manifest.engine.label, spec: manifest.spec, createdAt: manifest.createdAt, capabilities: manifest.engine.capabilities,
       lastVerify: historical(manifest.lastVerify),
       enforcementProblem: this.enforcementProblems.get(manifest.name) ?? manifest.enforcementProblem,
-      stopReason, activity: this.activity.get(manifest.name), template: manifest.template, ...(manifest.spec.gpu ? { kind: GPU_KIND } : {}) }
+      stopReason, activity: this.activity.get(manifest.name), template: manifest.template, ...(manifest.unfinished ? { unfinished: manifest.unfinished } : {}), ...(manifest.spec.gpu ? { kind: GPU_KIND } : {}) }
   }
 
   async list(): Promise<SandboxView[]> {
@@ -218,10 +224,95 @@ export class Core {
     return { checks, failed, configurationOnly: !running }
   }
 
+  private removeAt(): string { return new Date(Date.now() + this.unfinishedKeepMs).toISOString() }
+
+  // A create's start and first verify, which a retry repeats. Whatever fails, the sandbox is left stopped, and its
+  // unfinished record says why and when it goes.
+  private async firstChecks(manifest: Manifest, requireProbes: boolean): Promise<CheckResult[]> {
+    const name = manifest.name
+    try {
+      if ((await this.provider(manifest).status(manifest)) !== "running") await this.startChecked(manifest, true)
+      let verified: Awaited<ReturnType<Core["verifyNow"]>>
+      try { verified = await this.verifyNow(manifest, requireProbes) }
+      catch (error) {
+        // Whatever require-probes says: turning it off accepts an unknown probe, not a run with no verification at all.
+        const reason = error instanceof Error ? error.message : String(error)
+        try { await this.stopBecause(manifest, `Stopped after creation: its first checks could not finish. ${reason}`) }
+        catch (stop) { throw new AsideeError("runtime", `${name} was created, but its first checks could not finish (${reason}), and stopping it failed too (${stop instanceof Error ? stop.message : String(stop)}). The daemon stops it on its next pass, within 30 seconds.`) }
+        throw new AsideeError("runtime", `${name} was created but stopped: its first checks could not finish. ${reason}`)
+      }
+      const { checks, failed } = verified
+      if (failed.length) {
+        // Only when turning the requirement off would let this create through: a failure beside an unknown probe is a failed check.
+        const checklist = checklistFor(manifest.spec)
+        const unknown = failed.every((check) => check.status === "unknown" && checklist.find((item) => item.id === check.id)?.stage === "probe")
+        if (unknown) throw new AsideeError("probes-required", `${name} was created but stopped: ${failed.map((check) => `${titleOf(check.id, checklist)} (${check.detail})`).join("; ")}. Required isolation probes could not run. Only to allow creation without them: run \`asd config set require-probes off\` on this machine, or turn off Require isolation probes in Settings.`, failed)
+        this.refuse(manifest, failed, "was created but stopped")
+      }
+      return checks
+    } catch (error) {
+      const unfinished = manifest.unfinished ?? { stage: "checks" as const, reason: "", removeAt: "", done: [] }
+      Object.assign(unfinished, { stage: "checks", reason: error instanceof Error ? error.message : String(error), removeAt: this.removeAt() })
+      manifest.unfinished = unfinished
+      await writeManifest(this.dirs, manifest).catch(() => {})
+      const at = `${unfinished.removeAt.slice(0, 16).replace("T", " ")} UTC`
+      throw new AsideeError(error instanceof AsideeError ? error.code : "runtime", `${unfinished.reason.replace(/\.?$/, ".")} It is kept for diagnosis until ${at}, then removed. To try again: \`asd create --retry ${name}\`. To remove it now: \`asd remove ${name} --confirm ${name}\`.`,
+        error instanceof AsideeError ? error.details : undefined)
+    }
+  }
+
+  // The rest of a create that did not finish: its start and first checks again if they did not pass, then the setup
+  // steps not yet done, which the client runs (core/create-setup.ts) and reports one by one with createStep.
+  createRetry(name: string): Promise<{ sandbox: SandboxView; checks?: CheckResult[]; setup?: CreateSetup; remaining: string[] }> {
+    return this.exclusive(validName(name), async () => {
+      const manifest = await readManifest(this.dirs, name)
+      const unfinished = manifest.unfinished
+      if (!unfinished) throw new AsideeError("conflict", `${name}'s create finished; there is nothing to retry.`)
+      let checks: CheckResult[] | undefined
+      if (unfinished.stage === "checks") checks = await this.firstChecks(manifest, (await readConfig(this.dirs)).requireProbes)
+      else if ((await this.provider(manifest).status(manifest)) !== "running") await this.startChecked(manifest)
+      const remaining = remainingSteps(name, unfinished.setup, unfinished.done).map((step) => step.label)
+      if (remaining.length) Object.assign(unfinished, { stage: "setup", reason: "Its setup has not finished.", removeAt: this.removeAt() })
+      manifest.unfinished = remaining.length ? unfinished : undefined
+      await writeManifest(this.dirs, manifest)
+      return { sandbox: await this.view(manifest), ...(checks ? { checks } : {}), ...(unfinished.setup ? { setup: unfinished.setup } : {}), remaining }
+    })
+  }
+
+  // A client's report of one setup step. Each moves the removal on, and the last one done ends the record.
+  createStep(name: string, step: unknown, ok: unknown): Promise<SandboxView> {
+    return this.exclusive(validName(name), async () => {
+      const manifest = await readManifest(this.dirs, name)
+      const unfinished = manifest.unfinished
+      if (unfinished?.stage !== "setup") throw new AsideeError("conflict", `${name} has no setup waiting for its steps.`)
+      const remaining = remainingSteps(name, unfinished.setup, unfinished.done).map((entry) => entry.label)
+      if (typeof step !== "string" || !remaining.includes(step)) throw new AsideeError("usage", `${name}'s setup has no step ${JSON.stringify(step)} left; its steps left are ${remaining.join(", ")}.`)
+      if (typeof ok !== "boolean") throw new AsideeError("usage", "ok must be true or false.")
+      if (ok) { unfinished.done.push(step); if (unfinished.failed === step) delete unfinished.failed } else unfinished.failed = step
+      unfinished.reason = ok ? "Its setup has not finished." : `Its setup step ${step} failed.`
+      unfinished.removeAt = this.removeAt()
+      if (remaining.length === 1 && ok) delete manifest.unfinished
+      await writeManifest(this.dirs, manifest)
+      return this.view(manifest)
+    })
+  }
+
+  // Keeps a sandbox whose create did not finish as it is: it is no longer removed, and its remaining steps are dropped.
+  createKeep(name: string): Promise<SandboxView> {
+    return this.exclusive(validName(name), async () => {
+      const manifest = await readManifest(this.dirs, name)
+      if (!manifest.unfinished) throw new AsideeError("conflict", `${name}'s create finished; it is kept already.`)
+      delete manifest.unfinished
+      await writeManifest(this.dirs, manifest)
+      return this.view(manifest)
+    })
+  }
+
   // warning: said with every GPU container made (GPU_WARNING).
   async create(input: Record<string, unknown>): Promise<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }>; warning?: string }> {
     const config = await readConfig(this.dirs)
     const spec = validSpec(input, config.defaults)
+    const setup = validSetup(spec.name, input.setup)
     const { manifest, checks } = await this.exclusive(spec.name, async () => {
       if ((await listManifests(this.dirs)).some((entry) => entry.name === spec.name)) throw new AsideeError("conflict", `A sandbox named ${spec.name} already exists.`)
       const engines = await this.engines()
@@ -231,8 +322,10 @@ export class Core {
       if (!engine.ready) throw new AsideeError("dependency", `${engine.label} is not ready: ${engine.problems.join(" ")} ${engine.fix ?? ""}`.trim())
       if (spec.docker && !engine.capabilities?.docker) throw new AsideeError("dependency", `${engine.label} cannot run Docker inside a sandbox. Choose an engine with the docker capability (gVisor needs --net-raw and --overlay2=none).`)
       if (spec.gpu && !engine.capabilities?.gpu) throw new AsideeError("dependency", `${engine.label} cannot make a GPU container: Docker there lists no NVIDIA GPU (no nvidia.com/gpu CDI device and no nvidia runtime). It needs Linux with an NVIDIA GPU and the NVIDIA Container Toolkit.`)
-      // Written before the engine is touched, so a half-made sandbox can always be removed.
-      const manifest: Manifest = { version: 1, name: spec.name, id: randomBytes(16).toString("hex"), engine, spec, createdAt: new Date().toISOString() }
+      // Written before the engine is touched, so a half-made sandbox can always be removed, and is unfinished until its
+      // checks pass: one left by a daemon that ended mid-create goes too.
+      const manifest: Manifest = { version: 1, name: spec.name, id: randomBytes(16).toString("hex"), engine, spec, createdAt: new Date().toISOString(),
+        unfinished: { stage: "checks", reason: "It was being created.", removeAt: this.removeAt(), ...(setup ? { setup } : {}), done: [] } }
       const provider = this.provider(manifest)
       const createContainer = async () => {
         try { await provider.create(manifest) }
@@ -266,24 +359,10 @@ export class Core {
         this.activity.set(spec.name, `Creating (downloading ${spec.image} if it is not here yet)`)
         await createContainer()
       }
-      await this.startChecked(manifest, true)
-      let verified: Awaited<ReturnType<Core["verifyNow"]>>
-      try { verified = await this.verifyNow(manifest, config.requireProbes) }
-      catch (error) {
-        // Whatever require-probes says: turning it off accepts an unknown probe, not a run with no verification at all.
-        const reason = error instanceof Error ? error.message : String(error)
-        try { await this.stopBecause(manifest, `Stopped after creation: its first checks could not finish. ${reason}`) }
-        catch (stop) { throw new AsideeError("runtime", `${spec.name} was created, but its first checks could not finish (${reason}), and stopping it failed too (${stop instanceof Error ? stop.message : String(stop)}). The daemon stops it on its next pass, within 30 seconds.`) }
-        throw new AsideeError("runtime", `${spec.name} was created but stopped, and is kept for diagnosis: its first checks could not finish. ${reason} To try again: \`asd start ${spec.name}\`, then \`asd verify ${spec.name}\`; or \`asd remove ${spec.name} --confirm ${spec.name}\` and create it again.`)
-      }
-      const { checks, failed } = verified
-      if (failed.length) {
-        // Only when turning the requirement off would let this create through: a failure beside an unknown probe is a failed check.
-        const checklist = checklistFor(spec)
-        const unknown = failed.every((check) => check.status === "unknown" && checklist.find((item) => item.id === check.id)?.stage === "probe")
-        if (unknown) throw new AsideeError("probes-required", `${spec.name} was created but stopped, and is kept for diagnosis: ${failed.map((check) => `${titleOf(check.id, checklist)} (${check.detail})`).join("; ")}. Required isolation probes could not run. To try again: \`asd remove ${spec.name} --confirm ${spec.name}\`, then create it again. Only to allow creation without them: run \`asd config set require-probes off\` on this machine, or turn off Require isolation probes in Settings.`, failed)
-        this.refuse(manifest, failed, "was created but stopped, and is kept for diagnosis")
-      }
+      const checks = await this.firstChecks(manifest, config.requireProbes)
+      if (setup) manifest.unfinished = { stage: "setup", reason: "Its setup has not finished.", removeAt: this.removeAt(), setup, done: [] }
+      else delete manifest.unfinished
+      await writeManifest(this.dirs, manifest)
       return { manifest, checks }
     })
     // Hooks run once the sandbox is free again, so a hook may use any command on it (verify, stop, start).
@@ -337,15 +416,20 @@ export class Core {
     return this.exclusive(validName(name), async () => {
       const manifest = await readManifest(this.dirs, name)
       if (confirm !== name) throw new AsideeError("usage", `Removing ${name} deletes everything in it.${typeof confirm === "string" && confirm ? ` --confirm ${confirm} does not match ${name}; nothing was removed.` : ""} To confirm: \`asd remove ${name} --confirm ${name}\`.`)
-      this.activity.set(name, "Removing")
-      this.endSessions(name, `The session ended: ${name} was removed.`)
-      await this.provider(manifest).remove(manifest); await deleteManifest(this.dirs, name)
-      this.diskSeen.delete(name); this.cpuSeen.delete(name)
-      await this.links.forget(manifest).catch(() => {})
-      this.enforcementProblems.delete(name); this.unchecked.delete(name)
-      if (manifest.ssh) await writeClientFiles(this.dirs, await listManifests(this.dirs))
+      await this.removeNow(manifest)
       return { removed: name }
     })
+  }
+
+  private async removeNow(manifest: Manifest): Promise<void> {
+    const name = manifest.name
+    this.activity.set(name, "Removing")
+    this.endSessions(name, `The session ended: ${name} was removed.`)
+    await this.provider(manifest).remove(manifest); await deleteManifest(this.dirs, name)
+    this.diskSeen.delete(name); this.cpuSeen.delete(name)
+    await this.links.forget(manifest).catch(() => {})
+    this.enforcementProblems.delete(name); this.unchecked.delete(name)
+    if (manifest.ssh) await writeClientFiles(this.dirs, await listManifests(this.dirs))
   }
 
   // CPUs, memory and the task limit are set in the engine, and the manifest follows once it accepted them. For a running
@@ -661,6 +745,11 @@ export class Core {
         let stoppingFor: string | undefined
         try {
           const provider = this.provider(manifest)
+          // A create that did not finish goes once its time is up, but not from under an open shell or forward.
+          const unfinished = manifest.unfinished
+          if (unfinished && Date.parse(unfinished.removeAt) <= Date.now() && !this.sessions.get(manifest.name)?.size && ![...this.forwards.values()].some((forward) => forward.view.name === manifest.name)) {
+            try { return await this.removeNow(manifest) } catch (error) { throw new Error(`Removing it, since its create did not finish by ${unfinished.removeAt}, failed: ${(error as Error).message}`) }
+          }
           if ((await provider.status(manifest)) !== "running") {
             this.unchecked.delete(manifest.name)
             const pending = manifest.checksPending !== undefined; delete manifest.checksPending
