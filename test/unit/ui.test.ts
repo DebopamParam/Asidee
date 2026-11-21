@@ -581,8 +581,10 @@ test("every copyable command quotes a value for the shell only when it needs it"
 })
 
 test("create runs the chosen setup steps after the create, in the CLI's order, and stops at the first failure", async () => {
-  const bundled = ["logins", "repo", "skills", "t3"].map((id) => ({ id, name: id, actions: [] }))
+  const bundled = ["logins", "folders", "repo", "t3"].map((id) => ({ id, name: id, actions: [] }))
   const ui = await page({ ...base, list: () => [sandbox({ name: "fresh" })], extensions: () => ({ extensions: bundled, errors: [] }), create: (body) => ({ sandbox: { name: body.name } }),
+    folderBrowse: () => ({ path: "~", folders: [], picks: [{ path: "~/.agents", label: "Shared skills (.agents)" }] }),
+    folderPreview: (body) => ({ source: body.source, mirror: body.source, files: 2, links: 0, folders: 1, bytes: 10, partial: false, excluded: [], excludedCount: 0, skipped: [], skippedCount: 0, largest: [], warnings: [] }),
     createStep: (body) => sandbox({ name: "fresh", ...(body.ok ? {} : { unfinished: { stage: "setup", reason: "x", removeAt: "2026-11-21T10:00:00Z", done: [] } }) }),
     action: (body) => body.action === "profiles" ? { exitCode: 0, stdout: `noise <b>\n${JSON.stringify({ agent: body.values.agent, profiles: ["work", "home", "../x", "<b>"], token: "s3cret" })}\n`, stderr: "" }
       : body.action === "clone" ? { exitCode: 2, stdout: "<i>no access</i>", stderr: "" } : { exitCode: 0, stdout: `${body.action} ok`, stderr: "" } })
@@ -594,16 +596,24 @@ test("create runs the chosen setup steps after the create, in the CLI's order, a
   form.elements.namedItem("name").value = "fresh"; doc.getElementById("setup-gh").checked = true; doc.getElementById("setup-claude-work").checked = true; doc.getElementById("setup-claude-home").checked = true; doc.getElementById("setup-t3").checked = true
   doc.getElementById("setup-repo").value = "acme/app.git"; form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
   expect(ui.text("#create-command")).toContain("asd create fresh --gh --claude work --claude home --repo acme/app.git --t3")
-  // Skills and plugins come after the clone, which needs an empty ~/workspace.
-  doc.getElementById("setup-skills").value = "~/hq"; form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
-  expect(ui.text("#create-command")).toContain("--repo acme/app.git --skills ~/hq --t3")
-  // A value that needs it is quoted for the shell; ~/ stays outside the quotes.
-  doc.getElementById("setup-skills").value = "~/my hq"; form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
-  expect(ui.text("#create-command")).toContain("--skills ~/'my hq' --t3")
-  doc.getElementById("setup-skills").value = ""
+  // Folders are copied after the clone, which needs an empty ~/workspace, each in the order added. A quick pick fills
+  // the folder; the one being picked is in the command before it is added.
+  expect(ui.text("#create-setup")).toContain("Copy folders in")
+  const quick = doc.querySelector('#create-setup input[name="setup-copy-pick-pick"]')
+  expect(quick.closest("label").textContent).toBe("Shared skills (.agents)"); expect(quick.closest("label").title).toBe("~/.agents")
+  quick.checked = true; quick.dispatchEvent(new ui.window.Event("change", { bubbles: true })); await ui.settle()
+  expect(ui.text("#create-command")).toContain("--repo acme/app.git --copy ~/.agents --t3")
+  await ui.click("Add another folder")
+  expect(ui.text("#setup-copies")).toBe("~/.agents → the same placeRemove")
+  // A value that needs it is quoted for the shell; ~/ stays outside the quotes. DEST follows a colon.
+  const pick = doc.getElementById("setup-copy-pick")
+  pick.value = "~/my hq"; pick.dispatchEvent(new ui.window.Event("input", { bubbles: true })); doc.getElementById("setup-copy-dest").value = "~/hq"; form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
+  expect(ui.text("#create-command")).toContain("--copy ~/.agents --copy ~/'my hq:~/hq' --t3")
+  await ui.click("Add another folder")
+  doc.querySelector('[aria-label="Remove ~/.agents"]').click(); await ui.settle()
   // The browser sets T3 up first, so its one flag stands for both.
   doc.getElementById("setup-t3-browser").checked = true; form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
-  expect(ui.text("#create-command")).toContain("--repo acme/app.git --t3-browserCopy")
+  expect(ui.text("#create-command")).toContain("--repo acme/app.git --copy ~/'my hq:~/hq' --t3-browserCopy")
   await ui.submit(form)
   expect(ui.text("#create-error")).toBe("Repository takes a GitHub OWNER/REPO.")
   expect(ui.calls.some((call) => call.method === "create")).toBe(false)
@@ -611,7 +621,8 @@ test("create runs the chosen setup steps after the create, in the CLI's order, a
   await ui.submit(form)
   // The setup goes with the create, as the CLI's flags, so the daemon can keep it for a retry.
   const create = ui.calls.find((call) => call.method === "create")!.body
-  expect(create.setup).toEqual({ gh: true, claude: ["work", "home"], codex: [], repo: "acme/app", t3: true, "t3-browser": true })
+  expect(create.setup).toEqual({ gh: true, claude: ["work", "home"], codex: [], repo: "acme/app", copy: ["~/my hq:~/hq"], t3: true, "t3-browser": true })
+  expect(Object.keys(create).filter((key) => key.startsWith("setup-"))).toEqual([])
   expect(ui.calls.filter((call) => call.method === "createStep").map((call) => call.body)).toEqual([{ name: "fresh", step: "GitHub login", ok: true },
     { name: "fresh", step: "Claude login work", ok: true }, { name: "fresh", step: "Claude login home", ok: true }, { name: "fresh", step: "Clone acme/app", ok: false }])
   const steps = ui.calls.filter((call) => call.method === "action" && !["profiles", "list"].includes(call.body.action)).map((call) => call.body)
@@ -938,4 +949,65 @@ test("the page is light only", async () => {
   expect(html).not.toContain("prefers-color-scheme")
   expect(html).toContain('<meta name="color-scheme" content="light">')
   expect(html).toContain("prefers-reduced-motion")
+})
+
+test("the Folders page picks a folder from quick picks or the browser, previews what is left out, and runs the copy", async () => {
+  const declared = JSON.parse(await readFile(join(import.meta.dir, "..", "..", "extensions", "folders", "extension.json"), "utf8"))
+  const folders = { ...declared, id: "folders", bundled: true, dir: "/x", actions: declared.actions.map((action: object) => ({ ...action, run: ["asd", "extension-run", "folders"] })) }
+  const tree: Record<string, { parent?: string; folders: string[] }> = { "~": { folders: ["projects", ".agents", ".claude"] }, "~/projects": { parent: "~", folders: ["hq"] }, "~/projects/hq": { parent: "~/projects", folders: [] }, "~/.claude": { parent: "~", folders: ["skills"] } }
+  const ui = await page({ ...base, list: () => [sandbox()], extensions: () => ({ extensions: [folders], errors: ["Extension skills: Skills and plugins is no longer bundled: Folders copies any folder in, such as ~/.agents. Remove it with `asd ext remove skills`, and install Folders with `asd ext install folders`."] }),
+    folderBrowse: (body) => ({ path: body.path ?? "~", ...tree[body.path ?? "~"], picks: [{ path: "~/.agents", label: "Shared skills (.agents)" }, { path: "~/.claude", label: "Claude Code" }] }),
+    folderPreview: (body) => ({ source: body.source, mirror: body.source, files: 1200, links: 3, folders: 40, bytes: 620_000_000, partial: false, largest: [],
+      excluded: body.logins ? [{ path: "history.jsonl", reason: "history or cache" }] : [{ path: ".credentials.json", reason: "login file" }, { path: "history.jsonl", reason: "history or cache" }], excludedCount: body.logins ? 1 : 2,
+      skipped: [{ path: "skills/shared", reason: "points outside the folder" }], skippedCount: 1, warnings: ["This is a large copy; it can take a while and uses the sandbox's disk. Most of it is in node_modules."] }),
+    action: () => ({ exitCode: 0, stdout: "Copied ~/.claude to ~/.claude in demo: 1200 files, 3 links, 591.3 MiB.", stderr: "" }) }, "http://127.0.0.1:7717/extensions/folders#token=secret")
+  const doc = ui.doc as any
+  await ui.settle()
+  expect(ui.text("#extensions")).toContain("Skills and plugins is no longer bundled")
+  const card = doc.querySelector(".act-card[data-action=copy]")
+  expect(card.textContent).toContain("It copies into sandboxes on this Mac only.")
+  // Quick picks: the existing agent folders, by plain name, the path on hover.
+  const picks = [...card.querySelectorAll(".folder-picker label.pill")]
+  expect(picks.map((pill: any) => [pill.textContent, pill.title])).toEqual([["Shared skills (.agents)", "~/.agents"], ["Claude Code", "~/.claude"]])
+  const input = card.querySelector('input[name="source"]')
+  const choose = async (pill: any) => { const radio = pill.querySelector("input"); radio.checked = true; radio.dispatchEvent(new ui.window.Event("change", { bubbles: true })); await Bun.sleep(400); await ui.settle() }
+  await choose(picks[1])
+  expect(input.value).toBe("~/.claude")
+  expect(ui.calls.filter((call) => call.method === "folderPreview").at(-1)!.body).toEqual({ source: "~/.claude", logins: false })
+  const view = () => (doc.querySelector(".act-card[data-action=copy] .folder-preview").textContent ?? "").replace(/\s+/g, " ")
+  expect(view()).toContain("1,200 files, 3 links · 591 MB · goes to ~/.claude in the sandbox unless you give another place")
+  expect(view()).toContain("This is a large copy")
+  expect(view()).toContain("Left out: 2.credentials.json · login filehistory.jsonl · history or cache")
+  expect(view()).toContain("Skipped: 1skills/shared · points outside the folder")
+  expect(ui.text(".act-card[data-action=copy] .same")).toContain("asd ext run folders copy demo --set 'source=~/.claude'")
+  // Login files: off by default; ticked, it warns plainly and reads the folder again with them.
+  const logins = card.querySelector('input[name="logins"]')
+  expect(logins.checked).toBe(false)
+  expect(view()).not.toContain("Login files will be copied")
+  logins.checked = true; logins.dispatchEvent(new ui.window.Event("change", { bubbles: true })); await ui.settle()
+  expect(view()).toContain("Login files will be copied. Anything in the sandbox can read them and send them out. The Agent logins extension is the safer way to sign agents in.")
+  expect(ui.calls.filter((call) => call.method === "folderPreview").at(-1)!.body).toEqual({ source: "~/.claude", logins: true })
+  expect(view()).toContain("Left out: 1")
+  logins.checked = false; logins.dispatchEvent(new ui.window.Event("change", { bubbles: true })); await ui.settle()
+  // The browser lists folder names under the home; Up goes back, and the home itself cannot be used.
+  const button = (label: string) => [...doc.querySelectorAll(".act-card[data-action=copy] button")].find((node: any) => node.textContent === label) as any
+  button("Browse…").click(); await ui.settle()
+  expect(ui.calls.filter((call) => call.method === "folderBrowse").at(-1)!.body).toEqual({ path: "~/.claude" })
+  button("Close the browser").click(); await ui.settle()
+  input.value = ""; input.dispatchEvent(new ui.window.Event("input", { bubbles: true })); await ui.settle()
+  button("Browse…").click(); await ui.settle()
+  expect(button("Use this folder").disabled).toBe(true)
+  expect([...doc.querySelectorAll(".act-card[data-action=copy] .folders button")].map((node: any) => node.textContent)).toEqual(["projects/", ".agents/", ".claude/"])
+  button("projects/").click(); await ui.settle()
+  button("hq/").click(); await ui.settle()
+  expect(ui.text(".act-card[data-action=copy] .folder-browser")).toContain("~/projects/hqUpUse this folderNo folders in it.")
+  button("Up").click(); await ui.settle()
+  button("hq/").click(); await ui.settle()
+  button("Use this folder").click(); await Bun.sleep(400); await ui.settle()
+  expect(input.value).toBe("~/projects/hq")
+  expect(doc.querySelector(".act-card[data-action=copy] .folder-browser").textContent).toBe("")
+  card.querySelector('input[name="dest"]').value = "~/hq"; card.querySelector("form").dispatchEvent(new ui.window.Event("input")); await ui.settle()
+  expect(ui.text(".act-card[data-action=copy] .same")).toContain("asd ext run folders copy demo --set 'source=~/projects/hq' --set 'dest=~/hq'")
+  await ui.submit(card.querySelector("form"))
+  expect(ui.calls.find((call) => call.method === "action")!.body).toEqual({ extension: "folders", action: "copy", sandbox: "demo", values: { source: "~/projects/hq", dest: "~/hq", logins: "false", replace: "false" } })
 })

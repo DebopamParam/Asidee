@@ -87,6 +87,9 @@
   label.check { display: inline-flex; gap: 8px; align-items: center; color: var(--ink); font-size: 13px; }
   .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
   .pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .fields .wide { grid-column: 1 / -1; }
+  .folder-picker .folders { display: flex; flex-wrap: wrap; gap: 4px 14px; max-height: 220px; overflow: auto; }
+  ul.plain { list-style: none; margin: 8px 0 0; padding: 0; } ul.plain li { padding: 2px 0; overflow-wrap: anywhere; }
   label.pill { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 12px; border: 1px solid #d6d6d2; border-radius: 999px; color: #333; background: #fff; font-size: 13px; cursor: pointer; }
   label.pill:has(input:checked) { border-color: var(--ink); color: var(--ink); font-weight: 600; background: #f4f4f3; }
   label.pill input { position: absolute; opacity: 0; pointer-events: none; }
@@ -825,6 +828,79 @@ function extCommand(extension, action, values = {}, target) {
   }
   return parts.join(" ")
 }
+// Picking a folder of this Mac to copy in, for the folders extension and a create's "Copy folders in": quick picks for
+// the agent folders that exist, a browser of the home's folders (names only), and a preview of what a copy takes and
+// leaves out. Each picker's state is kept by its id, so a rebuild of the page keeps it.
+let folderPicks
+const folderUi = {}
+function loadFolderPicks() {
+  if (folderPicks !== undefined) return
+  folderPicks = null
+  api("folderBrowse").then((data) => { folderPicks = data.picks; for (const state of Object.values(folderUi)) state.redraw?.() }, () => { folderPicks = [] })
+}
+const LOGINS_WARNING = "Login files will be copied. Anything in the sandbox can read them and send them out. The Agent logins extension is the safer way to sign agents in."
+const pathCount = (count, word) => `${count.toLocaleString("en-US")} ${word}${count === 1 ? "" : "s"}`
+// logins: whether login files go too, and dest: where it goes if given, both read from the form. onChange: the folder,
+// after each change.
+function folderPicker(id, { name = id, logins = () => false, dest = () => "", onChange = () => {} } = {}) {
+  const state = folderUi[id] ??= { value: "", browse: null, preview: null }
+  loadFolderPicks()
+  const input = el("input", { id, name, value: state.value, placeholder: "~/path/to/folder", autocomplete: "off", spellcheck: "false" })
+  const picks = el("div", { class: "pills", role: "radiogroup", "aria-label": "Quick picks" }), browser = el("div", { class: "folder-browser" }), preview = el("div", { class: "folder-preview" })
+  const set = (value) => { input.value = value; input.dispatchEvent(new Event("input", { bubbles: true })) }
+  let timer
+  const changed = () => {
+    state.value = input.value.trim(); drawPicks(); onChange(state.value)
+    clearTimeout(timer); timer = setTimeout(read, 350)
+  }
+  const read = () => {
+    const key = `${state.value}|${logins()}`
+    if (!state.value) { state.preview = null; return drawPreview() }
+    if (state.preview?.key === key) return drawPreview()
+    state.preview = { key }; drawPreview()
+    api("folderPreview", { source: state.value, logins: logins() }).then((data) => ({ key, data }), (error) => ({ key, error: error.message }))
+      .then((done) => { if (state.preview?.key === key) { state.preview = done; state.redraw() } })
+  }
+  const drawPicks = () => picks.replaceChildren(...(folderPicks ?? []).map((pick) => el("label", { class: "pill", title: pick.path },
+    el("input", { type: "radio", name: `${id}-pick`, value: pick.path, ...(pick.path === state.value ? { checked: "" } : {}), onchange: () => set(pick.path) }), pick.label)),
+    el("button", { type: "button", class: "sm", "aria-expanded": String(Boolean(state.browse)), onclick: () => state.browse ? (state.browse = null, drawBrowser()) : open(state.value || "~") }, state.browse ? "Close the browser" : "Browse…"))
+  const open = (path) => {
+    state.browse = { path, loading: true }; drawBrowser()
+    api("folderBrowse", { path }).then((data) => { state.browse = { path: data.path, data } }, (error) => { state.browse = { path, error: error.message } }).then(() => state.redraw())
+  }
+  const drawBrowser = () => {
+    drawPicks()
+    const view = state.browse
+    if (!view) return browser.replaceChildren()
+    const data = view.data
+    browser.replaceChildren(el("div", { class: "lp pad stack" },
+      el("div", { class: "row" }, el("b", { class: "grow" }, data?.path ?? view.path), data?.parent ? el("button", { type: "button", class: "sm", onclick: () => open(data.parent) }, "Up") : null,
+        data ? el("button", { type: "button", class: "sm", ...(data.path === "~" ? { disabled: "", title: "Pick a folder inside your home, not the whole home" } : {}), onclick: () => { state.browse = null; set(data.path); drawBrowser() } }, "Use this folder") : null),
+      view.loading ? el("p", { class: "muted" }, "Reading…") : view.error ? el("p", { class: "error" }, view.error)
+        : data.folders.length ? el("div", { class: "folders" }, ...data.folders.map((folder) => el("button", { type: "button", class: "link", onclick: () => open(`${data.path === "~" ? "~" : data.path}/${folder}`) }, `${folder}/`)))
+        : el("p", { class: "muted" }, "No folders in it.")))
+  }
+  const listed = (title, entries, count) => group(`${id}:${title}`, `${title}: ${count}`, el("ul", { class: "small plain" }, ...entries.map((entry) => el("li", {}, entry.path, el("span", { class: "muted" }, ` · ${entry.reason}`))),
+    count > entries.length ? el("li", { class: "muted" }, `and ${count - entries.length} more`) : null))
+  const drawPreview = () => {
+    const view = state.preview, data = view?.data
+    const warn = logins() ? el("div", { class: "banner warn" }, LOGINS_WARNING) : null
+    if (!view) return preview.replaceChildren(...warn ? [warn] : [])
+    preview.replaceChildren(el("div", { class: "stack" }, warn,
+      !data && !view.error ? el("p", { class: "muted" }, "Reading the folder…") : view.error ? el("p", { class: "error" }, view.error) : el("p", {},
+        `${pathCount(data.files, "file")}, ${pathCount(data.links, "link")}${data.partial ? " or more" : ""} · ${data.bytes < 1024 ** 2 ? `${Math.ceil(data.bytes / 1024)} KB` : gib(data.bytes)}`, el("span", { class: "muted" }, dest() ? ` · goes to ${dest()} in the sandbox` : ` · goes to ${data.mirror} in the sandbox unless you give another place`)),
+      ...(data?.warnings ?? []).map((text) => el("div", { class: "banner warn" }, text)),
+      data?.excludedCount ? listed("Left out", data.excluded, data.excludedCount) : null,
+      data?.skippedCount ? listed("Skipped", data.skipped, data.skippedCount) : null))
+  }
+  state.redraw = () => { drawBrowser(); drawPreview() }
+  input.addEventListener("input", changed)
+  // A change of the logins box reads the folder again, with or without them.
+  state.relogin = () => { clearTimeout(timer); read() }
+  drawBrowser(); read()
+  return el("div", { class: "stack folder-picker" }, input, picks, browser, preview)
+}
+
 // run: the button's words, when the form is the only one in its panel.
 function actionForm(extension, action, sandbox, run = action.label) {
   const key = sandbox ? sandbox.name : `ext:${extension.id}`
@@ -841,6 +917,13 @@ function actionForm(extension, action, sandbox, run = action.label) {
   const inputs = el("div", { class: "fields" }), checks = el("div", { class: "row" })
   if (!sandbox && action.scope === "sandbox") inputs.append(el("label", {}, "Sandbox", el("select", { name: "asidee-sandbox" }, ...sandboxes.filter((entry) => entry.status === "running").map((entry) => el("option", {}, entry.name)))))
   for (const field of action.fields) {
+    if (field.type === "folder") {
+      const id = `folder-${key}-${extension.id}-${action.id}-${field.id}`
+      inputs.append(el("div", { class: "wide" }, el("label", { for: id }, field.label), folderPicker(id, { name: field.id, logins: () => Boolean(form.elements.logins?.checked), dest: () => form.elements.dest?.value.trim() ?? "" })))
+      form.addEventListener("change", (event) => { if (event.target.name === "logins") folderUi[id]?.relogin?.() })
+      form.addEventListener("input", (event) => { if (event.target.name === "dest") folderUi[id]?.redraw?.() })
+      continue
+    }
     // A short choice is a row of pills, all visible at once; a long one stays a select.
     if (field.type === "select" && field.options.length <= 6) {
       inputs.append(el("div", {}, el("label", {}, field.label), el("div", { class: "pills", role: "radiogroup" }, ...field.options.map((option) =>
@@ -890,7 +973,7 @@ async function sshSetup(name, writeConfig) {
 
 // Buckets: the bundled extensions sorted by what a person is doing, on every page. Others go under Other.
 const BUCKETS = [
-  { id: "agents", name: "Agents and logins", extensions: ["logins", "skills"] },
+  { id: "agents", name: "Agents and logins", extensions: ["logins", "folders"] },
   { id: "t3", name: "T3 Code", extensions: ["t3", "rotator"] },
   { id: "code", name: "Code and docs", extensions: ["repo", "env-docs"] },
 ]
@@ -1613,19 +1696,37 @@ function render() {
   for (const radio of document.querySelectorAll("#template-pills input")) radio.checked = radio.value === templateSelect.value
   // The setup a create can run, for the bundled extensions that are installed. What was chosen survives a rebuild.
   const kept = Object.fromEntries([...document.querySelectorAll("#create-setup input, #create-setup select")].map((input) => [input.id, input.type === "checkbox" ? input.checked : input.value]))
-  region("create-setup", [["logins", "repo", "skills", "t3"].filter(installed), profiles], (node) => {
+  region("create-setup", [["logins", "folders", "repo", "t3"].filter(installed), profiles], (node) => {
     const logins = installed("logins")
     // One box per profile: each becomes its own login in the sandbox, so several of one agent can be chosen.
     const pill = (id, text, data = {}) => el("label", { class: "pill" }, el("input", { id, type: "checkbox", ...data }), text)
     const profileSelect = (agent, label) => el("div", {}, el("label", {}, label), el("div", { class: "pills" },
       ...(profiles?.[agent]?.length ? profiles[agent].map((profile) => pill(`setup-${agent}-${profile}`, profile, { "data-agent": agent, "data-profile": profile }))
         : [el("span", { class: "muted" }, profiles?.[agent] === null ? "Profiles unknown" : "No profiles on this Mac")])))
-    // Grouped as on a sandbox's page.
+    // Several folders, each its own step in the order added. The folder being picked counts as added, so the command
+    // below always shows what Create runs.
+    const copies = el("div", { id: "setup-copies", class: "stack" })
+    const drawCopies = () => copies.replaceChildren(...createCopies.map((copy, index) => el("div", { class: "row" }, el("span", { class: "grow" }, copy.source, el("span", { class: "muted" }, ` → ${copy.dest || "the same place"}`)),
+      el("button", { type: "button", class: "sm", "aria-label": `Remove ${copy.source}`, onclick: () => { createCopies.splice(index, 1); drawCopies(); createCommand() } }, "Remove"))))
+    const addCopy = () => {
+      const pending = pendingCopy()
+      if (!pending) return
+      if (!createCopies.some((copy) => copy.source === pending.source && copy.dest === pending.dest)) createCopies.push(pending)
+      folderUi["setup-copy-pick"].value = ""; folderUi["setup-copy-pick"].preview = null
+      document.getElementById("setup-copy-pick").value = ""; document.getElementById("setup-copy-dest").value = ""
+      folderUi["setup-copy-pick"].redraw(); drawCopies(); createCommand()
+    }
+    const copyFields = installed("folders") ? [el("p", { class: "muted" }, "Copies of folders in your home. Login files, history and caches are left out; anything in the sandbox can read the rest."), copies,
+      el("div", {}, el("label", { for: "setup-copy-pick" }, "Folder on this Mac"), folderPicker("setup-copy-pick", { dest: () => document.getElementById("setup-copy-dest")?.value.trim() ?? "" })),
+      el("div", { class: "row" }, el("label", { class: "grow" }, "Into, in the sandbox", el("input", { id: "setup-copy-dest", placeholder: "the same place under its home", oninput: () => folderUi["setup-copy-pick"]?.redraw?.() })),
+        el("button", { type: "button", class: "sm", onclick: addCopy }, "Add another folder"))] : []
+    drawCopies()
+    // In the order the steps run.
     const buckets = [
-      ["Agents and logins", [...logins ? [el("div", {}, el("label", {}, "GitHub"), el("div", { class: "pills" }, pill("setup-gh", "This Mac's login"))), profileSelect("claude", "Claude logins"), profileSelect("codex", "Codex logins")] : [],
-        ...installed("skills") ? [el("div", {}, el("label", { for: "setup-skills" }, "Skills and plugins from this Mac folder (its .agents and .claude)"), el("input", { id: "setup-skills", placeholder: "none, or ~/path/to/folder" }))] : []]],
-      ["T3 Code", installed("t3") ? [el("div", { class: "pills" }, pill("setup-t3", "Set up T3 Code"), pill("setup-t3-browser", "Install T3's browser (Chrome)"))] : []],
+      ["Agents and logins", [...logins ? [el("div", {}, el("label", {}, "GitHub"), el("div", { class: "pills" }, pill("setup-gh", "This Mac's login"))), profileSelect("claude", "Claude logins"), profileSelect("codex", "Codex logins")] : []]],
       ["Code and docs", installed("repo") ? [el("div", {}, el("label", { for: "setup-repo" }, "Clone a repository (OWNER/REPO)"), el("input", { id: "setup-repo", placeholder: "none" }))] : []],
+      ["Copy folders in", copyFields],
+      ["T3 Code", installed("t3") ? [el("div", { class: "pills" }, pill("setup-t3", "Set up T3 Code"), pill("setup-t3-browser", "Install T3's browser (Chrome)"))] : []],
     ].filter(([, fields]) => fields.length)
     if (!buckets.length) return
     node.append(el("label", {}, "Then"), el("p", { class: "muted" }, `After the create, in this order; the first failure stops the rest and keeps the sandbox.${logins ? " A login's token is copied into the sandbox, where anything running there can read it." : ""}`),
@@ -1682,13 +1783,25 @@ function createCommand() {
 document.getElementById("create").addEventListener("input", createCommand)
 
 const installed = (id) => extensions.some((extension) => extension.id === id)
+// The folders a create copies in: those added, then the one being picked.
+const createCopies = []
+function clearCopies() {
+  createCopies.length = 0
+  const state = folderUi["setup-copy-pick"]
+  if (state) { state.value = ""; state.preview = null; state.browse = null; state.redraw?.() }
+  document.getElementById("setup-copies")?.replaceChildren()
+}
+function pendingCopy() {
+  const source = document.getElementById("setup-copy-pick")?.value.trim()
+  return source ? { source, dest: document.getElementById("setup-copy-dest")?.value.trim() ?? "" } : undefined
+}
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/, REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/
-// The setup the form asks for, as the CLI's flags: { gh, claude: [profiles], codex: [profiles], repo, skills, t3, "t3-browser" }.
+// The setup the form asks for, as the CLI's flags: { gh, claude: [profiles], codex: [profiles], repo, copy: [DIR[:DEST]], t3, "t3-browser" }.
 function formSetup() {
   const input = (id) => document.getElementById(`setup-${id}`)
   const profilesOf = (agent) => [...document.querySelectorAll(`#create-setup input[data-agent="${agent}"]:checked`)].map((box) => box.dataset.profile)
   return { gh: Boolean(input("gh")?.checked), claude: profilesOf("claude"), codex: profilesOf("codex"), repo: input("repo")?.value.trim() || undefined,
-    skills: input("skills")?.value.trim() || undefined, t3: Boolean(input("t3")?.checked), "t3-browser": Boolean(input("t3-browser")?.checked) }
+    copy: [...createCopies, ...installed("folders") && pendingCopy() ? [pendingCopy()] : []].map((copy) => copy.dest ? `${copy.source}:${copy.dest}` : copy.source), t3: Boolean(input("t3")?.checked), "t3-browser": Boolean(input("t3-browser")?.checked) }
 }
 // The CLI's `asd create NAME --gh --claude P --codex P --repo OWNER/REPO --t3`: the bundled extensions' actions, in the
 // order each needs the one before (a private clone needs GitHub; T3 finds the logins). The labels are the CLI's, which
@@ -1699,8 +1812,11 @@ function setupSteps(setup) {
   for (const agent of ["claude", "codex"]) for (const profile of new Set(setup[agent] ?? []))
     steps.push({ label: `${agent === "claude" ? "Claude" : "Codex"} login ${profile}`, flags: [`--${agent}`, profile], extension: "logins", action: "import", values: { agent, profile, setup: true } })
   if (setup.repo) steps.push({ label: `Clone ${setup.repo}`, flags: ["--repo", setup.repo], extension: "repo", action: "clone", values: { repository: setup.repo } })
-  // After the clone, which needs an empty ~/workspace.
-  if (setup.skills) steps.push({ label: `Skills and plugins from ${setup.skills}`, flags: ["--skills", setup.skills], extension: "skills", action: "import", values: { source: setup.skills } })
+  // After the clone, which needs an empty ~/workspace. DEST follows the first : before ~ or /, as the CLI reads it.
+  for (const value of new Set(setup.copy ?? [])) {
+    const at = value.search(/:[~/]/), source = at < 0 ? value : value.slice(0, at), dest = at < 0 ? "" : value.slice(at + 1)
+    steps.push({ label: `Copy ${source}${dest ? ` to ${dest}` : ""}`, flags: ["--copy", value], extension: "folders", action: "copy", values: { source, dest } })
+  }
   // The browser goes into T3's runtime, so it sets T3 up first.
   if (setup.t3 || setup["t3-browser"]) steps.push({ label: "T3 Code", flags: setup["t3-browser"] ? [] : ["--t3"], extension: "t3", action: "setup", values: {} })
   if (setup["t3-browser"]) steps.push({ label: "T3's browser", flags: ["--t3-browser"], extension: "t3", action: "browser", values: {} })
@@ -1845,13 +1961,15 @@ document.getElementById("create").addEventListener("submit", async (event) => {
   if (repository !== undefined && (!REPOSITORY.test(repository) || repository.endsWith(".git"))) { error.textContent = "Repository takes a GitHub OWNER/REPO."; return }
   button.disabled = true; button.textContent = "Creating…"; error.textContent = ""
   const { dockerInside, gpu, "template-pick": _pick, ...body } = Object.fromEntries(new FormData(form))
+  // The setup's own controls are sent as setup, not as fields of the create.
+  for (const key of Object.keys(body)) if (key.startsWith("setup-")) delete body[key]
   if (dockerInside) body.docker = dockerInside === "true"
   if (gpu) body.gpu = true
   if (!body.template) delete body.template
   if (steps.length) body.setup = setup
   waits.set("create", { label: `Creating ${body.name}`, value: "making and checking it", started: Date.now() }); drawIsland()
   let made
-  try { made = await api("create", body); form.reset(); closeNew(); page = made.sandbox.name; if (tab !== "sandboxes") section("sandboxes") }
+  try { made = await api("create", body); form.reset(); clearCopies(); closeNew(); page = made.sandbox.name; if (tab !== "sandboxes") section("sandboxes") }
   catch (failure) {
     error.textContent = failure.message
     if (failure.code === "probes-required") error.append(" ", el("button", { type: "button", class: "sm", onclick: () => { closeNew(); section("settings"); probeToggle.focus() } }, "Open settings"))
