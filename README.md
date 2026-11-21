@@ -125,6 +125,14 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   `SANDBOX.HOST.asidee`. A forward ends with its sandbox run, either daemon or its SSH control stream; fifteen
   seconds without a heartbeat from the other side ends it on either machine. Add a new forward after link loss.
   See [Machines](docs/architecture.md#machines) for the current limits and opt-in measurements.
+- Each sandbox is **private or public**. One created on its own machine is private; one another machine created
+  through `--host` is public; sandboxes from before this existed are public. Other machines never see a private
+  sandbox: lists leave it out and every routed call on it is refused, saying it is private. `asd share NAME` and
+  `asd unshare NAME` change it, on its own machine only; another machine can make a public one private, never the
+  reverse. Other machines may create sandboxes on a machine only after `asd config set remote-create on` there (off
+  by default). Private keeps a sandbox from other machines. Anyone signed in to this machine's own account can still
+  see it. The dashboard lists other machines' public sandboxes beside this machine's, tagged with their machine, each
+  with its own page, and runs this Mac's extensions on them (`asd --host NAME ext run …`, with `ASIDEE_HOST` set).
 - `asd host add NAME --ssh DEST --artifact PATH --sha256 HASH` enrolls a Linux systemd host after a read-only probe
   and review of a hash-bound plan: every privileged command and what it leaves, every file diff and checksum, and every
   running container a planned Docker restart may interrupt. `--json` applies nothing; interactive consent requires

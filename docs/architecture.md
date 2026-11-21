@@ -709,6 +709,56 @@ verify and daemon status/stop route over SSH. Streams, primary loopback forwards
 the remote daemon. The dashboard's Machines page lists each machine with its cached sandboxes and their use, GPU
 containers nested under their machine, and starts, stops, verifies and opens terminals in them by `host`.
 
+### Private and public sandboxes
+
+Every sandbox is private or public (`visibility` in its manifest). One created on its own machine, by its CLI or its
+dashboard, is private. One created by another machine through routing is public. A manifest without the field counts
+as public, so sandboxes made before this existed stay visible to the machines that used them; nothing is rewritten.
+
+The test for "another machine" is one rule, in the daemon (`routedRun` in `core/daemon.ts` and `Core.openSession`):
+a request that carries the `x-asidee-machine` header, which every routed call from a primary's `HttpPeer` sends, or a
+stream that names a `machineId`, is routed. Anything else is local, whichever socket or port it came in on. Host
+enrollment's own checks and the `hello` handshake carry no header, so they count as local: the throwaway sandbox an
+enrollment makes is private and is removed again.
+
+A routed request:
+
+- never lists a private sandbox: `list`, `summary` (and so the fleet and `list --all`), `usage`, and the dependants of
+  `templateList` and `templateRemove` leave private ones out, and a routed `summary` reports no workspaces;
+- is refused on a private sandbox with code `not-found` and "NAME is private on its machine, so other machines cannot
+  see or use it. To share it, run `asd share NAME` on that machine." This covers `get`, `start`, `stop`, `remove`,
+  `verify`, `resize`, `snapshot`, `exec`, `action`, the create retry and keep steps, SSH preparation and every stream
+  (shell, exec, forward leases). The message, unlike a bare "not found", says how to fix it, and it stays true for a
+  create of the same name, which names cannot hide;
+- may create only when that machine has `remoteCreate` on (`asd config set remote-create on`, or "Let other machines
+  create sandboxes here" in its dashboard's Settings), off by default on every machine; while it is off the create is
+  refused with code `usage`, naming the setting. What it creates is public;
+- cannot make a sandbox public (`visibilitySet`) and cannot turn `remoteCreate` on. It may make a public sandbox
+  private, after which it no longer sees it;
+- is refused for any method the routing catalog keeps on the primary (workspaces, folders, hosts, terminals) with
+  "X is not available to other machines."
+
+`asd share NAME` and `asd unshare NAME` (method `visibilitySet`) change it on the sandbox's own machine. Private keeps a
+sandbox from other machines. Anyone signed in to this machine's own account can still see it: the state folder, the
+socket and the dashboard are that account's. Template preparation is not gated by `remoteCreate`: it makes no sandbox
+that stays.
+
+The dashboard lists the public sandboxes of other machines in Sandboxes, after this machine's, each with its machine as
+a quiet tag. They come from the fleet's cache, so they show only while other machines are on. One opens at
+`/sandboxes/MACHINE/NAME` with the same controls as a local one, each call carrying `host`. An offline machine's
+sandboxes stay listed greyed as "MACHINE is offline" (the cached rows, whose state is unknown), never as running, and
+do not open controls. A local sandbox's page has a Private/Public choice with the caveat above as its help; a remote
+one's has "Make private…" with a confirm.
+
+Extension actions reach a public sandbox of another machine without anything installed there: `action` with
+`machine` checks that the sandbox is visible there (`get`, routed), then runs this machine's extension here with
+`ASIDEE_SANDBOX` and `ASIDEE_HOST` set. The `asd` CLI takes `ASIDEE_HOST` as its `--host` when none is given, so the
+extension's `asd exec`, `asd ssh access` and `asd verify` calls go to that machine. The daemon itself ignores
+`ASIDEE_HOST`. `asd --host NAME ext run …` does this; `ext list`, `ext install` and `ext remove` with `--host` still
+act on that machine's own extensions. Every bundled extension (logins, folders, repo, T3 Code, env-docs, rotator) acts
+on the sandbox only through `asd`, so each works this way; the folder, repository or login copied in comes from this
+machine. Create setup steps (`--claude`, `--repo`, `--copy`, `--t3` and the like) still run for local creates only.
+
 The gateway executes the registered absolute binary's fixed `transport stdio --protocol 1` command, with the state
 directory set explicitly. That command only relays bytes to an existing daemon socket; it cannot install, start or
 replace a daemon. When the daemon's side closes, it ends its stdout (up to five seconds for SSH to take the last
@@ -1073,6 +1123,7 @@ and is not removed. A step that runs for over 30 minutes without a report can se
 `ui/index.html` is one page with no build step, a client of the API like any other. Light theme only; Reduce motion
 turns its animation off. Each place has a path, and the tab's title follows it ("my-app · Asidee"): every move pushes
 it, a redirect replaces it (`/` to `/sandboxes`, Machines while other machines are off, a removed sandbox's page),
+a public sandbox of another machine is `/sandboxes/MACHINE/NAME`,
 Back and Forward return through it, and a reload opens the same place once the data arrives. A sandbox or extension
 that is not there says so, with a button back to its list. The token stays out of the path: `asd ui`'s link carries it
 in `#token=`, which the page keeps in the tab's `sessionStorage` and strips from the address. A tab opened on a path

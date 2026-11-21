@@ -76,6 +76,12 @@ Remote aliases are `SANDBOX.HOST.asidee`; their private editor key stays on the 
 on the primary's 127.0.0.1 and closes when its sandbox run, either daemon or the SSH control stream ends. Each side
 ends it after fifteen seconds without the other's heartbeat; it never reconnects or recreates itself. Its evidence is
 `asd --host NAME forward list` on the primary, not a check. Add a new forward explicitly after link loss.
+Sandboxes are private or public. One created on its own machine is private; one created with `--host` is public;
+older ones are public. `--host` never shows or acts on a private sandbox: lists leave it out, and a call on it fails
+(exit 3) saying it is private on its machine. `asd share NAME` / `asd unshare NAME` change it on that machine only;
+from another machine you can only make a public one private. A `--host NAME create` fails (exit 2) until that machine
+ran `asd config set remote-create on`, which only it can do; ask the user. Private keeps a sandbox from other machines.
+Anyone signed in to that machine's own account can still see it.
 `asd host add NAME --ssh DEST --artifact PATH --sha256 HASH --json` produces a read-only install or update plan. For an enrolled machine, use the same command with the new artifact;
 keep `--docker` to retain inner Docker. Do not remove its registration first. An update refuses changed daemon identity,
 SSH public key or state directory, covers the existing record in consent, and preserves that record on failure. Build the
@@ -301,6 +307,9 @@ Create `~/.config/asidee/extensions/ID/extension.json`:
 - The dashboard shows each sandbox action as a form on running sandboxes; the CLI runs it with
   `asd ext run EXTENSION ACTION SANDBOX --set FIELD=VALUE`. Check your work with `asd ext list`, which also
   prints what is wrong with an extension that did not load.
+- `asd --host NAME ext run …` runs this machine's extension on a public sandbox of NAME: the command runs here with
+  `ASIDEE_HOST=NAME` too, and `asd` takes `ASIDEE_HOST` as its `--host`, so call `asd` plainly and it reaches the
+  right machine. Do not pass `--host` yourself inside an extension.
 - Because the command runs with the user's rights, tell the user what it does before installing it.
 
 ### Install a bundled extension
