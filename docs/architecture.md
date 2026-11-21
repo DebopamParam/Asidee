@@ -1064,11 +1064,18 @@ turns its animation off. A sidebar holds five places and Settings:
 - **Settings**: every setting above, the engines with `asd setup` as commands, what this daemon is, and a table of the
   plain words the page uses with the exact terms.
 
-**New ▾** opens the create form on the right, which shows the same create as a CLI command, or goes to the workspace or
-template form. The page uses plain words; the exact term (a check's title, `forward`, `pids`, …) shows beside a word on
-hover or keyboard focus. "Walled off from your Mac" is said only of a sandbox on an engine with `kernelIsolation:
-gvisor`. One indicator at the top, the island, shows each wait: the newest one, as a ring that fills with progress or
-turns while it cannot be measured, and a ring that empties over 60 seconds while a dialog on the Mac waits.
+**New ▾** opens the create form on the right, which shows the same create as a CLI command, opens the New workspace
+form on the right, or goes to the template form. Each copyable command quotes a value for a POSIX shell when it needs it
+(`'…'`, with a leading `~/` left outside), and leaves it bare otherwise. The list shows a Type column only when a GPU
+container is in it. A workspace is a card like a sandbox page's head: Check now, Terminal and Stop, with its disk limit,
+command and terminal commands under ⋯, each opening on the right. The page uses plain words; the exact term (a check's
+title, `forward`, `pids`, …) shows beside a word on hover or keyboard focus, with a faint dotted line under short terms
+and none under states, rows or sentences. "Walled off from your Mac" is said only of a sandbox on an engine with
+`kernelIsolation: gvisor`. One indicator at the top, the island, shows each wait: the newest one, as a ring that fills
+with progress or turns while it cannot be measured, and a ring that empties over 60 seconds while a dialog on the Mac
+waits ("Allow on your Mac · Stop render · 49 s"). Idle, it says Ready only while the service answers and an engine is
+ready (the page reads the engines every 15 seconds, and on each refresh while none is); otherwise "No engine", "Engine
+not running", "Engine not set up" or "Not connected".
 
 A first run opens by itself while no engine is ready, or while there is no sandbox and the browser has not finished it
 before (`localStorage`): the engine (OrbStack only: Download or open it), `asd setup` as a command the page waits for,
@@ -1076,8 +1083,8 @@ a test that creates a throwaway `setup-check-XXXXXX` sandbox, shows its 12 requi
 coding-tools template (or Skip), the first sandbox, and opening an agent in it. It uses only what the daemon returns.
 
 What acts on the Mac itself (workspace changes, SSH setup with `~/.ssh/config`, the custom terminal command, attaching
-and forgetting machines, daemon stop) has "Asks on your Mac" beside its button, explained on hover, and says while it
-waits that no answer within 60 seconds means no; there is no Cancel, since the API cannot take a request back. What
+and forgetting machines, daemon stop) has a ⌘ on its button, explained on hover, and one line per card or form says
+"Buttons marked ⌘ ask on your Mac". While it waits, it says that no answer within 60 seconds means no; there is no Cancel, since the API cannot take a request back. What
 stays socket-only (`asd setup`, `host add`, shells and streamed sessions) is shown as the command, with a Copy button.
 A unit test fails if the page calls a method that is not open to the dashboard.
 

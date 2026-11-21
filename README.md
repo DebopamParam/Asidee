@@ -107,8 +107,9 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
 - The daemon, the CLI with `--json`, a web dashboard, and extensions. The dashboard is a list of sandboxes with a page
   for each, and a first run that tests the engine with a throwaway sandbox; terminal-only steps such as `asd setup` show
   as a command it waits for. What it does to the Mac itself (workspaces, the custom terminal command, `~/.ssh/config`,
-  machines, daemon stop) is marked "Asks on your Mac" and runs only after Allow in a dialog there, which denies by itself
-  after 60 seconds; where no dialog can be shown, the page offers the CLI command.
+  machines, daemon stop) has a ⌘ on its button and runs only after Allow in a dialog there, which denies by itself
+  after 60 seconds; where no dialog can be shown, the page offers the CLI command. Every copyable command quotes its
+  values for the shell.
 - Other machines are **experimental and off by default**: they are not yet proven on enough machines. While off, the
   daemon refuses every `host` command, `--host NAME` and `list --all`, contacts no registered machine and leaves the
   registry as it is; `asd config set experimental on` turns them on. A daemon that another machine reaches over
