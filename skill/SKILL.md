@@ -277,7 +277,8 @@ still being validated as inside the account's real home. No test creates an owne
 
 ## Customizing Asidee
 
-All customization lives in `~/.config/asidee/` (`$ASIDEE_CONFIG_DIR`). None of it can change what a sandbox is or what
+All customization lives in `~/.config/asidee/` (`$ASIDEE_CONFIG_DIR`; on a Linux machine enrolled from another one,
+the service's `/var/lib/asidee/UID/config`, which `asd` there uses on its own). None of it can change what a sandbox is or what
 `asd verify` reports.
 
 ### Add an action or a hook: an extension

@@ -25,7 +25,7 @@ import { systemRunner } from "../core/run"
 import { copyFlag, createSteps, runCreateSteps, type CreateSetup, type SetupStep } from "../core/create-setup"
 import { hostVersion, validVersion, type Prepared, type Preparing } from "../core/prepare"
 import { applySetup, ORBSTACK_DOWNLOAD, orbstackEngine, orbstackInstalled, planSetup, setupChanges, setupPlanLines } from "../core/setup"
-import { checkSocketPath, DEFAULT_SPEC, defaultDirs, socketPath, streamSocketPath, validTemplateName, type Config, type Defaults } from "../core/state"
+import { checkSocketPath, DEFAULT_SPEC, defaultDirs, enrolledService, serviceProblem, socketPath, streamSocketPath, validTemplateName, type Config, type Defaults } from "../core/state"
 import { dataFrames, frame, FrameReader, type OpenRequest, type EnrollmentRequest } from "../core/stream"
 import { AsideeError, type CheckResult, type DiskWarning, type Engine, type ErrorCode, type RunResult, type Template } from "../core/types"
 
@@ -254,7 +254,9 @@ fi
 exec "$agent" "$@"`
 const EXIT: Record<ErrorCode, number> = { runtime: 1, usage: 2, "not-found": 3, conflict: 4, dependency: 5, "check-failed": 6, "probes-required": 6, offline: 7, incompatible: 8, "identity-changed": 9, "outcome-unknown": 10 }
 let selectedHost: string | undefined
-const dirs = defaultDirs()
+// On a machine enrolled from another one, this account's daemon is that system service, with its folders.
+const service = enrolledService()
+const dirs = defaultDirs(process.env, service)
 const compiled = Bun.main.startsWith("/$bunfs/")
 const self = compiled ? [process.execPath] : [process.execPath, Bun.main]
 const cliDir = compiled ? dirname(process.execPath) : join(dirname(Bun.main), "..", "bin")
@@ -284,6 +286,12 @@ async function ensureDaemon(): Promise<void> {
   const probe = () => request<{ version: string; build?: string; stopping?: boolean }>("version").catch(() => undefined)
   const build = () => probe().then((reply) => reply?.build)
   let running = await probe()
+  if (service) {
+    const problem = serviceProblem(service, running, BUILD)
+    if (problem) throw new AsideeError(running ? "incompatible" : "dependency", problem)
+    daemonReady = true
+    return
+  }
   if (running?.stopping) { await daemonGone(); running = undefined }
   if (running?.build !== BUILD) {
     if (running) {
@@ -935,6 +943,8 @@ async function main(argv: string[]): Promise<void> {
           const result = await call(rest[0] === "stop" ? "shutdown" : "version")
           return out(result, () => console.log(JSON.stringify(result)))
         }
+        if (service && (rest[0] === "run" || rest[0] === "stop"))
+          throw new AsideeError("usage", `The daemon here is the system service ${service.unit}; ${rest[0] === "run" ? "start" : "stop"} it with: sudo systemctl ${rest[0] === "run" ? "start" : "stop"} ${service.unit}${rest[0] === "stop" ? ". Its sandboxes stop with it." : "."}`)
         if (rest[0] === "run") return await runDaemon(dirs, cliDir)
         if (rest[0] === "stop") {
           const asked = await request("shutdown").then(() => true, (error) => error instanceof AsideeError && error.code === "conflict")
@@ -944,7 +954,8 @@ async function main(argv: string[]): Promise<void> {
         }
         const version = await request<{ version: string }>("version").catch(() => undefined)
         const daemon = version ? await readDaemonFile(dirs) : undefined
-        return out({ running: Boolean(version), ...daemon, token: undefined }, () => console.log(version ? `Running: version ${version.version}, pid ${daemon?.pid}, ${daemon?.port ? `dashboard on port ${daemon.port}` : "no dashboard (socket only)"}.` : "Not running. It starts with the first command."))
+        return out({ running: Boolean(version), ...daemon, token: undefined, ...(service ? { service: service.unit } : {}) }, () => console.log(version ? `Running${service ? ` as the system service ${service.unit}` : ""}: version ${version.version}, pid ${daemon?.pid}, ${daemon?.port ? `dashboard on port ${daemon.port}` : "no dashboard (socket only)"}.`
+          : service ? `Not running. It is the system service ${service.unit}; start it with: sudo systemctl start ${service.unit}` : "Not running. It starts with the first command."))
       }
       case "host": {
         if (selectedHost && selectedHost !== "local") throw new AsideeError("usage", "The host registry belongs to the primary machine.")

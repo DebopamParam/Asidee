@@ -230,7 +230,8 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
 // public sandboxes only, can make one private but never public, creates only while this machine lets other machines
 // create here (and what it creates is public), and cannot turn that setting on. Only the methods routing sends are
 // taken. Enrollment's test sandbox is made by a request without the header, as the person enrolling approved.
-export const REMOTE_CREATE_OFF = "This machine does not let other machines create sandboxes here. To allow it, run on this machine: asd config set remote-create on (or turn on “Let other machines create sandboxes here” in its dashboard's Settings)."
+// The dashboard is named only on a machine that has one: an enrolled machine's service answers on its socket only.
+export const remoteCreateOff = (dashboard = process.env.ASIDEE_SOCKET_ONLY !== "1") => `This machine does not let other machines create sandboxes here. To allow it, run on this machine: asd config set remote-create on${dashboard ? " (or turn on “Let other machines create sandboxes here” in its dashboard's Settings)" : ""}.`
 const NAMED: Partial<Record<string, (body: Body) => unknown>> = Object.fromEntries([
   ...["create", "get", "start", "stop", "remove", "verify", "resize", "snapshot", "exec", "createRetry", "createStep", "createKeep", "sessionTarget", "sshPrepare", "visibilitySet"].map((method) => [method, (body: Body) => body.name]),
   ["action", (body: Body) => body.sandbox]])
@@ -240,7 +241,7 @@ export async function routedRun(core: Core, name: string, method: Method, body: 
   const target = NAMED[name]?.(body)
   if (target !== undefined) await core.visible(target)
   if (name === "create") {
-    if (!(await core.configGet()).remoteCreate) throw new AsideeError("usage", REMOTE_CREATE_OFF)
+    if (!(await core.configGet()).remoteCreate) throw new AsideeError("usage", remoteCreateOff())
     return core.create(body, "public")
   }
   if (name === "configSet" && body.remoteCreate === true) throw new AsideeError("usage", "Only this machine can let other machines create sandboxes here: run asd config set remote-create on on it.")

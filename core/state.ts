@@ -1,14 +1,40 @@
+import { readFileSync } from "node:fs"
 import { chmod, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { AsideeError, type Manifest, type SandboxSpec } from "./types"
 
 export type Dirs = { state: string; config: string }
-export function defaultDirs(env: Record<string, string | undefined> = process.env): Dirs {
+// A machine enrolled from another one runs this account's daemon as a system service (serviceUnit in core/hosts.ts),
+// with its own state and config folders. Read from its unit file, so asd run on that machine uses that service and its
+// sandboxes and settings, and never starts a second daemon beside it.
+export type EnrolledService = { unit: string; state: string; config: string }
+export const serviceUnitPath = (uid: number) => `/etc/systemd/system/asidee@${uid}.service`
+export function parseServiceUnit(text: string, unit: string): EnrolledService | undefined {
+  const value = (name: string) => text.split("\n").find((line) => line.startsWith(`Environment=${name}=`))?.slice(`Environment=${name}=`.length).trim()
+  const state = value("ASIDEE_STATE_DIR"), config = value("ASIDEE_CONFIG_DIR")
+  return state?.startsWith("/") && config?.startsWith("/") ? { unit, state, config } : undefined
+}
+export function enrolledService(env: Record<string, string | undefined> = process.env, platform: string = process.platform, uid = process.getuid?.(),
+  read = (path: string) => readFileSync(path, "utf8")): EnrolledService | undefined {
+  // The service sets both folders for its own daemon; so does anyone choosing others, and then they win.
+  if (platform !== "linux" || uid === undefined || env.ASIDEE_STATE_DIR !== undefined || env.ASIDEE_CONFIG_DIR !== undefined) return undefined
+  const path = serviceUnitPath(uid)
+  try { return parseServiceUnit(read(path), `asidee@${uid}.service`) } catch { return undefined }
+}
+export function defaultDirs(env: Record<string, string | undefined> = process.env, service: EnrolledService | undefined = undefined): Dirs {
+  if (service) return { state: service.state, config: service.config }
   return {
     state: env.ASIDEE_STATE_DIR ?? join(env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "asidee"),
     config: env.ASIDEE_CONFIG_DIR ?? join(env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "asidee"),
   }
+}
+// Why asd cannot use an enrolled service as it is: systemd starts, stops and updates it, never asd. running: what its
+// socket answered, if anything; build: this asd's own.
+export function serviceProblem(service: EnrolledService, running: { version: string; build?: string; stopping?: boolean } | undefined, build: string): string | undefined {
+  if (!running || running.stopping) return `This machine's Asidee runs as the system service ${service.unit}, which is not answering. Start it with: sudo systemctl start ${service.unit} (its log: journalctl -u ${service.unit}).`
+  if (running.build !== build) return `This asd is not the build the system service ${service.unit} runs (version ${running.version}). Use /usr/local/bin/asd, which enrollment installed and an update of this machine changes with the service.`
+  return undefined
 }
 export const socketPath = (dirs: Dirs) => join(dirs.state, "daemon.sock")
 // Sessions (core/stream.ts). Its path is shorter than the API socket's, so the length check below covers it.

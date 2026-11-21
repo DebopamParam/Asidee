@@ -637,6 +637,14 @@ finish, so a second daemon never runs beside it. It listens on:
 Links add no listener here: each link's listener runs inside the sandbox that uses it, on that sandbox's loopback.
 
 State is in `~/.local/state/asidee`, configuration in `~/.config/asidee` (`ASIDEE_STATE_DIR`, `ASIDEE_CONFIG_DIR`).
+On a Linux machine enrolled from another one, this account's daemon is the system service `asidee@UID.service`, and
+`asd` run there uses the folders that service runs with, read from the `ASIDEE_STATE_DIR` and `ASIDEE_CONFIG_DIR` lines
+of `/etc/systemd/system/asidee@UID.service` (`enrolledService` in `core/state.ts`). Reading the unit enrollment already
+writes needs no extra file, so a machine enrolled before this works as it is. With a service, `asd` never starts,
+replaces or stops a daemon: if the service does not answer, it says to `sudo systemctl start` it (exit 5); if it runs
+another build, it says to use `/usr/local/bin/asd` (exit 8); `asd daemon run` and `asd daemon stop` name the
+`systemctl` command instead. Setting either `ASIDEE_STATE_DIR` or `ASIDEE_CONFIG_DIR` turns this off, as the service's
+own daemon does.
 Malformed request URLs, including invalid percent encoding in paths or query parameters, receive a generic HTTP 400
 before routing or reading dashboard files. No parser diagnostic is returned.
 
@@ -732,7 +740,8 @@ A routed request:
   create of the same name, which names cannot hide;
 - may create only when that machine has `remoteCreate` on (`asd config set remote-create on`, or "Let other machines
   create sandboxes here" in its dashboard's Settings), off by default on every machine; while it is off the create is
-  refused with code `usage`, naming the setting. What it creates is public;
+  refused with code `usage`, naming the command, and the dashboard only on a machine that has one (an enrolled
+  machine's service is socket-only). What it creates is public;
 - cannot make a sandbox public (`visibilitySet`) and cannot turn `remoteCreate` on. It may make a public sandbox
   private, after which it no longer sees it;
 - is refused for any method the routing catalog keeps on the primary (workspaces, folders, hosts, terminals) with
@@ -861,7 +870,8 @@ with tty-scoped sudo timestamps. Automation uses `sudo -n` and needs noninteract
 restored and no registration (N13). A disconnected terminal cannot commit a host registration; an interrupted install can have an unknown outcome and names its journal.
 
 The system unit runs as the SSH user with `SupplementaryGroups=docker`, a fixed PATH, socket-only access and
-`Restart=on-failure`, after Docker. State/configuration live under `/var/lib/asidee/UID`. Login groups and sudoers are
+`Restart=on-failure`, after Docker. State/configuration live under `/var/lib/asidee/UID`, and `asd` run on that
+machine as that account uses them (see the state folders above). Login groups and sudoers are
 not changed. Docker authority is effectively root. Installation progress and the interrupted step are journaled there,
 separately from sandbox manifests. Failure reports the completed steps, what they left and what the interrupted step
 may have left, without shared-package rollback; a failure before the first step says that none ran. An installer

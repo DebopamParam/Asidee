@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { connect } from "node:net"
 import { join } from "node:path"
 import { blockers, CHECKLIST, complete } from "../../core/checks"
-import { createHandler, methods, REMOTE_CREATE_OFF } from "../../core/daemon"
+import { createHandler, methods, remoteCreateOff } from "../../core/daemon"
 import { Core, privateThere, UNCHECKED_PASSES } from "../../core/core"
 import { CATALOG, Machines, type Hello } from "../../core/machines"
 import { object, parseReply } from "../../core/transport"
@@ -1069,7 +1069,13 @@ test("routed calls see only public sandboxes and get, start, stop, exec, remove 
 
 test("routed create is refused while the switch is off, makes a public sandbox once it is on, and another machine cannot turn it on or share", async () => {
   const { remote, machines, call } = await twoMachines()
-  expect(await call("create", { host: "build", name: "theirs" })).toMatchObject({ ok: false, error: { code: "usage", message: REMOTE_CREATE_OFF } })
+  expect(await call("create", { host: "build", name: "theirs" })).toMatchObject({ ok: false, error: { code: "usage", message: remoteCreateOff(true) } })
+  expect(remoteCreateOff(true)).toContain("in its dashboard's Settings")
+  // An enrolled machine's service has no dashboard, so the refusal names only the command.
+  process.env.ASIDEE_SOCKET_ONLY = "1"
+  try {
+    expect(await call("create", { host: "build", name: "theirs" })).toMatchObject({ ok: false, error: { code: "usage", message: "This machine does not let other machines create sandboxes here. To allow it, run on this machine: asd config set remote-create on." } })
+  } finally { delete process.env.ASIDEE_SOCKET_ONLY }
   expect(await remote.list()).toEqual([])
   expect(await call("configSet", { host: "build", remoteCreate: true })).toMatchObject({ ok: false, error: { message: "Only this machine can let other machines create sandboxes here: run asd config set remote-create on on it." } })
   expect((await remote.configGet()).remoteCreate).toBe(false)

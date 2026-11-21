@@ -116,7 +116,9 @@ before registration.
   socket-only access, `Restart=on-failure` and journal logging. Docker access is effectively host-root authority.
   Login group membership stays unchanged.
 - `/var/lib/asidee/UID`, owned by the SSH user, mode 0700, with configuration in `config/` and the installation journal
-  in `enrollment.json`. The journal records the plan hash, file contents/hashes, completed steps and the step in progress.
+  in `enrollment.json`. `asd` run on the machine as that account (`asd share NAME`, `asd config set remote-create on`)
+  reads the unit's `ASIDEE_STATE_DIR` and `ASIDEE_CONFIG_DIR` and talks to this service; it never starts a second
+  daemon of its own. If the service is down it says `sudo systemctl start asidee@UID.service`. The journal records the plan hash, file contents/hashes, completed steps and the step in progress.
 - From verification and from sandboxes: the helper image `asidee-helper:TAG`, the pulled sandbox images, and the
   `inet` and `bridge` firewall tables named `asidee_guard`.
 
