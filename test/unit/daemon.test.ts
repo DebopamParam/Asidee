@@ -70,6 +70,31 @@ test("the dashboard is served without a token, a custom one replaces it, and pat
   expect((await get("/..%2Fsecret.txt")).status).toBe(404)
 })
 
+test("each place in the dashboard serves its page; other paths, the API and the custom folder are unchanged", async () => {
+  const { handle, config } = await handler()
+  const get = (path: string) => handle(new Request(`http://127.0.0.1:7717${path}`, { headers: { host: "127.0.0.1:7717" } }), false, 7717)
+  const root = await (await get("/")).text()
+  for (const path of ["/sandboxes", "/sandboxes/my-app", "/sandboxes/a%20b", "/workspaces", "/templates", "/extensions", "/extensions/logins", "/machines", "/settings", "/setup", "/setup/engine", "/setup/open"]) {
+    const response = await get(path)
+    expect(response.status).toBe(200)
+    expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8")
+    expect(response.headers.get("x-frame-options")).toBe("DENY")
+    expect(await response.text()).toBe(root)
+  }
+  for (const path of ["/nope", "/sandboxes/a/b", "/settings/x", "/setup/nope", "/sandboxes/", "/index.html", "/api"]) expect((await get(path)).status).toBe(404)
+  // An encoded name is one segment: it gets the page, which says the sandbox is not here, never a file.
+  expect(await (await get("/sandboxes/..%2F..%2Fsecret.txt")).text()).toBe(root)
+  // The API is not a page: a GET to it is still refused, and a call still answers as before.
+  expect((await get("/api/list")).status).toBe(404)
+  expect(await (await handle(post("list", auth), false, 7717)).json()).toEqual({ ok: true, data: ["demo"] })
+  expect((await handle(new Request("http://asidee/sandboxes", { method: "GET" }), true, 0)).status).toBe(404)
+  // With a custom page, a place serves that page, never a file outside its folder.
+  await writeFile(join(config, "secret.txt"), "outside the ui folder")
+  await mkdir(join(config, "ui")); await writeFile(join(config, "ui", "index.html"), "<p>mine</p>")
+  expect(await (await get("/sandboxes/my-app")).text()).toBe("<p>mine</p>")
+  for (const path of ["/sandboxes/..%2F..%2Fsecret.txt", "/extensions/..%2Fsecret.txt", "/sandboxes/%2E%2E"]) expect(await (await get(path)).text()).not.toContain("outside the ui folder")
+})
+
 // The approval gate, with a fake approver standing in for the dialog on the Mac.
 async function gated(answers: Array<Answer | Promise<Answer> | Error>) {
   const config = await mkdtemp(join(tmpdir(), "asidee-approve-"))

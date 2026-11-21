@@ -26,6 +26,9 @@ import { HOST_TEMP_DISCLOSURE } from "./workspace-profile"
 
 // Bun's types describe an .html import as a page bundle; with type "text" it is the file's text.
 const BUILT_IN_UI = builtInUi as unknown as string
+// The dashboard's places, as ui/index.html writes them in the address bar. One segment after sandboxes or extensions is
+// a name, percent-encoded, so it never holds a slash.
+const DASHBOARD_ROUTE = /^\/(?:(?:sandboxes|extensions)(?:\/[^/]+)?|workspaces|templates|machines|settings|setup(?:\/(?:engine|setup|test|tools|first|open))?)$/
 
 export const VERSION: string = pkg.version
 // The version plus when this program file was written. A daemon left running by an older build of the same version
@@ -290,8 +293,12 @@ export function createHandler(table: Record<string, Method>, token: string, conf
     // A folder at CONFIG/ui replaces the built-in dashboard: it is a client of the same API, with the same token.
     const custom = join(configDir, "ui"); const path = normalize(join(custom, url.pathname === "/" ? "index.html" : pathname))
     if (path.startsWith(`${custom}/`) && await Bun.file(path).exists()) return new Response(Bun.file(path), { headers: { "x-frame-options": "DENY" } })
-    if (url.pathname === "/") return new Response(BUILT_IN_UI, { headers: { "content-type": "text/html; charset=utf-8", "x-frame-options": "DENY" } })
-    return new Response("Not found", { status: 404 })
+    if (url.pathname !== "/" && !DASHBOARD_ROUTE.test(url.pathname)) return new Response("Not found", { status: 404 })
+    // A place in the dashboard (/sandboxes/NAME, …) is the dashboard's page, which reads the path: the custom one if
+    // there is one, so a copy of the built-in page survives a reload too.
+    const customIndex = join(custom, "index.html")
+    if (url.pathname !== "/" && await Bun.file(customIndex).exists()) return new Response(Bun.file(customIndex), { headers: { "x-frame-options": "DENY" } })
+    return new Response(BUILT_IN_UI, { headers: { "content-type": "text/html; charset=utf-8", "x-frame-options": "DENY" } })
   }
 }
 

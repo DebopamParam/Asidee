@@ -261,7 +261,8 @@ dashboard and add extensions freely, and none of that can change what a sandbox 
   [t3](extensions/t3), [rotator](extensions/rotator) and [skills](extensions/skills). `asd ext list` shows the ones not yet installed;
   `asd ext install NAME` (or the dashboard's Install button) installs one and `asd ext remove NAME` removes it. They
   need neither Bun nor the Asidee source.
-- **The dashboard** is replaced by putting your own `index.html` in `~/.config/asidee/ui/`.
+- **The dashboard** is replaced by putting your own `index.html` in `~/.config/asidee/ui/`. It is also served at the
+  dashboard's places (`/sandboxes/NAME`, `/extensions/ID`, …), so a copy of the built-in page survives a reload.
 - **Defaults** (image, sizes, Docker, engine) go in `~/.config/asidee/config.json`.
 
 [skill/SKILL.md](skill/SKILL.md) tells an AI agent how to do each of these.
