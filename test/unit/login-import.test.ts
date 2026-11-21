@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test"
 import { existsSync } from "node:fs"
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { PassThrough } from "node:stream"
@@ -340,6 +340,28 @@ test("Claude subscription imports clear a competing API key even without copying
   await put(g, ".claude-work/settings.json", JSON.stringify({ model: "keep", env: { OTHER: "keep", ANTHROPIC_API_KEY: secret } }))
   await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "work", replace: false, setup: false })
   expect(await json(join(g, ".claude-work/settings.json"))).toEqual({ model: "keep", env: { OTHER: "keep", ANTHROPIC_API_KEY: "" } })
+})
+
+test("a profile whose settings.json links to a shared one is imported into, and Claude's own signed-out file is no login", async () => {
+  const h = await home(), g = await home(), transport = guestRunner(g)
+  await put(h, ".claude-deb/.credentials.json", credential)
+  // As profile launchers lay a sandbox out: the profile links to the shared settings, and Claude logged out, leaving empty tokens.
+  await put(g, ".claude/settings.json", JSON.stringify({ model: "shared" }))
+  await mkdir(join(g, ".claude-deb"), { recursive: true })
+  await symlink(join(g, ".claude/settings.json"), join(g, ".claude-deb/settings.json"))
+  await put(g, ".claude-deb/.credentials.json", JSON.stringify({ claudeAiOauth: { accessToken: "", refreshToken: "", expiresAt: 0 } }))
+  expect(await listLogins(transport.runner, "demo")).toEqual([])
+  await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "deb", replace: false, setup: false })
+  expect(await readFile(join(g, ".claude-deb/.credentials.json"), "utf8")).toBe(credential)
+  expect((await lstat(join(g, ".claude-deb/settings.json"))).isSymbolicLink()).toBe(true)
+  expect(await json(join(g, ".claude/settings.json"))).toEqual({ model: "shared", env: { ANTHROPIC_API_KEY: "" } })
+  // A real login still needs replacing explicitly; a link out of the home is still refused.
+  await expect(importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "deb", replace: false, setup: false })).rejects.toThrow("already exists")
+  const outside = await home()
+  await put(outside, "settings.json", "{}")
+  await rm(join(g, ".claude-deb/settings.json")); await symlink(join(outside, "settings.json"), join(g, ".claude-deb/settings.json"))
+  await expect(importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "deb", replace: true, setup: false })).rejects.toThrow()
+  expect(await readFile(join(outside, "settings.json"), "utf8")).toBe("{}")
 })
 
 test("ambiguous duplicate GitHub YAML sections are refused before logout or replacement", async () => {

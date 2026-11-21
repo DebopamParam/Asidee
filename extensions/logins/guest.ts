@@ -27,6 +27,20 @@ function json(p) {
   const value = JSON.parse(text); if (!object(value)) fail(66)
   return value
 }
+// Claude's own logout keeps .credentials.json with empty tokens: that is no login, so it is not listed and an import
+// replaces it without asking.
+function signedOut(a, f) {
+  if (a !== "claude") return false
+  try { const o = JSON.parse(read(f)).claudeAiOauth; return object(o) && !o.accessToken && !o.refreshToken } catch { return false }
+}
+// A profile's settings.json may be a link to a shared one, as profile launchers lay them out; that shared file is edited,
+// when it is a regular file in the home.
+function linked(p) {
+  if (!info(p)?.isSymbolicLink()) return p
+  const real = fs.realpathSync(p), rel = path.relative(fs.realpathSync(home), real)
+  if (rel.startsWith("..") || path.isAbsolute(rel) || !info(real)?.isFile()) fail()
+  return path.join(home, rel)
+}
 function atomic(p, data, mode = 0o600, replace = true) {
   safe(p); mkdir(path.dirname(p))
   const tmp = path.join(path.dirname(p), ".login-" + crypto.randomBytes(12).toString("hex"))
@@ -72,7 +86,7 @@ function list() {
     const p = name === "." + a ? "~" : name.startsWith("." + a + "-") ? name.slice(a.length + 2) : undefined
     if (!(p === "~" || validProfile(p))) continue
     const d = dir(a, p), f = path.join(d, files[a])
-    if (info(d)?.isDirectory() && info(f)?.isFile()) out.push({ agent: a, profile: p, account: account(a, p) })
+    if (info(d)?.isDirectory() && info(f)?.isFile() && !signedOut(a, f)) out.push({ agent: a, profile: p, account: account(a, p) })
   }
   const section = githubSection(read(ghFile)).section
   if (section) {
@@ -195,16 +209,17 @@ async function main() {
     if (!Object.hasOwn(files, agent) || !validProfile(profile) || !["create", "replace"].includes(choice)) fail(64)
     const payload = await input(), root = dir(agent, profile), dest = path.join(root, files[agent])
     safe(dest)
-    if (info(dest) && choice !== "replace") fail(67)
+    const replace = choice === "replace" || (info(dest) !== undefined && signedOut(agent, dest))
+    if (info(dest) && !replace) fail(67)
     if (!object(payload) || typeof payload.credential !== "string" || Buffer.byteLength(payload.credential) > 1024 * 1024 || !object(JSON.parse(payload.credential))) fail(66)
     const setup = payload.setup ? installSetup(agent, profile, payload.setup) : undefined
-    const settingsPath = path.join(root, "settings.json")
+    const settingsPath = linked(path.join(root, "settings.json"))
     // Claude prefers an API key over the imported subscription, including one copied in setup.
     if (agent === "claude") { const current = json(settingsPath); if (current.env !== undefined && !object(current.env)) fail(66) }
     let state, statePath
     if (agent === "claude" && object(payload.account)) { statePath = path.join(root, ".claude.json"); state = json(statePath); state.oauthAccount = payload.account }
     mkdir(root); fs.chmodSync(root, 0o700)
-    atomic(dest, payload.credential, 0o600, choice === "replace")
+    atomic(dest, payload.credential, 0o600, replace)
     if (statePath) atomic(statePath, JSON.stringify(state, null, 2) + "\n")
     const result = setup ? setup() : { files: 0, missingCommands: 0, missingCommandNames: [] }
     result.missingCommandNames = result.missingCommandNames.filter((name) => /^[\x20-\x7e]{1,160}$/.test(name) && Array.isArray(payload.commandNames) && payload.commandNames.includes(name)).slice(0, 64)
