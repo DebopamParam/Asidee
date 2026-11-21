@@ -4,7 +4,7 @@ import { createHash } from "node:crypto"
 import { basename, resolve } from "node:path"
 import { CHECKLIST } from "./checks"
 import { HOST_APPLY, HOST_PROBE, HOST_REQUEST, HOST_ROOT_STEP } from "./host-scripts"
-import { compatible, hostName, parseHello, readHosts, type Hello, type HostRecord, type Machines } from "./machines"
+import { compatible, digest, hostName, parseHello, readHosts, type Hello, type HostRecord, type Machines } from "./machines"
 import { HELPER_IMAGE, MANAGED_RUNTIME } from "./providers/gvisor"
 import HELPER_DOCKERFILE from "./providers/helper.Dockerfile" with { type: "text" }
 import { systemRunner, must } from "./run"
@@ -56,7 +56,6 @@ const IMAGE = "alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b
 const DOCKER_IMAGE = "docker:29.9.3-dind@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121"
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex")
-const digest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)
 
 export type EnrollmentOptions = {
   name: string

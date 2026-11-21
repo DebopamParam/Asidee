@@ -10,7 +10,7 @@ import { readConfig, validName, validSpec, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
 import { addInclude, alias, editorKey, included, includeLine, parseSshSetup, remoteAliases, updateRemoteAlias, userConfig } from "./ssh"
 import { absolutePath, bounded, enrolledKeyHelp, hostPublicKey, HttpPeer, keyFingerprint, KILL_GRACE_MS, MUTATION_DEADLINE_MS, object, PROTOCOL, RemoteSession, sshDestination, sshIdentity, type Endpoint } from "./transport"
-import { AsideeError, type CheckResult } from "./types"
+import { AsideeError } from "./types"
 
 // Each method's access on the dashboard's port (open, asked first on this Mac, or never) and its routing.
 export const CATALOG = {
@@ -72,7 +72,7 @@ export function hostOption(argv: string[]): { host?: string; argv: string[] } {
 }
 
 const id = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{32}$/.test(value)
-const digest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)
+export const digest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)
 export async function machineIdentity(dirs: Dirs): Promise<string> {
   const path = join(dirs.state, "machine-id")
   await mkdir(dirs.state, { recursive: true, mode: 0o700 })

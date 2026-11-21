@@ -10,7 +10,7 @@ import { writeConfig } from "../../core/state"
 import { AsideeError, type RunResult, type Runner } from "../../core/types"
 import controlProfile from "../../core/workspace-control.sb" with { type: "text" }
 import { WORKSPACE_DISCLOSURE, HOST_TEMP_DISCLOSURE, workspaceDisclosure, workspaceEnvironment, workspaceProfile } from "../../core/workspace-profile"
-import { acquire, canonical, validateRead, validWorkspaceSpec, Workspaces } from "../../core/workspaces"
+import { acquire, validateRead, validWorkspaceSpec, Workspaces } from "../../core/workspaces"
 import { WorkspaceSession } from "../../core/workspace-session"
 import { ExplainedWorkspaces } from "./workspace-evidence"
 
@@ -162,7 +162,7 @@ mac("workspace PTY receives input and a resize, and returns the command's output
 }, 15_000)
 
 mac("workspace file login copies are private, not hard links, and credential bytes never enter manifests", async () => {
-  const { root, env, workspaces, clean } = await fixture()
+  const { root, workspaces, clean } = await fixture()
   try {
     const secret = "workspace-test-credential-never-in-manifest"
     for (const [source, file] of [[join(root, ".claude"), ".credentials.json"], [join(root, ".codex"), "auth.json"]] as const) {
@@ -198,7 +198,7 @@ mac("stop recovers an unreadable or missing folder before identifying its own li
 }, 30_000)
 
 mac("summary and get never repair identity or permissions; only an explicit size request runs du", async () => {
-  const { root, commands, workspaces, clean } = await fixture()
+  const { commands, workspaces, clean } = await fixture()
   try {
     const made = await workspaces.create({ name: "inventory", logins: { kind: "none" } })
     await rm(join(made.workspace.folder, ".asidee-tag"))
@@ -269,7 +269,7 @@ mac("named login profiles ignore daemon environment and no-logins imports nothin
 mac("option-shaped commands cannot override workspace parameters", async () => {
   const { root, workspaces, clean } = await fixture()
   try {
-    const ws = await workspaces.create({ name: "arguments", logins: { kind: "none" } })
+    await workspaces.create({ name: "arguments", logins: { kind: "none" } })
     const target = join(root, "escaped")
     const argv = ["-D", "WS=/", "/bin/sh", "-c", 'printf escaped > "$1"', "control", target]
     const safe = await workspaces.exec("arguments", argv)
