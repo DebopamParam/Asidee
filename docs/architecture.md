@@ -629,7 +629,10 @@ finish, so a second daemon never runs beside it. It listens on:
 - `127.0.0.1` at each forward's port, relayed to the sandbox and nothing else;
 - `127.0.0.1` on port 7717 (or a free port), used by the dashboard. Requests need the token from `asd ui` and a
   `Host` header naming this server. `shutdown`, `sshSetup` (it can change `~/.ssh/config`) and sessions are not
-  available here.
+  available here. Its GETs need no token: a file in `CONFIG/ui` (kept inside that folder) comes first; then `/` and the
+  dashboard's places (`DASHBOARD_ROUTE` in `core/daemon.ts`: `/sandboxes[/NAME]`, `/workspaces`, `/templates`,
+  `/extensions[/ID]`, `/machines`, `/settings`, `/setup[/STEP]`) get the page, `CONFIG/ui/index.html` if there is one;
+  any other path is 404.
 
 Links add no listener here: each link's listener runs inside the sandbox that uses it, on that sandbox's loopback.
 
@@ -1052,7 +1055,12 @@ and is not removed. A step that runs for over 30 minutes without a report can se
 ## Dashboard
 
 `ui/index.html` is one page with no build step, a client of the API like any other. Light theme only; Reduce motion
-turns its animation off. A sidebar holds five places and Settings:
+turns its animation off. Each place has a path, and the tab's title follows it ("my-app · Asidee"): every move pushes
+it, a redirect replaces it (`/` to `/sandboxes`, Machines while other machines are off, a removed sandbox's page),
+Back and Forward return through it, and a reload opens the same place once the data arrives. A sandbox or extension
+that is not there says so, with a button back to its list. The token stays out of the path: `asd ui`'s link carries it
+in `#token=`, which the page keeps in the tab's `sessionStorage` and strips from the address. A tab opened on a path
+without it says it is not signed in and to open `asd ui`'s link. A sidebar holds five places and Settings:
 
 - **Sandboxes**: one row per sandbox (state, kind, disk use), and a page for each. The page has the Checks card (what
   needs a look first; "Show all" gives every stored result, required and good to know), Use (CPU, memory, processes,

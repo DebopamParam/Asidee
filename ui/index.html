@@ -495,7 +495,7 @@
 // A client of the daemon's API and nothing more. To change this dashboard, copy it to CONFIG/ui/index.html (see the
 // skill): the copy gets the same API and token, and cannot change what the checks report from `asd verify`.
 const hash = new URLSearchParams(location.hash.slice(1))
-if (hash.get("token")) { sessionStorage.setItem("asidee-token", hash.get("token")); history.replaceState(null, "", location.pathname) }
+if (hash.get("token")) { sessionStorage.setItem("asidee-token", hash.get("token")); history.replaceState(null, "", location.pathname + location.search) }
 const token = sessionStorage.getItem("asidee-token") ?? ""
 // Each status in one word and one mark; "Note" is only ever a disclosure.
 const STATUS = { pass: ["ok", "Passed"], weak: ["weak", "Partly"], fail: ["fail", "Failed"], unsupported: ["na", "Not available"], unknown: ["unk", "Not checked"], info: ["info", "Note"] }
@@ -606,11 +606,46 @@ function section(name) {
     key === name ? button.setAttribute("aria-current", "page") : button.removeAttribute("aria-current")
   }
   window.scrollTo?.(0, 0)
+  syncPath()
   void refresh()
 }
 for (const key of Object.keys(TABS)) document.getElementById(`${key}-tab`).addEventListener("click", () => { if (key === "sandboxes") page = null; if (key === "extensions") extPage = null; section(key) })
 const openSandbox = (name) => { page = name; section("sandboxes") }
 const openExtension = (id) => { extPage = id; section("extensions") }
+
+// The place, in the address bar: /sandboxes, /sandboxes/NAME, /extensions/ID, /setup/STEP, … Each move pushes its path
+// (a redirect replaces it), Back and Forward read it, and a reload opens the same place. The token is never in it.
+const SETUP_STEPS = ["engine", "setup", "test", "tools", "first", "open"]
+const TITLES = { sandboxes: "Sandboxes", workspaces: "Workspaces", templates: "Templates", extensions: "Extensions", machines: "Machines", settings: "Settings", setup: "First run" }
+let routed = false, replacePath = false, extensionsRead = false
+function placePath() {
+  if (tab === "setup") return `/setup/${SETUP_STEPS[onboarding.step - 1] ?? "engine"}`
+  if (tab === "sandboxes" && page) return `/sandboxes/${encodeURIComponent(page)}`
+  if (tab === "extensions" && extPage) return `/extensions/${encodeURIComponent(extPage)}`
+  return `/${tab}`
+}
+function syncPath() {
+  if (!routed) return
+  const path = placePath()
+  if (path !== location.pathname) { replacePath ? history.replaceState(null, "", path) : history.pushState(null, "", path) }
+  replacePath = false
+  const named = tab === "sandboxes" && page ? page : tab === "extensions" && extPage ? extensions.find((entry) => entry.id === extPage)?.name ?? extPage : TITLES[tab]
+  document.title = `${named} · Asidee`
+}
+const segment = (text) => { try { return decodeURIComponent(text) } catch { return null } }
+// Opens the place a path names. "/" and a path the page does not know go to the sandboxes, replacing the path, and so
+// does Machines while other machines are off.
+function openPath(path) {
+  const [first, second, extra] = path.split("/").filter(Boolean).map(segment)
+  const known = extra === undefined && (first === "setup" ? second === undefined || SETUP_STEPS.includes(second) : first in TABS && (second === undefined || first === "sandboxes" || first === "extensions"))
+  routed = true
+  if (!known || first === "machines" && settings && !settings.experimental) { page = null; extPage = null; replacePath = true; section("sandboxes"); return }
+  if (first === "setup") { onboarding.step = second ? SETUP_STEPS.indexOf(second) + 1 : 1; section("setup"); return }
+  page = first === "sandboxes" ? second ?? null : page
+  extPage = first === "extensions" ? second ?? null : extPage
+  section(first)
+}
+window.addEventListener("popstate", () => { closeModal(); openPath(location.pathname) })
 
 // The island: one indicator for each wait, the newest shown. A wait on this Mac's dialog empties over its 60 s.
 const waits = new Map()
@@ -1038,7 +1073,7 @@ function unfinishedCard(sandbox) {
         onclick: () => act(name, "keep", async () => { await api("createKeep", { name }); return `${name} stays as it is until you remove it. The steps left do not run.` }, { label: name, value: "keeping" }) }, busy.has(`${name}:keep`) ? "Working…" : "Don't remove"),
       removeButton(name, "Remove now")))
 }
-const removeButton = (name, label = "Remove") => el("button", { type: "button", class: "dang", onclick: () => { const typed = prompt(`This deletes ${name} and everything in it. Type its name to confirm.`); if (typed !== null) act(name, "remove", () => api("remove", { name, confirm: typed }).then(() => { if (page === name) page = null; return `Removed ${name}.` }), { label: name, value: "removing" }) } }, label)
+const removeButton = (name, label = "Remove") => el("button", { type: "button", class: "dang", onclick: () => { const typed = prompt(`This deletes ${name} and everything in it. Type its name to confirm.`); if (typed !== null) act(name, "remove", () => api("remove", { name, confirm: typed }).then(() => { if (page === name) { page = null; replacePath = true } return `Removed ${name}.` }), { label: name, value: "removing" }) } }, label)
 
 // Opens an agent with the login it would pick in the terminal, or asks which when there are several.
 function openAgent(name, agent) {
@@ -1205,7 +1240,7 @@ function extensionPage(extension) {
   const node = el("div", { class: "detail", "data-extension": extension.id },
     el("div", { class: "crumb" }, el("button", { type: "button", class: "link", onclick: () => { extPage = null; render() } }, "Extensions /")),
     el("div", { class: "head", style: "margin-bottom:0" }, el("h1", {}, extension.dir ? quiet(extension.name, `In ${extension.dir}`) : extension.name),
-      extension.bundled ? el("div", { class: "end" }, menu("⋯", [item("Remove", () => act(key, "remove", () => api("extensionRemove", { id: extension.id }).then(() => `Removed ${extension.name}.`), { label: extension.name, value: "remove" }), { class: "dang" })])) : null),
+      extension.bundled ? el("div", { class: "end" }, menu("⋯", [item("Remove", () => act(key, "remove", () => api("extensionRemove", { id: extension.id }).then(() => { if (extPage === extension.id) { extPage = null; replacePath = true } return `Removed ${extension.name}.` }), { label: extension.name, value: "remove" }), { class: "dang" })])) : null),
     el("p", { class: "sub" }, extension.description ?? actionCount(extension)),
     extension.hooks?.postCreate ? el("p", { class: "muted small", style: "margin-top:4px" }, `After each create it runs: ${extension.hooks.postCreate.join(" ")}`) : null,
     result(key, "remove"))
@@ -1380,16 +1415,20 @@ function region(id, data, build) {
   const node = document.getElementById(id); node.replaceChildren(); build(node)
 }
 
+// A page whose sandbox or extension is not there: said plainly, with the way back.
+const gone = (name, list, back) => el("div", { class: "empty" }, el("h2", {}, `${name} is not here any more`),
+  el("p", {}, `There is no ${list === "Sandboxes" ? "sandbox" : "extension"} of that name now. It may have been removed, or the link may be old.`),
+  el("div", { class: "row" }, el("button", { type: "button", onclick: back }, `All ${list.toLowerCase()}`)))
 function render() {
-  if (page && !sandboxes.some((sandbox) => sandbox.name === page)) page = null
+  syncPath()
   // A count only once it is known: the machines are read when their page is open.
   const counts = { sandboxes: sandboxes.length, workspaces: workspaces.length, templates: templates.length, extensions: extensions.length, machines: machines?.machines.filter(({ machine }) => machine.host.name !== "local").length }
   for (const [key, count] of Object.entries(counts)) document.getElementById(`${key}-tab`).setAttribute("data-count", count === undefined ? "" : String(count))
   document.getElementById("sandboxes").hidden = Boolean(page); document.getElementById("sandbox-page").hidden = !page
   region("sandboxes", [sandboxes, engines.map((engine) => [engine.ready, engine.capabilities?.kernelIsolation])], sandboxList)
   const current = sandboxes.find((sandbox) => sandbox.name === page)
-  region("sandbox-page", current ? [current, engines.map((engine) => [engine.label, engine.capabilities?.kernelIsolation]), extensions, forwards, links, ssh[page], sandboxLogins[page], [...busy], output[page], from[page], showAll.has(page), settings?.diskWatchSeconds, Math.floor(Date.now() / 60000)] : null,
-    (node) => { if (current) node.append(sandboxPage(current)) })
+  region("sandbox-page", !current ? [page, connected] : [current, engines.map((engine) => [engine.label, engine.capabilities?.kernelIsolation]), extensions, forwards, links, ssh[page], sandboxLogins[page], [...busy], output[page], from[page], showAll.has(page), settings?.diskWatchSeconds, Math.floor(Date.now() / 60000)],
+    (node) => { if (current) node.append(sandboxPage(current)); else if (page && connected) node.append(gone(page, "Sandboxes", () => { page = null; render() })) })
   drawUsage()
 
   region("workspaces", [workspaces, workspaceProblem, [...busy], output, about?.platform], (list) => {
@@ -1463,11 +1502,10 @@ function render() {
     list.append(card)
   })
 
-  if (extPage && !extensions.some((extension) => extension.id === extPage)) extPage = null
   document.getElementById("extension-list").hidden = Boolean(extPage); document.getElementById("extension-page").hidden = !extPage
   const openExt = extensions.find((extension) => extension.id === extPage)
-  region("extension-page", openExt ? [openExt, sandboxes.filter((entry) => entry.status === "running").map((entry) => entry.name), [...busy], output[`ext:${openExt.id}`], about?.platform] : null,
-    (node) => { if (openExt) node.append(extensionPage(openExt)) })
+  region("extension-page", !openExt ? [extPage, extensionsRead] : [openExt, sandboxes.filter((entry) => entry.status === "running").map((entry) => entry.name), [...busy], output[`ext:${openExt.id}`], about?.platform],
+    (node) => { if (openExt) node.append(extensionPage(openExt)); else if (extPage && extensionsRead) node.append(gone(extPage, "Extensions", () => { extPage = null; render() })) })
   region("extensions", [extensions, extensionErrors, available, sandboxes.filter((entry) => entry.status === "running").map((entry) => entry.name), [...busy], output], (list) => {
     for (const problem of extensionErrors) list.append(el("div", { class: "banner bad", style: "margin-bottom:12px" }, problem))
     const button = (label, key, what, task, cls = "sm") => el("button", { type: "button", class: cls, ...(busy.has(`${key}:${what}`) ? { disabled: "" } : {}), onclick: () => act(key, what, task, { label: key.slice(4), value: label.toLowerCase() }) }, busy.has(`${key}:${what}`) ? "Working…" : label)
@@ -1670,13 +1708,16 @@ async function runSetup(name, steps) {
   show()
 }
 
+// No token in this tab: the sign-in is kept per tab, so a link or a new tab on a place has none until `asd ui`'s link
+// is opened in it.
+const signIn = () => el("span", {}, "This tab is not signed in. Run ", el("code", {}, "asd ui"), " in a terminal and open the link it prints.")
 async function refresh() {
   try {
     sandboxes = await api("list"); connected = true; document.getElementById("notice").replaceChildren()
     try { workspaces = (await api("summary")).workspaces ?? []; workspaceProblem = "" } catch (error) { workspaces = []; workspaceProblem = error.message }
   } catch (error) {
     connected = false
-    document.getElementById("notice").replaceChildren(el("div", { class: "banner bad", style: "margin-bottom:16px" }, token ? error.message : "Open this page with the link that `asd ui` prints."))
+    document.getElementById("notice").replaceChildren(el("div", { class: "banner bad", style: "margin-bottom:16px" }, token ? error.message : signIn()))
   }
   await Promise.all([
     readSettings(),
@@ -1688,7 +1729,7 @@ async function refresh() {
     (tab === "templates" || tab === "setup") && !prepareInfo ? readPrepareInfo() : null,
     tab === "settings" || tab === "setup" || !engines.some((engine) => engine.ready) || Date.now() - enginesAt > 15000 ? api("engines").then((data) => { engines = data; enginesAt = Date.now() }, () => {}) : null,
     tab === "settings" || !about ? api("about").then((data) => { about = data }, () => {}) : null,
-    tab === "extensions" ? api("extensions").then((data) => { extensions = data.extensions; extensionErrors = data.errors ?? []; available = data.available ?? [] }, () => {}) : null,
+    tab === "extensions" ? api("extensions").then((data) => { extensions = data.extensions; extensionErrors = data.errors ?? []; available = data.available ?? []; extensionsRead = true }, () => {}) : null,
     tab === "machines" ? refreshMachines() : null,
     installed("logins") && !profiles ? readProfiles() : null,
   ])
@@ -1955,10 +1996,16 @@ document.addEventListener("keydown", (event) => {
 })
 
 ;(async () => {
-  try { [checklist, gpuChecklist, engines, { extensions, errors: extensionErrors = [], available = [] }] = await Promise.all([api("checklist"), api("checklist", { kind: "gpu" }), api("engines"), api("extensions")]); enginesAt = Date.now() } catch {}
+  // The place in the address bar opens at once; what it shows fills in as the data arrives.
+  const landed = location.pathname
+  openPath(landed)
+  try { [checklist, gpuChecklist, engines, { extensions, errors: extensionErrors = [], available = [] }] = await Promise.all([api("checklist"), api("checklist", { kind: "gpu" }), api("engines"), api("extensions")]); enginesAt = Date.now(); extensionsRead = true } catch {}
   await refresh()
   // First run: until an engine is ready, or while there is no sandbox and the steps were not finished here.
-  if (connected && (!engines.some((engine) => engine.ready) || !sandboxes.length && !remembered.get("asidee-setup-done"))) { onboarding.step = engineState()[0] === "set" ? 3 : 1; section("setup") }
+  // Only when it was opened at /: a reload of a place stays there.
+  if (landed === "/" && connected && (!engines.some((engine) => engine.ready) || !sandboxes.length && !remembered.get("asidee-setup-done"))) { onboarding.step = engineState()[0] === "set" ? 3 : 1; replacePath = true; section("setup") }
+  // Machines is a place only while other machines are on, which the settings say once read.
+  if (tab === "machines" && settings && !settings.experimental) { replacePath = true; section("sandboxes") }
   setInterval(refresh, 3000); setInterval(drawIsland, 1000)
   window.asideeRefresh = refresh
 })()
