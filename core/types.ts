@@ -116,7 +116,11 @@ export type Manifest = {
   // was asked for (core/create-setup.ts) has run. The daemon removes it at removeAt, which each step's report moves on,
   // unless `asd create --retry` finishes it or `asd create --keep` keeps it as it is. failed: the step that failed last.
   unfinished?: { stage: "checks" | "setup"; reason: string; removeAt: string; setup?: CreateSetup; done: string[]; failed?: string }
+  // Who may see it: private, only this machine's own Asidee; public, also other machines through routing. A sandbox made
+  // before this existed has none and counts as public, so nothing another machine used disappears.
+  visibility?: Visibility
 }
+export type Visibility = "private" | "public"
 // The create's setup flags, as `asd create` takes them.
 export type CreateSetup = { gh?: boolean; claude?: string[]; codex?: string[]; repo?: string; copy?: string[]; t3?: boolean; "t3-browser"?: boolean }
 // user and home: the login, the same as exec's. unlocked: its locked password was replaced by * (still no password),

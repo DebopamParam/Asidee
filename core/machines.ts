@@ -18,7 +18,7 @@ export const CATALOG = {
   configGet: ["dashboard", "read"], configSet: ["dashboard", "write"],
   engines: ["dashboard", "read"], list: ["dashboard", "read"], get: ["dashboard", "read"], create: ["dashboard", "write"],
   createRetry: ["dashboard", "write"], createStep: ["dashboard", "write"], createKeep: ["dashboard", "write"],
-  start: ["dashboard", "write"], stop: ["dashboard", "write"], remove: ["dashboard", "write"], verify: ["dashboard", "write"],
+  start: ["dashboard", "write"], stop: ["dashboard", "write"], remove: ["dashboard", "write"], verify: ["dashboard", "write"], visibilitySet: ["dashboard", "write"],
   resize: ["dashboard", "write"], snapshot: ["dashboard", "write"], templateList: ["dashboard", "read"], templateRemove: ["dashboard", "write"],
   templatePrepare: ["dashboard", "write"], templatePreparing: ["dashboard", "read"], templatePrepareInfo: ["dashboard", "primary"],
   exec: ["dashboard", "write"], extensions: ["dashboard", "read"], action: ["dashboard", "write"], extensionInstall: ["dashboard", "write"], extensionRemove: ["dashboard", "write"],
@@ -34,7 +34,7 @@ export const CATALOG = {
 export type MethodName = keyof typeof CATALOG
 export const EXPERIMENTAL_OFF = "Other machines are experimental and off on this machine: they are not yet proven on enough machines. To turn them on: asd config set experimental on"
 export const LINKS_LOCAL = "Links join two sandboxes on this machine only, so they cannot be used with --host."
-export const FOLDERS_LOCAL = "Folders are copied from this Mac into sandboxes on this Mac only, so they cannot be used with --host."
+export const FOLDERS_LOCAL = "Folders are browsed and previewed on this Mac, where they are copied from, so this takes no --host."
 export const isMethod = (method: string): method is MethodName => Object.hasOwn(CATALOG, method)
 export const mutates = (method: MethodName) => CATALOG[method][1] === "write"
 
@@ -192,7 +192,7 @@ export function parseRow(entry: unknown, hello: Hello, index = 0): SandboxView {
     const spec = entry.status === "damaged" ? damagedSpec(name) : validSpec(entry.spec.template ? { ...entry.spec, image: undefined } : entry.spec)
     if (entry.status !== "damaged" && entry.spec.template && typeof entry.spec.image === "string") spec.image = entry.spec.image
     return { name, status: entry.status as SandboxView["status"], machineId: hello.machineId, ...(id(entry.sandboxId) ? { sandboxId: entry.sandboxId } : {}), engine: entry.engine, createdAt: entry.createdAt, spec, ...(spec.gpu ? { kind: GPU_KIND } : {}),
-      lastVerify, enforcementProblem, ...(diskWarning ? { diskWarning } : {}), ...(typeof entry.stopReason === "string" ? { stopReason: entry.stopReason } : {}), ...(typeof entry.activity === "string" ? { activity: entry.activity } : {}) }
+      lastVerify, enforcementProblem, ...(diskWarning ? { diskWarning } : {}), ...(entry.visibility === "private" || entry.visibility === "public" ? { visibility: entry.visibility } : {}), ...(typeof entry.stopReason === "string" ? { stopReason: entry.stopReason } : {}), ...(typeof entry.activity === "string" ? { activity: entry.activity } : {}) }
   } catch (error) {
     return { name, status: "damaged", machineId: hello.machineId, ...(id(entry.sandboxId) ? { sandboxId: entry.sandboxId } : {}), engine: typeof entry.engine === "string" ? entry.engine : "", createdAt: "", spec: damagedSpec(name),
       stopReason: `The remote daemon reported this sandbox in a form this Asidee cannot read (${(error as Error).message}). See it with that machine's own Asidee.` }
@@ -215,9 +215,9 @@ export function parseSummary(value: unknown, hello: Hello): MachineSummary {
 const withRow = (shape: Shape) => (value: unknown, hello: Hello) => { shaped(shape)(value); return { ...(value as object), sandbox: parseRow((value as { sandbox: unknown }).sandbox, hello) } }
 const REPLIES: Partial<Record<MethodName, (value: unknown, hello: Hello) => unknown>> = {
   version: shaped({ version: "string" }), hello: (value) => parseHello(value), checklist: shaped([{ id: "string", title: "string" }]), summary: (value, hello) => parseSummary(value, hello),
-  configGet: shaped({ defaults: "object", requireProbes: "boolean", "experimental?": "boolean" }), configSet: shaped({ defaults: "object", requireProbes: "boolean", "experimental?": "boolean" }),
+  configGet: shaped({ defaults: "object", requireProbes: "boolean", "experimental?": "boolean", "remoteCreate?": "boolean" }), configSet: shaped({ defaults: "object", requireProbes: "boolean", "experimental?": "boolean", "remoteCreate?": "boolean" }),
   engines: shaped([ENGINE]), list: (value, hello) => { if (!Array.isArray(value)) throw new Error("its shape"); return value.map((entry, index) => parseRow(entry, hello, index)) },
-  get: (value, hello) => parseRow(value, hello), start: (value, hello) => parseRow(value, hello), stop: (value, hello) => parseRow(value, hello),
+  get: (value, hello) => parseRow(value, hello), start: (value, hello) => parseRow(value, hello), stop: (value, hello) => parseRow(value, hello), visibilitySet: (value, hello) => parseRow(value, hello),
   create: withRow({ sandbox: "object", checks: [CHECK], hooks: [{ extension: "string", exitCode: "number", output: "string" }] }), remove: shaped({ removed: "string" }),
   verify: withRow({ sandbox: "object", checks: [CHECK], ok: "boolean" }), resize: withRow({ sandbox: "object", changes: [CHANGE], checks: [CHECK] }),
   snapshot: shaped({ template: TEMPLATE, contents: "string" }), templateList: shaped([TEMPLATE]), templateRemove: shaped({ removed: "string", imageId: "string", dependants: ["string"], note: "string" }),

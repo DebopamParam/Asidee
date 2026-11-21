@@ -10,7 +10,11 @@ import { OUTPUT_LIMIT } from "./run"
 import { addInclude, alias, editorKey, GUEST_SETUP, GUEST_SSH, includeLine, included, keyFingerprint, parseGuestSetup, userConfig, validPublicKey, writeClientFiles, type SshAccess } from "./ssh"
 import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSizes, validSpec, validTemplateName, writeManifest, writeConfig, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
-import { AsideeError, type CheckResult, type CreateSetup, type DiskWarning, type Engine, type Limits, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage, type Template, type SshSetup } from "./types"
+import { AsideeError, type CheckResult, type CreateSetup, type DiskWarning, type Engine, type Limits, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage, type Template, type SshSetup, type Visibility } from "./types"
+
+// Private: only this machine's own Asidee sees it. Public: other machines see and use it too, through routing.
+export const visibilityOf = (manifest: Pick<Manifest, "visibility">): Visibility => manifest.visibility ?? "public"
+export const privateThere = (name: string) => `${name} is private on its machine, so other machines cannot see or use it. To share it, run \`asd share ${name}\` on that machine.`
 
 // A running sandbox is stopped when a blocking check could not be made this many timer passes in a row.
 export const UNCHECKED_PASSES = 4
@@ -38,6 +42,7 @@ export type SandboxView = {
   activity?: string
   template?: Manifest["template"]
   unfinished?: Manifest["unfinished"]
+  visibility?: Visibility
   // Set only for the weaker kind, a GPU container (GPU_KIND); a sandbox has none.
   kind?: string
 }
@@ -140,7 +145,8 @@ export class Core {
     return { name: manifest.name, machineId: this.machineId, sandboxId: manifest.id, status, engine: manifest.engine.label, spec: manifest.spec, createdAt: manifest.createdAt, capabilities: manifest.engine.capabilities,
       lastVerify: historical(manifest.lastVerify),
       enforcementProblem: this.enforcementProblems.get(manifest.name) ?? manifest.enforcementProblem,
-      stopReason, activity: this.activity.get(manifest.name), template: manifest.template, ...(manifest.unfinished ? { unfinished: manifest.unfinished } : {}), ...(manifest.spec.gpu ? { kind: GPU_KIND } : {}) }
+      stopReason, activity: this.activity.get(manifest.name), template: manifest.template, ...(manifest.unfinished ? { unfinished: manifest.unfinished } : {}), ...(manifest.spec.gpu ? { kind: GPU_KIND } : {}),
+      visibility: visibilityOf(manifest) }
   }
 
   async list(): Promise<SandboxView[]> {
@@ -150,6 +156,25 @@ export class Core {
         stopReason: `Its state file ${entry.file} cannot be read (${entry.problem}). Asidee does nothing with it; fix the file or delete it.` }))]
   }
   async get(name: string): Promise<SandboxView> { return this.view(await readManifest(this.dirs, name)) }
+
+  // For a request from another machine: refuses a private sandbox, and leaves one that does not exist to the method,
+  // which says so.
+  async visible(name: unknown): Promise<void> {
+    const manifest = await readManifest(this.dirs, validName(name)).catch((error) => { if (error instanceof AsideeError && error.code === "not-found") return undefined; throw error })
+    if (manifest && visibilityOf(manifest) === "private") throw new AsideeError("not-found", privateThere(manifest.name))
+  }
+  // routed: asked by another machine, which may make a sandbox private but never public.
+  setVisibility(name: string, visibility: unknown, routed = false): Promise<SandboxView> {
+    return this.exclusive(validName(name), async () => {
+      if (visibility !== "private" && visibility !== "public") throw new AsideeError("usage", "visibility is private or public.")
+      if (routed && visibility === "public") throw new AsideeError("usage", `Only ${name}'s own machine can make it public: run \`asd share ${name}\` there.`)
+      const manifest = await readManifest(this.dirs, name)
+      if (routed && visibilityOf(manifest) === "private") throw new AsideeError("not-found", privateThere(name))
+      manifest.visibility = visibility
+      await writeManifest(this.dirs, manifest)
+      return this.view(manifest)
+    })
+  }
 
   private async stage(manifest: Manifest, stages: readonly Stage[], running: boolean): Promise<CheckResult[]> {
     const provider = this.provider(manifest); const results: CheckResult[] = []
@@ -308,8 +333,8 @@ export class Core {
     })
   }
 
-  // warning: said with every GPU container made (GPU_WARNING).
-  async create(input: Record<string, unknown>): Promise<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }>; warning?: string }> {
+  // warning: said with every GPU container made (GPU_WARNING). visibility: public when another machine asked for it.
+  async create(input: Record<string, unknown>, visibility: Visibility = "private"): Promise<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }>; warning?: string }> {
     const config = await readConfig(this.dirs)
     const spec = validSpec(input, config.defaults)
     const setup = validSetup(spec.name, input.setup)
@@ -324,7 +349,7 @@ export class Core {
       if (spec.gpu && !engine.capabilities?.gpu) throw new AsideeError("dependency", `${engine.label} cannot make a GPU container: Docker there lists no NVIDIA GPU (no nvidia.com/gpu CDI device and no nvidia runtime). It needs Linux with an NVIDIA GPU and the NVIDIA Container Toolkit.`)
       // Written before the engine is touched, so a half-made sandbox can always be removed, and is unfinished until its
       // checks pass: one left by a daemon that ended mid-create goes too.
-      const manifest: Manifest = { version: 1, name: spec.name, id: randomBytes(16).toString("hex"), engine, spec, createdAt: new Date().toISOString(),
+      const manifest: Manifest = { version: 1, name: spec.name, id: randomBytes(16).toString("hex"), engine, spec, createdAt: new Date().toISOString(), visibility,
         unfinished: { stage: "checks", reason: "It was being created.", removeAt: this.removeAt(), ...(setup ? { setup } : {}), done: [] } }
       const provider = this.provider(manifest)
       const createContainer = async () => {
@@ -552,6 +577,8 @@ export class Core {
     if (request.kind === "workspace") throw new AsideeError("usage", "Use the workspace session handler.")
     const manifest = await readManifest(this.dirs, request.name); const provider = this.provider(manifest)
     if (request.machineId !== undefined && request.machineId !== this.machineId) throw new AsideeError("identity-changed", "The session names another machine.")
+    // A session that names this machine's identity came through machine routing: another machine asked for it.
+    if (request.machineId !== undefined && visibilityOf(manifest) === "private") throw new AsideeError("not-found", privateThere(manifest.name))
     if (request.sandboxId !== undefined && request.sandboxId !== manifest.id) throw new AsideeError("identity-changed", "The sandbox was recreated; open a new session or forward explicitly.")
     if (request.generation !== undefined && request.generation !== await provider.generation(manifest)) throw new AsideeError("conflict", "The sandbox's run changed; open a new forward explicitly.")
     if (manifest.engine.capabilities?.execStream === false) throw new AsideeError("dependency", `${manifest.engine.label} cannot relay a session's bytes.`)
@@ -725,12 +752,21 @@ export class Core {
   installExtension(id: unknown) { return installExtension(this.dirs, id) }
   removeExtension(id: unknown) { return removeExtension(this.dirs, id) }
 
-  async runAction(extensionId: unknown, actionId: unknown, sandbox: unknown, values: unknown): Promise<RunResult> {
+  // An installed extension's action. host: a registered machine whose sandbox it is for; this machine's extension runs
+  // here with ASIDEE_HOST set, so the asd commands it runs act on that machine (the daemon checked the sandbox there).
+  async actionFor(extensionId: unknown, actionId: unknown, host?: string) {
     const extension = (await loadExtensions(this.dirs)).extensions.find((entry) => entry.id === extensionId)
     const action = extension?.actions.find((entry) => entry.id === actionId)
     if (!extension || !action) throw new AsideeError("not-found", `There is no action ${String(actionId)} in an extension ${String(extensionId)}.`)
+    if (host === undefined) return { extension, action }
+    if (action.scope !== "sandbox") throw new AsideeError("usage", `${extension.name}'s ${action.label} acts on this machine, not on a sandbox, so it takes no other machine.`)
+    return { extension, action }
+  }
+  async runAction(extensionId: unknown, actionId: unknown, sandbox: unknown, values: unknown, host?: string): Promise<RunResult> {
+    const { extension, action } = await this.actionFor(extensionId, actionId, host)
     const env = fieldValues(action, (values ?? {}) as Record<string, unknown>)
-    if (action.scope === "sandbox") env.ASIDEE_SANDBOX = (await readManifest(this.dirs, validName(sandbox))).name
+    if (host !== undefined) Object.assign(env, { ASIDEE_SANDBOX: validName(sandbox), ASIDEE_HOST: host })
+    else if (action.scope === "sandbox") env.ASIDEE_SANDBOX = (await readManifest(this.dirs, validName(sandbox))).name
     return runCommand(this.run, extension, action.run, env, this.cliDir)
   }
 

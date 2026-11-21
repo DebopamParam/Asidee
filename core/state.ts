@@ -110,8 +110,9 @@ export const listManifests = async (dirs: Dirs) => (await scanManifests(dirs)).m
 // experimental: unproven features (today, other machines), off by default. workspaceFreeSpaceGb: below this much free
 // space where workspaces live, workspace launches are refused and the daemon stops running workspaces. diskWatchSeconds:
 // the pause between two measurements of a sandbox's watched disk limit. terminal: the app a dashboard button opens a
-// shell in (core/terminal.ts); terminalCommand: the command used when it is "custom".
-export type Config = { defaults: Defaults; engine?: string; requireProbes: boolean; experimental: boolean; workspaceFreeSpaceGb: number; diskWatchSeconds: number
+// shell in (core/terminal.ts); terminalCommand: the command used when it is "custom". remoteCreate: whether other
+// machines may create sandboxes here through routing, off by default; only this machine's own Asidee turns it on.
+export type Config = { defaults: Defaults; engine?: string; requireProbes: boolean; experimental: boolean; remoteCreate: boolean; workspaceFreeSpaceGb: number; diskWatchSeconds: number
   terminal: Terminal; terminalCommand?: string }
 export const TERMINALS = ["default", "terminal", "ghostty", "iterm", "custom"] as const
 export type Terminal = typeof TERMINALS[number]
@@ -126,7 +127,7 @@ export function validTerminalCommand(value: unknown): string {
 
 // What `configSet` may change. defaults, engine and terminal are checked on their own below; null removes defaults or
 // engine.
-const SETTINGS = { requireProbes: "boolean", experimental: "boolean", workspaceFreeSpaceGb: "number", diskWatchSeconds: "number" } as const
+const SETTINGS = { requireProbes: "boolean", experimental: "boolean", remoteCreate: "boolean", workspaceFreeSpaceGb: "number", diskWatchSeconds: "number" } as const
 // Each number setting's unit, lowest and highest value. The enforcement pass measures disk use every 30 s whatever
 // diskWatchSeconds says, so a longer pause than that would change nothing.
 const NUMBER_SETTINGS: Record<string, [string, number, number]> = { workspaceFreeSpaceGb: ["GiB", 0, 100_000], diskWatchSeconds: ["seconds", 1, 30] }
@@ -162,7 +163,7 @@ function parseConfig(dirs: Dirs, data: Record<string, unknown>): Config {
   // The defaults pass the same validation as a request, so config cannot set what a request cannot.
   try { validSpec({ ...defaults, name: "x" }) } catch (error) { wrong(`in defaults, ${(error as Error).message.replace(/^./, (first) => first.toLowerCase()).replace(/\.$/, "")}`) }
   const known = Object.fromEntries(Object.entries(defaults).filter(([key]) => DEFAULT_KEYS_ALLOWED.includes(key)))
-  return { defaults: known as Defaults, engine: data.engine as string | undefined, requireProbes: data.requireProbes !== false, experimental: data.experimental === true,
+  return { defaults: known as Defaults, engine: data.engine as string | undefined, requireProbes: data.requireProbes !== false, experimental: data.experimental === true, remoteCreate: data.remoteCreate === true,
     workspaceFreeSpaceGb: (data.workspaceFreeSpaceGb as number | undefined) ?? 5, diskWatchSeconds: (data.diskWatchSeconds as number | undefined) ?? DEFAULT_DISK_WATCH_SECONDS,
     terminal: (data.terminal as Terminal | undefined) ?? "default", ...(typeof data.terminalCommand === "string" ? { terminalCommand: data.terminalCommand } : {}) }
 }

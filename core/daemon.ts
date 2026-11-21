@@ -5,7 +5,7 @@ import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:net"
 import { join, normalize } from "node:path"
 import { CHECKLIST, GPU_CHECKLIST } from "./checks"
-import { Core } from "./core"
+import { Core, type SandboxView } from "./core"
 import { browseFolders, previewFolder } from "./folders"
 import { APPROVAL_SECONDS, approvalText, dialogApprover, literal, word, type Answer, type Approval, type Approver } from "./approval"
 import { CATALOG, hostName, isMethod, machineIdentity, Machines, type Hello } from "./machines"
@@ -185,7 +185,17 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     extensions: { run: () => core.extensions() },
     extensionInstall: { run: (body) => core.installExtension(body.id) },
     extensionRemove: { run: (body) => core.removeExtension(body.id) },
-    action: { run: (body) => core.runAction(body.extension, body.action, body.sandbox, body.values) },
+    // machine: a registered machine whose sandbox the action is for. The extension still runs here, as this machine's,
+    // with ASIDEE_HOST set so its asd commands act on that machine; get there first refuses a private or missing one.
+    action: { run: async (body) => {
+      if (body.machine === undefined || body.machine === "local") return core.runAction(body.extension, body.action, body.sandbox, body.values)
+      if (!machines) throw new AsideeError("dependency", "Machine routing is unavailable.")
+      const host = await machines.resolve(body.machine)
+      await core.actionFor(body.extension, body.action, host.name)
+      const sandbox = await machines.route("get", { host: host.name, name: validName(body.sandbox) }) as SandboxView
+      return core.runAction(body.extension, body.action, sandbox.name, body.values, host.name)
+    } },
+    visibilitySet: { run: (body) => core.setVisibility(String(body.name), body.visibility) },
     // For picking a folder to copy in: folder names under the home, and what a copy would take. Names and sizes only.
     folderBrowse: { run: (body) => browseFolders(body.path === undefined ? "~" : String(body.path)) },
     folderPreview: { run: (body) => previewFolder(String(body.source ?? ""), body.logins === true) },
@@ -215,6 +225,38 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
   return table
 }
 
+// A routed request: one that another machine's Asidee sent through machine routing (Machines.route always names the
+// machine it is for in x-asidee-machine; a routed stream names it as machineId, see Core.openSession). It sees and acts on
+// public sandboxes only, can make one private but never public, creates only while this machine lets other machines
+// create here (and what it creates is public), and cannot turn that setting on. Only the methods routing sends are
+// taken. Enrollment's test sandbox is made by a request without the header, as the person enrolling approved.
+export const REMOTE_CREATE_OFF = "This machine does not let other machines create sandboxes here. To allow it, run on this machine: asd config set remote-create on (or turn on “Let other machines create sandboxes here” in its dashboard's Settings)."
+const NAMED: Partial<Record<string, (body: Body) => unknown>> = Object.fromEntries([
+  ...["create", "get", "start", "stop", "remove", "verify", "resize", "snapshot", "exec", "createRetry", "createStep", "createKeep", "sessionTarget", "sshPrepare", "visibilitySet"].map((method) => [method, (body: Body) => body.name]),
+  ["action", (body: Body) => body.sandbox]])
+const shared = (sandboxes: SandboxView[]) => sandboxes.filter((sandbox) => sandbox.visibility === "public")
+export async function routedRun(core: Core, name: string, method: Method, body: Body, signal?: AbortSignal): Promise<unknown> {
+  if (!isMethod(name) || CATALOG[name][1] === "primary") throw new AsideeError("usage", `${name} is not available to other machines.`)
+  const target = NAMED[name]?.(body)
+  if (target !== undefined) await core.visible(target)
+  if (name === "create") {
+    if (!(await core.configGet()).remoteCreate) throw new AsideeError("usage", REMOTE_CREATE_OFF)
+    return core.create(body, "public")
+  }
+  if (name === "configSet" && body.remoteCreate === true) throw new AsideeError("usage", "Only this machine can let other machines create sandboxes here: run asd config set remote-create on on it.")
+  if (name === "visibilitySet") return core.setVisibility(String(body.name), body.visibility, true)
+  const result = await method.run(body, signal)
+  const names = async () => new Set(shared(await core.list()).map((sandbox) => sandbox.name))
+  if (name === "list") return shared(result as SandboxView[])
+  if (name === "summary") return { ...(result as object), sandboxes: shared((result as { sandboxes: SandboxView[] }).sandboxes), workspaces: [] }
+  if (name === "usage") { const seen = await names(); return (result as Array<{ name: string }>).filter((entry) => seen.has(entry.name)) }
+  if (name === "templateList" || name === "templateRemove") {
+    const seen = await names(), hide = (template: { dependants: string[] }) => ({ ...template, dependants: template.dependants.filter((entry) => seen.has(entry)) })
+    return Array.isArray(result) ? result.map(hide) : hide(result as { dependants: string[] })
+  }
+  return result
+}
+
 const STATUS: Record<ErrorCode, number> = { usage: 400, "not-found": 404, conflict: 409, dependency: 424, "check-failed": 422, "probes-required": 422, runtime: 500, offline: 503, incompatible: 409, "identity-changed": 409, "outcome-unknown": 504 }
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
 const refuse = (status: number, message: string) => json(status, { ok: false, error: { code: "usage", message } })
@@ -235,7 +277,8 @@ const notApproved = (answer: keyof typeof APPROVAL, approval: Approval) => {
 // another site that resolves its own name to 127.0.0.1 does not). There a method with approve runs only once the person
 // at the Mac allows it, one dialog at a time, so a token holder cannot stack them up. Only the daemon passes the real
 // dialog; any other caller, a test included, gets "unavailable" and never puts one on the screen.
-export function createHandler(table: Record<string, Method>, token: string, configDir: string, machines?: Machines, approver: Approver = async () => "unavailable") {
+// core: this machine's sandboxes, for requests from other machines (routedRun); without it they are refused.
+export function createHandler(table: Record<string, Method>, token: string, configDir: string, machines?: Machines, approver: Approver = async () => "unavailable", core?: Core) {
   let asking = false
   return async (request: Request, viaSocket: boolean, port: number): Promise<Response> => {
     let url: URL; let pathname: string
@@ -287,6 +330,10 @@ export function createHandler(table: Record<string, Method>, token: string, conf
           }
         } else if (payload.host !== undefined && payload.host !== "local") throw new AsideeError("dependency", "Machine routing is unavailable.")
         const { host: _host, machineId: _identity, ...local } = payload
+        if (request.headers.has("x-asidee-machine")) {
+          if (!core) throw new AsideeError("dependency", "This daemon cannot answer other machines.")
+          return json(200, { ok: true, data: await routedRun(core, url.pathname.slice(5), method, local, request.signal) })
+        }
         return json(200, { ok: true, data: await method.run(local, request.signal) })
       } catch (error) {
         const code: ErrorCode = error instanceof AsideeError ? error.code : error instanceof SyntaxError ? "usage" : "runtime"
@@ -308,6 +355,9 @@ export function createHandler(table: Record<string, Method>, token: string, conf
 
 export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   checkSocketPath(dirs)
+  // Set only for an extension acting on another machine's sandbox; a daemon started from one must not pass it on to
+  // every extension it runs.
+  delete process.env.ASIDEE_HOST
   await mkdir(dirs.state, { recursive: true, mode: 0o700 })
   const socket = socketPath(dirs)
   const alive = await fetch("http://asidee/api/version", { unix: socket, method: "POST", body: "{}" } as RequestInit).then(() => true, () => false)
@@ -330,7 +380,7 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   // A daemon that is stopping still answers `version`, so a client waits for it instead of starting a second one, and
   // takes no new work: a sandbox started now would be stopped, or left unwatched, a moment later.
   let stopping = false
-  const answer = createHandler(methods(core, (keep) => stop(keep), () => stopping, machines, hosts, workspaces), token, dirs.config, machines, dialogApprover(systemRunner))
+  const answer = createHandler(methods(core, (keep) => stop(keep), () => stopping, machines, hosts, workspaces), token, dirs.config, machines, dialogApprover(systemRunner), core)
   const handle = (request: Request, viaSocket: boolean, port: number): Promise<Response> =>
     stopping && URL.canParse(request.url) && new URL(request.url).pathname !== "/api/version"
       ? Promise.resolve(json(STATUS.conflict, { ok: false, error: { code: "conflict", message: "The daemon is stopping. Try again in a moment." } }))

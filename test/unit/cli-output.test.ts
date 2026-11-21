@@ -220,7 +220,7 @@ test("config get/set route settings and support JSON; invalid commands are refus
   const calls: unknown[] = []
   const asidee = await daemon({ configGet: (body: unknown) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5, terminal: "default" } } },
     configSet: (body: { requireProbes?: boolean; experimental?: boolean; workspaceFreeSpaceGb?: number; diskWatchSeconds?: number }) => { calls.push(body); return { ok: true, data: { defaults: {}, requireProbes: body.requireProbes ?? true, experimental: body.experimental ?? false, workspaceFreeSpaceGb: body.workspaceFreeSpaceGb ?? 5, diskWatchSeconds: body.diskWatchSeconds ?? 5, terminal: "default" } } } })
-  expect(await asidee("config", "get")).toMatchObject({ code: 0, out: "require-probes on\nexperimental off\nworkspace-free-space 5 GiB\ndisk-watch 5 s\nengine auto\ndefault-image auto (docker/sandbox-templates:shell-docker)\ndefault-cpus auto (2)\ndefault-memory auto (4 GiB)\ndefault-pids auto (4096)\ndefault-disk auto (20 GiB)\ndefault-docker auto (off)\ndefault-template auto (none)\nterminal default\nterminal-command none\n" })
+  expect(await asidee("config", "get")).toMatchObject({ code: 0, out: "require-probes on\nexperimental off\nremote-create off\nworkspace-free-space 5 GiB\ndisk-watch 5 s\nengine auto\ndefault-image auto (docker/sandbox-templates:shell-docker)\ndefault-cpus auto (2)\ndefault-memory auto (4 GiB)\ndefault-pids auto (4096)\ndefault-disk auto (20 GiB)\ndefault-docker auto (off)\ndefault-template auto (none)\nterminal default\nterminal-command none\n" })
   expect(await asidee("config", "set", "disk-watch", "1")).toMatchObject({ code: 0, out: "disk-watch 1 s\n" })
   expect(await asidee("config", "set", "workspace-free-space", "12.5")).toMatchObject({ code: 0, out: "workspace-free-space 12.5 GiB\n" })
   expect(await asidee("config", "set", "require-probes", "off")).toMatchObject({ code: 0, out: "require-probes off\n" })
@@ -636,4 +636,30 @@ test("B12: a verify that stops a running sandbox does not claim only configurati
   expect(result.code).toBe(6)
   expect(result.out).not.toContain("only its configuration was checked")
   expect(result.out).toContain("Reached the host.")
+})
+
+test("share and unshare set a sandbox's visibility, ASIDEE_HOST selects a machine, and ext run aimed at one runs this machine's extension", async () => {
+  const bodies: Record<string, Array<Record<string, unknown>>> = {}
+  const spec = { name: "demo", image: "ubuntu:24.04", cpus: 2, memoryGb: 4, pids: 4096, diskGb: 20, docker: false }
+  const answer = (method: string, data: (body: Record<string, unknown>) => unknown) => (body: Record<string, unknown>) => { (bodies[method] ??= []).push(body); return { ok: true, data: data(body) } }
+  const view = (visibility: unknown) => ({ name: "demo", status: "running", engine: "Fake engine", spec, createdAt: "2026-11-21T00:00:00Z", visibility })
+  const asidee = await daemon({ visibilitySet: answer("visibilitySet", (body) => view(body.visibility)), get: answer("get", () => view("public")), action: answer("action", () => ({ exitCode: 0, stdout: "done\n", stderr: "" })) })
+  const withHost = async (host: string, ...args: string[]) => {
+    const run = Bun.spawn([process.execPath, CLI, ...args], { env: { ...asidee.env, ASIDEE_HOST: host }, stdout: "pipe", stderr: "pipe" })
+    const [out, err, code] = await Promise.all([new Response(run.stdout).text(), new Response(run.stderr).text(), run.exited])
+    return { code, out, err }
+  }
+  expect(await asidee("share", "demo")).toMatchObject({ code: 0, out: "demo is public: other machines that route here see and use it. To make it private: asd unshare demo\n" })
+  expect(await asidee("--host", "build", "unshare", "demo")).toMatchObject({ code: 0, out: "build/demo is private: only its own machine's Asidee sees it. This machine no longer sees it; only that machine can share it again. Anyone signed in to that machine's account can still see it.\n" })
+  expect(bodies.visibilitySet).toEqual([{ name: "demo", visibility: "public" }, { name: "demo", visibility: "private", host: "build" }])
+  expect(await asidee("get", "demo")).toMatchObject({ code: 0, out: expect.stringContaining("demo: running on Fake engine, public\n") })
+  expect(await withHost("build", "get", "demo")).toMatchObject({ code: 0, out: expect.stringContaining("build/demo: running") })
+  expect(bodies.get!.at(-1)).toEqual({ name: "demo", host: "build" })
+  // The extension is this machine's: the action goes to this daemon, naming the machine its sandbox is on.
+  expect(await asidee("--host", "build", "ext", "run", "folders", "copy", "demo", "--set", "source=~/.agents")).toMatchObject({ code: 0, out: "done\n" })
+  expect(await withHost("build", "ext", "run", "t3", "setup", "demo")).toMatchObject({ code: 0 })
+  expect(await asidee("ext", "run", "t3", "setup", "demo")).toMatchObject({ code: 0 })
+  expect(bodies.action).toEqual([{ extension: "folders", action: "copy", sandbox: "demo", values: { source: "~/.agents" }, machine: "build" },
+    { extension: "t3", action: "setup", sandbox: "demo", values: {}, machine: "build" }, { extension: "t3", action: "setup", sandbox: "demo", values: {} }])
+  expect(await withHost("Not a name", "list")).toMatchObject({ code: 2, err: expect.stringContaining("asd: ") })
 })

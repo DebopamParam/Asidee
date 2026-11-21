@@ -18,7 +18,7 @@ import { FORWARD_REACH, type ForwardView } from "../core/forwards"
 import { RELAY } from "../core/providers/gvisor"
 import { LINK_LIMITS, type LinkView } from "../core/links"
 import type { HostPlan } from "../core/hosts"
-import { FOLDERS_LOCAL, hostOption, type FleetView, type HostView } from "../core/machines"
+import { hostOption, type FleetView, type HostView } from "../core/machines"
 import { bounded, PROTOCOL, transportStdio } from "../core/transport"
 import { included, userConfig, type SshAccess } from "../core/ssh"
 import { systemRunner } from "../core/run"
@@ -61,6 +61,9 @@ const GROUPS: Array<[string, string[]]> = [
     "asd start NAME",
     "asd stop NAME",
     "asd remove NAME --confirm NAME     deletes the sandbox and everything in it",
+    "asd share NAME                     make it public: other machines that route here see and use it",
+    "asd unshare NAME                   make it private again (the default for a sandbox made here); another",
+    "                                   machine can unshare a public sandbox but never share one",
   ]],
   ["Reach in", [
     "asd forward add NAME --port PORT [--local-port PORT]   127.0.0.1 here to PORT on the sandbox's loopback",
@@ -83,6 +86,8 @@ const GROUPS: Array<[string, string[]]> = [
     "asd config get                     settings on the selected machine",
     "asd config set require-probes on|off   require blocking isolation probes at create (default on)",
     "asd config set experimental on|off     features not yet proven on enough machines: other machines (default off)",
+    "asd config set remote-create on|off    let other machines create sandboxes here (default off); theirs are public.",
+    "                                           Only this machine can turn it on",
     "asd config set workspace-free-space GiB below this much free space, workspace launches are refused and running",
     "                                           workspaces are stopped (default 5; 0 turns it off; purgeable space not counted)",
     "asd config set disk-watch SECONDS      pause between two measurements of a watched disk limit (default 5; 1 to 30)",
@@ -118,12 +123,15 @@ const GROUPS: Array<[string, string[]]> = [
     "asd ext install EXTENSION          install a bundled extension: logins, folders, repo, env-docs, t3, rotator",
     "asd ext remove EXTENSION           remove a bundled extension asd installed",
     "asd ext run EXTENSION ACTION [SANDBOX] [--set FIELD=VALUE]…",
+    "                                   with --host, this machine's extension runs here and its asd commands act on that",
+    "                                   machine's sandbox; ext list, install and remove with --host act on that machine's own",
     "asd ui [--open]                    the dashboard's address",
     "asd daemon status | stop | run",
     "asd transport stdio --protocol 1 [--stream]   internal SSH socket relay; starts nothing",
   ]],
 ]
-const OPTIONS = `  --host NAME   select a registered machine (experimental); unqualified names always mean local
+const OPTIONS = `  --host NAME   select a registered machine (experimental); unqualified names always mean local. Without
+                it, ASIDEE_HOST selects one (an extension acting on another machine's sandbox runs with it set)
   --json   print {"ok":true,"data":…} or {"ok":false,"error":{code,message}}
   --help   after any command, that command's usage`
 const EXITS = "Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 conflict, 5 missing dependency, 6 a check failed or required probes could not run, 7 unreachable, 8 incompatible, 9 identity changed, 10 outcome unknown."
@@ -311,7 +319,7 @@ async function call<T>(method: string, body: object = {}, watch?: string): Promi
   }
   const buffered = ["create", "workspaceCreate", "resize", "snapshot", "templatePrepare"].includes(method)
   if (buffered) process.once("SIGINT", interrupted)
-  try { return await request<T>(method, { ...body, host: selectedHost }) } finally { clearInterval(timer); if (buffered) process.off("SIGINT", interrupted) }
+  try { return await request<T>(method, { host: selectedHost, ...body }) } finally { clearInterval(timer); if (buffered) process.off("SIGINT", interrupted) }
 }
 
 // A session on the daemon's stream socket (core/stream.ts). This process only moves bytes between its own stdio and the
@@ -399,7 +407,7 @@ function printChecks(checks: CheckResult[], checklist = CHECKLIST, full: string 
 }
 
 function printSandbox(view: SandboxView): void {
-  console.log(`${displayName(view.name)}: ${view.spec?.gpu ? `${GPU_KIND}, ` : ""}${shown(view.status)} on ${shown(view.engine)}${view.stopReason ? `\n  ${shown(view.stopReason)}` : ""}`)
+  console.log(`${displayName(view.name)}: ${view.spec?.gpu ? `${GPU_KIND}, ` : ""}${shown(view.status)} on ${shown(view.engine)}${view.visibility ? `, ${view.visibility}` : ""}${view.stopReason ? `\n  ${shown(view.stopReason)}` : ""}`)
   if (view.diskWarning) console.log(`  ${shown(view.diskWarning.message)}`)
   if (view.enforcementProblem) console.log(`  Enforcement problem at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}`)
   for (const line of unfinishedLines(view.name, view.unfinished)) console.log(`  ${line}`)
@@ -428,7 +436,10 @@ async function printRun(output: RunResult & { diskWarning?: DiskWarning }, asJso
 }
 
 async function main(argv: string[]): Promise<void> {
-  try { const parsed = hostOption(argv); selectedHost = parsed.host; argv = parsed.argv } catch (error) {
+  try {
+    const parsed = hostOption(argv); argv = parsed.argv
+    selectedHost = parsed.host ?? (process.env.ASIDEE_HOST ? hostOption(["--host", process.env.ASIDEE_HOST]).host : undefined)
+  } catch (error) {
     const message = (error as Error).message
     if (argv.slice(0, argv.indexOf("--") < 0 ? undefined : argv.indexOf("--")).includes("--json")) console.log(JSON.stringify({ ok: false, error: { code: "usage", message } }))
     else console.error(`asd: ${message}`)
@@ -461,7 +472,7 @@ async function main(argv: string[]): Promise<void> {
       case "config": {
         const { positionals } = parse({})
         const [action, key, value] = positionals
-        const settings: Record<string, keyof Config> = { "require-probes": "requireProbes", experimental: "experimental" }
+        const settings: Record<string, keyof Config> = { "require-probes": "requireProbes", experimental: "experimental", "remote-create": "remoteCreate" }
         const numbers: Record<string, keyof Config> = { "workspace-free-space": "workspaceFreeSpaceGb", "disk-watch": "diskWatchSeconds" }
         const number = Object.hasOwn(numbers, key ?? "") && /^\d+(\.\d+)?$/.test(value ?? "")
         if (action === "set" && positionals.length === 3 && (key === "engine" || key === "terminal" || key === "terminal-command" || Object.hasOwn(DEFAULT_KEYS, key!))) {
@@ -479,9 +490,9 @@ async function main(argv: string[]): Promise<void> {
           return out(config, () => console.log(`${key} ${shownValue}${clearing ? ` (default-${cleared} is now auto)` : ""}`))
         }
         if (!((action === "get" && positionals.length === 1) || (action === "set" && positionals.length === 3 && (number || (Object.hasOwn(settings, key!) && (value === "on" || value === "off"))))))
-          throw new AsideeError("usage", "Use asd config get, asd config set require-probes|experimental on|off, workspace-free-space GiB, disk-watch SECONDS, engine ID|auto, default-KEY VALUE|auto, terminal NAME, or terminal-command CMD|none. See asd config --help.")
+          throw new AsideeError("usage", "Use asd config get, asd config set require-probes|experimental|remote-create on|off, workspace-free-space GiB, disk-watch SECONDS, engine ID|auto, default-KEY VALUE|auto, terminal NAME, or terminal-command CMD|none. See asd config --help.")
         const config = await call<Config>(action === "get" ? "configGet" : "configSet", action === "get" ? {} : number ? { [numbers[key!]!]: Number(value) } : { [settings[key!]!]: value === "on" })
-        const lines = { "require-probes": config.requireProbes ? "on" : "off", experimental: config.experimental ? "on" : "off", "workspace-free-space": `${config.workspaceFreeSpaceGb} GiB`, "disk-watch": `${config.diskWatchSeconds} s`, engine: config.engine ?? "auto",
+        const lines = { "require-probes": config.requireProbes ? "on" : "off", experimental: config.experimental ? "on" : "off", "remote-create": config.remoteCreate ? "on" : "off", "workspace-free-space": `${config.workspaceFreeSpaceGb} GiB`, "disk-watch": `${config.diskWatchSeconds} s`, engine: config.engine ?? "auto",
           ...Object.fromEntries(Object.entries(DEFAULT_KEYS).map(([name, field]) => [name, defaultShown(config, field)])),
           terminal: config.terminal, "terminal-command": config.terminalCommand ?? "none" }
         return out(config, () => { for (const [name, text] of Object.entries(lines)) if (action === "get" || name === key) console.log(`${name} ${text}`) })
@@ -669,7 +680,7 @@ async function main(argv: string[]): Promise<void> {
             const minutes = view.lastVerify ? Math.max(0, Math.floor((Date.now() - Date.parse(view.lastVerify.at)) / 60000)) : 0
             const verified = view.lastVerify ? `verified ${minutes < 120 ? `${minutes} min` : minutes < 2880 ? `${Math.floor(minutes / 60)} h` : `${Math.floor(minutes / 1440)} d`} ago` : "never verified"
             if (view.status === "damaged") { console.log(`${displayName(view.name).padEnd(24)} damaged\n    ${shown(view.stopReason)}`); continue }
-            console.log(`${displayName(view.name).padEnd(24)} ${shown(view.status).padEnd(8)} ${view.spec.gpu ? `${GPU_KIND}  ` : ""}${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  disk limit ${view.spec.diskGb} GB  ${shown(view.engine)}${view.template ? `  template ${shown(view.template.name)}` : ""}  (${verified})${view.stopReason ? `\n    ${shown(view.stopReason)}` : ""}`)
+            console.log(`${displayName(view.name).padEnd(24)} ${shown(view.status).padEnd(8)} ${view.spec.gpu ? `${GPU_KIND}  ` : ""}${view.spec.cpus} CPU  ${view.spec.memoryGb} GB  disk limit ${view.spec.diskGb} GB  ${shown(view.engine)}${view.template ? `  template ${shown(view.template.name)}` : ""}${view.visibility ? `  ${view.visibility}` : ""}  (${verified})${view.stopReason ? `\n    ${shown(view.stopReason)}` : ""}`)
             if (view.enforcementProblem) console.log(`    Enforcement problem at ${shown(view.enforcementProblem.at)}: ${shown(view.enforcementProblem.message)}`)
             if (view.unfinished) console.log(`    Unfinished create, removed at ${utc(view.unfinished.removeAt)}: ${shown(view.unfinished.reason)} To finish it: ${next("create", "--retry", view.name)}`)
           }
@@ -690,6 +701,12 @@ async function main(argv: string[]): Promise<void> {
           printSandbox(view)
           if (command === "start") console.log(`  Its configuration was checked before it started and its runtime after; its network was not tested. To test it: ${next("verify", view.name)}`)
         })
+      }
+      case "share": case "unshare": {
+        const view = await call<SandboxView>("visibilitySet", { name: need(rest[0], "a name"), visibility: command === "share" ? "public" : "private" })
+        return out(view, () => console.log(view.visibility === "public"
+          ? `${displayName(view.name)} is public: other machines that route here see and use it. To make it private: ${next("unshare", view.name)}`
+          : `${displayName(view.name)} is private: only its own machine's Asidee sees it.${selectedHost && selectedHost !== "local" ? " This machine no longer sees it; only that machine can share it again." : ""} Anyone signed in to that machine's account can still see it.`))
       }
       case "verify": {
         const report = await call<{ sandbox: SandboxView; checks: CheckResult[]; ok: boolean; configurationOnly: boolean }>("verify", { name: need(rest[0], "a name") }, watching(rest[0]!))
@@ -893,9 +910,10 @@ async function main(argv: string[]): Promise<void> {
         let parsed
         try { parsed = parseArgs({ args: rest.slice(1), options: { set: { type: "string", multiple: true } }, allowPositionals: true }) } catch (error) { throw argumentError(error, "ext run") }
         const { values, positionals } = parsed
-        if (positionals[0] === "folders" && selectedHost && selectedHost !== "local") throw new AsideeError("usage", FOLDERS_LOCAL)
         const fields = Object.fromEntries((values.set ?? []).map((pair) => { const at = pair.indexOf("="); return at < 0 ? [pair, "true"] : [pair.slice(0, at), pair.slice(at + 1)] }))
-        const output = await call<RunResult>("action", { extension: need(positionals[0], "an extension"), action: need(positionals[1], "an action"), sandbox: positionals[2], values: fields })
+        // With another machine selected, this machine's extension runs, aimed at that machine (the daemon's action, machine).
+        const remote = selectedHost && selectedHost !== "local" ? selectedHost : undefined
+        const output = await call<RunResult>("action", { extension: need(positionals[0], "an extension"), action: need(positionals[1], "an action"), sandbox: positionals[2], values: fields, ...(remote ? { machine: remote, host: undefined } : {}) })
         return printRun(output, asJson)
       }
       case "ui": {

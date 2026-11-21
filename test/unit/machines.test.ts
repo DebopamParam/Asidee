@@ -4,6 +4,7 @@ import { connect, createServer, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createHandler } from "../../core/daemon"
+import type { Core } from "../../core/core"
 import { Hosts } from "../../core/hosts"
 import { CATALOG, compatible, type MachineIo, hostName, hostOption, machineIdentity, Machines, parseHello, parseHosts, parseSummary, staleSummary, type Hello, type HostRecord, type MachineSummary } from "../../core/machines"
 import { frame, FrameReader, type Frame } from "../../core/stream"
@@ -25,6 +26,8 @@ async function setup(experimental = true) {
 }
 const PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEU61N7KJmkiTPSmrOfaemXZu/1hocrAC0WXPcRUyjQ8"
 const identity: Partial<MachineIo> = { sshIdentity: async () => ({ user: "builder", hostKey: "SHA256:0X7US8OfQfzxyXkA9yUZy3JjznnQA/iqkCBdPkPPSEQ", hostPublicKey: PUBLIC_KEY }) }
+// This machine's sandboxes as routed requests see them (daemon.ts, routedRun): every one shared.
+const SHARED = { visible: async () => {}, list: async () => [] } as unknown as Core
 const summary = (hello = REMOTE): MachineSummary => ({ hello, checkedAt: "2026-11-11T00:00:00Z", sandboxes: [{ machineId: hello.machineId, sandboxId: "f".repeat(32), name: "demo", status: "running", engine: "remote-engine", createdAt: "2026-11-11",
   spec: { name: "demo", image: "alpine", cpus: 1, memoryGb: 1, diskGb: 1, pids: 512, docker: false }, lastVerify: { at: "2026-11-11", results: [{ id: "kernel", status: "pass", evidence: "probed", detail: "remote probe" }] } }] })
 
@@ -309,7 +312,7 @@ test("two builds of one version are refused in both directions, saying how to up
   }
   const dirs = await setup(); let ran = 0
   const machines = new Machines(dirs, REMOTE, async () => summary())
-  const handle = createHandler({ get: { run: async () => { ran++; return ROW } } }, "token", dirs.config, machines)
+  const handle = createHandler({ get: { run: async () => { ran++; return ROW } } }, "token", dirs.config, machines, undefined, SHARED)
   const call = (build: string) => handle(new Request("http://asidee/api/get", { method: "POST", headers: { "x-asidee-machine": REMOTE.machineId, "x-asidee-protocol": "1", "x-asidee-version": REMOTE.version, "x-asidee-build": build }, body: JSON.stringify({ name: "demo" }) }), true, 0)
   const refused = await (await call("8".repeat(64))).json() as { ok: boolean; error: { code: string; message: string } }
   expect(refused).toMatchObject({ ok: false, error: { code: "incompatible" } }); expect(ran).toBe(0)
@@ -373,7 +376,7 @@ test("hosts refuse enrollment while experimental is off, before reading the arti
 test("the target side answers another machine's primary whatever its own experimental setting", async () => {
   const dirs = await setup(false)
   const machines = new Machines(dirs, REMOTE, async () => summary())
-  const handle = createHandler({ hello: { run: async () => REMOTE, socketOnly: true }, get: { run: async () => ROW }, summary: { run: async () => summary() } }, "token", dirs.config, machines)
+  const handle = createHandler({ hello: { run: async () => REMOTE, socketOnly: true }, get: { run: async () => ROW }, summary: { run: async () => summary() } }, "token", dirs.config, machines, undefined, SHARED)
   const headers = { "x-asidee-machine": REMOTE.machineId, "x-asidee-protocol": "1", "x-asidee-version": REMOTE.version, "x-asidee-build": REMOTE.sourceDigest }
   for (const method of ["hello", "get", "summary"])
     expect(await (await handle(new Request(`http://asidee/api/${method}`, { method: "POST", headers, body: JSON.stringify({ name: "demo" }) }), true, 0)).json()).toMatchObject({ ok: true })

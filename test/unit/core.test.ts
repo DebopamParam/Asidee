@@ -4,8 +4,8 @@ import { tmpdir } from "node:os"
 import { connect } from "node:net"
 import { join } from "node:path"
 import { blockers, CHECKLIST, complete } from "../../core/checks"
-import { createHandler, methods } from "../../core/daemon"
-import { Core, UNCHECKED_PASSES } from "../../core/core"
+import { createHandler, methods, REMOTE_CREATE_OFF } from "../../core/daemon"
+import { Core, privateThere, UNCHECKED_PASSES } from "../../core/core"
 import { CATALOG, Machines, type Hello } from "../../core/machines"
 import { object, parseReply } from "../../core/transport"
 import { fieldValues, loadExtensions, parseExtension } from "../../core/extensions"
@@ -93,6 +93,8 @@ test("remote relay leases require the current sandbox and run and are revoked on
   const { provider, state } = fakeProvider(); const asidee = await core(provider)
   const made = await asidee.create({ name: "demo" }); const target = await asidee.sessionTarget("demo")
   expect(made.sandbox.sandboxId).toBe(target.sandboxId)
+  // A lease is another machine's; it reaches only a public sandbox.
+  await asidee.setVisibility("demo", "public")
   const lease = { kind: "lease" as const, ...target, port: 3000, leaseId: "a".repeat(32) }
   await expect(asidee.openSession({ ...lease, sandboxId: "b".repeat(32) })).rejects.toThrow("recreated")
   await expect(asidee.openSession({ ...lease, generation: "old" })).rejects.toThrow("run changed")
@@ -111,7 +113,7 @@ test("remote relay leases require the current sandbox and run and are revoked on
 
 test("a remote lease ends on its own when the primary stops renewing it, and lasts while it renews", async () => {
   const { provider } = fakeProvider(); const asidee = await core(provider); asidee.leaseTtlMs = 200
-  await asidee.create({ name: "demo" }); const target = await asidee.sessionTarget("demo")
+  await asidee.create({ name: "demo" }); await asidee.setVisibility("demo", "public"); const target = await asidee.sessionTarget("demo")
   const lease = { kind: "lease" as const, ...target, port: 3000, leaseId: "a".repeat(32) }
   const renewed = await asidee.openSession(lease); let renewedEnd = ""
   renewed.on("end", (exit) => { renewedEnd = exit.error ?? "ended" })
@@ -716,13 +718,13 @@ test("a running sandbox that cannot be checked for several passes in a row is st
 
 test("a config file with a mistake is refused by name, and its defaults obey the same limits as a request", async () => {
   const root = await mkdtemp(join(tmpdir(), "asidee-config-")); const dirs = { state: join(root, "state"), config: root }
-  expect(await readConfig(dirs)).toEqual({ defaults: {}, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5, terminal: "default" })
+  expect(await readConfig(dirs)).toEqual({ defaults: {}, requireProbes: true, experimental: false, remoteCreate: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5, terminal: "default" })
   for (const bad of ['{"workspaceFreeSpaceGb":-1}', '{"diskWatchSeconds":0}', '{"diskWatchSeconds":31}', '{"diskWatchSeconds":"1"}', '{"workspaceFreeSpaceGb":"5"}', '{"workspaceFreeSpaceGb":100001}', '{"experimental":"on"}', '{"experimental":1}', "{ nope", "[]", "null", '{"defaults":"x"}', '{"engine":5}', '{"requireProbes":"off"}', '{"requireProbes":null}', '{"requireProbes":0}', '{"defaults":{"cpus":"lots"}}', '{"defaults":{"image":"--privileged"}}', '{"defaults":{"memoryGb":100000}}']) {
     await writeFile(join(root, "config.json"), bad)
     await expect(readConfig(dirs)).rejects.toThrow("config.json")
   }
   await writeFile(join(root, "config.json"), '{"defaults":{"image":"alpine:3","cpus":1,"privileged":true,"name":"x"},"engine":"gvisor:orbstack"}')
-  expect(await readConfig(dirs)).toEqual({ defaults: { image: "alpine:3", cpus: 1 }, engine: "gvisor:orbstack", requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5, terminal: "default" })
+  expect(await readConfig(dirs)).toEqual({ defaults: { image: "alpine:3", cpus: 1 }, engine: "gvisor:orbstack", requireProbes: true, experimental: false, remoteCreate: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5, terminal: "default" })
 })
 
 test("a damaged state file is listed as damaged and the other sandboxes still work", async () => {
@@ -1001,6 +1003,104 @@ test("routed create preserves the remote refusal text and code and uses only the
   expect(await (await localHandle(request("build"), true, 0)).json()).toMatchObject({ ok: true, data: { sandbox: { status: "running" } } })
   expect((await local.configGet()).requireProbes).toBe(true)
   expect((await remote.configGet()).requireProbes).toBe(false)
+  await machines.close()
+})
+
+// Two machines in one process: this one (the primary) and "build", reached through a peer that carries the machine
+// header as HttpPeer does, so the remote daemon sees each call as routed.
+async function twoMachines(run?: (argv: readonly string[], options?: { env?: Record<string, string> }) => Promise<{ exitCode: number; stdout: string; stderr: string }>) {
+  const fake = fakeProvider(); const target = await core(fake.provider)
+  const remote = new Core([fake.provider], target.dirs, async () => ({ exitCode: 0, stdout: "", stderr: "" }), "/nowhere", "d".repeat(32))
+  const root = await mkdtemp(join(tmpdir(), "asidee-test-"))
+  const local = new Core([fakeProvider().provider], { state: join(root, "state"), config: join(root, "config") }, run ?? (async () => ({ exitCode: 0, stdout: "", stderr: "" })), "/nowhere")
+  await local.configSet({ requireProbes: false, experimental: true }); await remote.configSet({ requireProbes: false })
+  const hello: Hello = { machineId: "a".repeat(32), bootId: "b".repeat(32), buildDigest: "c".repeat(64), sourceDigest: "e".repeat(64), version: "0.4.0", protocols: [1], features: [], methods: Object.keys(CATALOG) }
+  const remoteHandle = createHandler({ ...methods(remote, () => {}), hello: { run: async () => ({ ...hello, machineId: remote.machineId }) } }, "remote-token", remote.dirs.config, undefined, undefined, remote)
+  const machines = new Machines(local.dirs, hello, async () => ({ hello, sandboxes: [], checkedAt: new Date().toISOString() }), { connectPeer: () => ({ close: async () => {}, call: async (method, body = {}, options = {}) =>
+    parseReply(await (await remoteHandle(new Request(`http://asidee/api/${method}`, { method: "POST", body: JSON.stringify(body), headers: options.machineId ? { "x-asidee-machine": options.machineId } : {} }), true, 0)).json()) }) })
+  await writeFile(join(local.dirs.config, "hosts.json"), JSON.stringify({ version: 1, hosts: [{ name: "build", ssh: "fixture", binary: "/fixture/asd", stateDir: "/fixture/state", machineId: remote.machineId, addedAt: "2026-11-21", diskPolicy: "watched", service: "prepared" }] }))
+  const localHandle = createHandler(methods(local, () => {}, () => false, machines), "local-token", local.dirs.config, machines, undefined, local)
+  const call = async (method: string, body: object) => (await localHandle(new Request(`http://asidee/api/${method}`, { method: "POST", body: JSON.stringify(body) }), true, 0)).json() as Promise<{ ok: boolean; data?: any; error?: { code: string; message: string } }>
+  return { fake, remote, local, machines, call, remoteHandle }
+}
+
+test("a sandbox made on its own machine is private, one made before visibility existed is public, and share and unshare switch it", async () => {
+  const { fake, remote, machines } = await twoMachines()
+  expect((await remote.create({ name: "mine" })).sandbox.visibility).toBe("private")
+  // Made by an earlier Asidee: its record has no visibility, and it stays public.
+  const old = await readManifest(remote.dirs, "mine"); delete old.visibility
+  await writeFile(join(remote.dirs.state, "sandboxes", "mine.json"), JSON.stringify(old))
+  expect((await remote.get("mine")).visibility).toBe("public")
+  expect((await remote.list()).map((sandbox) => [sandbox.name, sandbox.visibility])).toEqual([["mine", "public"]])
+  expect((await remote.setVisibility("mine", "private")).visibility).toBe("private")
+  expect((await readManifest(remote.dirs, "mine")).visibility).toBe("private")
+  expect((await remote.setVisibility("mine", "public")).visibility).toBe("public")
+  await expect(remote.setVisibility("mine", "hidden")).rejects.toThrow("visibility is private or public.")
+  expect(fake.state.created.at(-1)?.visibility).toBe("private")
+  await machines.close()
+})
+
+test("routed calls see only public sandboxes and get, start, stop, exec, remove and sessions on a private one are refused as private", async () => {
+  const { remote, machines, call, remoteHandle } = await twoMachines()
+  await remote.create({ name: "mine" }); await remote.create({ name: "open" }); await remote.setVisibility("open", "public")
+  expect((await machines.route("list", { host: "build" }) as Array<{ name: string }>).map((sandbox) => sandbox.name)).toEqual(["open"])
+  const routed = (method: string) => remoteHandle(new Request(`http://asidee/api/${method}`, { method: "POST", body: "{}", headers: { "x-asidee-machine": remote.machineId } }), true, 0).then((response) => response.json())
+  expect(await routed("summary")).toMatchObject({ ok: true, data: { sandboxes: [{ name: "open" }], workspaces: [] } })
+  expect((await machines.route("usage", { host: "build" }) as Array<{ name: string }>).map((entry) => entry.name)).toEqual(["open"])
+  for (const [method, body] of [["get", {}], ["start", {}], ["stop", {}], ["verify", {}], ["exec", { argv: ["true"] }], ["remove", { confirm: "mine" }], ["snapshot", { as: "copy" }], ["visibilitySet", { visibility: "private" }]] as const)
+    expect(await call(method, { host: "build", name: "mine", ...body })).toMatchObject({ ok: false, error: { code: "not-found", message: privateThere("mine") } })
+  expect(await call("action", { host: "build", extension: "x", action: "y", sandbox: "mine" })).toMatchObject({ ok: false, error: { message: privateThere("mine") } })
+  // A stream from another machine names this machine's identity; the CLI's own sessions do not.
+  await expect(remote.openSession({ kind: "exec", name: "mine", argv: ["true"], tty: false, machineId: remote.machineId })).rejects.toThrow(privateThere("mine"))
+  await expect(remote.openSession({ kind: "exec", name: "open", argv: ["true"], tty: false, machineId: remote.machineId })).rejects.toThrow("no sessions in the fake")
+  await expect(remote.openSession({ kind: "exec", name: "mine", argv: ["true"], tty: false })).rejects.toThrow("no sessions in the fake")
+  // Only what machine routing sends is taken from another machine; a workspace, for one, is not.
+  expect(await (await call("get", { host: "build", name: "open" }))).toMatchObject({ ok: true, data: { name: "open", visibility: "public" } })
+  expect(await (await (await import("../../core/daemon")).createHandler({ workspaceList: { run: async () => [] } }, "t", remote.dirs.config, undefined, undefined, remote)(new Request("http://asidee/api/workspaceList", { method: "POST", body: "{}", headers: { "x-asidee-machine": remote.machineId } }), true, 0)).json())
+    .toMatchObject({ ok: false, error: { message: "workspaceList is not available to other machines." } })
+  // Still the machine's own: everything works on it locally.
+  expect((await remote.get("mine")).name).toBe("mine")
+  await machines.close()
+})
+
+test("routed create is refused while the switch is off, makes a public sandbox once it is on, and another machine cannot turn it on or share", async () => {
+  const { remote, machines, call } = await twoMachines()
+  expect(await call("create", { host: "build", name: "theirs" })).toMatchObject({ ok: false, error: { code: "usage", message: REMOTE_CREATE_OFF } })
+  expect(await remote.list()).toEqual([])
+  expect(await call("configSet", { host: "build", remoteCreate: true })).toMatchObject({ ok: false, error: { message: "Only this machine can let other machines create sandboxes here: run asd config set remote-create on on it." } })
+  expect((await remote.configGet()).remoteCreate).toBe(false)
+  // Turning it off, and other settings, are still another machine's to change.
+  expect(await call("configSet", { host: "build", remoteCreate: false, requireProbes: false })).toMatchObject({ ok: true })
+  await remote.configSet({ remoteCreate: true })
+  expect(await call("create", { host: "build", name: "theirs" })).toMatchObject({ ok: true, data: { sandbox: { name: "theirs", visibility: "public" } } })
+  expect((await readManifest(remote.dirs, "theirs")).visibility).toBe("public")
+  // A private one's name is not taken over or revealed as anything but private.
+  await remote.create({ name: "mine" })
+  expect(await call("create", { host: "build", name: "mine" })).toMatchObject({ ok: false, error: { message: privateThere("mine") } })
+  // Another machine may make a public sandbox private, and then no longer sees it; it may never make one public.
+  expect(await call("visibilitySet", { host: "build", name: "theirs", visibility: "public" })).toMatchObject({ ok: false, error: { message: "Only theirs's own machine can make it public: run `asd share theirs` there." } })
+  expect(await call("visibilitySet", { host: "build", name: "theirs", visibility: "private" })).toMatchObject({ ok: true, data: { visibility: "private" } })
+  expect(await call("list", { host: "build" })).toMatchObject({ ok: true, data: [] })
+  expect(await call("visibilitySet", { host: "build", name: "theirs", visibility: "public" })).toMatchObject({ ok: false, error: { message: privateThere("theirs") } })
+  await machines.close()
+})
+
+test("this machine's extension acts on another machine's public sandbox with ASIDEE_HOST set, and a private one is refused first", async () => {
+  const runs: Array<{ argv: string[]; env: Record<string, string> }> = []
+  const { local, remote, machines, call } = await twoMachines(async (argv, options) => { runs.push({ argv: [...argv], env: options?.env ?? {} }); return { exitCode: 0, stdout: "ran", stderr: "" } })
+  await mkdir(join(local.dirs.config, "extensions", "probe"), { recursive: true })
+  await writeFile(join(local.dirs.config, "extensions", "probe", "extension.json"), JSON.stringify({ name: "Probe", actions: [{ id: "touch", label: "Touch", scope: "sandbox", run: ["asd", "exec"] }, { id: "here", label: "Here", scope: "global", run: ["./here"] }] }))
+  await remote.create({ name: "mine" }); await remote.create({ name: "open" }); await remote.setVisibility("open", "public")
+  expect(await call("action", { extension: "probe", action: "touch", sandbox: "open", machine: "build", values: {} })).toMatchObject({ ok: true, data: { stdout: "ran" } })
+  expect(runs.at(-1)).toMatchObject({ argv: ["/nowhere/asd", "exec"], env: { ASIDEE_SANDBOX: "open", ASIDEE_HOST: "build" } })
+  expect(await call("action", { extension: "probe", action: "touch", sandbox: "mine", machine: "build", values: {} })).toMatchObject({ ok: false, error: { message: privateThere("mine") } })
+  expect(await call("action", { extension: "probe", action: "here", machine: "build", values: {} })).toMatchObject({ ok: false, error: { message: "Probe's Here acts on this machine, not on a sandbox, so it takes no other machine." } })
+  expect(await call("action", { extension: "probe", action: "touch", sandbox: "open", machine: "nowhere", values: {} })).toMatchObject({ ok: false, error: { code: "not-found" } })
+  expect(runs.length).toBe(1)
+  // The same action on a sandbox of this machine runs without ASIDEE_HOST.
+  await local.create({ name: "here" })
+  expect(await call("action", { extension: "probe", action: "touch", sandbox: "here", values: {} })).toMatchObject({ ok: true })
+  expect(runs.at(-1)!.env.ASIDEE_HOST).toBeUndefined()
   await machines.close()
 })
 
