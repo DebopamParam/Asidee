@@ -436,7 +436,7 @@
       <div class="fields">
         <div><label for="default-engine">Engine<span class="help" tabindex="0" data-tip="The app on this Mac that sandboxes run on.">?</span></label><select id="default-engine" name="engine"></select></div>
         <div><label for="d-image">Image</label><input id="d-image" name="image"></div>
-        <div><label for="d-template">Or a template</label><input id="d-template" name="template" placeholder="none"></div>
+        <div><label for="d-template">Or a template</label><select id="d-template" name="template"><option value="">None</option></select></div>
         <div><label for="d-cpus">CPUs</label><input id="d-cpus" name="cpus" type="number" step="0.25"></div>
         <div><label for="d-memory">Memory (GB)</label><input id="d-memory" name="memoryGb" type="number" step="0.25"></div>
         <div><label for="d-pids"><span class="hv" tabindex="0" data-tip="pids: tasks">Processes</span></label><input id="d-pids" name="pids" type="number" step="1"></div>
@@ -705,6 +705,7 @@ function showSettings() {
   }
   if (settings) controls.terminal.querySelector("option[value=custom]").disabled = !settings.terminalCommand
   document.getElementById("machines-tab").hidden = !settings?.experimental
+  fillTemplates()
   if (settings && !defaultsDirty) {
     const builtIn = about?.builtInDefaults ?? {}
     for (const [key, id] of Object.entries(defaultFields)) {
@@ -716,6 +717,19 @@ function showSettings() {
   }
   const create = { cpus: "f-cpus", memoryGb: "f-memory", pids: "f-pids", diskGb: "f-disk", image: "f-image" }
   for (const [key, id] of Object.entries(create)) document.getElementById(id).placeholder = String(defaultOf(key) ?? "")
+}
+// The default template is picked from the templates. One that is gone stays listed as itself, so saving the other
+// defaults does not drop it unasked.
+function fillTemplates() {
+  const select = document.getElementById("d-template"), current = defaultsDirty ? select.value : settings?.defaults?.template ?? select.value
+  const names = templates.map((template) => template.name)
+  if (current && !names.includes(current)) names.push(current)
+  const key = JSON.stringify(names)
+  if (select.dataset.names !== key) {
+    select.dataset.names = key
+    select.replaceChildren(el("option", { value: "" }, "None"), ...names.map((name) => el("option", { value: name }, templateProblem || templates.some((template) => template.name === name) ? name : `${name} (not found)`)))
+  }
+  select.value = current ?? ""
 }
 const defaultOf = (key) => settings?.defaults?.[key] ?? about?.builtInDefaults?.[key]
 async function readSettings() {
@@ -855,7 +869,9 @@ function miniForm(key, what, label, fields, send, ask) {
     event.preventDefault()
     const values = Object.fromEntries(fields.map(([name]) => [name, form.elements[name].value.trim()]))
     act(key, what, () => send(values), ask ? { label: typeof ask === "function" ? ask(values) : ask, mac: true } : { label: label, value: key.replace(/^\w+:/, "") })
-  } }, ...fields.map(([name, text, type = "text"]) => el("label", { class: type === "number" ? "short" : "grow" }, text, el("input", { name, type, ...(type === "number" ? { step: "any" } : {}) }))))
+  } }, ...fields.map(([name, text, type = "text", options = []]) => el("label", { class: type === "number" ? "short" : "grow" }, text,
+    type === "select" ? el("select", { name }, ...options.map(([value, shown]) => el("option", { value }, shown)))
+    : el("input", { name, type, ...(type === "number" ? { step: "any" } : {}) }))))
   form.append(el("span", { class: "ask" }, el("button", ask ? macButton(on ? { disabled: "" } : {}) : on ? { disabled: "" } : {}, on ? ask ? `${WAITING}…` : "Working…" : label), ask && on ? waitingNote() : null))
   if (ask && !on) form.append(askLegend())
   const shown = result(key, what)
@@ -1332,13 +1348,35 @@ function workspaceCreateCommand() {
   else parts.push("--no-logins")
   return parts.join(" ")
 }
+// The service takes a login for both agents or for neither, so one alone is refused here before it is sent.
+const halfLogins = () => Boolean(wsDraft.claude.trim()) !== Boolean(wsDraft.codex.trim())
 function newWorkspace() {
+  if (installed("logins") && !profiles) void readProfiles().then(drawModal)
   openModal("New workspace", () => {
     const key = "workspace:new", on = busy.has(`${key}:create`)
     const field = (name, label, attrs = {}) => el("div", {}, el("label", { for: `ws-${name}` }, label), el("input", { id: `ws-${name}`, name, value: wsDraft[name], autocomplete: "off", ...attrs }))
+    // A login for each agent: this Mac's profiles as a row of choices with None, or typed when they cannot be listed.
+    const loginPicker = (agent) => {
+      const list = profiles?.[agent], label = AGENT[agent]
+      if (Array.isArray(list)) {
+        if (!["", ...list].includes(wsDraft[agent])) wsDraft[agent] = ""
+        return el("div", {}, el("label", {}, `${label} login`), el("div", { class: "pills", role: "radiogroup", "aria-label": `${label} login`, "data-agent": agent },
+          ...["", ...list].map((profile) => el("label", { class: "pill" }, el("input", { type: "radio", name: agent, value: profile, ...(wsDraft[agent] === profile ? { checked: "" } : {}) }), profile || "None"))),
+          list.length ? null : el("p", { class: "muted small", style: "margin-top:6px" }, `No ${label} login on this Mac.`))
+      }
+      const note = list === null ? `Could not list this Mac's ${label} logins. Type a profile name, or leave it blank for none.`
+        : !installed("logins") ? `This Mac's logins are listed by the Agent logins extension, which is not installed. Type a profile name (default is the main login), or leave it blank for none.`
+        : "Reading this Mac's logins…"
+      return el("div", {}, field(agent, `${label} profile`, { placeholder: "none" }), el("p", { class: "muted small", style: "margin-top:6px" }, note))
+    }
+    const pairError = el("p", { class: "error", id: "ws-logins-error" }, "Pick a Claude and a Codex login, or None for both.")
+    const createButton = el("button", macButton({ class: "acc" }), on ? `${WAITING}…` : "Create workspace")
     const commandBox = el("div", {}, command(workspaceCreateCommand()))
-    const form = el("form", { class: "stack", id: "workspace-form", oninput: (event) => { wsDraft[event.target.name] = event.target.value; commandBox.replaceChildren(command(workspaceCreateCommand())) }, onsubmit: (event) => {
+    const update = () => { pairError.hidden = !halfLogins(); createButton.disabled = on || halfLogins(); commandBox.replaceChildren(command(workspaceCreateCommand())) }
+    const keep = (event) => { if (event.target.name in wsDraft) wsDraft[event.target.name] = event.target.value; update() }
+    const form = el("form", { class: "stack", id: "workspace-form", oninput: keep, onchange: keep, onsubmit: (event) => {
       event.preventDefault()
+      if (halfLogins()) return
       const values = Object.fromEntries(Object.entries(wsDraft).map(([name, value]) => [name, value.trim()]))
       const logins = values.claude || values.codex ? { kind: "profiles", claude: values.claude, codex: values.codex } : { kind: "none" }
       act(key, "create", () => api("workspaceCreate", { name: values.name, ...(values.copy ? { copy: values.copy } : {}), ...(values.diskGb ? { diskGb: Number(values.diskGb) } : {}), logins })
@@ -1349,13 +1387,13 @@ function newWorkspace() {
       field("name", "Name", { required: "", placeholder: "render" }),
       field("copy", "Copy this folder in", { placeholder: "blank: start empty" }),
       el("div", { class: "short" }, field("diskGb", "Disk limit (GB)", { type: "number", step: "any", placeholder: "default" })),
-      el("div", {}, el("label", {}, "Logins"), el("p", { class: "muted small" }, "A login profile from this Mac for both agents, or both blank for none."),
-        el("div", { class: "fields", style: "margin-top:6px" }, field("claude", "Claude profile", { placeholder: "none" }), field("codex", "Codex profile", { placeholder: "none" }))),
+      el("div", { class: "stack", id: "ws-logins" }, el("p", { class: "muted small" }, "Copies a login from this Mac in for both agents, or for neither."), loginPicker("claude"), loginPicker("codex"), pairError),
       el("div", {}, el("label", {}, "The same in a terminal"), commandBox,
         el("p", { class: "muted small", style: "margin-top:8px" }, "Extra readable folders (--read), PATH entries (--path) and the shared temp folder (--host-temp) are terminal options.")),
-      el("div", { class: "row" }, el("button", macButton({ class: "acc", ...(on ? { disabled: "" } : {}) }), on ? `${WAITING}…` : "Create workspace"), el("button", { type: "button", class: "ghost", onclick: closeModal }, "Cancel")),
+      el("div", { class: "row" }, createButton, el("button", { type: "button", class: "ghost", onclick: closeModal }, "Cancel")),
       on ? waitingNote() : askLegend(),
       result(key))
+    update()
     return [form]
   })
 }
@@ -1375,7 +1413,7 @@ function toolModal(name, which) {
     if (which === "snapshot") return [el("p", { class: "muted" }, "Saves this sandbox's files, without the usual login files, as a template new sandboxes can start from. A running sandbox pauses for the copy."),
       miniForm(name, "snapshot", "Save", [["as", "Template name"]], async (values) => { const done = await api("snapshot", { name, as: values.as }); return `Saved template ${done.template.name}.\n${done.contents}` })]
     if (which === "ports") {
-      const mine = forwards.filter((forward) => forward.name === name), myLinks = links.filter((link) => link.from === name || link.to === name)
+      const mine = forwards.filter((forward) => forward.name === name), myLinks = links.filter((link) => link.from === name || link.to === name), others = sandboxes.filter((other) => other.name !== name)
       return [el("h4", {}, "Open on this Mac"),
         el("p", { class: "muted" }, "A port inside the sandbox, opened at 127.0.0.1 on this Mac. Any program on this Mac can connect. It closes when the sandbox or the Asidee service stops."),
         ...mine.map((forward) => el("div", { class: "card", style: "flex-direction:row;align-items:center" }, el("span", { class: "grow" }, `127.0.0.1:${forward.localPort} → port ${forward.port} inside`),
@@ -1388,10 +1426,11 @@ function toolModal(name, which) {
         el("p", { class: "muted" }, "Programs in one sandbox reach one port of another, and nothing else of it. A connection comes back after restarts."),
         ...myLinks.map((link) => el("div", { class: "card" }, el("div", { class: "row" }, el("span", { class: "grow" }, `${link.from} → ${link.to}:${link.port} · ${link.state}${link.reason ? ` (${link.reason})` : ""} · reach it at ${link.address}`),
           button("Remove", `link-${link.from}-${link.to}-${link.port}`, () => api("linkRemove", { from: link.from, to: link.to, port: link.port }), { class: "sm dang" })), el("div", { class: "muted" }, link.trust))),
-        miniForm(name, "link", "Connect", [["to", "To sandbox"], ["port", "Port", "number"]], async (values) => {
+        // The other sandboxes on this machine; a stopped one can be connected, and the connection opens when it runs.
+        others.length ? miniForm(name, "link", "Connect", [["to", "To sandbox", "select", others.map((other) => [other.name, other.status === "running" ? other.name : `${other.name} (${other.status})`])], ["port", "Port", "number"]], async (values) => {
           const made = await api("linkAdd", { from: name, to: values.to, port: values.port })
           return `Connected: programs in ${made.from} reach ${made.to}:${made.port} at ${made.address}. ${made.trust}`
-        }),
+        }) : el("p", { class: "muted" }, "There is no other sandbox to connect to."),
         resultFrom(name, "forward-"), resultFrom(name, "link-")]
     }
     if (which === "ssh") return [el("p", { class: "muted" }, "An SSH server inside the sandbox, reached through Asidee with no open port. Set up writes only Asidee's own SSH files; adding the Include line also changes how ssh reads your ~/.ssh/config."),
@@ -1454,6 +1493,7 @@ function render() {
       result("machine:attach"))
   })
 
+  fillTemplates()
   region("templates", [templates, templateProblem, [...busy], output], (list) => {
     if (templateProblem) { list.append(el("div", { class: "banner bad" }, `Templates unknown: ${templateProblem}`)); return }
     if (!templates.length) { list.append(el("div", { class: "lp pad muted" }, "No templates yet.")); return }

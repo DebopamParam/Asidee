@@ -1081,7 +1081,11 @@ without it says it is not signed in and to open `asd ui`'s link. A sidebar holds
 **New ▾** opens the create form on the right, which shows the same create as a CLI command, opens the New workspace
 form on the right, or goes to the template form. Each copyable command quotes a value for a POSIX shell when it needs it
 (`'…'`, with a leading `~/` left outside), and leaves it bare otherwise. The list shows a Type column only when a GPU
-container is in it. A workspace is a card like a sandbox page's head: Check now, Terminal and Stop, with its disk limit,
+container is in it. A value the page can list is picked, never typed: the New workspace form's Claude and Codex
+logins come from this Mac's profiles (the logins extension's `profiles` action) with None, and say "Pick a Claude and a
+Codex login, or None for both" with Create off while only one is set; the sandbox a connection goes to and the default
+template are picked too. Where the list is unknown (the listing failed, or the logins extension is not installed) the
+field is typed, with a note saying why. A workspace is a card like a sandbox page's head: Check now, Terminal and Stop, with its disk limit,
 command and terminal commands under ⋯, each opening on the right. The page uses plain words; the exact term (a check's
 title, `forward`, `pids`, …) shows beside a word on hover or keyboard focus, with a faint dotted line under short terms
 and none under states, rows or sentences. "Walled off from your Mac" is said only of a sandbox on an engine with

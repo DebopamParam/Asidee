@@ -408,7 +408,7 @@ test("Terminal asks the daemon to open a window for that sandbox or workspace an
 })
 
 test("a sandbox's tools resize, run a command, open a port, connect, and save a template", async () => {
-  const ui = await page({ ...base, list: () => [sandbox()], forwardList: () => [{ id: "f0", name: "demo", localPort: 3000, port: 3000, connections: 3 }], linkList: () => [],
+  const ui = await page({ ...base, list: () => [sandbox(), sandbox({ name: "other", status: "stopped" })], forwardList: () => [{ id: "f0", name: "demo", localPort: 3000, port: 3000, connections: 3 }], linkList: () => [],
     resize: () => ({ changes: [{ limit: "cpus", from: 2, to: 3, applies: "now" }], checks: [] }), exec: () => ({ exitCode: 0, stdout: "hi\n", stderr: "" }),
     forwardAdd: (body) => ({ id: "f1", name: "demo", localPort: 8080, port: Number(body.port), connections: 0 }), linkAdd: (body) => ({ ...body, address: "other:5432", trust: "trusted" }),
     snapshot: (body) => ({ template: { name: body.as }, contents: "files" }) })
@@ -421,7 +421,10 @@ test("a sandbox's tools resize, run a command, open a port, connect, and save a 
   await use("Run a command", "Run", { command: "echo hi" }); expect(ui.text("#modal pre")).toBe("hi")
   await use("Ports", "Open port", { port: "8080" })
   expect(ui.text("#modal")).not.toContain("connection ·")
-  await use("Ports", "Connect", { to: "other", port: "5432" })
+  // The sandbox to connect to is picked from the others, never typed.
+  await ui.pick("Ports")
+  expect([...ui.doc.querySelectorAll("#modal select[name=to] option")].map((node: any) => [node.value, node.textContent])).toEqual([["other", "other (stopped)"]])
+  await ui.submit(ui.button("Connect").closest("form"), { port: "5432" })
   await use("Save as template", "Save", { as: "base" }); expect(ui.text("#modal pre")).toContain("Saved template base.")
   const sent = ui.calls.filter((call) => ["resize", "exec", "forwardAdd", "linkAdd", "snapshot"].includes(call.method)).map((call) => [call.method, call.body])
   expect(sent).toEqual([["resize", { name: "demo", cpus: "3" }], ["exec", { name: "demo", argv: ["sh", "-c", "echo hi"] }], ["forwardAdd", { name: "demo", port: "8080" }],
@@ -728,6 +731,56 @@ test("actions asked on the Mac say so beside the button, show the wait in the is
   await ui.submit(form)
   expect(ui.calls.find((call) => call.method === "workspaceCreate")!.body).toEqual({ name: "art", copy: "~/My Projects/art", logins: { kind: "profiles", claude: "work", codex: "home" } })
   expect(ui.text("#island")).toMatch(/^(Allow on your Mac · (60|59) s · Create the workspace art|✗Create the workspace artdid not finish)$/)
+})
+
+test("New workspace offers this Mac's logins for each agent, and asks for both or neither before Create", async () => {
+  const logins = { id: "logins", name: "Agent logins", actions: [{ id: "profiles", label: "Profiles", scope: "global", run: ["./x"], fields: [] }] }
+  const listing: { claude: () => object; codex: () => object } = { claude: () => ({ exitCode: 0, stdout: `${JSON.stringify({ agent: "claude", profiles: ["default", "work"] })}\n`, stderr: "" }), codex: () => ({ exitCode: 0, stdout: `${JSON.stringify({ agent: "codex", profiles: ["default"] })}\n`, stderr: "" }) }
+  const replies = (codex: () => object) => ({ ...base, extensions: () => ({ extensions: [logins], errors: [] }), list: () => [], summary: () => ({ workspaces: [] }), workspaceCreate: () => new Promise(() => {}),
+    action: (body: any) => body.action === "profiles" ? (body.values.agent === "codex" ? codex : listing.claude)() : { exitCode: 0, stdout: "[]", stderr: "" } })
+  const ui = await page(replies(listing.codex))
+  await ui.click("Workspaces"); await ui.click("New workspace")
+  const choices = (agent: string) => [...ui.doc.querySelectorAll(`#ws-logins [data-agent=${agent}] label`)].map((node: any) => node.textContent)
+  expect(choices("claude")).toEqual(["None", "default", "work"])
+  expect(choices("codex")).toEqual(["None", "default"])
+  expect(ui.doc.querySelectorAll("#modal input[name=claude]:not([type=radio]), #modal input[name=codex]:not([type=radio])").length).toBe(0)
+  const form = () => ui.doc.getElementById("workspace-form") as any
+  const choose = async (agent: string, profile: string) => { const radio = ui.doc.querySelector(`#ws-logins input[name=${agent}][value="${profile}"]`) as any; radio.checked = true; radio.dispatchEvent(new ui.window.Event("change", { bubbles: true })); await ui.settle() }
+  const name = form().elements.namedItem("name"); name.value = "art"; name.dispatchEvent(new ui.window.Event("input", { bubbles: true }))
+  expect(ui.text("#modal .cmd code")).toBe("asd workspace create art --no-logins")
+  expect((ui.doc.getElementById("ws-logins-error") as any).hidden).toBe(true)
+  // One agent alone is refused by the service, so it is said here and Create waits.
+  await choose("claude", "work")
+  expect((ui.doc.getElementById("ws-logins-error") as any).hidden).toBe(false)
+  expect(ui.text("#ws-logins-error")).toBe("Pick a Claude and a Codex login, or None for both.")
+  expect(ui.button("Create workspace").disabled).toBe(true)
+  expect(ui.text("#modal .cmd code")).toBe("asd workspace create art --claude-profile work --codex-profile PROFILE")
+  await ui.submit(form())
+  expect(ui.calls.some((call) => call.method === "workspaceCreate")).toBe(false)
+  await choose("codex", "default")
+  expect((ui.doc.getElementById("ws-logins-error") as any).hidden).toBe(true)
+  expect(ui.button("Create workspace").disabled).toBe(false)
+  expect(ui.text("#modal .cmd code")).toBe("asd workspace create art --claude-profile work --codex-profile default")
+  await ui.submit(form())
+  expect(ui.calls.find((call) => call.method === "workspaceCreate")!.body).toEqual({ name: "art", logins: { kind: "profiles", claude: "work", codex: "default" } })
+  // A listing that failed is typed, with a note; a Mac with no login says so.
+  const failed = await page(replies(() => ({ exitCode: 1, stdout: "", stderr: "boom" })))
+  await failed.click("Workspaces"); await failed.click("New workspace")
+  expect(failed.doc.querySelector("#modal input[name=codex]:not([type=radio])")).not.toBe(null)
+  expect(failed.text("#ws-logins")).toContain("Could not list this Mac's Codex logins. Type a profile name, or leave it blank for none.")
+  const none = await page(replies(() => ({ exitCode: 0, stdout: `${JSON.stringify({ agent: "codex", profiles: [] })}\n`, stderr: "" })))
+  await none.click("Workspaces"); await none.click("New workspace")
+  expect(none.text("#ws-logins")).toContain("No Codex login on this Mac.")
+  expect([...none.doc.querySelectorAll("#ws-logins [data-agent=codex] label")].map((node: any) => node.textContent)).toEqual(["None"])
+})
+
+test("the default template is picked from the templates, and one that is gone stays as itself", async () => {
+  const ui = await page({ ...base, list: () => [], configGet: () => ({ defaults: { template: "old" }, requireProbes: true }), templateList: () => [{ name: "agent", engine: "fake:1", sizeBytes: 1, source: "x", sourceImage: "y", createdAt: "", dependants: [], loginsRemoved: [] }] })
+  await ui.click("Settings")
+  const select = ui.doc.getElementById("d-template") as any
+  expect(select.tagName).toBe("SELECT")
+  expect([...select.querySelectorAll("option")].map((node: any) => [node.value, node.textContent])).toEqual([["", "None"], ["agent", "agent"], ["old", "old (not found)"]])
+  expect(select.value).toBe("old")
 })
 
 test("on a machine without the dialog, the buttons say they are refused here and the command is offered", async () => {
