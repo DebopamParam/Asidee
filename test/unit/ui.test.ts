@@ -1107,3 +1107,30 @@ test("the Folders page picks a folder from quick picks or the browser, previews 
   await ui.submit(card.querySelector("form"))
   expect(ui.calls.find((call) => call.method === "action")!.body).toEqual({ extension: "folders", action: "copy", sandbox: "demo", values: { source: "~/projects/hq", dest: "~/hq", logins: "false", replace: "false" } })
 })
+
+test("on a Mac, the folder can be picked in Finder's own window; cancelling keeps it, and only a Mac shows the button", async () => {
+  const declared = JSON.parse(await readFile(join(import.meta.dir, "..", "..", "extensions", "folders", "extension.json"), "utf8"))
+  const folders = { ...declared, id: "folders", bundled: true, dir: "/x", actions: declared.actions.map((action: object) => ({ ...action, run: ["asd", "extension-run", "folders"] })) }
+  const replies: Array<() => unknown> = [() => ({}), () => ({ path: "~/projects/hq" }), () => { throw Object.assign(new Error("~/x is outside your home folder."), { code: "usage" }) }]
+  const preview = (body: any) => ({ source: body.source, mirror: body.source, files: 1, links: 0, folders: 1, bytes: 10, partial: false, largest: [], excluded: [], excludedCount: 0, skipped: [], skippedCount: 0, warnings: [] })
+  const open = async (finder: boolean) => {
+    const ui = await page({ ...base, list: () => [sandbox()], extensions: () => ({ extensions: [folders], errors: [] }), exec: () => ({ exitCode: 0, stdout: "agent\t/home/agent", stderr: "" }),
+      folderBrowse: () => ({ path: "~", folders: [], picks: [], ...(finder ? { finder: true } : {}) }), folderPreview: preview, folderChoose: () => replies.shift()!() }, "http://127.0.0.1:7717/extensions/folders#token=secret")
+    await ui.settle()
+    return ui
+  }
+  const ui = await open(true), doc = ui.doc as any
+  const button = (label: string) => [...doc.querySelectorAll(".act-card[data-action=copy] button")].find((node: any) => node.textContent === label) as any
+  const input = doc.querySelector('.act-card[data-action=copy] input[name="source"]')
+  button("Choose in Finder…").click(); await ui.settle()
+  expect(input.value).toBe("")
+  button("Choose in Finder…").click(); await Bun.sleep(400); await ui.settle()
+  expect(input.value).toBe("~/projects/hq")
+  expect(ui.calls.filter((call) => call.method === "folderPreview").at(-1)!.body).toEqual({ source: "~/projects/hq", logins: false })
+  button("Choose in Finder…").click(); await ui.settle()
+  expect(input.value).toBe("~/projects/hq")
+  expect(ui.text(".act-card[data-action=copy] .folder-picker")).toContain("~/x is outside your home folder.")
+  expect(ui.calls.filter((call) => call.method === "folderChoose").length).toBe(3)
+  const elsewhere = await open(false)
+  expect([...(elsewhere.doc as any).querySelectorAll(".act-card[data-action=copy] button")].map((node: any) => node.textContent)).not.toContain("Choose in Finder…")
+})

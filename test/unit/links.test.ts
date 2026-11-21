@@ -432,7 +432,7 @@ test("links are refused for another machine in one sentence, before any machine 
   for (const method of ["linkAdd", "linkList", "linkRemove"] as const)
     await expect(machines.route(method, { host: "build", from: "app", to: "db", port: 5432 })).rejects.toMatchObject({ code: "usage", message: LINKS_LOCAL })
   // Picking a folder to copy in reads this Mac's home, so it is refused for another machine the same way.
-  for (const method of ["folderBrowse", "folderPreview"] as const)
+  for (const method of ["folderBrowse", "folderPreview", "folderChoose"] as const)
     await expect(machines.route(method, { host: "build", source: "~/.agents" })).rejects.toMatchObject({ code: "usage", message: FOLDERS_LOCAL })
   expect(contacted).toBe(0)
   expect(LINKS_LOCAL.split(". ").length).toBe(1)

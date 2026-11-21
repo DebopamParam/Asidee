@@ -852,12 +852,13 @@ function extCommand(extension, action, values = {}, target, host) {
 // Picking a folder of this Mac to copy in, for the folders extension and a create's "Copy folders in": quick picks for
 // the agent folders that exist, a browser of the home's folders (names only), and a preview of what a copy takes and
 // leaves out. Each picker's state is kept by its id, so a rebuild of the page keeps it.
-let folderPicks
+// finder: whether the service can open Finder's own window to pick one (on a Mac).
+let folderPicks, finder = false
 const folderUi = {}
 function loadFolderPicks() {
   if (folderPicks !== undefined) return
   folderPicks = null
-  api("folderBrowse").then((data) => { folderPicks = data.picks; for (const state of Object.values(folderUi)) state.redraw?.() }, () => { folderPicks = [] })
+  api("folderBrowse").then((data) => { folderPicks = data.picks; finder = data.finder === true; for (const state of Object.values(folderUi)) state.redraw?.() }, () => { folderPicks = [] })
 }
 // The user a sandbox runs commands as and its home, asked of the sandbox itself (the image decides them), by key: a
 // copy's destination is shown as the path it becomes there. null when it could not be read.
@@ -898,7 +899,15 @@ function folderPicker(id, { name = id, logins = () => false, dest = () => "", gu
   }
   const drawPicks = () => picks.replaceChildren(...(folderPicks ?? []).map((pick) => el("label", { class: "pill", title: pick.path },
     el("input", { type: "radio", name: `${id}-pick`, value: pick.path, ...(pick.path === state.value ? { checked: "" } : {}), onchange: () => set(pick.path) }), pick.label)),
-    el("button", { type: "button", class: "sm", "aria-expanded": String(Boolean(state.browse)), onclick: () => state.browse ? (state.browse = null, drawBrowser()) : open(state.value || "~") }, state.browse ? "Close the browser" : "Browse…"))
+    finder ? el("button", { type: "button", class: "sm", ...(state.choosing ? { disabled: "" } : {}), onclick: choose }, state.choosing ? "Waiting for Finder…" : "Choose in Finder…") : null,
+    el("button", { type: "button", class: "sm", "aria-expanded": String(Boolean(state.browse)), onclick: () => state.browse ? (state.browse = null, drawBrowser()) : open(state.value || "~") }, state.browse ? "Close the browser" : "Browse…"),
+    state.chooseError ? el("p", { class: "error", style: "flex-basis: 100%; margin: 0" }, state.chooseError) : null)
+  // Finder's window opens on this Mac, over the browser; cancelling it leaves the folder as it was.
+  const choose = () => {
+    state.choosing = true; state.chooseError = undefined; drawPicks()
+    api("folderChoose").then((data) => { if (data.path) { state.browse = null; set(data.path) } }, (error) => { state.chooseError = error.message })
+      .finally(() => { state.choosing = false; state.redraw() })
+  }
   const open = (path) => {
     state.browse = { path, loading: true }; drawBrowser()
     api("folderBrowse", { path }).then((data) => { state.browse = { path: data.path, data } }, (error) => { state.browse = { path, error: error.message } }).then(() => state.redraw())

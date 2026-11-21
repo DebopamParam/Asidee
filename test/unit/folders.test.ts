@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { lstat, mkdir, readFile, readlink, readdir, realpath, symlink, truncate } from "node:fs/promises"
 import { join } from "node:path"
-import { browseFolders, homeFolder, previewFolder, walkFolder } from "../../core/folders"
+import { browseFolders, chooseFolder, homeFolder, previewFolder, walkFolder } from "../../core/folders"
 import { copyFolder, listCopies, removeCopy, type Spawner } from "../../extensions/folders/folders"
 import { fixture, put } from "./client-feature-fixtures"
 
@@ -86,10 +86,23 @@ test("only folders in the home can be picked or browsed, links resolved first", 
   // Browsing lists folder names only, ordinary ones first; a link out of the home is not listed and cannot be opened.
   const top = await browseFolders("~", root)
   expect(top).toEqual({ path: "~", folders: ["notes", "shared", ".agents", ".claude", ".codex", ".config"], picks: [
-    { path: "~/.agents", label: "Shared skills (.agents)" }, { path: "~/.claude", label: "Claude Code" }, { path: "~/.codex", label: "Codex" }] })
+    { path: "~/.agents", label: "Shared skills (.agents)" }, { path: "~/.claude", label: "Claude Code" }, { path: "~/.codex", label: "Codex" }], finder: process.platform === "darwin" })
   expect(await browseFolders("~/.claude", root)).toMatchObject({ path: "~/.claude", parent: "~", folders: ["cache", "projects", "skills"] })
   await expect(browseFolders("~/escape", root)).rejects.toThrow("outside your home folder")
   await expect(browseFolders("/", root)).rejects.toThrow("outside your home folder")
+})
+
+test("Finder's window gives a folder in the home as ~/…; cancelled, none; outside the home, refused; one window at a time", async () => {
+  const root = await home()
+  const finder = (script: string) => ["sh", "-c", script]
+  if (process.platform !== "darwin") return void await expect(chooseFolder(root, finder("exit 0"))).rejects.toThrow("Finder is only on a Mac")
+  expect(await chooseFolder(root, finder(`printf '%s/\\n' '${root}/.claude'`))).toEqual({ path: "~/.claude" })
+  expect(await chooseFolder(root, finder("echo 'execution error: User canceled. (-128)' >&2; exit 1"))).toEqual({})
+  await expect(chooseFolder(root, finder("exit 1"))).rejects.toThrow("Finder's window could not be opened")
+  await expect(chooseFolder(root, finder("echo /"))).rejects.toThrow("outside your home folder")
+  const first = chooseFolder(root, finder("sleep 0.3; echo ~"))
+  await expect(chooseFolder(root, finder("exit 0"))).rejects.toThrow("already open")
+  await first.catch(() => {})
 })
 
 test("a preview counts what goes, lists what is left out, and warns about a large copy without refusing it", async () => {

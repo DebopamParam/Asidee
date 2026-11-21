@@ -28,7 +28,7 @@ export const CATALOG = {
   hostList: ["dashboard", "primary"], fleet: ["dashboard", "primary"], hostAttach: ["approve", "primary"], hostPlan: ["socket", "primary"], hostApply: ["socket", "primary"], hostRemove: ["approve", "primary"],
   sessionTarget: ["socket", "read"],
   sshPrepare: ["socket", "write"],
-  folderBrowse: ["dashboard", "primary"], folderPreview: ["dashboard", "primary"],
+  folderBrowse: ["dashboard", "primary"], folderPreview: ["dashboard", "primary"], folderChoose: ["dashboard", "primary"],
   terminalCommandSet: ["approve", "primary"], about: ["dashboard", "primary"], usage: ["dashboard", "read"], openTerminal: ["dashboard", "primary"],
 } as const
 export type MethodName = keyof typeof CATALOG
@@ -308,7 +308,7 @@ export class Machines {
     const { host: selected, ...payload } = body
     if (selected === undefined || selected === "local") return undefined
     if (method === "linkAdd" || method === "linkList" || method === "linkRemove") throw new AsideeError("usage", LINKS_LOCAL)
-    if (method === "folderBrowse" || method === "folderPreview") throw new AsideeError("usage", FOLDERS_LOCAL)
+    if (method === "folderBrowse" || method === "folderPreview" || method === "folderChoose") throw new AsideeError("usage", FOLDERS_LOCAL)
     await this.experimental()
     const host = await this.resolve(selected)
     if (body.machineId !== undefined && body.machineId !== host.machineId) throw new AsideeError("identity-changed", `${host.name} is machine ${host.machineId}, not the ${String(body.machineId)} the request names. Nothing was sent.`)

@@ -6,7 +6,7 @@ import { createServer } from "node:net"
 import { join, normalize } from "node:path"
 import { CHECKLIST, GPU_CHECKLIST } from "./checks"
 import { Core, type SandboxView } from "./core"
-import { browseFolders, previewFolder } from "./folders"
+import { browseFolders, chooseFolder, previewFolder } from "./folders"
 import { APPROVAL_SECONDS, approvalText, dialogApprover, literal, word, type Answer, type Approval, type Approver } from "./approval"
 import { CATALOG, hostName, isMethod, machineIdentity, Machines, type Hello } from "./machines"
 import { Hosts } from "./hosts"
@@ -199,6 +199,7 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     // For picking a folder to copy in: folder names under the home, and what a copy would take. Names and sizes only.
     folderBrowse: { run: (body) => browseFolders(body.path === undefined ? "~" : String(body.path)) },
     folderPreview: { run: (body) => previewFolder(String(body.source ?? ""), body.logins === true) },
+    folderChoose: { run: () => chooseFolder() },
     forwardAdd: { run: (body) => core.forwardAdd(String(body.name), body.port, body.localPort) },
     forwardList: { run: async (body) => core.forwardList(body.name) },
     forwardRemove: { run: async (body) => machines?.forwardRemove(body.id) ?? core.forwardRemove(body.id) },

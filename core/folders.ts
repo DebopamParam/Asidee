@@ -129,7 +129,7 @@ export async function previewFolder(source: string, logins = false, home = homed
 
 // The folders inside one folder of the home, names only, for picking a folder. A link to a folder is listed when it
 // stays in the home. picks: the quick picks that exist.
-export async function browseFolders(given = "~", home = homedir()): Promise<{ path: string; parent?: string; folders: string[]; picks: typeof FOLDER_PICKS }> {
+export async function browseFolders(given = "~", home = homedir()): Promise<{ path: string; parent?: string; folders: string[]; picks: typeof FOLDER_PICKS; finder: boolean }> {
   const folder = await homeFolder(given, home, true), realHome = await realpath(home)
   const folders: string[] = []
   for (const entry of await readdir(folder.path, { withFileTypes: true }).catch(() => { throw new AsideeError("runtime", `${folder.shown} could not be read.`) })) {
@@ -144,5 +144,25 @@ export async function browseFolders(given = "~", home = homedir()): Promise<{ pa
   folders.sort((a, b) => Number(a.startsWith(".")) - Number(b.startsWith(".")) || a.localeCompare(b))
   const picks = []
   for (const pick of FOLDER_PICKS) if (await homeFolder(pick.path, home).then(() => true, () => false)) picks.push(pick)
-  return { path: folder.shown, ...(folder.path !== realHome ? { parent: tilde(dirname(folder.path), realHome) } : {}), folders, picks }
+  return { path: folder.shown, ...(folder.path !== realHome ? { parent: tilde(dirname(folder.path), realHome) } : {}), folders, picks, finder: FINDER }
+}
+
+// On a Mac, a folder can also be picked in Finder's own window, opened by this service. One window at a time; no path
+// when it is cancelled.
+const FINDER = process.platform === "darwin"
+const CHOOSE = ['tell current application to activate', 'POSIX path of (choose folder with prompt "Pick a folder to copy into the sandbox" default location (path to home folder))']
+let choosing = false
+export async function chooseFolder(home = homedir(), argv = ["osascript", ...CHOOSE.flatMap((line) => ["-e", line])]): Promise<{ path?: string }> {
+  if (!FINDER) throw new AsideeError("usage", "Finder is only on a Mac. Type the folder or use Browse.")
+  if (choosing) throw new AsideeError("conflict", "A Finder window to pick a folder is already open.")
+  choosing = true
+  try {
+    const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+    const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    if (code !== 0) {
+      if (/-128/.test(err)) return {}
+      throw new AsideeError("runtime", "Finder's window could not be opened. Type the folder or use Browse.")
+    }
+    return { path: (await homeFolder(out.trim().replace(/(.)\/$/, "$1"), home)).shown }
+  } finally { choosing = false }
 }
