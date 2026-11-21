@@ -33,7 +33,7 @@ async function page(replies: Record<string, (body: any) => unknown>, url = "http
   }
   const prompts: string[] = []
   const globals = { window, document: window.document, location: window.location, history: window.history, sessionStorage: window.sessionStorage, fetch,
-    setInterval: () => 0, prompt: (text: string) => { prompts.push(text); return "demo" }, FormData: window.FormData, URLSearchParams, Event: window.Event }
+    setInterval: () => 0, prompt: (text: string) => { prompts.push(text); return "demo" }, confirm: (text: string) => { prompts.push(text); return true }, FormData: window.FormData, URLSearchParams, Event: window.Event }
   new Function(...Object.keys(globals), script)(...Object.values(globals))
   const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((resolve) => setTimeout(resolve, 0)) }
   await settle()
@@ -540,6 +540,94 @@ test("machines are off until experimental is on; then remote sandboxes are route
   ;(ui.doc.querySelector("#machines .item button.sm") as any).click(); await ui.settle()
   expect(ui.calls.find((call) => call.method === "stop")!.body).toEqual({ name: "soak", host: "home-linux" })
   expect(ui.text("#machines")).toContain("ForgetButtons marked ⌘ ask on your Mac")
+})
+
+// Another machine's public sandboxes, as the fleet reports them: home-linux answers, lab does not (its last-known rows).
+const fleetOf = (sandboxes: object[], offline: object[] = []) => () => ({ machines: [{ machine: { host: { name: "local", machineId: "a" }, state: "online" }, stale: false },
+  { machine: { host: { name: "home-linux", ssh: "home-linux" }, state: "online", hello: { version: "0.4.0", service: "systemd" } }, cached: { sandboxes }, stale: false },
+  ...offline.length ? [{ machine: { host: { name: "lab", ssh: "lab" }, state: "offline", error: "ssh: connect timed out" }, cached: { sandboxes: offline }, stale: true }] : []] })
+const fleetReplies = { configGet: () => ({ defaults: {}, requireProbes: true, experimental: true }), usage: (body: any) => body.host ? [usageOf({ name: "soak" })] : [], forwardList: () => [] }
+
+test("public sandboxes of other machines join the list with their machine as a tag; an offline machine's are greyed, never running", async () => {
+  const ui = await page({ ...base, ...fleetReplies, list: () => [sandbox({ visibility: "private" })],
+    fleet: fleetOf([sandbox({ name: "soak", spec: { name: "soak", image: "x", cpus: 2, memoryGb: 4, pids: 4096, diskGb: 20 } })], [sandbox({ name: "old", status: "unknown" })]) })
+  expect(ui.doc.getElementById("sandboxes-tab")!.getAttribute("data-count")).toBe("3")
+  const row = ui.doc.querySelector('#sandboxes .lrow[data-name="home-linux/soak"]') as any
+  expect(row.tagName).toBe("BUTTON")
+  expect(row.querySelector(".mtag").textContent).toBe("home-linux")
+  expect(ui.text('#sandboxes .lrow[data-name="home-linux/soak"] .disk-col')).toContain("3.0 GB of 20.0 GB")
+  expect(ui.text("#sandboxes .lrow[data-name=demo]")).not.toContain("home-linux")
+  const away = ui.doc.querySelector('#sandboxes .lrow[data-name="lab/old"]') as any
+  expect(away.tagName).toBe("DIV")
+  expect(away.className).toContain("away")
+  expect(ui.text('#sandboxes .lrow[data-name="lab/old"]')).toContain("lab is offline")
+  expect(ui.text('#sandboxes .lrow[data-name="lab/old"]')).not.toContain("Running")
+  // With other machines off, only this machine's sandboxes are listed and the fleet is not read.
+  const off = await page({ ...base, list: () => [sandbox()], fleet: fleetOf([sandbox({ name: "soak" })]) })
+  expect(off.doc.querySelectorAll("#sandboxes button.lrow")).toHaveLength(1)
+  expect(off.calls.some((call) => call.method === "fleet")).toBe(false)
+})
+
+test("a remote sandbox has its own page at /sandboxes/MACHINE/NAME with full control, routed to its machine", async () => {
+  const soak = sandbox({ name: "soak", spec: { name: "soak", image: "x", cpus: 2, memoryGb: 4, pids: 4096, diskGb: 20 } })
+  const ui = await page({ ...base, ...fleetReplies, list: () => [], fleet: fleetOf([soak]), stop: () => ({}), verify: () => ({}), visibilitySet: () => ({}),
+    sshAccess: (body) => ({ alias: `${body.name}.${body.host}.asidee`, user: "root", home: "/root", batchReady: true, loopbackForwarding: true }),
+    action: () => ({ exitCode: 0, stdout: "done", stderr: "" }) })
+  await ui.open("home-linux/soak")
+  expect(ui.window.location.pathname).toBe("/sandboxes/home-linux/soak")
+  expect(ui.doc.title).toBe("soak on home-linux · Asidee")
+  expect(ui.text("#sandbox-page h1")).toBe("soak")
+  expect(ui.text("#sandbox-page .head .tag")).toBe("home-linux")
+  // Private and public are set on the sandbox's own machine; from here it can only be made private.
+  expect(ui.doc.getElementById("visibility")).toBe(null)
+  expect(ui.text("#sandbox-page")).toContain("SSH ready · soak.home-linux.asidee")
+  await ui.click("Stop")
+  expect(ui.calls.find((call) => call.method === "stop")!.body).toEqual({ name: "soak", host: "home-linux" })
+  await ui.click("Check now")
+  expect(ui.calls.find((call) => call.method === "verify")!.body).toEqual({ name: "soak", host: "home-linux" })
+  // This Mac's extension runs here and reaches the sandbox through its machine.
+  ;(ui.doc.querySelector('#sandbox-page [data-extension=tools] button') as any).click(); await ui.settle()
+  expect(ui.text("#modal .cmd code")).toBe("asd --host home-linux ext run tools install soak --set version=latest")
+  await ui.submit(ui.doc.querySelector("#modal form.action"))
+  expect(ui.calls.find((call) => call.method === "action")!.body).toEqual({ extension: "tools", action: "install", sandbox: "soak", machine: "home-linux", values: { version: "latest", force: "false" } })
+  await ui.pick("Commands for a terminal")
+  expect([...ui.doc.querySelectorAll("#modal .cmd code")].map((node: any) => node.textContent)[0]).toBe("asd --host home-linux shell soak")
+  await ui.pick("Make private…")
+  expect(ui.prompts.at(-1)).toContain("Make soak private on home-linux? This Mac then no longer sees it")
+  expect(ui.calls.find((call) => call.method === "visibilitySet")!.body).toEqual({ name: "soak", host: "home-linux", visibility: "private" })
+})
+
+test("a deep link to a remote sandbox opens once the machines are read, and one that is not shared says it is not there", async () => {
+  const fleet = fleetOf([sandbox({ name: "soak", spec: { name: "soak", image: "x", cpus: 2, memoryGb: 4, pids: 4096, diskGb: 20 } })], [sandbox({ name: "old", status: "unknown" })])
+  const ui = await page({ ...base, ...fleetReplies, list: () => [], fleet }, "http://127.0.0.1:7717/sandboxes/home-linux/soak#token=secret")
+  expect(ui.window.location.pathname).toBe("/sandboxes/home-linux/soak")
+  expect(ui.text("#sandbox-page h1")).toBe("soak")
+  const gone = await page({ ...base, ...fleetReplies, list: () => [], fleet }, "http://127.0.0.1:7717/sandboxes/home-linux/hidden#token=secret")
+  expect(gone.text("#sandbox-page")).toContain("hidden on home-linux is not here any more")
+  const offline = await page({ ...base, ...fleetReplies, list: () => [], fleet }, "http://127.0.0.1:7717/sandboxes/lab/old#token=secret")
+  expect(offline.text("#sandbox-page")).toContain("lab is offline, so old cannot be reached")
+  expect(offline.doc.querySelector("#sandbox-page .end")).toBe(null)
+})
+
+test("a sandbox of this machine is private or public by a toggle that says what private does not hide; Settings has the switch for other machines' creates", async () => {
+  let config: any = { defaults: {}, requireProbes: true, experimental: false, remoteCreate: false }
+  const ui = await page({ ...base, list: () => [sandbox({ visibility: "private" })], visibilitySet: (body) => sandbox({ visibility: body.visibility }),
+    configGet: () => config, configSet: (body) => { config = { ...config, ...body }; return config } })
+  await ui.open("demo")
+  const radio = (value: string) => ui.doc.querySelector(`#visibility input[value=${value}]`) as any
+  expect(radio("private").checked).toBe(true)
+  expect(ui.doc.querySelector("#visibility .help")!.getAttribute("data-tip")).toBe("Private keeps a sandbox from other machines. Anyone signed in to this machine's own account can still see it.")
+  expect(ui.text("#visibility")).toContain("Other machines do not see it.")
+  radio("public").checked = true; radio("public").dispatchEvent(new ui.window.Event("change")); await ui.settle()
+  expect(ui.calls.find((call) => call.method === "visibilitySet")!.body).toEqual({ name: "demo", visibility: "public" })
+  expect(ui.text("#sandbox-page")).toContain("demo is public: other machines that route here see it and can use it.")
+  await ui.click("Settings")
+  const toggle = ui.doc.getElementById("remote-create") as any
+  expect(toggle.checked).toBe(false)
+  expect(ui.text("#settings-section")).toContain("Let other machines create sandboxes here")
+  toggle.checked = true; toggle.dispatchEvent(new ui.window.Event("change")); await ui.settle()
+  expect(ui.calls.filter((call) => call.method === "configSet").map((call) => call.body)).toEqual([{ remoteCreate: true }])
+  expect(toggle.checked).toBe(true)
 })
 
 test("the page calls only methods open to the dashboard", async () => {

@@ -74,14 +74,14 @@ test("each place in the dashboard serves its page; other paths, the API and the 
   const { handle, config } = await handler()
   const get = (path: string) => handle(new Request(`http://127.0.0.1:7717${path}`, { headers: { host: "127.0.0.1:7717" } }), false, 7717)
   const root = await (await get("/")).text()
-  for (const path of ["/sandboxes", "/sandboxes/my-app", "/sandboxes/a%20b", "/workspaces", "/templates", "/extensions", "/extensions/logins", "/machines", "/settings", "/setup", "/setup/engine", "/setup/open"]) {
+  for (const path of ["/sandboxes", "/sandboxes/my-app", "/sandboxes/a%20b", "/sandboxes/home-linux/soak", "/workspaces", "/templates", "/extensions", "/extensions/logins", "/machines", "/settings", "/setup", "/setup/engine", "/setup/open"]) {
     const response = await get(path)
     expect(response.status).toBe(200)
     expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8")
     expect(response.headers.get("x-frame-options")).toBe("DENY")
     expect(await response.text()).toBe(root)
   }
-  for (const path of ["/nope", "/sandboxes/a/b", "/settings/x", "/setup/nope", "/sandboxes/", "/index.html", "/api"]) expect((await get(path)).status).toBe(404)
+  for (const path of ["/nope", "/sandboxes/a/b/c", "/extensions/a/b", "/settings/x", "/setup/nope", "/sandboxes/", "/index.html", "/api"]) expect((await get(path)).status).toBe(404)
   // An encoded name is one segment: it gets the page, which says the sandbox is not here, never a file.
   expect(await (await get("/sandboxes/..%2F..%2Fsecret.txt")).text()).toBe(root)
   // The API is not a page: a GET to it is still refused, and a call still answers as before.

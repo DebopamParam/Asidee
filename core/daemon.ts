@@ -29,7 +29,7 @@ import { HOST_TEMP_DISCLOSURE } from "./workspace-profile"
 const BUILT_IN_UI = builtInUi as unknown as string
 // The dashboard's places, as ui/index.html writes them in the address bar. One segment after sandboxes or extensions is
 // a name, percent-encoded, so it never holds a slash.
-const DASHBOARD_ROUTE = /^\/(?:(?:sandboxes|extensions)(?:\/[^/]+)?|workspaces|templates|machines|settings|setup(?:\/(?:engine|setup|test|tools|first|open))?)$/
+const DASHBOARD_ROUTE = /^\/(?:sandboxes(?:\/[^/]+){0,2}|extensions(?:\/[^/]+)?|workspaces|templates|machines|settings|setup(?:\/(?:engine|setup|test|tools|first|open))?)$/
 
 export const VERSION: string = pkg.version
 // The version plus when this program file was written. A daemon left running by an older build of the same version

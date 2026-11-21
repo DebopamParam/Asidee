@@ -144,6 +144,8 @@
   .kind.ws { background: var(--hatch-amber), #fff; color: #7a4a00; border: 1.5px dashed #d79a2b; } .kind.ws::before { content: "!"; font-weight: 700; }
   .kind.gpu { background: var(--hatch-red), #fff; color: #b42318; border: 1.5px dashed #e0665e; } .kind.gpu::before { content: "⚠"; font-size: 10px; }
   .kind.rm { background: #fff; color: #555; border: 1px solid #c9c9c5; }
+  .mtag { margin-left: 8px; font-size: 12px; font-weight: 400; color: var(--muted); }
+  .list .lrow.away, .list .lrow.away .name { color: var(--muted); }
   .chip { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 6px; font-size: 12px; font-weight: 600; background: #0000000d; color: #3f3f3d; white-space: nowrap; }
   .chip.set { background: #fff; border: 1.5px solid var(--ink); color: var(--ink); }
   .chip.exp { background: #fff; border: 1px solid #c9c9c5; color: #5f5f5c; }
@@ -413,6 +415,10 @@
         <p>Not yet proven on enough machines: today, other machines. Off by default.</p>
       </div>
       <div class="setting">
+        <label class="check" for="remote-create"><input id="remote-create" type="checkbox" disabled> Let other machines create sandboxes here</label>
+        <p>Another machine that has this one added can then make sandboxes on it. Those are public: that machine sees and uses them. Sandboxes made here are private until shared. Only this machine can turn this on. Off by default.</p>
+      </div>
+      <div class="setting">
         <label for="disk-watch"><span class="hv" tabindex="0" data-tip="disk watch: diskWatchSeconds">Disk limit check</span>, every (seconds)</label>
         <div><input id="disk-watch" type="number" min="1" max="30" step="1" disabled><p>How often each sandbox's disk use is measured against its limit, 1 to 30. Default 5. A sandbox can go past its limit between checks; it is stopped at the next one.</p></div>
       </div>
@@ -521,6 +527,9 @@ let page = null
 // The extension whose page is open; null for the list.
 let extPage = null
 let sandboxes = [], engines = [], workspaces = [], workspaceProblem = "", forwards = [], links = [], ssh = {}, templates = [], templateProblem = ""
+// remotes: the public sandboxes of other machines, from the fleet, each with its machine as host, and offline when that
+// machine does not answer (its last-known ones, never running). remoteForwards: this Mac's ports to them, per machine.
+let remotes = [], remoteForwards = {}, remotesRead = false
 // enginesAt: when the engines were last read; the island says Ready only while one is.
 let enginesAt = 0
 let usage = [], usageProblem = "", remoteUsage = {}, machines, machineProblem = "", about, settings, savingSettings = false, connected = true
@@ -545,6 +554,18 @@ const gib = (bytes) => bytes === undefined ? "?" : bytes >= 1024 ** 3 ? `${(byte
 const when = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 const whenFull = (iso) => new Date(iso).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
 const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`
+// A sandbox's key names its page, its output and its busy buttons: its name on this machine, MACHINE/NAME on another.
+// Names have no slash, so the key splits back. nameAt: the name and machine an API call takes.
+const keyOf = (sandbox) => sandbox.host ? `${sandbox.host}/${sandbox.name}` : sandbox.name
+const ref = (key) => { const [first, second] = String(key).split("/"); return second === undefined ? { name: first } : { name: second, host: first } }
+const nameAt = (key) => { const { name, host } = ref(key); return host ? { name, host } : { name } }
+const shownName = (key) => { const { name, host } = ref(key); return host ? `${name} on ${host}` : name }
+const findSandbox = (key) => { const { name, host } = ref(key); return host ? remotes.find((entry) => entry.host === host && entry.name === name) : sandboxes.find((entry) => entry.name === name) }
+// An extension action aimed at a sandbox: one on another machine runs here, with its asd calls sent to that machine.
+const actionTarget = (key) => { const { name, host } = ref(key); return { sandbox: name, ...(host ? { machine: host } : {}) } }
+const asdFor = (host) => host ? `asd --host ${shq(host)}` : "asd"
+const aliasOf = (key) => { const { name, host } = ref(key); return ssh[key]?.alias ?? `${name}${host ? `.${host}` : ""}.asidee` }
+const PRIVATE_NOTE = "Private keeps a sandbox from other machines. Anyone signed in to this machine's own account can still see it."
 // Per viewer only: whether the first-run steps were finished or put away.
 const remembered = { get: (key) => { try { return window.localStorage.getItem(key) } catch { return null } }, set: (key, value) => { try { window.localStorage.setItem(key, value) } catch {} } }
 // A plain word whose exact term shows beside it on hover or keyboard focus. term marks a short term with a faint
@@ -623,7 +644,7 @@ const TITLES = { sandboxes: "Sandboxes", workspaces: "Workspaces", templates: "T
 let routed = false, replacePath = false, extensionsRead = false
 function placePath() {
   if (tab === "setup") return `/setup/${SETUP_STEPS[onboarding.step - 1] ?? "engine"}`
-  if (tab === "sandboxes" && page) return `/sandboxes/${encodeURIComponent(page)}`
+  if (tab === "sandboxes" && page) return `/sandboxes/${page.split("/").map(encodeURIComponent).join("/")}`
   if (tab === "extensions" && extPage) return `/extensions/${encodeURIComponent(extPage)}`
   return `/${tab}`
 }
@@ -632,19 +653,19 @@ function syncPath() {
   const path = placePath()
   if (path !== location.pathname) { replacePath ? history.replaceState(null, "", path) : history.pushState(null, "", path) }
   replacePath = false
-  const named = tab === "sandboxes" && page ? page : tab === "extensions" && extPage ? extensions.find((entry) => entry.id === extPage)?.name ?? extPage : TITLES[tab]
+  const named = tab === "sandboxes" && page ? shownName(page) : tab === "extensions" && extPage ? extensions.find((entry) => entry.id === extPage)?.name ?? extPage : TITLES[tab]
   document.title = `${named} · Asidee`
 }
 const segment = (text) => { try { return decodeURIComponent(text) } catch { return null } }
 // Opens the place a path names. "/" and a path the page does not know go to the sandboxes, replacing the path, and so
-// does Machines while other machines are off.
+// does Machines while other machines are off. A sandbox of another machine is /sandboxes/MACHINE/NAME.
 function openPath(path) {
-  const [first, second, extra] = path.split("/").filter(Boolean).map(segment)
-  const known = extra === undefined && (first === "setup" ? second === undefined || SETUP_STEPS.includes(second) : first in TABS && (second === undefined || first === "sandboxes" || first === "extensions"))
+  const [first, second, third, extra] = path.split("/").filter(Boolean).map(segment)
+  const known = extra === undefined && (third === undefined || first === "sandboxes" && second && third) && (first === "setup" ? second === undefined || SETUP_STEPS.includes(second) : first in TABS && (second === undefined || first === "sandboxes" || first === "extensions"))
   routed = true
   if (!known || first === "machines" && settings && !settings.experimental) { page = null; extPage = null; replacePath = true; section("sandboxes"); return }
   if (first === "setup") { onboarding.step = second ? SETUP_STEPS.indexOf(second) + 1 : 1; section("setup"); return }
-  page = first === "sandboxes" ? second ?? null : page
+  page = first === "sandboxes" ? second ? third ? `${second}/${third}` : second : null : page
   extPage = first === "extensions" ? second ?? null : extPage
   section(first)
 }
@@ -695,7 +716,7 @@ function drawIsland() {
 
 // Settings. Each control saves on its own; a refresh never overwrites one that is being saved or has focus.
 const probeToggle = document.getElementById("require-probes")
-const controls = { requireProbes: probeToggle, experimental: document.getElementById("experimental"), diskWatchSeconds: document.getElementById("disk-watch"),
+const controls = { requireProbes: probeToggle, experimental: document.getElementById("experimental"), remoteCreate: document.getElementById("remote-create"), diskWatchSeconds: document.getElementById("disk-watch"),
   workspaceFreeSpaceGb: document.getElementById("workspace-free-space"), terminal: document.getElementById("terminal") }
 const defaultFields = { image: "d-image", template: "d-template", cpus: "d-cpus", memoryGb: "d-memory", pids: "d-pids", diskGb: "d-disk", docker: "d-docker" }
 let defaultsDirty = false
@@ -818,8 +839,8 @@ function readable(text) {
 
 // The same action in a terminal: `asd ext run EXTENSION ACTION [SANDBOX] --set FIELD=VALUE`, from what the form holds.
 // A field left blank, or a checkbox left as its default, is left out.
-function extCommand(extension, action, values = {}, target) {
-  const parts = ["asd ext run", shq(extension.id), shq(action.id)]
+function extCommand(extension, action, values = {}, target, host) {
+  const parts = [`${asdFor(host)} ext run`, shq(extension.id), shq(action.id)]
   if (action.scope === "sandbox") parts.push(target ? shq(target) : "SANDBOX")
   for (const field of action.fields) {
     const value = values[field.id] ?? (field.default === undefined ? "" : String(field.default))
@@ -903,15 +924,15 @@ function folderPicker(id, { name = id, logins = () => false, dest = () => "", on
 
 // run: the button's words, when the form is the only one in its panel.
 function actionForm(extension, action, sandbox, run = action.label) {
-  const key = sandbox ? sandbox.name : `ext:${extension.id}`
+  const key = sandbox ? keyOf(sandbox) : `ext:${extension.id}`
   const read = () => Object.fromEntries(action.fields.map((field) => [field.id, field.type === "checkbox" ? String(form.elements[field.id].checked) : form.elements[field.id].value]))
   const target = () => sandbox ? sandbox.name : form.elements["asidee-sandbox"]?.value
   const commandBox = el("div")
-  const showCommand = () => { const text = extCommand(extension, action, read(), target()); if (commandBox.textContent !== `${text}Copy`) commandBox.replaceChildren(command(text)) }
+  const showCommand = () => { const text = extCommand(extension, action, read(), target(), sandbox?.host); if (commandBox.textContent !== `${text}Copy`) commandBox.replaceChildren(command(text)) }
   const form = el("form", { class: "action", oninput: showCommand, onchange: showCommand, onsubmit: (event) => {
     event.preventDefault()
     const values = read(), on = target()
-    act(key, `${extension.id}/${action.id}`, () => api("action", { extension: extension.id, action: action.id, ...(action.scope === "sandbox" ? { sandbox: on } : {}), values }), { label: action.label, value: on ?? extension.name })
+    act(key, `${extension.id}/${action.id}`, () => api("action", { extension: extension.id, action: action.id, ...(action.scope === "sandbox" ? { sandbox: on, ...(sandbox?.host ? { machine: sandbox.host } : {}) } : {}), values }), { label: action.label, value: on ?? extension.name })
   } })
   // Each field is labelled above it; checkboxes go on a line of their own, and the button closes the action.
   const inputs = el("div", { class: "fields" }), checks = el("div", { class: "row" })
@@ -964,9 +985,9 @@ function miniForm(key, what, label, fields, send, ask) {
 const terminal = (name, kind, machine, profile) => api("openTerminal", { name, kind, ...(machine ? { machine } : {}), ...(profile ? { profile } : {}) })
   .then((done) => `Opened in ${done.terminal === "default" ? "the default terminal" : done.terminal}. If no window appeared, run: ${done.command}`)
 
-async function sshSetup(name, writeConfig) {
-  const done = await api("sshSetup", { name, writeConfig })
-  ssh[name] = done
+async function sshSetup(key, writeConfig) {
+  const done = await api("sshSetup", { ...nameAt(key), writeConfig })
+  ssh[key] = done
   const login = `ssh ${done.alias} logs in as ${done.user} with the key ${done.editorKey}.`
   return done.included ? `Set up. ${login}` : `Set up. Add this line at the top of ${done.config}, or use the button that adds it:\n  ${done.include}\nThen ${login}`
 }
@@ -981,15 +1002,15 @@ const bucketOf = (id) => BUCKETS.find((bucket) => bucket.extensions.includes(id)
 const AGENT = { claude: "Claude", codex: "Codex", github: "GitHub" }
 const profileLabel = (profile) => profile === "~" ? "main login" : profile
 
-// A button for a sandbox's own actions; its output belongs to the sandbox.
-const sandboxButton = (name) => (label, what, task, extra = {}) => {
-  const on = busy.has(`${name}:${what}`)
-  return el("button", { type: "button", ...extra, ...(on ? { disabled: "" } : {}), onclick: () => act(name, what, task, { label: name, value: label.toLowerCase() }) }, on ? "Working…" : label)
+// A button for a sandbox's own actions (by its key); its output belongs to the sandbox.
+const sandboxButton = (key) => (label, what, task, extra = {}) => {
+  const on = busy.has(`${key}:${what}`)
+  return el("button", { type: "button", ...extra, ...(on ? { disabled: "" } : {}), onclick: () => act(key, what, task, { label: shownName(key), value: label.toLowerCase() }) }, on ? "Working…" : label)
 }
 // The output of the buttons whose what starts with prefix, for a form that holds them.
 const resultFrom = (name, prefix) => String(from[name] ?? "").startsWith(prefix) ? result(name) : ""
 // The buttons on the sandbox page show their output on the page; everything else shows it in its form.
-const PAGE_OUTPUT = new Set(["stop", "start", "terminal", "verify", "remove", "open-agent", "setup", "retry", "keep"])
+const PAGE_OUTPUT = new Set(["stop", "start", "terminal", "verify", "remove", "open-agent", "setup", "retry", "keep", "visibility"])
 
 // A form that slides in from the right. Like a region, it is built again only when what it shows changed.
 let modal = null
@@ -998,7 +1019,7 @@ function closeModal() { modal = null; drawModal() }
 function drawModal() {
   const root = document.getElementById("modal")
   if (!modal) { root.hidden = true; root.replaceChildren(); drawn.modal = undefined; return }
-  const key = JSON.stringify([modal.title, sandboxes, workspaces, [...busy], output, sandboxLogins, profiles, ssh, forwards, links, extensions, about?.platform])
+  const key = JSON.stringify([modal.title, sandboxes, remotes, remoteForwards, workspaces, [...busy], output, sandboxLogins, profiles, ssh, forwards, links, extensions, about?.platform])
   if (drawn.modal === key) return
   const opening = drawn.modal === undefined
   drawn.modal = key
@@ -1008,21 +1029,21 @@ function drawModal() {
     el("div", { class: "drawer-head" }, el("h3", {}, modal.title), el("button", { type: "button", class: "sm", onclick: closeModal }, "Close")), el("div", { class: "stack" }, ...modal.build())))
   if (focused && document.getElementById(focused)) document.getElementById(focused).focus()
 }
-// A form for one sandbox; it says so if the sandbox is gone.
-const sandboxModal = (name, title, build) => openModal(title, () => { const sandbox = sandboxes.find((entry) => entry.name === name); return sandbox ? build(sandbox) : [el("p", {}, `${name} is gone.`)] })
+// A form for one sandbox, by its key; it says so if the sandbox is gone.
+const sandboxModal = (key, title, build) => openModal(title, () => { const sandbox = findSandbox(key); return sandbox && !sandbox.offline ? build(sandbox) : [el("p", {}, `${shownName(key)} is gone.`)] })
 
 // The logins each running sandbox holds, as the logins extension lists them: [{agent, profile, account}], null when unknown.
 let sandboxLogins = {}
 const readingLogins = new Set()
 const LOGIN = /^(claude|codex|github)\/(\S+) \((.*)\)$/
-async function readLogins(name) {
-  readingLogins.add(name)
+async function readLogins(key) {
+  readingLogins.add(key)
   try {
-    const reply = await api("action", { extension: "logins", action: "list", sandbox: name, values: {} })
-    sandboxLogins[name] = reply.exitCode === 0 ? reply.stdout.split("\n").map((line) => LOGIN.exec(line.trim())).filter(Boolean)
+    const reply = await api("action", { extension: "logins", action: "list", ...actionTarget(key), values: {} })
+    sandboxLogins[key] = reply.exitCode === 0 ? reply.stdout.split("\n").map((line) => LOGIN.exec(line.trim())).filter(Boolean)
       .map(([, agent, profile, account]) => ({ agent, profile, account: account === "account unknown" ? "" : account })) : null
-  } catch { sandboxLogins[name] = null }
-  readingLogins.delete(name); render()
+  } catch { sandboxLogins[key] = null }
+  readingLogins.delete(key); render()
 }
 const loginSummary = (name) => {
   const list = sandboxLogins[name]
@@ -1036,10 +1057,10 @@ const loginSummary = (name) => {
 const openable = (name, agent) => { const list = sandboxLogins[name] ?? []; const own = list.filter((login) => login.agent === agent); const named = own.filter((login) => login.profile !== "~"); return named.length ? named : own }
 // SSH readiness, asked once per sandbox.
 const checkingSsh = new Set()
-function readSsh(name) {
-  if (ssh[name] !== undefined || checkingSsh.has(name)) return
-  checkingSsh.add(name)
-  api("sshAccess", { name }).then((done) => { ssh[name] = done }, (error) => { ssh[name] = { error: error.message } }).finally(() => { checkingSsh.delete(name); render() })
+function readSsh(key) {
+  if (ssh[key] !== undefined || checkingSsh.has(key)) return
+  checkingSsh.add(key)
+  api("sshAccess", nameAt(key)).then((done) => { ssh[key] = done }, (error) => { ssh[key] = { error: error.message } }).finally(() => { checkingSsh.delete(key); render() })
 }
 const sshReady = (name) => ssh[name]?.batchReady || ssh[name]?.included
 
@@ -1080,8 +1101,13 @@ const si = (state, size = "") => el("span", { class: `si ${state} ${size}`, "ari
 function meterRow(label, value, fraction, warn) {
   return el("div", {}, el("div", { class: "row" }, el("span", {}, label), el("span", { class: "kv" }, value)), el("div", { class: `meter${warn ? " warn" : ""}` }, el("i", { style: `width:${Math.max(0, Math.min(100, fraction * 100)).toFixed(1)}%` })))
 }
+function useOf(key) {
+  const { name, host } = ref(key), list = host ? remoteUsage[host] : usage
+  return Array.isArray(list) ? list.find((entry) => entry.name === name) : undefined
+}
 function useNodes(entry, sandbox) {
-  if (!entry) return [el("p", { class: "muted" }, usageProblem ? `Use unknown: ${usageProblem}` : "Measuring…")]
+  const problem = sandbox?.host ? typeof remoteUsage[sandbox.host] === "string" ? remoteUsage[sandbox.host] : "" : usageProblem && `Use unknown: ${usageProblem}`
+  if (!entry) return [el("p", { class: "muted" }, problem || "Measuring…")]
   if (entry.problem) return [el("p", { class: "muted" }, `Use unknown: ${entry.problem}`)]
   const disk = entry.diskBytes === undefined ? el("p", { class: "muted" }, `Disk: not measured yet, limit ${gib(entry.diskLimitBytes)}`)
     : meterRow(term("Disk", `Measured ${when(entry.diskMeasuredAt)} by the disk limit check, a start or a check.`), `${gib(entry.diskBytes)} of ${gib(entry.diskLimitBytes)}`, entry.diskBytes / entry.diskLimitBytes, entry.diskBytes / entry.diskLimitBytes > .9)
@@ -1097,34 +1123,39 @@ function diskCell(entry) {
   return [el("div", { class: "disk" }, el("div", { class: `meter${fraction > .9 ? " warn" : ""}` }, el("i", { style: `width:${Math.min(100, fraction * 100).toFixed(1)}%` })), el("span", { class: "kv" }, `${gib(entry.diskBytes)} of ${gib(entry.diskLimitBytes)}`))]
 }
 function drawUsage() {
-  for (const node of document.querySelectorAll("[data-usage]")) { const name = node.getAttribute("data-usage"); node.replaceChildren(...useNodes(usage.find((entry) => entry.name === name), sandboxes.find((entry) => entry.name === name))) }
-  for (const node of document.querySelectorAll("[data-disk]")) node.replaceChildren(...diskCell(usage.find((entry) => entry.name === node.getAttribute("data-disk"))))
+  for (const node of document.querySelectorAll("[data-usage]")) { const key = node.getAttribute("data-usage"); node.replaceChildren(...useNodes(useOf(key), findSandbox(key))) }
+  for (const node of document.querySelectorAll("[data-disk]")) node.replaceChildren(...diskCell(useOf(node.getAttribute("data-disk"))))
 }
 
 function sandboxList(list) {
   list.append(el("div", { class: "head" }, el("h1", {}, "Sandboxes"), el("div", { class: "end" }, el("button", { type: "button", class: "acc", onclick: () => openNew() }, "New sandbox"))))
-  if (!sandboxes.length) {
+  const all = [...sandboxes, ...remotes]
+  if (!all.length) {
     list.append(el("div", { class: "empty" }, el("h2", {}, "No sandboxes yet"), el("p", {}, sandboxWords()),
       el("div", { class: "row" }, el("button", { type: "button", class: "acc", onclick: () => openNew() }, "New sandbox")), command("asd create my-app")))
     return
   }
   // The Type column only when it tells rows apart. A GPU container always shows that it is not a sandbox.
-  const typed = sandboxes.some((sandbox) => sandbox.spec?.gpu)
+  const typed = all.some((sandbox) => sandbox.spec?.gpu)
   list.append(el("div", { class: `lp list${typed ? " typed" : ""}` }, el("div", { class: "lrow lhead", "aria-hidden": "true" }, el("span"), el("span", {}, "Name"), el("span", { class: "state-col" }, "State"), typed ? el("span", { class: "kind-col" }, "Type") : null, el("span", { class: "disk-col" }, "Disk use"), el("span")),
-    ...sandboxes.map((sandbox) => {
-      const [state, words, tip] = stateOf(sandbox)
-      return el("button", { type: "button", class: "lrow", "data-name": sandbox.name, onclick: () => openSandbox(sandbox.name) }, si(state), el("span", { class: "name" }, sandbox.name),
-        el("span", { class: "state-col" }, tip ? quiet(words, tip) : words), typed ? el("span", { class: "kind-col" }, kindChip(sandbox)) : null, el("span", { class: "disk-col", "data-disk": sandbox.name }), el("span", { class: "chev", "aria-hidden": "true" }, "›"))
+    ...all.map((sandbox) => {
+      const key = keyOf(sandbox)
+      // An offline machine's sandboxes are what it last reported: greyed, never running, and not opened.
+      const [state, words, tip] = sandbox.offline ? ["unk", `${sandbox.host} is offline`, `What ${sandbox.host} last reported. Its state now is not known.`] : stateOf(sandbox)
+      const cells = [si(state), el("span", { class: "name" }, sandbox.name, sandbox.host ? el("span", { class: "mtag", "data-tip": `On ${sandbox.host}, where it is public` }, sandbox.host) : null),
+        el("span", { class: "state-col" }, tip ? quiet(words, tip) : words), typed ? el("span", { class: "kind-col" }, kindChip(sandbox)) : null, el("span", { class: "disk-col", "data-disk": key })]
+      return sandbox.offline ? el("div", { class: "lrow away", "data-name": key }, ...cells, el("span"))
+        : el("button", { type: "button", class: "lrow", "data-name": key, onclick: () => openSandbox(key) }, ...cells, el("span", { class: "chev", "aria-hidden": "true" }, "›"))
     })))
 }
 
 // The Checks card: the required checks first, then the good to know; past results, with when they were measured.
 const showAll = new Set()
 function checksCard(sandbox) {
-  const name = sandbox.name, verify = sandbox.lastVerify
+  const name = keyOf(sandbox), verify = sandbox.lastVerify
   const head = el("div", { class: "card-head" }, el("div", { class: "grow" }, el("div", { style: "font-weight:600;font-size:14px" }, verify ? verdict(tally(verify.results, sandbox, true)) : "Not checked yet"),
     el("div", { class: "muted small" }, verify ? `Last checked ${whenFull(verify.at)}. A past result: it may have changed since.` : "Check now runs every check on it.")),
-    sandbox.status === "running" ? sandboxButton(name)("Check now", "verify", () => api("verify", { name }), { class: "sm" }) : null)
+    sandbox.status === "running" ? sandboxButton(name)("Check now", "verify", () => api("verify", nameAt(name)), { class: "sm" }) : null)
   const card = el("div", { class: "lp", id: `checks-${name}` }, head)
   if (!verify) return card
   const rows = verify.results.map((check) => ({ check, past: measured(check), required: required(check.id, sandbox) }))
@@ -1172,33 +1203,55 @@ function unfinishedCard(sandbox) {
         onclick: () => act(name, "keep", async () => { await api("createKeep", { name }); return `${name} stays as it is until you remove it. The steps left do not run.` }, { label: name, value: "keeping" }) }, busy.has(`${name}:keep`) ? "Working…" : "Don't remove"),
       removeButton(name, "Remove now")))
 }
-const removeButton = (name, label = "Remove") => el("button", { type: "button", class: "dang", onclick: () => { const typed = prompt(`This deletes ${name} and everything in it. Type its name to confirm.`); if (typed !== null) act(name, "remove", () => api("remove", { name, confirm: typed }).then(() => { if (page === name) { page = null; replacePath = true } return `Removed ${name}.` }), { label: name, value: "removing" }) } }, label)
+const removeButton = (key, label = "Remove") => el("button", { type: "button", class: "dang", onclick: () => { const typed = prompt(`This deletes ${shownName(key)} and everything in it. Type its name to confirm.`); if (typed !== null) act(key, "remove", () => api("remove", { ...nameAt(key), confirm: typed }).then(() => { if (page === key) { page = null; replacePath = true } return `Removed ${shownName(key)}.` }), { label: shownName(key), value: "removing" }) } }, label)
+// Another machine may make its public sandbox private, and then no longer sees it; only that machine can share it again.
+function makePrivate(key) {
+  const { name, host } = ref(key)
+  if (!confirm(`Make ${name} private on ${host}? This Mac then no longer sees it, and only ${host} can share it again.`)) return
+  act(key, "visibility", () => api("visibilitySet", { name, host, visibility: "private" }).then(() => {
+    remotes = remotes.filter((entry) => keyOf(entry) !== key); if (page === key) { page = null; replacePath = true }
+    return `${name} is private on ${host} now.`
+  }), { label: shownName(key), value: "making private" })
+}
+// Who else sees a sandbox of this machine: private (only this machine's Asidee) or public (other machines that route here).
+function visibilityCard(sandbox) {
+  const key = keyOf(sandbox), on = busy.has(`${key}:visibility`)
+  const set = (visibility) => act(key, "visibility", () => api("visibilitySet", { name: sandbox.name, visibility }).then(() => visibility === "public"
+    ? `${sandbox.name} is public: other machines that route here see it and can use it.` : `${sandbox.name} is private: only this machine's Asidee sees it.`), { label: sandbox.name, value: visibility === "public" ? "sharing" : "making private" })
+  const pill = (value, text) => el("label", { class: "pill" }, el("input", { type: "radio", name: `visibility-${key}`, value, ...(sandbox.visibility === value ? { checked: "" } : {}), ...(on ? { disabled: "" } : {}), onchange: () => set(value) }), text)
+  return el("div", { class: "lp pad", id: "visibility" }, el("h4", {}, "Other machines"),
+    el("div", { class: "row" }, el("div", { class: "pills", role: "radiogroup", "aria-label": "Who can see it" }, pill("private", "Private"), pill("public", "Public")), help(PRIVATE_NOTE)),
+    el("p", { class: "muted small", style: "margin-top:8px" }, sandbox.visibility === "public" ? "Other machines that route here see it and can use it fully." : "Other machines do not see it."))
+}
 
 // Opens an agent with the login it would pick in the terminal, or asks which when there are several.
-function openAgent(name, agent) {
-  const logins = openable(name, agent)
-  if (logins.length > 1) return agentModal(name, agent)
+function openAgent(key, agent) {
+  const logins = openable(key, agent), { name, host } = ref(key)
+  if (logins.length > 1) return agentModal(key, agent)
   const profile = logins[0]?.profile
-  act(name, "open-agent", () => terminal(name, agent, undefined, profile && profile !== "~" ? profile : undefined), { label: name, value: `opening ${AGENT[agent]}` })
+  act(key, "open-agent", () => terminal(name, agent, host, profile && profile !== "~" ? profile : undefined), { label: shownName(key), value: `opening ${AGENT[agent]}` })
 }
 
 // The live sandbox carries the template it was made from as an object; a spec may still name it as a string.
 function templateName(sandbox) { return sandbox.template?.name ?? sandbox.spec?.template }
 function sandboxPage(sandbox) {
-  const name = sandbox.name, button = sandboxButton(name), running = sandbox.status === "running"
-  if (running && installed("logins") && !(name in sandboxLogins) && !readingLogins.has(name)) readLogins(name)
-  if (running) readSsh(name)
+  const key = keyOf(sandbox), name = sandbox.name, host = sandbox.host, at = nameAt(key), button = sandboxButton(key), running = sandbox.status === "running"
+  const crumb = el("div", { class: "crumb" }, el("button", { type: "button", class: "link", onclick: () => { page = null; render() } }, "Sandboxes /"))
+  const tag = host ? el("span", { class: "tag", tabindex: "0", "data-tip": `On ${host}, where it is public: this Mac uses it through ${host}'s Asidee.` }, host) : null
+  if (sandbox.offline) return el("div", { class: "detail" }, crumb, el("div", { class: "head" }, el("h1", {}, name), tag),
+    el("div", { class: "banner info" }, `${host} is offline, so ${name} cannot be reached. Its state now is not known.`))
+  if (running && installed("logins") && !(key in sandboxLogins) && !readingLogins.has(key)) readLogins(key)
+  if (running) readSsh(key)
   const [state, words, tip] = stateOf(sandbox)
-  const tools = [item("Resize", () => toolModal(name, "resize")), running ? item("Run a command", () => toolModal(name, "exec")) : null, item("Save as template", () => toolModal(name, "snapshot")),
-    item("Commands for a terminal", () => toolModal(name, "commands")), el("div", { class: "sep" }), item("Remove…", () => removeButton(name).click(), { class: "dang" })]
-  const node = el("div", { class: "detail" },
-    el("div", { class: "crumb" }, el("button", { type: "button", class: "link", onclick: () => { page = null; render() } }, "Sandboxes /")),
-    el("div", { class: "head", style: "margin-bottom:0" }, el("h1", {}, name), si(state, "lg"), el("span", { style: "font-size:14px" }, tip ? quiet(words, tip) : words), sandbox.spec?.gpu ? kindChip(sandbox) : null,
+  const tools = [item("Resize", () => toolModal(key, "resize")), running ? item("Run a command", () => toolModal(key, "exec")) : null, item("Save as template", () => toolModal(key, "snapshot")),
+    item("Commands for a terminal", () => toolModal(key, "commands")), el("div", { class: "sep" }), host ? item("Make private…", () => makePrivate(key)) : null, item("Remove…", () => removeButton(key).click(), { class: "dang" })]
+  const node = el("div", { class: "detail" }, crumb,
+    el("div", { class: "head", style: "margin-bottom:0" }, el("h1", {}, name), tag, si(state, "lg"), el("span", { style: "font-size:14px" }, tip ? quiet(words, tip) : words), sandbox.spec?.gpu ? kindChip(sandbox) : null,
       el("div", { class: "end" },
-        running ? menu("Open ▾", [item("Claude Code", () => openAgent(name, "claude")), item("Codex", () => openAgent(name, "codex")), item("Terminal", () => act(name, "terminal", () => terminal(name, "sandbox"), { label: name, value: "opening a terminal" })),
-          installed("logins") ? el("div", { class: "sep" }) : null, installed("logins") ? item("Pick a login…", () => agentModal(name)) : null], "acc") : null,
-        sandbox.status === "damaged" ? null : running ? button("Stop", "stop", () => api("stop", { name })) : button("Start", "start", () => api("start", { name }), { class: "acc" }),
-        sandbox.status === "damaged" ? removeButton(name) : menu("⋯", tools))),
+        running ? menu("Open ▾", [item("Claude Code", () => openAgent(key, "claude")), item("Codex", () => openAgent(key, "codex")), item("Terminal", () => act(key, "terminal", () => terminal(name, "sandbox", host), { label: shownName(key), value: "opening a terminal" })),
+          installed("logins") ? el("div", { class: "sep" }) : null, installed("logins") ? item("Pick a login…", () => agentModal(key)) : null], "acc") : null,
+        sandbox.status === "damaged" ? null : running ? button("Stop", "stop", () => api("stop", at)) : button("Start", "start", () => api("start", at), { class: "acc" }),
+        sandbox.status === "damaged" ? removeButton(key) : menu("⋯", tools))),
     sandbox.spec ? el("p", { class: "sub" }, [templateName(sandbox) ? `from ${templateName(sandbox)}` : null, plural(sandbox.spec.cpus, "CPU"), `${sandbox.spec.memoryGb} GB memory`, `${sandbox.spec.diskGb} GB disk`, sandbox.engine].filter(Boolean).join(" · ")) : null)
   const banners = el("div", { class: "page-banners" })
   if (sandbox.spec?.gpu) banners.append(el("div", { class: "banner warn" }, "Not a sandbox: it runs on the machine's own Linux kernel (runc), so a kernel or NVIDIA driver bug is a way onto the machine."))
@@ -1206,84 +1259,89 @@ function sandboxPage(sandbox) {
   if (sandbox.diskWarning) banners.append(el("div", { class: "banner warn" }, sandbox.diskWarning.message))
   if (sandbox.stopReason) banners.append(el("div", { class: sandbox.status === "damaged" ? "banner bad" : "banner info" }, sandbox.stopReason))
   if (sandbox.enforcementProblem) banners.append(el("div", { class: "banner bad" }, `A limit was not checked at ${sandbox.enforcementProblem.at}: ${sandbox.enforcementProblem.message}`))
-  if (sandbox.unfinished) banners.append(unfinishedCard(sandbox))
-  if (output[name] && PAGE_OUTPUT.has(from[name])) banners.append(result(name))
+  if (sandbox.unfinished && !host) banners.append(unfinishedCard(sandbox))
+  if (output[key] && PAGE_OUTPUT.has(from[key])) banners.append(result(key))
   node.append(banners)
   if (sandbox.status === "damaged") return node
 
-  const mine = forwards.filter((forward) => forward.name === name), myLinks = links.filter((link) => link.from === name || link.to === name)
-  const access = ssh[name]
+  // Ports to a sandbox of another machine open on this Mac too; connections join sandboxes of one machine only.
+  const mine = (host ? remoteForwards[host] ?? [] : forwards).filter((forward) => forward.name === name), myLinks = host ? [] : links.filter((link) => link.from === name || link.to === name)
+  const access = ssh[key]
   const right = el("div", { class: "col" },
-    el("div", { class: "lp pad" }, el("h4", {}, "Use"), el("div", { class: "use", "data-usage": name })))
+    host ? null : visibilityCard(sandbox),
+    el("div", { class: "lp pad" }, el("h4", {}, "Use"), el("div", { class: "use", "data-usage": key })))
   if (running) {
     right.append(el("div", { class: "lp pad" }, el("h4", {}, "Agents"),
-      el("div", { class: "row" }, el("button", { type: "button", class: "sm", onclick: () => openAgent(name, "claude") }, "Claude Code"), el("button", { type: "button", class: "sm", onclick: () => openAgent(name, "codex") }, "Codex"),
-        button("Terminal", "terminal", () => terminal(name, "sandbox"), { class: "sm", title: "A shell in this sandbox, in a terminal window on this Mac" })),
-      installed("logins") ? el("div", { class: "row small muted", style: "margin-top:10px" }, quiet(loginSummary(name), "Anything running in the sandbox can read a login copied into it."), el("button", { type: "button", class: "link small", onclick: () => loginsModal(name) }, "Manage logins")) : null),
+      el("div", { class: "row" }, el("button", { type: "button", class: "sm", onclick: () => openAgent(key, "claude") }, "Claude Code"), el("button", { type: "button", class: "sm", onclick: () => openAgent(key, "codex") }, "Codex"),
+        button("Terminal", "terminal", () => terminal(name, "sandbox", host), { class: "sm", title: "A shell in this sandbox, in a terminal window on this Mac" })),
+      installed("logins") ? el("div", { class: "row small muted", style: "margin-top:10px" }, quiet(loginSummary(key), "Anything running in the sandbox can read a login copied into it."), el("button", { type: "button", class: "link small", onclick: () => loginsModal(key) }, "Manage logins")) : null),
       el("div", { class: "lp pad" }, el("h4", {}, "Connect"),
         el("div", { style: "line-height:1.8" },
           el("div", {}, mine.length ? [`${plural(mine.length, "port")} open on this Mac · `, el("span", { class: "mono" }, mine.map((forward) => `:${forward.localPort}`).join(" "))] : quiet("No ports open on this Mac", "forward: 127.0.0.1 on this Mac to a port inside the sandbox")),
           myLinks.length ? el("div", {}, quiet(`${plural(myLinks.length, "connection")} with other sandboxes`, "link: one sandbox reaches one port of another")) : null,
-          el("div", {}, access === undefined ? "SSH: checking…" : access.error ? `SSH: ${access.error}` : sshReady(name) ? ["SSH ready · ", el("span", { class: "mono" }, `${access.alias ?? `${name}.asidee`}`)] : "SSH not set up")),
-        el("div", { class: "row", style: "margin-top:8px" }, el("button", { type: "button", class: "sm", onclick: () => toolModal(name, "ports") }, "Ports"), el("button", { type: "button", class: "sm", onclick: () => toolModal(name, "ssh") }, "SSH and editors"))))
+          el("div", {}, access === undefined ? "SSH: checking…" : access.error ? `SSH: ${access.error}` : sshReady(key) ? ["SSH ready · ", el("span", { class: "mono" }, aliasOf(key))] : "SSH not set up")),
+        el("div", { class: "row", style: "margin-top:8px" }, el("button", { type: "button", class: "sm", onclick: () => toolModal(key, "ports") }, "Ports"), el("button", { type: "button", class: "sm", onclick: () => toolModal(key, "ssh") }, "SSH and editors"))))
   }
   node.append(el("div", { class: "grid" }, checksCard(sandbox), right))
   if (!running) { node.append(el("p", { class: "muted", style: "margin-top:16px" }, "Start it to open agents, ports and its extensions.")); return node }
 
-  // A part for each installed extension that acts on a sandbox; its form opens on the right.
+  // A part for each installed extension that acts on a sandbox; its form opens on the right. For a sandbox of another
+  // machine, this Mac's extensions run here and reach it through that machine.
   const own = extensions.filter((extension) => extension.id !== "logins" && extension.actions.some((action) => action.scope === "sandbox"))
   if (own.length) node.append(el("h4", { style: "margin-top:28px" }, "Extensions"), el("div", { class: "parts" }, ...own.map((extension) => {
     const t3 = extension.id === "t3"
     return el("div", { class: "lp pad part", "data-extension": extension.id }, el("div", { class: "t" }, extension.name),
-      el("p", { class: "muted small" }, t3 ? access === undefined ? "Checking SSH…" : sshReady(name) ? `Ready to connect: ${name}.asidee` : "Set up SSH first" : extension.actions.filter((action) => action.scope === "sandbox").map((action) => action.label).join(" · ")),
-      el("div", { class: "row" }, el("button", { type: "button", class: "sm", onclick: () => t3 ? t3Modal(name) : extensionModal(name, extension.id) }, t3 ? "Connect T3 Code" : "Open")))
+      el("p", { class: "muted small" }, t3 ? access === undefined ? "Checking SSH…" : sshReady(key) ? `Ready to connect: ${aliasOf(key)}` : "Set up SSH first" : extension.actions.filter((action) => action.scope === "sandbox").map((action) => action.label).join(" · ")),
+      el("div", { class: "row" }, el("button", { type: "button", class: "sm", onclick: () => t3 ? t3Modal(key) : extensionModal(key, extension.id) }, t3 ? "Connect T3 Code" : "Open")))
   })))
   return node
 }
 
-function agentModal(name, only) {
-  sandboxModal(name, `Open an agent in ${name}`, () => {
+function agentModal(key, only) {
+  const { name, host } = ref(key)
+  sandboxModal(key, `Open an agent in ${shownName(key)}`, () => {
     // asd claude|codex opens the canonical login only when the agent has no named one.
-    const list = sandboxLogins[name], agents = ["claude", "codex"].filter((agent) => !only || agent === only).flatMap((agent) => openable(name, agent))
-    const open = (login) => { closeModal(); act(name, "open-agent", () => terminal(name, login.agent, undefined, login.profile === "~" ? undefined : login.profile), { label: name, value: `opening ${AGENT[login.agent]}` }) }
+    const list = sandboxLogins[key], agents = ["claude", "codex"].filter((agent) => !only || agent === only).flatMap((agent) => openable(key, agent))
+    const open = (login) => { closeModal(); act(key, "open-agent", () => terminal(name, login.agent, host, login.profile === "~" ? undefined : login.profile), { label: shownName(key), value: `opening ${AGENT[login.agent]}` }) }
     return [el("p", { class: "muted" }, "Opens a terminal window on this Mac with the agent in ~/workspace, signed in with the login you pick."),
       list === undefined ? el("p", {}, "Reading the sandbox's logins…")
         : list === null ? el("p", { class: "error" }, "Could not read the sandbox's logins.")
         : agents.length ? el("div", { class: "cards" }, ...agents.map((login) => el("button", { type: "button", class: "card", onclick: () => open(login) },
           el("span", { class: "t" }, `${AGENT[login.agent]} · ${profileLabel(login.profile)}`), el("span", { class: "muted" }, login.account || "account unknown"))))
         : el("p", {}, "No Claude or Codex login in this sandbox yet. Opening one asks it to sign in, in the terminal."),
-      el("div", { class: "row" }, el("button", { type: "button", onclick: () => loginsModal(name) }, "Manage logins…"))]
+      el("div", { class: "row" }, el("button", { type: "button", onclick: () => loginsModal(key) }, "Manage logins…"))]
   })
 }
 
 // Import or log out, then read the list again and let T3 see the change.
-async function changeLogin(name, action, values, done) {
-  const reply = await api("action", { extension: "logins", action, sandbox: name, values })
-  await readLogins(name)
+async function changeLogin(key, action, values, done) {
+  const reply = await api("action", { extension: "logins", action, ...actionTarget(key), values })
+  await readLogins(key)
   if (reply.exitCode !== 0) return `${reply.stdout}${reply.stderr}`.trim() || `Failed (exit ${reply.exitCode}).`
   const copied = /Copied [1-9]\d* setup files\./.exec(reply.stdout)?.[0]
   let t3 = ""
-  if (installed("t3") && values.agent !== "github" && action !== "github") try { const synced = await api("action", { extension: "t3", action: "sync", sandbox: name, values: {} }); if (synced.exitCode === 0) t3 = " T3 Code sees it now." } catch { /* T3 may not be set up in this sandbox. */ }
+  if (installed("t3") && values.agent !== "github" && action !== "github") try { const synced = await api("action", { extension: "t3", action: "sync", ...actionTarget(key), values: {} }); if (synced.exitCode === 0) t3 = " T3 Code sees it now." } catch { /* T3 may not be set up in this sandbox. */ }
   return `${done}${copied ? ` ${copied}` : ""}${t3}`
 }
 let copySetup = false
-function loginsModal(name) {
-  sandboxModal(name, `Logins in ${name}`, () => {
-    const button = sandboxButton(name), list = sandboxLogins[name]
+function loginsModal(key) {
+  const { name, host } = ref(key)
+  sandboxModal(key, `Logins in ${shownName(key)}`, () => {
+    const button = sandboxButton(key), list = sandboxLogins[key]
     const has = (agent, profile) => Boolean(list?.some((login) => login.agent === agent && login.profile === profile))
     const label = (agent, profile) => agent === "github" ? "GitHub" : `${AGENT[agent]} · ${profileLabel(profile)}`
     const add = (agent, profile) => agent === "github"
-      ? changeLogin(name, "github", { account: "", replace: String(has("github", "~")) }, `${has("github", "~") ? "Re-imported" : "Added"} GitHub.`)
-      : changeLogin(name, "import", { agent, profile, target: "", setup: String(copySetup), replace: String(has(agent, profile)) }, `${has(agent, profile) ? "Re-imported" : "Added"} ${label(agent, profile)}.`)
-    const inside = list === undefined ? [el("p", {}, "Reading…")] : list === null ? [el("p", { class: "error" }, "Could not read the logins."), button("Try again", "login:read", () => readLogins(name))]
+      ? changeLogin(key, "github", { account: "", replace: String(has("github", "~")) }, `${has("github", "~") ? "Re-imported" : "Added"} GitHub.`)
+      : changeLogin(key, "import", { agent, profile, target: "", setup: String(copySetup), replace: String(has(agent, profile)) }, `${has(agent, profile) ? "Re-imported" : "Added"} ${label(agent, profile)}.`)
+    const inside = list === undefined ? [el("p", {}, "Reading…")] : list === null ? [el("p", { class: "error" }, "Could not read the logins."), button("Try again", "login:read", () => readLogins(key))]
       : !list.length ? [el("p", { class: "muted" }, "None yet. Add one from this Mac below.")]
       : [el("div", { class: "cards" }, ...list.map((login) => el("div", { class: "card" },
         el("span", { class: "t" }, label(login.agent, login.profile)), el("span", { class: "muted" }, login.account || "account unknown"),
         el("div", { class: "actions" },
-          login.agent !== "github" && (login.profile !== "~" || !list.some((other) => other.agent === login.agent && other.profile !== "~")) ? el("button", { type: "button", class: "sm", onclick: () => { closeModal(); act(name, "open-agent", () => terminal(name, login.agent, undefined, login.profile === "~" ? undefined : login.profile), { label: name, value: `opening ${AGENT[login.agent]}` }) } }, "Open") : null,
+          login.agent !== "github" && (login.profile !== "~" || !list.some((other) => other.agent === login.agent && other.profile !== "~")) ? el("button", { type: "button", class: "sm", onclick: () => { closeModal(); act(key, "open-agent", () => terminal(name, login.agent, host, login.profile === "~" ? undefined : login.profile), { label: shownName(key), value: `opening ${AGENT[login.agent]}` }) } }, "Open") : null,
           login.agent === "github" || profiles?.[login.agent]?.includes(login.profile) ? button("Re-import", `login:${login.agent}/${login.profile}`, () => add(login.agent, login.profile), { class: "sm" }) : null,
           button("Log out", `login:${login.agent}/${login.profile}:out`, () => confirm(`Log ${label(login.agent, login.profile)} out of ${name}? This Mac stays logged in.`)
-            ? changeLogin(name, "logout", { agent: login.agent, profile: login.profile }, `Logged ${label(login.agent, login.profile)} out.`) : undefined, { class: "sm dang" })))))]
+            ? changeLogin(key, "logout", { agent: login.agent, profile: login.profile }, `Logged ${label(login.agent, login.profile)} out.`) : undefined, { class: "sm dang" })))))]
     // Only what the sandbox lacks; a login it has is re-imported from its own card above.
     const hostCards = [...["claude", "codex"].flatMap((agent) => (profiles?.[agent] ?? []).map((profile) => [agent, profile])), ["github", "~"]]
       .filter(([agent, profile]) => !has(agent, profile))
@@ -1295,16 +1353,16 @@ function loginsModal(name) {
       el("label", { class: "check" }, el("input", { type: "checkbox", id: "copy-setup", ...(copySetup ? { checked: "" } : {}), onchange: (event) => { copySetup = event.target.checked } }),
         " When adding or re-importing a Claude or Codex login, also copy its settings (CLAUDE.md, settings, skills), overwriting matching files in the sandbox"),
       profiles === undefined ? el("p", {}, "Reading this Mac's profiles…") : hostCards.length ? el("div", { class: "cards" }, ...hostCards) : el("p", { class: "muted" }, "The sandbox has every login this Mac has."),
-      resultFrom(name, "login:"),
+      resultFrom(key, "login:"),
       el("div", { class: "banner info" }, el("span", { class: "mk info" }), "A login's token is copied into the sandbox, where anything running there can read it and send it out. Asidee has no secret proxy yet.")]
   })
 }
 
-function t3Modal(name) {
-  sandboxModal(name, `T3 Code for ${name}`, (sandbox) => {
-    const button = sandboxButton(name), run = (action) => api("action", { extension: "t3", action, sandbox: name, values: {} })
+function t3Modal(key) {
+  sandboxModal(key, `T3 Code for ${shownName(key)}`, (sandbox) => {
+    const button = sandboxButton(key), run = (action) => api("action", { extension: "t3", action, ...actionTarget(key), values: {} })
     const failed = (reply) => `${reply.stdout}${reply.stderr}`.trim() || `Failed (exit ${reply.exitCode}).`
-    const access = ssh[name]
+    const access = ssh[key]
     return [el("ol", { class: "steps" },
       el("li", {}, el("b", {}, "Install T3 in the sandbox. "), el("span", { class: "muted" }, "Once per sandbox: this Mac's T3 version, with the sandbox's logins."),
         el("div", { class: "row", style: "margin-top:6px" }, button("Set up T3 Code", "t3:setup", async () => {
@@ -1318,11 +1376,11 @@ function t3Modal(name) {
           const done = JSON.parse(reply.stdout)
           return `Chrome ${done.chrome} ${done.browser === "installed" ? "installed" : "was already installed"}, with its libraries and fonts. Restart the T3 server if its browser pane was already open.`
         }, { class: "sm" }))),
-      el("li", {}, el("b", {}, "SSH. "), sshReady(name) ? el("span", { class: "word ok" }, "Ready.") : access?.error ? el("span", { class: "error" }, access.error)
+      el("li", {}, el("b", {}, "SSH. "), sshReady(key) ? el("span", { class: "word ok" }, "Ready.") : access?.error ? el("span", { class: "error" }, access.error)
         : el("span", { class: "muted" }, access ? "Set up SSH in the sandbox and add Asidee's Include line to your ~/.ssh/config." : "Checking…"),
-        !sshReady(name) && access ? el("div", { class: "row", style: "margin-top:6px" }, askButton("Set up SSH", name, "t3:ssh", () => sshSetup(name, true), { class: "sm" }, `Set up SSH for ${name}`), busy.has(`${name}:t3:ssh`) ? null : askLegend()) : null),
-      el("li", {}, el("b", {}, "Connect. "), "In T3 Code: Settings → Connections → Machine over SSH. Paste this as the SSH host:", command(`${name}.asidee`))),
-      resultFrom(name, "t3:"),
+        !sshReady(key) && access ? el("div", { class: "row", style: "margin-top:6px" }, askButton("Set up SSH", key, "t3:ssh", () => sshSetup(key, true), { class: "sm" }, `Set up SSH for ${shownName(key)}`), busy.has(`${key}:t3:ssh`) ? null : askLegend()) : null),
+      el("li", {}, el("b", {}, "Connect. "), "In T3 Code: Settings → Connections → Machine over SSH. Paste this as the SSH host:", command(aliasOf(key)))),
+      resultFrom(key, "t3:"),
       el("p", { class: "muted" }, "Logins added or removed under Logins reach T3 by themselves. ", button("Refresh T3 logins", "t3:sync", async () => {
         const reply = await run("sync"); if (reply.exitCode !== 0) return failed(reply)
         const done = JSON.parse(reply.stdout); return `T3 now has Claude ${done.claude} and Codex ${done.codex} logins.`
@@ -1361,8 +1419,8 @@ function extensionCommands(extension) {
     el("label", {}, "List or remove"), command("asd ext list"), extension.bundled ? command(`asd ext remove ${shq(extension.id)}`) : null].filter(Boolean)
 }
 
-function extensionModal(name, id) {
-  sandboxModal(name, `${extensions.find((extension) => extension.id === id)?.name ?? id} · ${name}`, (sandbox) => {
+function extensionModal(key, id) {
+  sandboxModal(key, `${extensions.find((extension) => extension.id === id)?.name ?? id} · ${shownName(key)}`, (sandbox) => {
     const extension = extensions.find((entry) => entry.id === id)
     if (!extension) return [el("p", {}, "This extension is gone.")]
     return [extension.description ? el("p", { class: "muted" }, extension.description) : null,
@@ -1481,50 +1539,51 @@ function newWorkspace() {
   })
 }
 
-function toolModal(name, which) {
+function toolModal(key, which) {
   const titles = { resize: "Resize", exec: "Run a command", ports: "Ports and connections", ssh: "SSH and editors", snapshot: "Save as template", commands: "Commands for a terminal" }
-  sandboxModal(name, `${titles[which]} · ${name}`, (sandbox) => {
-    const button = sandboxButton(name), running = sandbox.status === "running", access = ssh[name]
+  const { name, host } = ref(key), at = nameAt(key)
+  sandboxModal(key, `${titles[which]} · ${shownName(key)}`, (sandbox) => {
+    const button = sandboxButton(key), running = sandbox.status === "running", access = ssh[key]
     if (which === "resize") return [el("p", { class: "muted" }, "Blank keeps a limit as it is. CPUs, memory and processes change now when the engine allows; the disk limit applies at its next check."),
-      miniForm(name, "resize", "Resize", [["cpus", `CPUs (now ${sandbox.spec.cpus})`, "number"], ["memoryGb", `Memory GB (now ${sandbox.spec.memoryGb})`, "number"], ["pids", `Processes (now ${sandbox.spec.pids})`, "number"], ["diskGb", `Disk GB (now ${sandbox.spec.diskGb})`, "number"]], async (values) => {
+      miniForm(key, "resize", "Resize", [["cpus", `CPUs (now ${sandbox.spec.cpus})`, "number"], ["memoryGb", `Memory GB (now ${sandbox.spec.memoryGb})`, "number"], ["pids", `Processes (now ${sandbox.spec.pids})`, "number"], ["diskGb", `Disk GB (now ${sandbox.spec.diskGb})`, "number"]], async (values) => {
         const body = Object.fromEntries(Object.entries(values).filter(([, value]) => value !== ""))
-        const done = await api("resize", { name, ...body })
+        const done = await api("resize", { ...at, ...body })
         return done.changes.map((change) => `${change.limit}: ${change.from} → ${change.to}, ${change.applies}${change.note ? ` (${change.note})` : ""}`).join("\n") || "Nothing changed."
       })]
     if (which === "exec") return [el("p", { class: "muted" }, "Runs with sh -c inside the sandbox and shows what it printed. For anything interactive, use Terminal."),
-      miniForm(name, "exec", "Run", [["command", "Command"]], (values) => api("exec", { name, argv: ["sh", "-c", values.command] }))]
-    if (which === "snapshot") return [el("p", { class: "muted" }, "Saves this sandbox's files, without the usual login files, as a template new sandboxes can start from. A running sandbox pauses for the copy."),
-      miniForm(name, "snapshot", "Save", [["as", "Template name"]], async (values) => { const done = await api("snapshot", { name, as: values.as }); return `Saved template ${done.template.name}.\n${done.contents}` })]
+      miniForm(key, "exec", "Run", [["command", "Command"]], (values) => api("exec", { ...at, argv: ["sh", "-c", values.command] }))]
+    if (which === "snapshot") return [el("p", { class: "muted" }, `Saves this sandbox's files, without the usual login files, as a template new sandboxes${host ? ` on ${host}` : ""} can start from. A running sandbox pauses for the copy.`),
+      miniForm(key, "snapshot", "Save", [["as", "Template name"]], async (values) => { const done = await api("snapshot", { ...at, as: values.as }); return `Saved template ${done.template.name}.\n${done.contents}` })]
     if (which === "ports") {
-      const mine = forwards.filter((forward) => forward.name === name), myLinks = links.filter((link) => link.from === name || link.to === name), others = sandboxes.filter((other) => other.name !== name)
+      const mine = (host ? remoteForwards[host] ?? [] : forwards).filter((forward) => forward.name === name), myLinks = host ? [] : links.filter((link) => link.from === name || link.to === name), others = sandboxes.filter((other) => other.name !== name)
       return [el("h4", {}, "Open on this Mac"),
-        el("p", { class: "muted" }, "A port inside the sandbox, opened at 127.0.0.1 on this Mac. Any program on this Mac can connect. It closes when the sandbox or the Asidee service stops."),
+        el("p", { class: "muted" }, `A port inside the sandbox, opened at 127.0.0.1 on this Mac. Any program on this Mac can connect. It closes when the sandbox or the Asidee service stops${host ? `, or ${host} cannot be reached` : ""}.`),
         ...mine.map((forward) => el("div", { class: "card", style: "flex-direction:row;align-items:center" }, el("span", { class: "grow" }, `127.0.0.1:${forward.localPort} → port ${forward.port} inside`),
-          button("Close", `forward-${forward.id}`, () => api("forwardRemove", { id: forward.id }), { class: "sm dang" }))),
-        miniForm(name, "forward", "Open port", [["port", "Port inside", "number"], ["localPort", "Port on this Mac (blank: the same)", "number"]], async (values) => {
-          const made = await api("forwardAdd", { name, port: values.port, ...(values.localPort ? { localPort: values.localPort } : {}) })
-          return `Port ${made.port} in ${name} is open at 127.0.0.1:${made.localPort}.`
+          button("Close", `forward-${forward.id}`, () => api("forwardRemove", { id: forward.id, ...(host ? { host } : {}) }), { class: "sm dang" }))),
+        miniForm(key, "forward", "Open port", [["port", "Port inside", "number"], ["localPort", "Port on this Mac (blank: the same)", "number"]], async (values) => {
+          const made = await api("forwardAdd", { ...at, port: values.port, ...(values.localPort ? { localPort: values.localPort } : {}) })
+          return `Port ${made.port} in ${shownName(key)} is open at 127.0.0.1:${made.localPort}.`
         }),
         el("h4", {}, "Connect to another sandbox"),
-        el("p", { class: "muted" }, "Programs in one sandbox reach one port of another, and nothing else of it. A connection comes back after restarts."),
+        el("p", { class: "muted" }, host ? `Connections join two sandboxes of one machine, so ${name}'s are made on ${host}.` : "Programs in one sandbox reach one port of another, and nothing else of it. A connection comes back after restarts."),
         ...myLinks.map((link) => el("div", { class: "card" }, el("div", { class: "row" }, el("span", { class: "grow" }, `${link.from} → ${link.to}:${link.port} · ${link.state}${link.reason ? ` (${link.reason})` : ""} · reach it at ${link.address}`),
           button("Remove", `link-${link.from}-${link.to}-${link.port}`, () => api("linkRemove", { from: link.from, to: link.to, port: link.port }), { class: "sm dang" })), el("div", { class: "muted" }, link.trust))),
         // The other sandboxes on this machine; a stopped one can be connected, and the connection opens when it runs.
-        others.length ? miniForm(name, "link", "Connect", [["to", "To sandbox", "select", others.map((other) => [other.name, other.status === "running" ? other.name : `${other.name} (${other.status})`])], ["port", "Port", "number"]], async (values) => {
+        host ? null : others.length ? miniForm(key, "link", "Connect", [["to", "To sandbox", "select", others.map((other) => [other.name, other.status === "running" ? other.name : `${other.name} (${other.status})`])], ["port", "Port", "number"]], async (values) => {
           const made = await api("linkAdd", { from: name, to: values.to, port: values.port })
           return `Connected: programs in ${made.from} reach ${made.to}:${made.port} at ${made.address}. ${made.trust}`
         }) : el("p", { class: "muted" }, "There is no other sandbox to connect to."),
-        resultFrom(name, "forward-"), resultFrom(name, "link-")]
+        resultFrom(key, "forward-"), resultFrom(key, "link-")]
     }
     if (which === "ssh") return [el("p", { class: "muted" }, "An SSH server inside the sandbox, reached through Asidee with no open port. Set up writes only Asidee's own SSH files; adding the Include line also changes how ssh reads your ~/.ssh/config."),
       access ? el("p", {}, access.error ? access.error : `${access.batchReady ? "Ready" : "Not ready"}: ${access.alias}, user ${access.user}, home ${access.home}${access.loopbackForwarding ? ", loopback forwarding on" : ""}.`) : el("p", {}, "Checking…"),
-      el("div", { class: "row" }, button("Check again", "ssh", async () => { try { ssh[name] = await api("sshAccess", { name }) } catch (error) { ssh[name] = { error: error.message } } }, { class: "sm" }),
-        running ? button("Set up", "ssh-setup", () => sshSetup(name, false), { class: "sm" }) : null,
-        running ? askButton("Set up and add the Include line to ~/.ssh/config", name, "ssh-config", () => sshSetup(name, true), { class: "sm" }, `Set up SSH for ${name}`) : null),
-      running && !busy.has(`${name}:ssh-config`) ? askLegend() : null,
-      resultFrom(name, "ssh"), command(`ssh ${shq(access?.alias ?? `${name}.asidee`)}`), command(`asd ssh setup ${shq(name)} --write-config`)]
-    const word = shq(name)
-    return [command(`asd shell ${word}`), command(`asd claude ${word} PROFILE`), command(`asd exec ${word} -- uname -a`), command(`asd verify ${word}`), command(`asd remove ${word} --confirm ${word}`)]
+      el("div", { class: "row" }, button("Check again", "ssh", async () => { try { ssh[key] = await api("sshAccess", at) } catch (error) { ssh[key] = { error: error.message } } }, { class: "sm" }),
+        running ? button("Set up", "ssh-setup", () => sshSetup(key, false), { class: "sm" }) : null,
+        running ? askButton("Set up and add the Include line to ~/.ssh/config", key, "ssh-config", () => sshSetup(key, true), { class: "sm" }, `Set up SSH for ${shownName(key)}`) : null),
+      running && !busy.has(`${key}:ssh-config`) ? askLegend() : null,
+      resultFrom(key, "ssh"), command(`ssh ${shq(aliasOf(key))}`), command(`${asdFor(host)} ssh setup ${shq(name)} --write-config`)]
+    const word = shq(name), asd = asdFor(host)
+    return [command(`${asd} shell ${word}`), command(`${asd} claude ${word} PROFILE`), command(`${asd} exec ${word} -- uname -a`), command(`${asd} verify ${word}`), command(`${asd} remove ${word} --confirm ${word}`)]
   })
 }
 
@@ -1544,13 +1603,14 @@ const gone = (name, list, back) => el("div", { class: "empty" }, el("h2", {}, `$
 function render() {
   syncPath()
   // A count only once it is known: the machines are read when their page is open.
-  const counts = { sandboxes: sandboxes.length, workspaces: workspaces.length, templates: templates.length, extensions: extensions.length, machines: machines?.machines.filter(({ machine }) => machine.host.name !== "local").length }
+  const counts = { sandboxes: sandboxes.length + remotes.length, workspaces: workspaces.length, templates: templates.length, extensions: extensions.length, machines: machines?.machines.filter(({ machine }) => machine.host.name !== "local").length }
   for (const [key, count] of Object.entries(counts)) document.getElementById(`${key}-tab`).setAttribute("data-count", count === undefined ? "" : String(count))
   document.getElementById("sandboxes").hidden = Boolean(page); document.getElementById("sandbox-page").hidden = !page
-  region("sandboxes", [sandboxes, engines.map((engine) => [engine.ready, engine.capabilities?.kernelIsolation])], sandboxList)
-  const current = sandboxes.find((sandbox) => sandbox.name === page)
-  region("sandbox-page", !current ? [page, connected] : [current, engines.map((engine) => [engine.label, engine.capabilities?.kernelIsolation]), extensions, forwards, links, ssh[page], sandboxLogins[page], [...busy], output[page], from[page], showAll.has(page), settings?.diskWatchSeconds, Math.floor(Date.now() / 60000)],
-    (node) => { if (current) node.append(sandboxPage(current)); else if (page && connected) node.append(gone(page, "Sandboxes", () => { page = null; render() })) })
+  region("sandboxes", [sandboxes, remotes, engines.map((engine) => [engine.ready, engine.capabilities?.kernelIsolation])], sandboxList)
+  // A sandbox of another machine is known once the machines were read.
+  const current = page ? findSandbox(page) : undefined, known = page && (!ref(page).host || remotesRead)
+  region("sandbox-page", !current ? [page, connected, known] : [current, engines.map((engine) => [engine.label, engine.capabilities?.kernelIsolation]), extensions, forwards, links, remoteForwards[current.host], ssh[page], sandboxLogins[page], [...busy], output[page], from[page], showAll.has(page), settings?.diskWatchSeconds, Math.floor(Date.now() / 60000)],
+    (node) => { if (current) node.append(sandboxPage(current)); else if (known && connected) node.append(gone(shownName(page), "Sandboxes", () => { page = null; render() })) })
   drawUsage()
 
   region("workspaces", [workspaces, workspaceProblem, [...busy], output, about?.platform], (list) => {
@@ -1876,7 +1936,7 @@ async function refresh() {
     document.getElementById("notice").replaceChildren(el("div", { class: "banner bad", style: "margin-bottom:16px" }, token ? error.message : signIn()))
   }
   await Promise.all([
-    readSettings(),
+    readSettings().then(() => tab === "sandboxes" || tab === "machines" ? refreshMachines() : null),
     api("usage").then((data) => { usage = data; usageProblem = "" }, (error) => { usage = []; usageProblem = error.message }),
     api("forwardList").then((data) => { forwards = data }, () => { forwards = [] }),
     api("linkList").then((data) => { links = data }, () => { links = [] }),
@@ -1886,17 +1946,27 @@ async function refresh() {
     tab === "settings" || tab === "setup" || !engines.some((engine) => engine.ready) || Date.now() - enginesAt > 15000 ? api("engines").then((data) => { engines = data; enginesAt = Date.now() }, () => {}) : null,
     tab === "settings" || !about ? api("about").then((data) => { about = data }, () => {}) : null,
     tab === "extensions" ? api("extensions").then((data) => { extensions = data.extensions; extensionErrors = data.errors ?? []; available = data.available ?? []; extensionsRead = true }, () => {}) : null,
-    tab === "machines" ? refreshMachines() : null,
     installed("logins") && !profiles ? readProfiles() : null,
   ])
   render()
 }
 
+// The machines, and the public sandboxes of the others for the Sandboxes list. A machine that does not answer keeps its
+// last-known sandboxes, marked offline; a fleet that cannot be read keeps the last list.
 async function refreshMachines() {
-  if (!settings?.experimental) { machines = undefined; remoteUsage = {}; machineProblem = "Other machines are experimental and off on this Mac. Turn on Experimental features in Settings, then add a machine in a terminal."; return }
-  try { machines = await api("fleet"); machineProblem = "" } catch (error) { machines = undefined; machineProblem = error.message }
+  if (!settings?.experimental) { machines = undefined; remotes = []; remotesRead = true; remoteUsage = {}; machineProblem = "Other machines are experimental and off on this Mac. Turn on Experimental features in Settings, then add a machine in a terminal."; return }
+  try {
+    machines = await api("fleet"); machineProblem = ""
+    remotes = machines.machines.filter(({ machine }) => machine.host.name !== "local").flatMap(({ machine, cached }) => (cached?.sandboxes ?? [])
+      .map((sandbox) => ({ ...sandbox, host: machine.host.name, ...(machine.state === "online" ? {} : { offline: true }) })))
+  } catch (error) { machines = undefined; machineProblem = error.message }
+  remotesRead = true
   const online = (machines?.machines ?? []).filter(({ machine }) => machine.host.name !== "local" && machine.state === "online").map(({ machine }) => machine.host.name)
-  remoteUsage = Object.fromEntries(await Promise.all(online.map((host) => api("usage", { host }).then((data) => [host, data], (error) => [host, `Use unknown: ${error.message}`]))))
+  const open = page && ref(page).host
+  await Promise.all([
+    Promise.all(online.map((host) => api("usage", { host }).then((data) => [host, data], (error) => [host, `Use unknown: ${error.message}`]))).then((entries) => { remoteUsage = Object.fromEntries(entries) }),
+    open && online.includes(open) ? api("forwardList", { host: open }).then((data) => { remoteForwards[open] = data }, () => { remoteForwards[open] = [] }) : null,
+  ])
 }
 
 // Template prepare is one daemon method, the same the CLI calls; this form only collects its options.
