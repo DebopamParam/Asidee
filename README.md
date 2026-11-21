@@ -105,7 +105,8 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
 - `asd claude demo [PROFILE]` and `asd codex demo [PROFILE]` open the agent in `~/workspace` with an imported login.
   The dashboard opens the same in a terminal window on the Mac.
 - The daemon, the CLI with `--json`, a web dashboard, and extensions. The dashboard is a list of sandboxes with a page
-  for each, and a first run that tests the engine with a throwaway sandbox; terminal-only steps such as `asd setup` show
+  for each, a list of extensions with a page for each (its actions as forms, with the same `asd ext run` command
+  beneath), and a first run that tests the engine with a throwaway sandbox; terminal-only steps such as `asd setup` show
   as a command it waits for. What it does to the Mac itself (workspaces, the custom terminal command, `~/.ssh/config`,
   machines, daemon stop) has a ⌘ on its button and runs only after Allow in a dialog there, which denies by itself
   after 60 seconds; where no dialog can be shown, the page offers the CLI command. Every copyable command quotes its

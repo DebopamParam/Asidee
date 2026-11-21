@@ -111,7 +111,9 @@ their newly measured checks. Every stored `lastVerify` returned by list/get, for
 after create/start/stop/resize, is historical (`historical` in `core/checks.ts`): its results have current status
 `unknown` and no current evidence, and the detail reads `Measured <at>: <status> (<evidence>). <detail>`. The dashboard
 reads the measured status from that detail and shows it as a past result with its time: a past pass is a grey outline,
-never the green mark it keeps for results just measured; a remote sandbox whose host stopped answering adds "Last
+never the green mark it keeps for results just measured. A check that only reports (`info`: no links to measure, Docker
+not asked for) neither passes nor fails: the headline counts it apart ("11 required checks passed · 1 has nothing to
+pass"), and its row shows the first words of its detail ("No links") instead of a status; a remote sandbox whose host stopped answering adds "Last
 contact lost." in front. The CLI and dashboard label this even with the checklist collapsed. The saved
 manifest retains the original measurement. This deliberately conservative rule also covers an engine restart with
 live restore, engine replacement/reconfiguration and a daemon restart without pretending that container start time
@@ -1056,11 +1058,15 @@ turns its animation off. A sidebar holds five places and Settings:
   needs a look first; "Show all" gives every stored result, required and good to know), Use (CPU, memory, processes,
   disk, live), Agents (Claude Code, Codex, Terminal, logins), Connect (ports open on this Mac, connections to other
   sandboxes, SSH), and a part for each installed extension that acts on a sandbox. Resize, a command run with `sh -c`,
-  save as template, CLI commands and Remove are under ⋯. A create that did not finish shows what ran, what failed, when
-  it is removed (`unfinished.removeAt`), and Retry, Don't remove (`createKeep`) and Remove now.
-- **Workspaces**, **Templates** (with the coding-tools template form), **Extensions** (optional; none come installed;
-  every installed extension's actions, a sandbox action asks which sandbox; Install for each bundled extension not
-  installed, Remove for an installed one) and **Machines** (shown only with `experimental` on).
+  save as template, CLI commands and Remove are under ⋯. The line under its name says the template it was made from
+  (`template.name`). A create that did not finish shows what ran, what failed, when it is removed
+  (`unfinished.removeAt`), and Retry, Don't remove (`createKeep`) and Remove now.
+- **Workspaces**, **Templates** (with the coding-tools template form), **Extensions** and **Machines** (shown only with
+  `experimental` on). Extensions are optional and none come installed. Their page lists the installed ones like the
+  sandboxes (name, what it does, how many actions), then Install for each bundled one not installed. A row opens the
+  extension's own page: its folder on hover, Remove under ⋯, a card per action with its fields (a sandbox action asks
+  which running sandbox), Run, and the same run as an `asd ext run` command beneath it, then every command for a
+  terminal at the bottom. A machine's commands open on the right from a Commands link.
 - **Settings**: every setting above, the engines with `asd setup` as commands, what this daemon is, and a table of the
   plain words the page uses with the exact terms.
 

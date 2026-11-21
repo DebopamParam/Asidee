@@ -164,8 +164,10 @@
   th, td { text-align: left; padding: 8px 12px 8px 0; border-bottom: 1px solid var(--line-2); vertical-align: top; }
   th { font-weight: 500; color: var(--muted); width: 180px; }
   tr:last-child > * { border-bottom: none; }
+  /* A read-only "show more": a link, never a row of actions. */
   details.more { margin-top: 12px; }
-  details.more > summary { cursor: pointer; color: var(--muted); font-weight: 500; width: max-content; }
+  details.more > summary { cursor: pointer; color: var(--accent-ink); font-weight: 500; width: max-content; list-style: none; }
+  details.more > summary::-webkit-details-marker { display: none; }
   details.more[open] > summary { margin-bottom: 8px; }
   .ask { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .waiting { font-size: 12px; color: #3f3f3d; max-width: 420px; }
@@ -244,6 +246,23 @@
   .ws-sub { margin-top: 4px; overflow-wrap: anywhere; }
   .ws-body { padding: 14px 16px 16px; }
   .ws-foot { padding-top: 4px; } .ws-foot > .grow { min-width: min(100%, 280px); }
+  .list.exts .lrow { grid-template-columns: minmax(120px, 1fr) minmax(0, 2.6fr) auto 14px; }
+  .list.exts .desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .list.exts .grp { padding: 12px 16px 6px; font-size: 12px; color: var(--muted); border-bottom: 1px solid #f2f2f0; }
+  .list.exts .grp:not(:first-child) { border-top: 1px solid #efefed; }
+  .act-card { padding: 16px 18px 12px; } .act-card.stack > * + * { margin-top: 8px; }
+  .act-card .item-head h3 { font-size: 15px; }
+  .act-card .fields { grid-template-columns: repeat(auto-fill, minmax(180px, 260px)); }
+  /* The command, quietly, as the card's footer. */
+  form.action .same { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border-top: 1px solid var(--line-2); margin-top: 14px; padding-top: 8px; }
+  form.action .same > label { margin: 0; flex: none; }
+  form.action .same > div { flex: 1; min-width: min(100%, 240px); }
+  form.action .same .cmd { margin: 0; max-width: none; }
+  form.action .same .cmd code { background: none; border-color: transparent; padding: 4px 0; color: var(--muted); font-size: 12px; }
+  form.action .same .cmd button { height: 26px; padding: 0 10px; font-size: 12px; }
+  .tag { display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 6px; background: #0000000a; color: #5f5f5c; font-size: 12px; }
+  .ext-foot { border-top: 1px solid var(--line-2); margin-top: 14px !important; padding-top: 8px; }
+  .item .ext-foot { margin-top: 10px; }
   .nested { margin: 10px 0 0 18px; padding-left: 14px; border-left: 2px dashed #e0665e66; }
   .setting { display: grid; grid-template-columns: minmax(180px, 240px) 1fr; gap: 6px 20px; align-items: start; padding: 14px 18px; border-bottom: 1px solid var(--line-2); }
   .setting:last-child { border-bottom: none; }
@@ -283,6 +302,8 @@
     nav.side button { width: auto; flex: none; } nav.side .end { margin: 0; }
     main { padding: 18px 16px 56px; }
     .list .lrow, .list.typed .lrow { grid-template-columns: 18px minmax(0, 1fr) 14px; row-gap: 2px; padding: 10px 16px; }
+    .act-card .fields { grid-template-columns: minmax(0, 1fr); }
+    .list.exts .lrow { grid-template-columns: minmax(0, 1fr) auto 14px; } .list.exts .lrow > .desc { grid-column: 1 / 3; grid-row: 2; }
     .list .lrow > .state-col { grid-column: 2; grid-row: 2; } .list .lrow > .kind-col, .list .lhead { display: none; } .list .lrow > .chev { grid-row: 1 / 3; grid-column: 3; }
     .setting { grid-template-columns: 1fr; }
     .setup { grid-template-columns: 1fr; grid-template-rows: auto 1fr; margin: -18px -16px -56px; } .rail { border-right: 0; border-bottom: 1px solid #efefed; padding: 12px 16px; display: flex; overflow-x: auto; gap: 4px; } .rail .small { display: none; } .rail button { width: auto; flex: none; }
@@ -368,9 +389,12 @@
   </section>
 
   <section id="extension-section" aria-labelledby="extensions-tab" hidden>
-    <div class="head"><h1>Extensions</h1></div>
-    <p class="lead">Extensions are optional add-ons. Each adds buttons to a sandbox, such as copying in your logins or setting up T3 Code. None come installed. An extension's action runs one of its commands on this Mac, with <code>asd</code> first on its PATH.</p>
-    <div id="extensions"></div>
+    <div id="extension-list">
+      <div class="head"><h1>Extensions</h1></div>
+      <p class="lead">Extensions are optional add-ons. Each adds buttons to a sandbox, such as copying in your logins or setting up T3 Code. None come installed. An extension's action runs one of its commands on this Mac, with <code>asd</code> first on its PATH.</p>
+      <div id="extensions"></div>
+    </div>
+    <div id="extension-page" hidden></div>
   </section>
 
   <section id="settings-section" aria-labelledby="settings-tab" hidden>
@@ -444,7 +468,8 @@
       <div><label for="f-name">Name</label><input id="f-name" name="name" required pattern="[a-z0-9][a-z0-9-]{0,30}" placeholder="my-app" autocomplete="off"></div>
       <div><label>Starts from<span class="help" tabindex="0" data-tip="What is inside at first: a template you saved, or the built-in image.">?</span></label><select id="f-template" name="template" hidden></select><div id="template-pills" class="pills" role="radiogroup" aria-label="Starts from"></div></div>
       <div><label>Size</label><div class="pills" id="size-summary"></div></div>
-      <details class="more" id="create-advanced"><summary>Change size, image or engine</summary>
+      <div><button type="button" class="link" id="create-advanced-toggle" aria-expanded="false" aria-controls="create-advanced">Change size, image or engine</button>
+      <div id="create-advanced" hidden style="margin-top:10px">
         <div class="fields">
           <div><label for="f-cpus">CPUs</label><input id="f-cpus" name="cpus" type="number" step="0.25"></div>
           <div><label for="f-memory">Memory (GB)</label><input id="f-memory" name="memoryGb" type="number" step="0.25"></div>
@@ -454,7 +479,7 @@
           <div><label for="f-engine">Engine<span class="help" tabindex="0" data-tip="The app on this Mac that sandboxes run on.">?</span></label><select id="f-engine" name="engine"></select></div>
           <div><label for="f-docker">Docker inside</label><select id="f-docker" name="dockerInside"><option value="">Default</option><option value="true">On</option><option value="false">Off</option></select></div>
         </div>
-      </details>
+      </div></div>
       <div id="create-gpu" hidden><label class="check"><input type="checkbox" id="f-gpu" name="gpu" value="true"> <span class="kind gpu">GPU container</span></label>
         <p class="muted" style="margin-top:6px">Not a sandbox: it runs on this engine's own Linux kernel, so a bug in that kernel or in the NVIDIA driver is a way onto the machine. It runs as uid 1000 with no admin powers and gets the NVIDIA GPU; its network limits, memory, process and CPU limits and disk limit check are a sandbox's. No Docker inside, templates, connections or SSH.</p></div>
       <div id="create-setup"></div>
@@ -474,6 +499,15 @@ if (hash.get("token")) { sessionStorage.setItem("asidee-token", hash.get("token"
 const token = sessionStorage.getItem("asidee-token") ?? ""
 // Each status in one word and one mark; "Note" is only ever a disclosure.
 const STATUS = { pass: ["ok", "Passed"], weak: ["weak", "Partly"], fail: ["fail", "Failed"], unsupported: ["na", "Not available"], unknown: ["unk", "Not checked"], info: ["info", "Note"] }
+// A check that only reports (nothing to pass or fail: no links to measure, Docker not asked for) says what it found, in
+// its detail's first words; the whole detail is on hover.
+function statusWord(status, detail = "") {
+  if (status !== "info" || !detail.trim()) return (STATUS[status] ?? STATUS.unknown)[1]
+  const first = detail.trim().split(/[:;(]|\.(?:\s|$)/)[0].trim()
+  if (first.length <= 40) return first
+  const clause = first.split(",")[0]
+  return `${(clause.length <= 40 ? clause : first.slice(0, 38)).trimEnd()}…`
+}
 const TABS = { sandboxes: "sandbox-section", workspaces: "workspace-section", templates: "template-section", extensions: "extension-section", machines: "machine-section", settings: "settings-section" }
 // expanded: groups opened by hand, which the browser keeps open itself.
 let checklist = [], gpuChecklist = [], extensions = [], extensionErrors = [], available = [], expanded = new Set(), busy = new Set(), output = {}, tab = "sandboxes"
@@ -481,6 +515,8 @@ let checklist = [], gpuChecklist = [], extensions = [], extensionErrors = [], av
 let from = {}
 // page: the sandbox whose page is open, else the list.
 let page = null
+// The extension whose page is open; null for the list.
+let extPage = null
 let sandboxes = [], engines = [], workspaces = [], workspaceProblem = "", forwards = [], links = [], ssh = {}, templates = [], templateProblem = ""
 // enginesAt: when the engines were last read; the island says Ready only while one is.
 let enginesAt = 0
@@ -571,8 +607,9 @@ function section(name) {
   window.scrollTo?.(0, 0)
   void refresh()
 }
-for (const key of Object.keys(TABS)) document.getElementById(`${key}-tab`).addEventListener("click", () => { if (key === "sandboxes") page = null; section(key) })
+for (const key of Object.keys(TABS)) document.getElementById(`${key}-tab`).addEventListener("click", () => { if (key === "sandboxes") page = null; if (key === "extensions") extPage = null; section(key) })
 const openSandbox = (name) => { page = name; section("sandboxes") }
+const openExtension = (id) => { extPage = id; section("extensions") }
 
 // The island: one indicator for each wait, the newest shown. A wait on this Mac's dialog empties over its 60 s.
 const waits = new Map()
@@ -726,13 +763,29 @@ function readable(text) {
   return Object.entries(value).map(([key, field]) => `${key}: ${field && typeof field === "object" ? JSON.stringify(field) : field}`).join("\n")
 }
 
-function actionForm(extension, action, sandbox) {
+// The same action in a terminal: `asd ext run EXTENSION ACTION [SANDBOX] --set FIELD=VALUE`, from what the form holds.
+// A field left blank, or a checkbox left as its default, is left out.
+function extCommand(extension, action, values = {}, target) {
+  const parts = ["asd ext run", shq(extension.id), shq(action.id)]
+  if (action.scope === "sandbox") parts.push(target ? shq(target) : "SANDBOX")
+  for (const field of action.fields) {
+    const value = values[field.id] ?? (field.default === undefined ? "" : String(field.default))
+    if (value === "" || field.type === "checkbox" && value === String(field.default === true)) continue
+    parts.push("--set", shq(`${field.id}=${value}`))
+  }
+  return parts.join(" ")
+}
+// run: the button's words, when the form is the only one in its panel.
+function actionForm(extension, action, sandbox, run = action.label) {
   const key = sandbox ? sandbox.name : `ext:${extension.id}`
-  const form = el("form", { class: "action", onsubmit: (event) => {
+  const read = () => Object.fromEntries(action.fields.map((field) => [field.id, field.type === "checkbox" ? String(form.elements[field.id].checked) : form.elements[field.id].value]))
+  const target = () => sandbox ? sandbox.name : form.elements["asidee-sandbox"]?.value
+  const commandBox = el("div")
+  const showCommand = () => { const text = extCommand(extension, action, read(), target()); if (commandBox.textContent !== `${text}Copy`) commandBox.replaceChildren(command(text)) }
+  const form = el("form", { class: "action", oninput: showCommand, onchange: showCommand, onsubmit: (event) => {
     event.preventDefault()
-    const values = Object.fromEntries(action.fields.map((field) => [field.id, field.type === "checkbox" ? String(form.elements[field.id].checked) : form.elements[field.id].value]))
-    const target = sandbox ? sandbox.name : form.elements["asidee-sandbox"]?.value
-    act(key, `${extension.id}/${action.id}`, () => api("action", { extension: extension.id, action: action.id, ...(action.scope === "sandbox" ? { sandbox: target } : {}), values }), { label: action.label, value: target ?? extension.name })
+    const values = read(), on = target()
+    act(key, `${extension.id}/${action.id}`, () => api("action", { extension: extension.id, action: action.id, ...(action.scope === "sandbox" ? { sandbox: on } : {}), values }), { label: action.label, value: on ?? extension.name })
   } })
   // Each field is labelled above it; checkboxes go on a line of their own, and the button closes the action.
   const inputs = el("div", { class: "fields" }), checks = el("div", { class: "row" })
@@ -751,8 +804,10 @@ function actionForm(extension, action, sandbox) {
   }
   const running = busy.has(`${key}:${extension.id}/${action.id}`)
   form.append(...(inputs.childElementCount ? [inputs] : []), ...(checks.childElementCount ? [checks] : []),
-    el("div", { class: "row" }, el("button", running ? { disabled: "" } : {}, running ? "Running…" : action.label), action.description ? el("span", { class: "muted grow" }, action.description) : null),
-    result(key, `${extension.id}/${action.id}`))
+    el("div", { class: "row" }, el("button", running ? { disabled: "" } : {}, running ? "Running…" : run), run === action.label && action.description ? el("span", { class: "muted grow" }, action.description) : null),
+    result(key, `${extension.id}/${action.id}`),
+    el("div", { class: "same" }, el("label", { class: "muted small" }, "The same in a terminal"), commandBox))
+  showCommand()
   return form
 }
 
@@ -864,8 +919,10 @@ function tally(results, sandbox, past) {
   const total = Object.values(counts).reduce((sum, count) => sum + count, 0)
   return { ...counts, total, failed }
 }
+// A required check that only reports (status info) neither passed nor failed, so it is not counted as passed.
 const verdict = (count) => count.fail ? `${plural(count.fail, "required check")} failed` : count.unknown ? `${plural(count.unknown, "required check")} not checked`
-  : count.weak || count.unsupported ? `${count.pass} of ${count.total} required checks passed` : `All ${count.total} required checks passed`
+  : count.weak || count.unsupported ? `${count.pass} of ${count.total} required checks passed`
+  : count.info ? `${plural(count.pass, "required check")} passed · ${count.info} ${count.info === 1 ? "has" : "have"} nothing to pass` : `All ${count.total} required checks passed`
 // One status icon for a sandbox, a few words, and what they rest on (on hover).
 function stateOf(sandbox) {
   if (sandbox.status === "damaged") return ["fail", "Damaged", sandbox.stopReason ?? ""]
@@ -942,7 +999,7 @@ function checksCard(sandbox) {
   const notable = rows.filter((row) => row.required ? row.past.status !== "pass" : row.past.status === "weak" || row.past.status === "info" || row.past.status === "fail").sort((a, b) => rank(a) - rank(b))
   const all = showAll.has(name), shown = all ? rows : notable
   const row = ({ check, past }) => {
-    const [mark, word] = STATUS[past.status] ?? STATUS.unknown
+    const [mark] = STATUS[past.status] ?? STATUS.unknown, word = statusWord(past.status, past.detail)
     const right = check.id === "disk" && past.status === "weak" ? [el("span", { class: "word weak" }, word), ` · checked every ${settings?.diskWatchSeconds ?? 5} s · `, term("not a hard cap", "A sandbox can go past its limit between checks. It is stopped at the next one.")]
       : [quiet(word, `${past.detail}${past.method ? `\nHow: ${past.method}` : ""}`)]
     // A past pass is grey: green is kept for a result just measured.
@@ -990,6 +1047,8 @@ function openAgent(name, agent) {
   act(name, "open-agent", () => terminal(name, agent, undefined, profile && profile !== "~" ? profile : undefined), { label: name, value: `opening ${AGENT[agent]}` })
 }
 
+// The live sandbox carries the template it was made from as an object; a spec may still name it as a string.
+function templateName(sandbox) { return sandbox.template?.name ?? sandbox.spec?.template }
 function sandboxPage(sandbox) {
   const name = sandbox.name, button = sandboxButton(name), running = sandbox.status === "running"
   if (running && installed("logins") && !(name in sandboxLogins) && !readingLogins.has(name)) readLogins(name)
@@ -1005,7 +1064,7 @@ function sandboxPage(sandbox) {
           installed("logins") ? el("div", { class: "sep" }) : null, installed("logins") ? item("Pick a login…", () => agentModal(name)) : null], "acc") : null,
         sandbox.status === "damaged" ? null : running ? button("Stop", "stop", () => api("stop", { name })) : button("Start", "start", () => api("start", { name }), { class: "acc" }),
         sandbox.status === "damaged" ? removeButton(name) : menu("⋯", tools))),
-    sandbox.spec ? el("p", { class: "sub" }, [sandbox.template ? `from ${sandbox.template}` : null, plural(sandbox.spec.cpus, "CPU"), `${sandbox.spec.memoryGb} GB memory`, `${sandbox.spec.diskGb} GB disk`, sandbox.engine].filter(Boolean).join(" · ")) : null)
+    sandbox.spec ? el("p", { class: "sub" }, [templateName(sandbox) ? `from ${templateName(sandbox)}` : null, plural(sandbox.spec.cpus, "CPU"), `${sandbox.spec.memoryGb} GB memory`, `${sandbox.spec.diskGb} GB disk`, sandbox.engine].filter(Boolean).join(" · ")) : null)
   const banners = el("div", { class: "page-banners" })
   if (sandbox.spec?.gpu) banners.append(el("div", { class: "banner warn" }, "Not a sandbox: it runs on the machine's own Linux kernel (runc), so a kernel or NVIDIA driver bug is a way onto the machine."))
   if (sandbox.activity) banners.append(el("div", { class: "banner info" }, `${sandbox.activity}…`))
@@ -1134,6 +1193,37 @@ function t3Modal(name) {
         const done = JSON.parse(reply.stdout); return `T3 now has Claude ${done.claude} and Codex ${done.codex} logins.`
       }, { class: "sm" }))]
   })
+}
+
+// Where an action acts, as a quiet tag.
+const actsOn = (action) => action.scope === "sandbox" ? "On a sandbox" : "On this Mac"
+const actionCount = (extension) => extension.actions.length ? plural(extension.actions.length, "action") : "No actions"
+// An extension's page: what it is, a card for each action with its form, and its commands for a terminal.
+function extensionPage(extension) {
+  const key = `ext:${extension.id}`, running = sandboxes.some((entry) => entry.status === "running")
+  const node = el("div", { class: "detail", "data-extension": extension.id },
+    el("div", { class: "crumb" }, el("button", { type: "button", class: "link", onclick: () => { extPage = null; render() } }, "Extensions /")),
+    el("div", { class: "head", style: "margin-bottom:0" }, el("h1", {}, extension.dir ? quiet(extension.name, `In ${extension.dir}`) : extension.name),
+      extension.bundled ? el("div", { class: "end" }, menu("⋯", [item("Remove", () => act(key, "remove", () => api("extensionRemove", { id: extension.id }).then(() => `Removed ${extension.name}.`), { label: extension.name, value: "remove" }), { class: "dang" })])) : null),
+    el("p", { class: "sub" }, extension.description ?? actionCount(extension)),
+    extension.hooks?.postCreate ? el("p", { class: "muted small", style: "margin-top:4px" }, `After each create it runs: ${extension.hooks.postCreate.join(" ")}`) : null,
+    result(key, "remove"))
+  node.append(el("div", { class: "col", style: "margin-top:20px" }, ...extension.actions.map((action) => el("div", { class: "lp pad stack act-card", "data-action": action.id },
+    el("div", { class: "item-head" }, el("h3", {}, quiet(action.label, `Runs ${action.run.join(" ")}`)), el("span", { class: "tag" }, actsOn(action))),
+    action.description ? el("p", { class: "muted" }, action.description) : null,
+    action.scope === "sandbox" && !running ? el("p", { class: "error" }, "No sandbox is running. Start one first.") : null,
+    actionForm(extension, action, undefined, "Run")))))
+  if (!extension.actions.length) node.append(el("div", { class: "lp pad muted", style: "margin-top:20px" }, "No actions."))
+  node.append(el("h4", { style: "margin-top:28px" }, "In a terminal"), el("div", { class: "lp pad stack", id: "extension-commands" }, ...extensionCommands(extension)))
+  return node
+}
+// Each action as a command to fill in, then listing and removing. --set gives a field its value; a field with no
+// default shows its name in capitals, a checkbox its default.
+function extensionCommands(extension) {
+  const template = (action) => [`asd ext run ${shq(extension.id)} ${shq(action.id)}`, action.scope === "sandbox" ? "SANDBOX" : null,
+    ...action.fields.map((field) => `--set ${shq(`${field.id}=${field.type === "checkbox" ? field.default === true : field.default ?? field.id.toUpperCase()}`)}`)].filter(Boolean).join(" ")
+  return [...extension.actions.flatMap((action) => [el("label", {}, action.label), command(template(action))]),
+    el("label", {}, "List or remove"), command("asd ext list"), extension.bundled ? command(`asd ext remove ${shq(extension.id)}`) : null].filter(Boolean)
 }
 
 function extensionModal(name, id) {
@@ -1366,46 +1456,32 @@ function render() {
           const typed = prompt(`Forget the machine ${remote}? Type its name to confirm.`)
           if (typed !== null) act(`machine:${remote}`, "remove", () => api("hostRemove", { name: remote, confirm: typed }).then(() => `Forgot ${remote}.`), { label: `Forget ${remote}`, mac: true })
         } }), busy.has(`machine:${remote}:remove`) ? `${WAITING}…` : "Forget"), busy.has(`machine:${remote}:remove`) ? waitingNote() : askLegend())), result(`machine:${remote}`),
-        group(`machine-commands:${remote}`, "Commands for a terminal", command(`asd --host ${shq(remote)} list`), command(`asd --host ${shq(remote)} create NAME`), command(`asd host remove ${shq(remote)} --confirm ${shq(remote)}`)))
+        el("div", { class: "ext-foot" }, el("button", { type: "button", class: "link small", onclick: () => openModal(`Commands · ${remote}`, () => [command(`asd --host ${shq(remote)} list`), command(`asd --host ${shq(remote)} create NAME`), command(`asd host remove ${shq(remote)} --confirm ${shq(remote)}`)]) }, "Commands")))
       card.append(entry)
     }
     list.append(card)
   })
 
+  if (extPage && !extensions.some((extension) => extension.id === extPage)) extPage = null
+  document.getElementById("extension-list").hidden = Boolean(extPage); document.getElementById("extension-page").hidden = !extPage
+  const openExt = extensions.find((extension) => extension.id === extPage)
+  region("extension-page", openExt ? [openExt, sandboxes.filter((entry) => entry.status === "running").map((entry) => entry.name), [...busy], output[`ext:${openExt.id}`], about?.platform] : null,
+    (node) => { if (openExt) node.append(extensionPage(openExt)) })
   region("extensions", [extensions, extensionErrors, available, sandboxes.filter((entry) => entry.status === "running").map((entry) => entry.name), [...busy], output], (list) => {
     for (const problem of extensionErrors) list.append(el("div", { class: "banner bad", style: "margin-bottom:12px" }, problem))
     const button = (label, key, what, task, cls = "sm") => el("button", { type: "button", class: cls, ...(busy.has(`${key}:${what}`) ? { disabled: "" } : {}), onclick: () => act(key, what, task, { label: key.slice(4), value: label.toLowerCase() }) }, busy.has(`${key}:${what}`) ? "Working…" : label)
     list.append(el("h4", {}, `Installed · ${extensions.length}`))
     if (!extensions.length) list.append(el("div", { class: "lp pad muted" }, "None installed. Asidee works without any."))
-    // Grouped in the buckets a sandbox's page uses, then the rest.
+    // Grouped in the buckets a sandbox's page uses, then the rest; a row opens the extension's page.
     const sorted = [...BUCKETS.map((bucket) => [bucket.name, extensions.filter((extension) => bucketOf(extension.id) === bucket.id)]), ["Other", extensions.filter((extension) => bucketOf(extension.id) === "other")]].filter(([, members]) => members.length)
-    if (sorted.length) {
-      const card = el("div", { class: "lp" })
-      for (const [heading, members] of sorted) {
-        card.append(el("div", { class: "item", style: "padding-bottom:0" }, el("h4", { style: "margin:0" }, heading)))
-        for (const extension of members) {
-          const key = `ext:${extension.id}`
-          // The extension on one line with its Remove; each action a closed group.
-          const entry = el("div", { class: "item" }, el("div", { class: "item-head" }, el("span", { class: "name" }, extension.name), el("span", { class: "muted" }, extension.id),
-            el("div", { class: "end" }, extension.bundled ? button("Remove", key, "remove", () => api("extensionRemove", { id: extension.id }).then(() => `Removed ${extension.name}.`), "sm dang") : null)),
-            extension.description ? el("div", { class: "muted" }, extension.description) : null,
-            extension.dir ? el("div", { class: "muted" }, `In ${extension.dir}`) : null,
-            extension.hooks?.postCreate ? el("div", { class: "muted" }, `After each create it runs: ${extension.hooks.postCreate.join(" ")}`) : null)
-          if (extension.actions.length) entry.append(...extension.actions.map((action) => group(`ext-action:${extension.id}:${action.id}`, `${action.label}${action.scope === "sandbox" ? " (on a sandbox)" : ""}`,
-            el("div", { class: "muted mono" }, `Runs: ${action.run.join(" ")}`), actionForm(extension, action))))
-          else entry.append(el("div", { class: "muted" }, "No actions."))
-          if (output[key]) entry.append(result(key))
-          entry.append(group(`ext-cli:${extension.id}`, "The same in a terminal", command(`asd ext run ${extension.id} ACTION [SANDBOX] --set FIELD=VALUE`)))
-          card.append(entry)
-        }
-      }
-      list.append(card)
-    }
+    if (sorted.length) list.append(el("div", { class: "lp list exts" }, ...sorted.flatMap(([heading, members]) => [el("div", { class: "grp" }, heading), ...members.map((extension) =>
+      el("button", { type: "button", class: "lrow", "data-extension": extension.id, onclick: () => openExtension(extension.id) }, el("span", { class: "name" }, extension.name),
+        el("span", { class: "desc muted" }, extension.description ?? ""), el("span", { class: "muted small count" }, actionCount(extension)), el("span", { class: "chev", "aria-hidden": "true" }, "›")))])))
     const installable = available.filter((entry) => !entry.installed)
     if (installable.length) {
       list.append(el("h4", { style: "margin-top:28px" }, `Comes with Asidee, not installed · ${installable.length}`))
       list.append(el("div", { class: "lp" }, ...installable.map((entry) => el("div", { class: "item" },
-        el("div", { class: "item-head" }, el("span", { class: "name" }, entry.name), el("span", { class: "muted" }, entry.id),
+        el("div", { class: "item-head" }, el("span", { class: "name" }, entry.name),
           el("div", { class: "end" }, button("Install", `ext:${entry.id}`, "install", () => api("extensionInstall", { id: entry.id }).then(() => `Installed ${entry.name}.`)))),
         entry.description ? el("div", { class: "muted" }, entry.description) : null,
         extensions.some((extension) => extension.id === entry.id) ? null : result(`ext:${entry.id}`)))))
@@ -1500,6 +1576,8 @@ document.getElementById("new-workspace").addEventListener("click", () => { docum
 document.getElementById("workspace-new").addEventListener("click", () => newWorkspace())
 document.getElementById("new-template").addEventListener("click", () => { document.getElementById("new-menu").open = false; section("templates"); document.getElementById("p-name").focus() })
 document.getElementById("create-close").addEventListener("click", closeNew)
+const advancedToggle = document.getElementById("create-advanced-toggle")
+advancedToggle.addEventListener("click", () => { const box = document.getElementById("create-advanced"); box.hidden = !box.hidden; advancedToggle.setAttribute("aria-expanded", String(!box.hidden)); advancedToggle.textContent = box.hidden ? "Change size, image or engine" : "Hide size, image and engine" })
 document.getElementById("create-cancel").addEventListener("click", closeNew)
 createDrawer.addEventListener("click", (event) => { if (event.target === createDrawer) closeNew() })
 document.getElementById("setup-again").addEventListener("click", () => { onboarding.step = 1; section("setup") })
@@ -1778,7 +1856,7 @@ function testStep() {
   const groups = [["Settings", checklist.filter((entry) => entry.blocking !== false && entry.stage !== "probe")], ["Network test", checklist.filter((entry) => entry.blocking !== false && entry.stage === "probe")]]
   const row = (entry) => {
     const found = results?.find((check) => check.id === entry.id)
-    const [mark, word] = found ? STATUS[found.status] ?? STATUS.unknown : onboarding.testing ? ["idle", "Waiting"] : ["idle", "Not run yet"]
+    const [mark, word] = found ? [(STATUS[found.status] ?? STATUS.unknown)[0], statusWord(found.status, found.detail)] : onboarding.testing ? ["idle", "Waiting"] : ["idle", "Not run yet"]
     return el("div", { class: "row-l" }, el("span", { class: `mk ${mark}${found ? " pop" : ""}` }), quiet(plain(entry.id), `${entry.title} (${entry.id})`), el("span", { class: `r word ${found ? mark : ""}` }, found?.detail ? quiet(word, found.detail) : word))
   }
   const lists = el("div", { class: "two" }, ...groups.map(([label, members]) => el("div", {}, el("h4", {}, `${label} · ${members.length}`), el("div", { class: "lp" }, ...members.map(row)))))

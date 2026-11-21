@@ -143,6 +143,24 @@ test("Walled off from your Mac is said only of a sandbox on a gVisor engine", as
   expect(walled.text("#sandboxes")).toContain("walled off from your Mac")
 })
 
+test("a sandbox made from a template names it, from the object the daemon sends", async () => {
+  const ui = await page({ ...base, list: () => [sandbox({ template: { name: "agent", imageId: "sha256:abc", source: "base", createdAt: "2026-11-01T00:00:00Z" } })] })
+  await ui.open("demo")
+  expect(ui.text("#sandbox-page .sub")).toContain("from agent · 2 CPUs")
+  expect(ui.text("#sandbox-page")).not.toContain("[object Object]")
+})
+
+test("a required check that only reports is not counted as passed, and its row says what it found", async () => {
+  const results = [check("kernel", "pass", "gVisor answers."), check("net-host", "pass", "Refused."), check("link-scope", "info", "No links: nothing to measure. Other sandboxes are covered by \"Cannot reach other sandboxes\".")] as CheckResult[]
+  const ui = await page({ ...base, list: () => [sandbox({ lastVerify: historical({ at: "2026-11-10T10:00:00Z", results }) })] })
+  await ui.open("demo")
+  const card = ui.text("#checks-demo")
+  expect(card).toContain("2 required checks passed · 1 has nothing to pass")
+  expect(card).not.toContain("All 3 required checks passed")
+  expect(card).toContain("No links")
+  expect(card).not.toContain("Note")
+})
+
 test("verify, stop and remove call the API; remove sends the typed name as the confirmation", async () => {
   let gone = false
   const ui = await page({ ...base, list: () => gone ? [] : [sandbox()], verify: () => ({}), stop: () => ({}), remove: () => { gone = true; return {} } })
@@ -165,6 +183,7 @@ test("an extension's action is drawn as a form from its declaration and sends it
   ;(ui.doc.querySelector("#sandbox-page .part[data-extension=tools] button") as any).click(); await ui.settle()
   const form = ui.button("Install thing").closest("form") as any
   expect(form.elements.namedItem("version").value).toBe("latest")
+  expect(ui.text("#modal .cmd code")).toBe("asd ext run tools install demo --set version=latest")
   await ui.submit(form, { version: "1.2" })
   expect(ui.calls.find((call) => call.method === "action")!.body).toEqual({ extension: "tools", action: "install", sandbox: "demo", values: { version: "1.2", force: "false" } })
   expect(ui.text("#modal pre")).toBe("installed 1.2")
@@ -387,17 +406,42 @@ test("Settings shows every setting; each saves on its own, and the defaults save
 })
 
 test("extensions are optional; they list their actions, a global action runs with no sandbox, a sandbox action asks which", async () => {
-  const global = { ...extension, id: "acct", name: "Accounts", actions: [{ id: "sync", label: "Sync", scope: "global", run: ["./sync"], fields: [] }, extension.actions[0]] }
-  const ui = await page({ ...base, extensions: () => ({ extensions: [global], errors: ["broken: extension.json is not valid JSON"] }), list: () => [sandbox()], action: () => ({ exitCode: 0, stdout: "synced", stderr: "" }) })
+  const global = { ...extension, id: "acct", name: "Accounts", dir: "/x/extensions/acct", bundled: true, actions: [{ id: "sync", label: "Sync", scope: "global", run: ["./sync"], fields: [] }, extension.actions[0]] }
+  const ui = await page({ ...base, extensions: () => ({ extensions: [global], errors: ["broken: extension.json is not valid JSON"] }), list: () => [sandbox()], action: () => ({ exitCode: 0, stdout: "synced", stderr: "" }), extensionRemove: () => ({}) })
   await ui.click("Extensions")
   expect(ui.text("#extension-section")).toContain("None come installed.")
   expect(ui.text("#extensions")).toContain("broken: extension.json is not valid JSON")
-  const forms = [...ui.doc.querySelectorAll("#extensions form")] as any[]
-  await ui.submit(forms[0])
-  expect(forms[1].elements.namedItem("asidee-sandbox").value).toBe("demo")
-  await ui.submit(forms[1])
+  // A list like the sandboxes': a row per extension, with what it does and how many actions, and no disclosures.
+  expect(ui.doc.querySelectorAll("#extension-section details").length).toBe(0)
+  expect(ui.text("#extensions button.lrow[data-extension=acct]")).toBe("Accounts2 actions›")
+  ;(ui.doc.querySelector("#extensions button.lrow[data-extension=acct]") as any).click(); await ui.settle()
+  // Its own page: the folder only on hover, a card per action with where it acts, its form and its command beneath.
+  expect(ui.doc.getElementById("extension-list")!.hidden).toBe(true)
+  const view = ui.doc.querySelector("#extension-page [data-extension=acct]")!
+  expect(view.querySelector("h1")!.textContent).toBe("Accounts")
+  expect(view.querySelector("h1 [data-tip]")!.getAttribute("data-tip")).toBe("In /x/extensions/acct")
+  expect([...view.querySelectorAll(".act-card .item-head")].map((head) => head.textContent)).toEqual(["SyncOn this Mac", "Install thingOn a sandbox"])
+  const card = (id: string) => view.querySelector(`.act-card[data-action=${id}]`)!
+  expect(card("sync").querySelector(".cmd code")!.textContent).toBe("asd ext run acct sync")
+  await ui.submit(card("sync").querySelector("form"))
+  const page2 = () => ui.doc.querySelector("#extension-page [data-extension=acct]")!
+  const fresh = (id: string) => page2().querySelector(`.act-card[data-action=${id}]`)!
+  expect(fresh("sync").querySelector("pre")!.textContent).toBe("synced")
+  const form = fresh("install").querySelector("form") as any
+  expect(form.elements.namedItem("asidee-sandbox").value).toBe("demo")
+  expect(fresh("install").querySelector(".cmd code")!.textContent).toBe("asd ext run acct install demo --set version=latest")
+  form.elements.namedItem("version").value = "1 beta"; form.elements.namedItem("force").checked = true; form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
+  expect(fresh("install").querySelector(".cmd code")!.textContent).toBe("asd ext run acct install demo --set 'version=1 beta' --set force=true")
+  form.elements.namedItem("version").value = "latest"; form.elements.namedItem("force").checked = false
+  await ui.submit(form)
   expect(ui.calls.filter((call) => call.method === "action").map((call) => call.body)).toEqual([{ extension: "acct", action: "sync", values: {} }, { extension: "acct", action: "install", sandbox: "demo", values: { version: "latest", force: "false" } }])
-  expect(ui.text("#extensions pre")).toBe("synced")
+  // The terminal commands are a card at the bottom; Remove is in the ⋯ menu; the crumb goes back to the list.
+  expect([...ui.doc.querySelectorAll("#extension-commands .cmd code")].map((node) => node.textContent)).toEqual(["asd ext run acct sync", "asd ext run acct install SANDBOX --set version=latest --set force=false", "asd ext list", "asd ext remove acct"])
+  await ui.click("Remove")
+  expect(ui.calls.find((call) => call.method === "extensionRemove")!.body).toEqual({ id: "acct" })
+  await ui.click("Extensions /")
+  expect(ui.doc.getElementById("extension-list")!.hidden).toBe(false)
+  expect(ui.doc.getElementById("extension-page")!.hidden).toBe(true)
   const none = await page({ ...base, extensions: () => ({ extensions: [], errors: [], available: [{ id: "logins", name: "Agent logins", installed: false }] }), list: () => [], extensionInstall: () => ({}) })
   await none.click("Extensions")
   expect(none.text("#extensions")).toContain("None installed. Asidee works without any.")
