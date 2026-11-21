@@ -462,6 +462,13 @@ test("a create that did not finish says when it is removed and how to retry, kee
   expect(calls).toEqual([["createKeep", { name: "demo" }], ["createRetry", { name: "demo" }]])
 })
 
+test("a relative --copy folder is sent from the folder the command runs in; ~ and absolute ones as given", async () => {
+  const bodies: unknown[] = []
+  const asidee = await daemon({ create: (body: unknown) => { bodies.push(body); return { ok: false, error: { code: "usage", message: "Refused here." } } } })
+  expect((await asidee("create", "demo", "--copy", "scratch/copytest:/root/copytest", "--copy", "~/.agents", "--copy", "/abs/kit:~/kit")).code).toBe(2)
+  expect(bodies).toMatchObject([{ name: "demo", setup: { copy: [`${process.cwd()}/scratch/copytest:/root/copytest`, "~/.agents", "/abs/kit:~/kit"] } }])
+})
+
 test("a create refused by its checks prints how long it is kept and how to retry", async () => {
   const failed = [{ id: "net-host", status: "fail", evidence: "probed", detail: "A connection reached the host." }]
   const note = "It is kept for diagnosis until 2026-11-21 10:00 UTC, then removed. To try again: `asd create --retry demo`. To remove it now: `asd remove demo --confirm demo`."

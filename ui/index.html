@@ -859,11 +859,25 @@ function loadFolderPicks() {
   folderPicks = null
   api("folderBrowse").then((data) => { folderPicks = data.picks; for (const state of Object.values(folderUi)) state.redraw?.() }, () => { folderPicks = [] })
 }
+// The user a sandbox runs commands as and its home, asked of the sandbox itself (the image decides them), by key: a
+// copy's destination is shown as the path it becomes there. null when it could not be read.
+const guests = {}, readingGuests = new Set()
+function readGuest(key) {
+  if (guests[key] !== undefined || readingGuests.has(key)) return
+  readingGuests.add(key)
+  api("exec", { ...nameAt(key), argv: ["sh", "-c", 'printf "%s\\t%s" "$(id -un 2>/dev/null || id -u)" "$HOME"'] }).then((reply) => {
+    const [user, home] = reply.exitCode === 0 ? reply.stdout.split("\t") : []
+    guests[key] = user && home?.startsWith("/") ? { user, home: home.replace(/(.)\/+$/, "$1") } : null
+  }, () => { guests[key] = null }).finally(() => { readingGuests.delete(key); for (const state of Object.values(folderUi)) state.redraw?.() })
+}
+// Where a destination as given (~, ~/…, absolute, or under the home) is in a sandbox whose home is known.
+const inGuest = (path, guest) => !guest || path.startsWith("/") ? path : path === "~" ? guest.home : `${guest.home}/${path.replace(/^~\//, "")}`
 const LOGINS_WARNING = "Login files will be copied. Anything in the sandbox can read them and send them out. The Agent logins extension is the safer way to sign agents in."
 const pathCount = (count, word) => `${count.toLocaleString("en-US")} ${word}${count === 1 ? "" : "s"}`
 // logins: whether login files go too, and dest: where it goes if given, both read from the form. onChange: the folder,
 // after each change.
-function folderPicker(id, { name = id, logins = () => false, dest = () => "", onChange = () => {} } = {}) {
+// guest: the sandbox's user and home once read; without it (no sandbox yet) a destination is shown as under its home.
+function folderPicker(id, { name = id, logins = () => false, dest = () => "", guest = () => undefined, onChange = () => {} } = {}) {
   const state = folderUi[id] ??= { value: "", browse: null, preview: null }
   loadFolderPicks()
   const input = el("input", { id, name, value: state.value, placeholder: "~/path/to/folder", autocomplete: "off", spellcheck: "false" })
@@ -909,7 +923,10 @@ function folderPicker(id, { name = id, logins = () => false, dest = () => "", on
     if (!view) return preview.replaceChildren(...warn ? [warn] : [])
     preview.replaceChildren(el("div", { class: "stack" }, warn,
       !data && !view.error ? el("p", { class: "muted" }, "Reading the folder…") : view.error ? el("p", { class: "error" }, view.error) : el("p", {},
-        `${pathCount(data.files, "file")}, ${pathCount(data.links, "link")}${data.partial ? " or more" : ""} · ${data.bytes < 1024 ** 2 ? `${Math.ceil(data.bytes / 1024)} KB` : gib(data.bytes)}`, el("span", { class: "muted" }, dest() ? ` · goes to ${dest()} in the sandbox` : ` · goes to ${data.mirror} in the sandbox unless you give another place`)),
+        `${pathCount(data.files, "file")}, ${pathCount(data.links, "link")}${data.partial ? " or more" : ""} · ${data.bytes < 1024 ** 2 ? `${Math.ceil(data.bytes / 1024)} KB` : gib(data.bytes)}`, el("span", { class: "muted" }, (() => {
+          const where = dest() || data.mirror, known = guest()
+          return ` · goes to ${inGuest(where, known)} in the sandbox${known ? `, as its user ${known.user}` : where.startsWith("/") ? "" : ", under its user's home"}${dest() ? "" : ", unless you give another place"}`
+        })())),
       ...(data?.warnings ?? []).map((text) => el("div", { class: "banner warn" }, text)),
       data?.excludedCount ? listed("Left out", data.excluded, data.excludedCount) : null,
       data?.skippedCount ? listed("Skipped", data.skipped, data.skippedCount) : null))
@@ -927,6 +944,8 @@ function actionForm(extension, action, sandbox, run = action.label) {
   const key = sandbox ? keyOf(sandbox) : `ext:${extension.id}`
   const read = () => Object.fromEntries(action.fields.map((field) => [field.id, field.type === "checkbox" ? String(form.elements[field.id].checked) : form.elements[field.id].value]))
   const target = () => sandbox ? sandbox.name : form.elements["asidee-sandbox"]?.value
+  // The sandbox a copy goes to, whose user and home its destination is shown in: this page's, or the one picked.
+  const guestKey = () => sandbox ? (sandbox.status === "running" ? key : undefined) : target() || undefined
   const commandBox = el("div")
   const showCommand = () => { const text = extCommand(extension, action, read(), target(), sandbox?.host); if (commandBox.textContent !== `${text}Copy`) commandBox.replaceChildren(command(text)) }
   const form = el("form", { class: "action", oninput: showCommand, onchange: showCommand, onsubmit: (event) => {
@@ -940,8 +959,11 @@ function actionForm(extension, action, sandbox, run = action.label) {
   for (const field of action.fields) {
     if (field.type === "folder") {
       const id = `folder-${key}-${extension.id}-${action.id}-${field.id}`
-      inputs.append(el("div", { class: "wide" }, el("label", { for: id }, field.label), folderPicker(id, { name: field.id, logins: () => Boolean(form.elements.logins?.checked), dest: () => form.elements.dest?.value.trim() ?? "" })))
-      form.addEventListener("change", (event) => { if (event.target.name === "logins") folderUi[id]?.relogin?.() })
+      inputs.append(el("div", { class: "wide" }, el("label", { for: id }, field.label), folderPicker(id, { name: field.id, logins: () => Boolean(form.elements.logins?.checked), dest: () => form.elements.dest?.value.trim() ?? "", guest: () => guests[guestKey()] ?? undefined })))
+      form.addEventListener("change", (event) => {
+        if (event.target.name === "logins") folderUi[id]?.relogin?.()
+        if (event.target.name === "asidee-sandbox") { readGuest(event.target.value); folderUi[id]?.redraw?.() }
+      })
       form.addEventListener("input", (event) => { if (event.target.name === "dest") folderUi[id]?.redraw?.() })
       continue
     }
@@ -962,6 +984,7 @@ function actionForm(extension, action, sandbox, run = action.label) {
     result(key, `${extension.id}/${action.id}`),
     el("div", { class: "same" }, el("label", { class: "muted small" }, "The same in a terminal"), commandBox))
   showCommand()
+  if (action.fields.some((field) => field.type === "folder") && guestKey()) readGuest(guestKey())
   return form
 }
 

@@ -22,7 +22,7 @@ import { hostOption, type FleetView, type HostView } from "../core/machines"
 import { bounded, PROTOCOL, transportStdio } from "../core/transport"
 import { included, userConfig, type SshAccess } from "../core/ssh"
 import { systemRunner } from "../core/run"
-import { createSteps, runCreateSteps, type CreateSetup, type SetupStep } from "../core/create-setup"
+import { copyFlag, createSteps, runCreateSteps, type CreateSetup, type SetupStep } from "../core/create-setup"
 import { hostVersion, validVersion, type Prepared, type Preparing } from "../core/prepare"
 import { applySetup, ORBSTACK_DOWNLOAD, orbstackEngine, orbstackInstalled, planSetup, setupChanges, setupPlanLines } from "../core/setup"
 import { checkSocketPath, DEFAULT_SPEC, defaultDirs, socketPath, streamSocketPath, validTemplateName, type Config, type Defaults } from "../core/state"
@@ -647,6 +647,8 @@ async function main(argv: string[]): Promise<void> {
           if (!asJson) { printSandbox(retried.sandbox); if (retried.checks) printChecks(retried.checks, checklistFor(retried.sandbox.spec), next("verify", name)) }
           return await setUp(steps, retried)
         }
+        // A relative --copy folder is from this command's folder; the daemon, which checks it, runs elsewhere.
+        values.copy = values.copy?.map((value) => { const { source, dest } = copyFlag(value); const path = source === "~" || source.startsWith("~/") ? source : resolve(source); return dest ? `${path}:${dest}` : path })
         // Checked before anything is made. The logins come from this Mac, and the extensions reach local sandboxes only.
         const steps = createSteps(name, values)
         if (steps.length && selectedHost && selectedHost !== "local") throw new AsideeError("usage", "--gh, --claude, --codex, --repo, --copy, --t3 and --t3-browser work for sandboxes on this Mac only.")

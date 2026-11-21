@@ -3,7 +3,8 @@ import { EventEmitter } from "node:events"
 import type { Server } from "node:net"
 import { blockers, checklistFor, complete, failures, GPU_KIND, GPU_USER, GPU_WARNING, historical, titleOf } from "./checks"
 import { availableExtensions, fieldValues, installExtension, loadExtensions, removeExtension, runCommand } from "./extensions"
-import { remainingSteps, validSetup } from "./create-setup"
+import { copyFlag, remainingSteps, validSetup } from "./create-setup"
+import { homeFolder } from "./folders"
 import { boundPort, FORWARD_REACH, LEASE_TTL_MS, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
 import { Links } from "./links"
 import { OUTPUT_LIMIT } from "./run"
@@ -338,6 +339,11 @@ export class Core {
     const config = await readConfig(this.dirs)
     const spec = validSpec(input, config.defaults)
     const setup = validSetup(spec.name, input.setup)
+    // A folder to copy in that cannot be copied is refused now, not after the sandbox is made: the same checks as the copy.
+    for (const value of setup?.copy ?? []) {
+      const { source } = copyFlag(value)
+      await homeFolder(source).catch((error: Error) => { throw new AsideeError(error instanceof AsideeError ? error.code : "usage", `Cannot copy ${source} in: ${error.message} Nothing was created.`) })
+    }
     const { manifest, checks } = await this.exclusive(spec.name, async () => {
       if ((await listManifests(this.dirs)).some((entry) => entry.name === spec.name)) throw new AsideeError("conflict", `A sandbox named ${spec.name} already exists.`)
       const engines = await this.engines()

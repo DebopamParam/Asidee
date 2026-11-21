@@ -14,10 +14,14 @@ asd ext run folders remove NAME --set dest=~/.agents
 asd create NAME --copy ~/.agents --copy ~/.claude:~/claude-settings    # the same copies right after the create
 ```
 
-The folder must be in your home once its links are resolved, and not the home itself. It goes, by default, to the same
-place under the sandbox user's home (`asd exec` runs as root in the built-in image, so `~/.agents` lands in
-`/root/.agents`), or to `dest`: `~/…`, an absolute path, or a path under that home. In `--copy DIR:DEST`, DEST starts
-at the first `:` followed by `~` or `/`.
+The folder must be in your home once its links are resolved, and not the home itself; `asd create --copy` checks every
+folder before it makes the sandbox, so a bad one leaves nothing behind, and a relative DIR is taken from the folder the
+command runs in. It goes, by default, to the same place under the home of the user the sandbox runs commands as, or to
+`dest`: `~/…`, an absolute path, or a path under that home. That user, and so the home, depends on the image or
+template (for example `agent` with `/home/agent`, or `root` with `/root`); the copy reads it in the sandbox, and the
+dashboard's form on a sandbox's page asks the sandbox and shows the path it becomes. If that user cannot write to the
+destination, the copy stops with nothing changed and says so. In `--copy DIR:DEST`, DEST starts at the first `:`
+followed by `~` or `/`.
 
 Left out, and listed after the copy:
 
@@ -46,7 +50,8 @@ already there that Asidee did not copy stops the copy with nothing changed, unle
 folder again updates it: changed files are replaced, and files an earlier copy put there that the folder no longer has
 are removed. What each copy put there is recorded in `~/.asidee/copies/` in the sandbox; `list` shows the copies, and
 `remove` deletes exactly those files and links and then the folders they leave empty, so anything else in the folder
-stays. Anything running in the sandbox can read the copies.
+stays; it also removes the parent folders the first copy had to make for the destination, while they are empty, and
+never one that was there before. Anything running in the sandbox can read the copies.
 
 Agents find these files only where they look for them. Checked live on 2026-11-18 with Claude Code 2.1.327, for the
 skills extension this replaces: started in `~/workspace` it listed the skills imported into `~/workspace/.claude`;

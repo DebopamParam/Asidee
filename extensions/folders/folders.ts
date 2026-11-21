@@ -10,8 +10,8 @@ export function sandboxName(value: string): string {
 
 // The guest's half, in sh so it runs in any image. Each takes the folder in the sandbox as $1: ~, ~/…, absolute, or
 // under $HOME. What a copy put there is recorded in ~/.asidee/copies/KEY (KEY from the folder's full path): its files
-// and links, where it came from, when, and whether the copy made the folder. Only a message the script writes with
-// "folders: " in front reaches the user.
+// and links, where it came from, when, whether the copy made the folder, and which of its parents it made (deepest
+// first). Only a message the script writes with "folders: " in front reaches the user.
 const WHERE = `case "$1" in "~") dest="$HOME" ;; "~/"*) dest="$HOME/\${1#"~/"}" ;; /*) dest="$1" ;; *) dest="$HOME/$1" ;; esac
 store="$HOME/.asidee/copies"
 record="$store/$(printf '%s' "$dest" | cksum | cut -d ' ' -f 1)"
@@ -27,6 +27,14 @@ export const COPY = `set -eu
 ${WHERE}replace="$2"; source="$3"
 if { [ -e "$dest" ] || [ -L "$dest" ]; } && [ ! -d "$dest" ]; then echo "folders: $1 is already in the sandbox and is not a folder; nothing was changed." >&2; exit 3; fi
 made=false; [ -d "$dest" ] || made=true; [ -f "$record/made" ] && made="$(cat "$record/made")"
+# The nearest folder that exists decides whether the sandbox's user can make or fill the folder. The user, and so the
+# home, depends on the image.
+at="$dest"; parents=""
+while [ ! -e "$at" ] && [ ! -L "$at" ]; do at="$(dirname "$at")"; [ -e "$at" ] || [ -L "$at" ] || parents="$parents$at
+"; done
+if [ ! -w "$at" ] || [ ! -x "$at" ]; then
+  echo "folders: $(id -un 2>/dev/null || echo "uid $(id -u)") (the sandbox's user) cannot write to $dest; nothing was copied. Its home is $HOME." >&2; exit 3
+fi
 mkdir -p "$dest" "$store"
 work="$(mktemp -d "$store/.work.XXXXXX")"; stage="$(mktemp -d "$dest/.asidee-copy.XXXXXX")"
 trap 'rm -rf "$work" "$stage"' EXIT
@@ -54,6 +62,7 @@ prune "$work/gone"
 find . -mindepth 1 -maxdepth 1 | tar -c -f - -T - | (cd "$dest" && tar -x --no-same-owner -f -)
 cp "$work/new" "$record/files"
 printf '%s\\n' "$dest" > "$record/dest"; printf '%s\\n' "$source" > "$record/source"; printf '%s\\n' "$made" > "$record/made"
+[ -f "$record/parents" ] || printf '%s' "$parents" > "$record/parents"
 date -u +%Y-%m-%dT%H:%M:%SZ > "$record/at"
 printf 'ok\\n'
 `
@@ -64,7 +73,10 @@ count="$(wc -l < "$record/safe" | tr -d ' ')"
 if [ -d "$dest" ]; then
   (cd "$dest" && tr '\\n' '\\0' < "$record/safe" | xargs -0 -r rm -f --) || true
   prune "$record/safe"
-  [ "$(cat "$record/made" 2>/dev/null)" = true ] && rmdir "$dest" 2>/dev/null || true
+  # The folder, then the parents the first copy made, while each is empty; a parent that was there before is not listed.
+  if [ "$(cat "$record/made" 2>/dev/null)" = true ] && rmdir "$dest" 2>/dev/null && [ -f "$record/parents" ]; then
+    while IFS= read -r p; do case "$dest" in "$p"/*) rmdir "$p" 2>/dev/null || break ;; *) break ;; esac; done < "$record/parents"
+  fi
 fi
 rm -rf "$record"
 printf '%s\\n' "$count"

@@ -691,6 +691,9 @@ test("create runs the chosen setup steps after the create, in the CLI's order, a
   expect(quick.closest("label").textContent).toBe("Shared skills (.agents)"); expect(quick.closest("label").title).toBe("~/.agents")
   quick.checked = true; quick.dispatchEvent(new ui.window.Event("change", { bubbles: true })); await ui.settle()
   expect(ui.text("#create-command")).toContain("--repo acme/app.git --copy ~/.agents --t3")
+  // No sandbox yet to ask, so the place is given as under its user's home, which the image decides.
+  await Bun.sleep(400); await ui.settle()
+  expect(ui.text("#create-setup .folder-preview")).toContain("goes to ~/.agents in the sandbox, under its user's home, unless you give another place")
   await ui.click("Add another folder")
   expect(ui.text("#setup-copies")).toBe("~/.agents → the same placeRemove")
   // A value that needs it is quoted for the shell; ~/ stays outside the quotes. DEST follows a colon.
@@ -1048,7 +1051,8 @@ test("the Folders page picks a folder from quick picks or the browser, previews 
     folderPreview: (body) => ({ source: body.source, mirror: body.source, files: 1200, links: 3, folders: 40, bytes: 620_000_000, partial: false, largest: [],
       excluded: body.logins ? [{ path: "history.jsonl", reason: "history or cache" }] : [{ path: ".credentials.json", reason: "login file" }, { path: "history.jsonl", reason: "history or cache" }], excludedCount: body.logins ? 1 : 2,
       skipped: [{ path: "skills/shared", reason: "points outside the folder" }], skippedCount: 1, warnings: ["This is a large copy; it can take a while and uses the sandbox's disk. Most of it is in node_modules."] }),
-    action: () => ({ exitCode: 0, stdout: "Copied ~/.claude to ~/.claude in demo: 1200 files, 3 links, 591.3 MiB.", stderr: "" }) }, "http://127.0.0.1:7717/extensions/folders#token=secret")
+    action: () => ({ exitCode: 0, stdout: "Copied ~/.claude to ~/.claude in demo: 1200 files, 3 links, 591.3 MiB.", stderr: "" }),
+    exec: () => ({ exitCode: 0, stdout: "agent\t/home/agent/", stderr: "" }) }, "http://127.0.0.1:7717/extensions/folders#token=secret")
   const doc = ui.doc as any
   await ui.settle()
   expect(ui.text("#extensions")).toContain("Skills and plugins is no longer bundled")
@@ -1063,7 +1067,9 @@ test("the Folders page picks a folder from quick picks or the browser, previews 
   expect(input.value).toBe("~/.claude")
   expect(ui.calls.filter((call) => call.method === "folderPreview").at(-1)!.body).toEqual({ source: "~/.claude", logins: false })
   const view = () => (doc.querySelector(".act-card[data-action=copy] .folder-preview").textContent ?? "").replace(/\s+/g, " ")
-  expect(view()).toContain("1,200 files, 3 links · 591 MB · goes to ~/.claude in the sandbox unless you give another place")
+  // Where it goes is shown in the picked sandbox's own home, as its user: asked of the sandbox, since the image decides them.
+  expect(ui.calls.find((call) => call.method === "exec")!.body).toEqual({ name: "demo", argv: ["sh", "-c", 'printf "%s\\t%s" "$(id -un 2>/dev/null || id -u)" "$HOME"'] })
+  expect(view()).toContain("1,200 files, 3 links · 591 MB · goes to /home/agent/.claude in the sandbox, as its user agent, unless you give another place")
   expect(view()).toContain("This is a large copy")
   expect(view()).toContain("Left out: 2.credentials.json · login filehistory.jsonl · history or cache")
   expect(view()).toContain("Skipped: 1skills/shared · points outside the folder")
@@ -1094,7 +1100,9 @@ test("the Folders page picks a folder from quick picks or the browser, previews 
   button("Use this folder").click(); await Bun.sleep(400); await ui.settle()
   expect(input.value).toBe("~/projects/hq")
   expect(doc.querySelector(".act-card[data-action=copy] .folder-browser").textContent).toBe("")
-  card.querySelector('input[name="dest"]').value = "~/hq"; card.querySelector("form").dispatchEvent(new ui.window.Event("input")); await ui.settle()
+  card.querySelector('input[name="dest"]').value = "~/hq"; card.querySelector('input[name="dest"]').dispatchEvent(new ui.window.Event("input", { bubbles: true })); await ui.settle()
+  expect(view()).toContain("goes to /home/agent/hq in the sandbox, as its user agent")
+  expect(view()).not.toContain("unless you give another place")
   expect(ui.text(".act-card[data-action=copy] .same")).toContain("asd ext run folders copy demo --set 'source=~/projects/hq' --set 'dest=~/hq'")
   await ui.submit(card.querySelector("form"))
   expect(ui.calls.find((call) => call.method === "action")!.body).toEqual({ extension: "folders", action: "copy", sandbox: "demo", values: { source: "~/projects/hq", dest: "~/hq", logins: "false", replace: "false" } })

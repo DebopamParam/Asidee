@@ -163,3 +163,25 @@ test("a copy lands in the same place under the sandbox's home, updates on a seco
   await expect(copyFolder("../x", { source: "~/.agents", logins: false, replace: false }, guest.spawn, root)).rejects.toThrow("lowercase")
   await expect(copyFolder("demo", { source: "~/.agents", dest: "~/../etc", logins: false, replace: false }, guest.spawn, root)).rejects.toThrow("without ..")
 })
+
+test("a destination the sandbox's user cannot write is named with that user; remove takes away only the parents the copy made", async () => {
+  const root = await home(), guestHome = await realpath(await fixture()), guest = local(guestHome)
+  const user = (await Bun.$`id -un`.text()).trim()
+  await mkdir(join(guestHome, "locked"))
+  await Bun.$`chmod 555 ${join(guestHome, "locked")}`
+  await expect(copyFolder("demo", { source: "~/notes", dest: join(guestHome, "locked/deep/notes"), logins: false, replace: false }, guest.spawn, root))
+    .rejects.toThrow(`${user} (the sandbox's user) cannot write to ${join(guestHome, "locked/deep/notes")}; nothing was copied. Its home is ${guestHome}.`)
+  expect(await readdir(join(guestHome, "locked"))).toEqual([])
+  await Bun.$`chmod 755 ${join(guestHome, "locked")}`
+
+  // Made parents go once empty; a parent that was there before stays, and so does one that holds something else.
+  await mkdir(join(guestHome, "kept"))
+  await copyFolder("demo", { source: "~/notes", dest: "~/a/b/notes", logins: false, replace: false }, guest.spawn, root)
+  await copyFolder("demo", { source: "~/notes", dest: "~/kept/x/notes", logins: false, replace: false }, guest.spawn, root)
+  await copyFolder("demo", { source: "~/notes", dest: "~/c/d/notes", logins: false, replace: false }, guest.spawn, root)
+  await put(guestHome, "c/other.txt", "the sandbox's own")
+  for (const dest of ["~/a/b/notes", "~/kept/x/notes", "~/c/d/notes"]) expect(await removeCopy("demo", dest, guest.spawn)).toBe(1)
+  for (const gone of ["a", "kept/x", "c/d"]) expect(await lstat(join(guestHome, gone)).catch(() => undefined)).toBeUndefined()
+  expect(await readdir(join(guestHome, "kept"))).toEqual([])
+  expect(await readdir(join(guestHome, "c"))).toEqual(["other.txt"])
+})

@@ -439,7 +439,11 @@ test("a create's setup steps are recorded: a failed one is retried from where it
   const { provider, state } = fakeProvider(); const asidee = await core(provider)
   await expect(asidee.create({ name: "bad", setup: { repo: "not a repo" } })).rejects.toThrow("--repo")
   await expect(asidee.create({ name: "bad", setup: { shell: true } })).rejects.toThrow("not shell")
+  // A folder to copy in is checked before the sandbox is made, as the copy would check it.
+  for (const [copy, reason] of [["~/.asidee-test-no-such-folder", "Cannot copy ~/.asidee-test-no-such-folder in:"], ["/etc", "Cannot copy /etc in:"], ["~:/root/home", "Cannot copy ~ in:"]] as const)
+    await expect(asidee.create({ name: "bad", setup: { copy: [copy] } })).rejects.toThrow(new RegExp(`^${reason} .+ Nothing was created\\.$`))
   expect(state.created).toEqual([])
+  expect(await asidee.list()).toEqual([])
   expect((await asidee.create({ name: "plain", setup: { gh: false, claude: [] } })).sandbox.unfinished).toBeUndefined()
   const made = await asidee.create({ name: "demo", setup: { gh: true, repo: "o/r", t3: true } })
   expect(made.sandbox.unfinished).toMatchObject({ stage: "setup", done: [], setup: { gh: true, repo: "o/r", t3: true } })

@@ -96,7 +96,7 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
 - One-step create: `asd create demo --gh --claude PROFILE --codex PROFILE --repo OWNER/REPO --t3` runs the bundled
   extensions after the create: this machine's GitHub login, each login with its setup (repeat `--claude` or `--codex`
   for several), a clone into `~/workspace`, `--copy DIR[:DEST]` (a folder of your home copied in, to the same place
-  under the sandbox's home unless DEST is given; repeat it for several) and T3 Code. `--t3-browser` also installs the
+  under the sandbox's home unless DEST is given; repeat it for several; each folder is checked before the create) and T3 Code. `--t3-browser` also installs the
   Chrome T3's browser pane uses. On this machine only.
 - A create that does not finish leaves nothing behind for long. If the sandbox itself cannot be made, nothing is kept.
   If its checks fail, or a setup step fails (the first failure stops the rest), the sandbox is kept for 30 minutes after

@@ -1090,7 +1090,8 @@ is used by `validSpec` only when a request names neither an image nor a template
 template exclude each other.
 
 `asd create … --gh --claude P… --codex P… --repo OWNER/REPO --copy DIR[:DEST]… --t3` (`core/create-setup.ts`) checks its options before the
-create, then runs `asd extension-run` for GitHub, each login with its setup, the clone, each `--copy` (after the clone, which needs an empty
+create (each `--copy` folder too: it exists, is a folder, and is in the home but not the home; the CLI makes a relative one
+absolute first), then runs `asd extension-run` for GitHub, each login with its setup, the clone, each `--copy` (after the clone, which needs an empty
 `~/workspace`), T3 and T3's browser (`--t3-browser`, which implies `--t3`), in that order, stopping
 at the first failure and keeping the sandbox for a retry. The logins read this machine's credentials and the extensions reach
 local sandboxes only, so these options are refused with `--host`. `asd claude|codex NAME [PROFILE]` is a session like
