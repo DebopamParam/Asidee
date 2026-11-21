@@ -95,8 +95,9 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   the sandbox being prepared.
 - One-step create: `asd create demo --gh --claude PROFILE --codex PROFILE --repo OWNER/REPO --t3` runs the bundled
   extensions after the create: this machine's GitHub login, each login with its setup (repeat `--claude` or `--codex`
-  for several), a clone into `~/workspace`, `--skills DIR` (that folder's agent skills and plugins into
-  `~/workspace`) and T3 Code. `--t3-browser` also installs the Chrome T3's browser pane uses. On this machine only.
+  for several), a clone into `~/workspace`, `--copy DIR[:DEST]` (a folder of your home copied in, to the same place
+  under the sandbox's home unless DEST is given; repeat it for several) and T3 Code. `--t3-browser` also installs the
+  Chrome T3's browser pane uses. On this machine only.
 - A create that does not finish leaves nothing behind for long. If the sandbox itself cannot be made, nothing is kept.
   If its checks fail, or a setup step fails (the first failure stops the rest), the sandbox is kept for 30 minutes after
   its last progress and then removed by the daemon (not while a shell or forward is open in it). `asd create --retry
@@ -257,8 +258,8 @@ dashboard and add extensions freely, and none of that can change what a sandbox 
 
 - **Extensions** add actions and hooks. An extension is a folder in `~/.config/asidee/extensions/` with an
   `extension.json`; see [extensions/examples/agent-tools](extensions/examples/agent-tools). Six extensions ship
-  inside `asd`: [logins](extensions/logins), [repo](extensions/repo), [env-docs](extensions/env-docs),
-  [t3](extensions/t3), [rotator](extensions/rotator) and [skills](extensions/skills). `asd ext list` shows the ones not yet installed;
+  inside `asd`: [logins](extensions/logins), [folders](extensions/folders), [repo](extensions/repo),
+  [env-docs](extensions/env-docs), [t3](extensions/t3) and [rotator](extensions/rotator). `asd ext list` shows the ones not yet installed;
   `asd ext install NAME` (or the dashboard's Install button) installs one and `asd ext remove NAME` removes it. They
   need neither Bun nor the Asidee source.
 - **The dashboard** is replaced by putting your own `index.html` in `~/.config/asidee/ui/`. It is also served at the

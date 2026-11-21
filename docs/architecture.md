@@ -985,12 +985,28 @@ with explicit artifacts. A hard disk cap, user-service installation and automati
 
 ### Bundled extensions
 
-logins, repo, skills, env-docs, t3 and rotator are compiled into the `asd` binary (`extensions/catalog.ts`, `cli/bundled.ts`).
+logins, folders, repo, env-docs, t3 and rotator are compiled into the `asd` binary (`extensions/catalog.ts`, `cli/bundled.ts`).
 Installing one writes a marker folder, `~/.config/asidee/extensions/NAME/extension.json` containing only
 `{"bundled":"NAME"}`. When the daemon loads extensions, a marker takes its declaration from the binary and each action's
 `run` becomes `asd extension-run NAME …`, a hidden subcommand the daemon starts from its own binary. Neither Bun nor
 PATH is needed to find it, and upgrading `asd` updates the extension. A marker that names an id this `asd` does not
-have, or a different id from its folder's name, is reported as an extension error and not loaded.
+have, or a different id from its folder's name, is reported as an extension error and not loaded. An id that was
+bundled before (`RETIRED` in `extensions/catalog.ts`: `skills`, replaced by `folders`) is reported with what replaced it,
+and `asd ext remove` still takes its marker away.
+
+The folders extension copies a folder of this machine's home into a sandbox. `core/folders.ts` holds the rules, read by
+the extension and by two daemon methods the dashboard uses to pick a folder: `folderBrowse` (`path`, default `~`)
+returns the folder names in it and the quick picks that exist, and `folderPreview` (`source`, `logins`) returns the
+counts, size, what is left out and skipped, and warnings. Both read names, kinds and sizes only, accept only a folder in
+the home once links are resolved, and are refused with `host`: the folder is on this Mac. A walk leaves out login files
+everywhere (the agents' token files, `hosts.yml`, `.git-credentials`, `.netrc`, `.ssh`, `.aws`, `.gnupg`, `.claude.json`,
+`.mcp.json`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `.env*`) unless `logins` is set, and history, sessions and caches
+directly inside an agent's own folder (`.claude*`, `.codex*`, `opencode`) always. A link is kept when it points inside
+the folder; one that points outside it or by an absolute path is skipped, never followed. Above 500 MB or 20000 entries a
+preview warns; nothing is refused for size. The copy packs exactly the walked paths with tar (`--no-recursion`, the list
+on stdin) and the guest script unpacks them beside the destination, refuses a path already there that no earlier copy
+put there (unless `replace`), removes files an earlier copy put there that the folder no longer has, and records what it
+copied in `~/.asidee/copies/` in the sandbox, which `list` reads and `remove` uses to delete exactly those files.
 
 Two daemon methods manage the markers. `extensionInstall` (`asd ext install NAME`) writes a missing folder or rewrites
 the same marker; `extensionRemove` (`asd ext remove NAME`) deletes only a marker folder. A user's own folder of the same
@@ -1023,8 +1039,8 @@ engine only with `--replace`, snapshots, and removes the sandbox whatever happen
 is used by `validSpec` only when a request names neither an image nor a template; a default image and a default
 template exclude each other.
 
-`asd create … --gh --claude P… --codex P… --repo OWNER/REPO --t3` (`core/create-setup.ts`) checks its options before the
-create, then runs `asd extension-run` for GitHub, each login with its setup, the clone, the skills import (after the clone, which needs an empty
+`asd create … --gh --claude P… --codex P… --repo OWNER/REPO --copy DIR[:DEST]… --t3` (`core/create-setup.ts`) checks its options before the
+create, then runs `asd extension-run` for GitHub, each login with its setup, the clone, each `--copy` (after the clone, which needs an empty
 `~/workspace`), T3 and T3's browser (`--t3-browser`, which implies `--t3`), in that order, stopping
 at the first failure and keeping the sandbox for a retry. The logins read this machine's credentials and the extensions reach
 local sandboxes only, so these options are refused with `--host`. `asd claude|codex NAME [PROFILE]` is a session like
@@ -1074,7 +1090,12 @@ without it says it is not signed in and to open `asd ui`'s link. A sidebar holds
   sandboxes (name, what it does, how many actions), then Install for each bundled one not installed. A row opens the
   extension's own page: its folder on hover, Remove under ⋯, a card per action with its fields (a sandbox action asks
   which running sandbox), Run, and the same run as an `asd ext run` command beneath it, then every command for a
-  terminal at the bottom. A machine's commands open on the right from a Commands link.
+  terminal at the bottom. A folder field (the folders extension's Copy a folder in) has quick picks for the agent
+  folders that exist (`~/.agents`, `~/.claude`, `~/.codex`, `~/.config/opencode`; the path on hover), a browser of the
+  home's folders, and a preview of what the copy takes, leaves out and skips, which reads the folder again when "Also
+  copy login files" is ticked and then warns that anything in the sandbox can read them. The create form's "Copy folders
+  in" uses the same picker for several folders, each a step in the order added. A machine's commands open on the right
+  from a Commands link.
 - **Settings**: every setting above, the engines with `asd setup` as commands, what this daemon is, and a table of the
   plain words the page uses with the exact terms.
 

@@ -318,14 +318,14 @@ Copy the built-in page (`ui/index.html` in the Asidee source) to `~/.config/asid
 Other files in that folder are served next to it. The page calls `POST /api/METHOD` with a JSON body and the header
 `Authorization: Bearer TOKEN`; it reads the token from the `#token=` part of the link `asd ui` prints. Methods:
 `checklist`, `engines`, `list`, `get`, `create`, `createRetry`, `createStep`, `createKeep`, `start`, `stop`, `remove`, `verify`, `resize`, `snapshot`, `templateList`,
-`templateRemove`, `templatePrepare`, `templatePreparing`, `templatePrepareInfo`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `linkAdd`, `linkList`, `linkRemove`, `sshAccess`, `extensions`, `extensionInstall`, `extensionRemove`, `action`, `summary`,
-`hostList`, `fleet`, `configGet`, `configSet`, `usage`, `about`, `openTerminal`. `linkAdd` and `linkRemove` take `from`, `to` and `port`; `linkList` takes an optional `name`. `configGet` returns this machine's effective configuration. `configSet`
+`templateRemove`, `templatePrepare`, `templatePreparing`, `templatePrepareInfo`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `linkAdd`, `linkList`, `linkRemove`, `sshAccess`, `extensions`, `folderBrowse`, `folderPreview`, `extensionInstall`, `extensionRemove`, `action`, `summary`,
+`hostList`, `fleet`, `configGet`, `configSet`, `usage`, `about`, `openTerminal`. `linkAdd` and `linkRemove` take `from`, `to` and `port`; `linkList` takes an optional `name`. `folderBrowse` (`path`) and `folderPreview` (`source`, `logins`) read folder names and sizes in this Mac's home for the folders extension, never contents, and refuse `host`. `configGet` returns this machine's effective configuration. `configSet`
 accepts only `requireProbes` and `experimental`, each a boolean, `workspaceFreeSpaceGb` and `diskWatchSeconds`, each a number, `defaults` and `engine` (`null` removes either) and `terminal`, saves them to `config.json` and returns the new
 effective configuration. `terminalCommandSet`, the `workspace*` changes, `sshSetup` with `writeConfig`, `hostAttach`, `hostRemove` and `shutdown` are also open,
 but each request first shows a dialog on the Mac and runs only when the person there clicks Allow; a refusal is 403 (409 when another is waiting) with
 `details.approval` (`denied`, `timed-out`, `unavailable` or `busy`) and `details.command`, the CLI command to suggest instead. Do not retry a denial. `usage` returns each sandbox's CPU, memory, tasks and last disk measurement against its limits;
 `openTerminal` with `name` and `kind` (`sandbox`, `workspace`, `claude` or `codex`, the last two with an optional `profile`) opens a shell or the agent in a terminal window on this Mac.
-`create` takes an optional `setup` (the CLI's setup flags: `gh`, `claude`, `codex`, `repo`, `skills`, `t3`,
+`create` takes an optional `setup` (the CLI's setup flags: `gh`, `claude`, `codex`, `repo`, `copy` as a list of `DIR[:DEST]`, `t3`,
 `t3-browser`); the page then runs each step and reports it with `createStep` (`name`, `step` as the step's label, `ok`).
 A sandbox's `unfinished` says when it is removed; `createRetry` (`name`) returns the `setup` and the labels `remaining`
 to run, and `createKeep` (`name`) keeps it as it is.
