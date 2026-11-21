@@ -35,7 +35,7 @@ All external behavior not established by those sources is marked **unverified**,
 
 | Source | Observed constraint |
 |---|---|
-| [Migration plan](../migration-plan.md) | Core alone touches engines. Remote access uses SSH to machine-local daemon sockets. No engine port publishing. |
+| Migration plan (since removed) | Core alone touches engines. Remote access uses SSH to machine-local daemon sockets. No engine port publishing. |
 | [Daemon](../../core/daemon.ts), `methods`, `createHandler` | JSON POST API. `attach` and `shutdown` are socket-only. Dashboard uses loopback TCP, token, and Host validation. |
 | [Core](../../core/core.ts), `exclusive`, `enforce` | Per-name serialization. Enforcement every 30 seconds, four unchecked blocking passes before stopping. |
 | [State](../../core/state.ts), [types](../../core/types.ts) | Per-user manifests. Names have no dots or colons. Capabilities currently describe one disk-limit mode. |
