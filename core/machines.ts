@@ -28,11 +28,13 @@ export const CATALOG = {
   hostList: ["dashboard", "primary"], fleet: ["dashboard", "primary"], hostAttach: ["approve", "primary"], hostPlan: ["socket", "primary"], hostApply: ["socket", "primary"], hostRemove: ["approve", "primary"],
   sessionTarget: ["socket", "read"],
   sshPrepare: ["socket", "write"],
+  folderBrowse: ["dashboard", "primary"], folderPreview: ["dashboard", "primary"],
   terminalCommandSet: ["approve", "primary"], about: ["dashboard", "primary"], usage: ["dashboard", "read"], openTerminal: ["dashboard", "primary"],
 } as const
 export type MethodName = keyof typeof CATALOG
 export const EXPERIMENTAL_OFF = "Other machines are experimental and off on this machine: they are not yet proven on enough machines. To turn them on: asd config set experimental on"
 export const LINKS_LOCAL = "Links join two sandboxes on this machine only, so they cannot be used with --host."
+export const FOLDERS_LOCAL = "Folders are copied from this Mac into sandboxes on this Mac only, so they cannot be used with --host."
 export const isMethod = (method: string): method is MethodName => Object.hasOwn(CATALOG, method)
 export const mutates = (method: MethodName) => CATALOG[method][1] === "write"
 
@@ -306,6 +308,7 @@ export class Machines {
     const { host: selected, ...payload } = body
     if (selected === undefined || selected === "local") return undefined
     if (method === "linkAdd" || method === "linkList" || method === "linkRemove") throw new AsideeError("usage", LINKS_LOCAL)
+    if (method === "folderBrowse" || method === "folderPreview") throw new AsideeError("usage", FOLDERS_LOCAL)
     await this.experimental()
     const host = await this.resolve(selected)
     if (body.machineId !== undefined && body.machineId !== host.machineId) throw new AsideeError("identity-changed", `${host.name} is machine ${host.machineId}, not the ${String(body.machineId)} the request names. Nothing was sent.`)

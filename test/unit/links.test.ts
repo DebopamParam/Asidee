@@ -7,7 +7,7 @@ import { CHECKLIST } from "../../core/checks"
 import { Core } from "../../core/core"
 import { FIN_QUIET_MS } from "../../core/forwards"
 import { LINK_CONNECTIONS, LINKS_PER_SANDBOX, pump, RETRY_MAX_MS, RETRY_MS } from "../../core/links"
-import { CATALOG, LINKS_LOCAL, Machines, type Hello } from "../../core/machines"
+import { CATALOG, FOLDERS_LOCAL, LINKS_LOCAL, Machines, type Hello } from "../../core/machines"
 import { type CheckResult, type Engine, type LinkSupport, type Provider, type Session, type Stage } from "../../core/types"
 
 const engine: Engine = { id: "fake:1", provider: "fake", label: "Fake engine", ready: true, problems: [], data: {}, capabilities: { kernelIsolation: "gvisor", diskLimit: "none", networkGuard: true, docker: false, execStream: true, loopbackRelay: true, resize: "live", snapshot: false } }
@@ -431,6 +431,9 @@ test("links are refused for another machine in one sentence, before any machine 
   const machines = new Machines({ state: join(root, "state"), config: join(root, "config") }, hello, async () => ({ hello, sandboxes: [], checkedAt: "" }), { connectPeer: () => { contacted++; throw new Error("should not connect") } } as never)
   for (const method of ["linkAdd", "linkList", "linkRemove"] as const)
     await expect(machines.route(method, { host: "build", from: "app", to: "db", port: 5432 })).rejects.toMatchObject({ code: "usage", message: LINKS_LOCAL })
+  // Picking a folder to copy in reads this Mac's home, so it is refused for another machine the same way.
+  for (const method of ["folderBrowse", "folderPreview"] as const)
+    await expect(machines.route(method, { host: "build", source: "~/.agents" })).rejects.toMatchObject({ code: "usage", message: FOLDERS_LOCAL })
   expect(contacted).toBe(0)
   expect(LINKS_LOCAL.split(". ").length).toBe(1)
 })
