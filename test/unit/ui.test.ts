@@ -17,10 +17,12 @@ const sandbox = (over: object = {}) => ({
 })
 const extension = { id: "tools", name: "Tools", actions: [{ id: "install", label: "Install thing", scope: "sandbox", run: ["./x"], fields: [{ id: "version", label: "Version", type: "text", default: "latest" }, { id: "force", label: "Force", type: "checkbox" }] }] }
 
-async function page(replies: Record<string, (body: any) => unknown>, url = "http://127.0.0.1:7717/#token=secret") {
+// setupDone: whether this browser finished the first-run steps before, which keeps them from opening by themselves.
+async function page(replies: Record<string, (body: any) => unknown>, url = "http://127.0.0.1:7717/#token=secret", { setupDone = true } = {}) {
   const html = await readFile(join(import.meta.dir, "..", "..", "ui", "index.html"), "utf8")
   const script = html.slice(html.indexOf("<script>") + 8, html.indexOf("</script>"))
   const window = new Window({ url })
+  if (setupDone) window.localStorage.setItem("asidee-setup-done", "1")
   window.document.write(html.replace(/<script>[\s\S]*<\/script>/, ""))
   const calls: Array<{ method: string; body: any; authorization: string | null }> = []
   const fetch = async (path: string, init: { headers: Record<string, string>; body: string }) => {
@@ -35,21 +37,34 @@ async function page(replies: Record<string, (body: any) => unknown>, url = "http
   new Function(...Object.keys(globals), script)(...Object.values(globals))
   const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((resolve) => setTimeout(resolve, 0)) }
   await settle()
-  const text = (selector: string) => (window.document.querySelector(selector)?.textContent ?? "").replace(/\s+/g, " ")
-  // While a pop-up is open, only its buttons can be clicked.
-  const button = (label: string) => [...(window.document.querySelector("#modal:not([hidden])") ?? window.document).querySelectorAll("button")].find((node) => node.textContent === label)!
-  // Opens the pop-up behind a card on a sandbox.
-  const tile = async (title: string) => { ([...window.document.querySelectorAll("#sandboxes .tile")].find((node) => node.querySelector(".t")!.textContent === title) as any).click(); await settle() }
-  return { window, calls, prompts, settle, text, button, tile }
+  const doc = window.document as any
+  const text = (selector: string) => (doc.querySelector(selector)?.textContent ?? "").replace(/\s+/g, " ")
+  // While a form is open on the right, only its buttons can be clicked.
+  const button = (label: string) => [...(doc.querySelector("#modal:not([hidden])") ?? doc).querySelectorAll("button")].find((node) => node.textContent === label)!
+  const click = async (label: string) => { button(label).click(); await settle() }
+  // Opens a sandbox's page from the list.
+  const open = async (name: string) => { (doc.querySelector(`#sandboxes button.lrow[data-name="${name}"]`) as any).click(); await settle() }
+  // Closes any open form, then picks an item from a menu on the page.
+  const pick = async (label: string) => { if (!doc.getElementById("modal")!.hidden) await click("Close"); await click(label) }
+  const submit = async (form: any, values: Record<string, string> = {}) => {
+    for (const [name, value] of Object.entries(values)) form.elements.namedItem(name).value = value
+    form.dispatchEvent(new window.Event("submit", { cancelable: true })); await settle()
+  }
+  return { window, doc, calls, prompts, settle, text, button, click, open, pick, submit }
 }
 
-const base = { configGet: () => ({ defaults: {}, requireProbes: true }), checklist: () => CHECKLIST, engines: () => [{ id: "fake:1", label: "Fake engine", ready: true, problems: [], capabilities: { kernelIsolation: "gvisor", networkGuard: true, diskLimit: "watched" } }], extensions: () => ({ extensions: [extension], errors: [] }) }
+const ready = { id: "fake:1", label: "Fake engine", ready: true, problems: [], capabilities: { kernelIsolation: "gvisor", networkGuard: true, diskLimit: "watched" } }
+const base = { configGet: () => ({ defaults: {}, requireProbes: true }), checklist: () => CHECKLIST, engines: () => [ready], extensions: () => ({ extensions: [extension], errors: [] }) }
+const usageOf = (over: object = {}) => ({ name: "demo", running: true, cpus: 2, memoryLimitBytes: 4 * 1024 ** 3, pidsLimit: 4096, diskLimitBytes: 20 * 1024 ** 3, cpuPercent: 37.5, memoryBytes: 512 * 1024 ** 2, tasks: 40, diskBytes: 3 * 1024 ** 3, diskMeasuredAt: "2026-11-18T10:00:00Z", ...over })
+const later = (minutes: number) => new Date(Date.now() + minutes * 60000).toISOString()
 
 test("workspaces appear separately with their disclosure, and unavailable inventory is unknown", async () => {
   const ui = await page({ ...base, list: () => [], summary: () => ({ workspaces: [{ name: "render", status: "idle", processes: 0, folder: "/fixture/render", disclosure: "Workspace, not a sandbox. Loopback open; no limits." }] }) })
-  expect(ui.text("#workspaces")).toContain("render: workspace, not a sandbox")
-  expect(ui.text("#workspaces")).toContain("Loopback open; no limits")
+  expect(ui.text("#workspaces")).toContain("renderWorkspace")
+  expect(ui.text("#workspaces")).toContain("Note Workspace, not a sandbox. Loopback open; no limits.")
+  expect(ui.text("#workspace-section .lead")).toContain("It is not a sandbox")
   expect(ui.text("#sandboxes")).not.toContain("render")
+  expect(ui.doc.getElementById("workspaces-tab")!.getAttribute("data-count")).toBe("1")
   const unavailable = await page({ ...base, list: () => [], summary: () => { throw new Error("Inventory unavailable") } })
   expect(unavailable.text("#workspaces")).toContain("Workspaces unknown: Inventory unavailable")
   expect(unavailable.text("#workspaces")).not.toContain("No workspaces")
@@ -57,108 +72,174 @@ test("workspaces appear separately with their disclosure, and unavailable invent
 
 test("the dashboard lists sandboxes, sends the token, and hides it from the address bar", async () => {
   const ui = await page({ ...base, list: () => [sandbox()] })
-  expect(ui.text("#sandboxes")).toContain("demo running")
-  expect(ui.text("#sandboxes")).toContain("2 CPU · 4 GB memory · 20 GB disk · Fake engine")
+  expect(ui.text("#sandboxes .lrow[data-name=demo]")).toContain("demo")
+  expect(ui.text("#sandboxes .lrow[data-name=demo]")).toContain("Sandbox")
+  expect(ui.doc.getElementById("sandboxes-tab")!.textContent).toBe("Sandboxes")
+  expect(ui.doc.getElementById("sandboxes-tab")!.getAttribute("data-count")).toBe("1")
+  await ui.open("demo")
+  expect(ui.text("#sandbox-page h1")).toBe("demo")
+  expect(ui.text("#sandbox-page .sub")).toBe("2 CPUs · 4 GB memory · 20 GB disk · Fake engine")
   expect(ui.calls.every((call) => call.authorization === "Bearer secret")).toBe(true)
   expect(ui.window.location.hash).toBe("")
-  expect(ui.text("#engines")).toContain("Kernel isolation: gvisor")
+  ui.doc.getElementById("settings-tab")!.click(); await ui.settle()
+  expect(ui.text("#engines")).toContain("Walled off from your Mac")
+  expect(ui.doc.querySelector("#engines [data-tip]")!.getAttribute("data-tip")).toContain("gVisor")
 })
 
-test("past checks show what they measured and when, always as a past result", async () => {
+test("the sidebar has five places and Settings, with no Usage tab; Machines shows only with Experimental on", async () => {
+  const ui = await page({ ...base, list: () => [] })
+  expect([...ui.doc.querySelectorAll("nav.side button")].map((node) => node.textContent)).toEqual(["Sandboxes", "Workspaces", "Templates", "Extensions", "Machines", "Settings"])
+  expect(ui.doc.getElementById("machines-tab")!.hidden).toBe(true)
+  expect(ui.doc.getElementById("usage")).toBe(null)
+  const on = await page({ ...base, list: () => [], configGet: () => ({ defaults: {}, requireProbes: true, experimental: true }) })
+  expect(on.doc.getElementById("machines-tab")!.hidden).toBe(false)
+})
+
+test("past checks show what they measured and when, as a past result, never green", async () => {
   const ui = await page({ ...base, list: () => [sandbox()] })
-  expect(ui.text("#sandboxes")).toContain(`Checked ${new Date("2026-11-10T10:00:00Z").toLocaleString()}: 1 fail · 1 weak · 1 pass (past result; it may have changed since)`)
-  ui.button("Checks…").click(); await ui.settle()
-  expect(ui.text("#modal")).toContain("That is a past result: what holds now is unknown until the next check.")
-  const checks = ui.text("ul.checks")
-  expect(checks).toContain("✗Cannot reach the host — does not hold then, probedA connection reached the host.")
-  expect(checks).toContain("— holds in a weaker form then, probedWatched, not capped.")
-  expect(checks).toContain("— held then, probedgVisor answers.")
-  expect(checks).not.toContain("current"); expect(checks).not.toContain("Previous")
+  const at = new Date("2026-11-10T10:00:00Z").toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
+  expect(ui.text("#sandboxes .lrow[data-name=demo]")).toContain("Running · 1 check failed")
+  expect(ui.doc.querySelector("#sandboxes .lrow[data-name=demo] .si.fail")).not.toBe(null)
+  await ui.open("demo")
+  const card = ui.text("#checks-demo")
+  expect(card).toContain("1 required check failed")
+  expect(card).toContain(`Last checked ${at}. A past result: it may have changed since.`)
+  // What needs a look shows first: the failed required check and the partly disk limit.
+  expect(card).toContain("Can't reach your Mac")
+  expect(card).toContain("Failed")
+  expect(card).toContain("Disk limitPartly · checked every 5 s · not a hard cap")
+  expect(card).not.toContain("Walled off from your Mac")
+  await ui.click("Show all 3 · 2 required, 1 good to know")
+  expect(ui.text("#checks-demo")).toContain("Required · 2")
+  expect(ui.text("#checks-demo")).toContain("Walled off from your Mac")
+  // A pass from the past is an outline, never the green filled mark.
+  expect(ui.doc.querySelectorAll("#checks-demo .mk.ok.past").length).toBe(1)
+  expect(ui.doc.querySelectorAll("#checks-demo .mk.ok:not(.past)").length).toBe(0)
+  // The plain words carry the exact title on hover or focus.
+  const plain = [...ui.doc.querySelectorAll("#checks-demo .hv")].find((node) => node.textContent === "Can't reach your Mac")!
+  expect(plain.getAttribute("data-tip")).toBe("Cannot reach the host (net-host)")
+  plain.dispatchEvent(new ui.window.FocusEvent("focusin", { bubbles: true }))
+  expect(ui.text("#ftip")).toBe("Cannot reach the host (net-host)")
+  const failed = [...ui.doc.querySelectorAll("#checks-demo .hv")].find((node) => node.textContent === "Failed")!
+  expect(failed.getAttribute("data-tip")).toContain("A connection reached the host.")
+})
+
+test("Walled off from your Mac is said only of a sandbox on a gVisor engine", async () => {
+  const runc = { ...ready, capabilities: { ...ready.capabilities, kernelIsolation: "runc" } }
+  const ui = await page({ ...base, engines: () => [runc], list: () => [sandbox()] })
+  await ui.open("demo")
+  await ui.click("Show all 3 · 2 required, 1 good to know")
+  expect(ui.text("#checks-demo")).not.toContain("Walled off")
+  expect(ui.text("#checks-demo")).toContain(CHECKLIST.find((entry) => entry.id === "kernel")!.title)
+  const empty = await page({ ...base, engines: () => [runc], list: () => [] })
+  expect(empty.text("#sandboxes")).toContain("A sandbox is a small Linux computer. Your agent works there")
+  expect(empty.text("#sandboxes")).not.toContain("walled off")
+  const walled = await page({ ...base, list: () => [] })
+  expect(walled.text("#sandboxes")).toContain("walled off from your Mac")
 })
 
 test("verify, stop and remove call the API; remove sends the typed name as the confirmation", async () => {
-  const ui = await page({ ...base, list: () => [sandbox()], verify: () => ({}), stop: () => ({}), remove: () => ({}) })
-  ui.button("Checks…").click(); await ui.settle()
-  ui.button("Check now").click(); await ui.settle()
-  ui.button("Close").click(); await ui.settle()
-  ui.button("Stop").click(); await ui.settle()
-  ui.button("Remove").click(); await ui.settle()
+  let gone = false
+  const ui = await page({ ...base, list: () => gone ? [] : [sandbox()], verify: () => ({}), stop: () => ({}), remove: () => { gone = true; return {} } })
+  await ui.open("demo")
+  await ui.click("Check now")
+  await ui.click("Stop")
+  await ui.click("Remove…")
   expect(ui.prompts[0]).toContain("deletes demo")
   const sent = ui.calls.filter((call) => ["verify", "stop", "remove"].includes(call.method)).map((call) => [call.method, call.body])
   expect(sent).toEqual([["verify", { name: "demo" }], ["stop", { name: "demo" }], ["remove", { name: "demo", confirm: "demo" }]])
+  // The page of a removed sandbox goes back to the list.
+  expect(ui.doc.getElementById("sandbox-page")!.hidden).toBe(true)
+  expect(ui.text("#sandboxes")).toContain("No sandboxes yet")
 })
 
 test("an extension's action is drawn as a form from its declaration and sends its fields", async () => {
   const ui = await page({ ...base, list: () => [sandbox()], action: () => ({ exitCode: 0, stdout: "installed 1.2\n", stderr: "" }) })
-  await ui.tile("Tools")
+  await ui.open("demo")
+  expect(ui.text("#sandbox-page .part[data-extension=tools]")).toContain("ToolsInstall thing")
+  ;(ui.doc.querySelector("#sandbox-page .part[data-extension=tools] button") as any).click(); await ui.settle()
   const form = ui.button("Install thing").closest("form") as any
   expect(form.elements.namedItem("version").value).toBe("latest")
-  form.elements.namedItem("version").value = "1.2"
-  form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  await ui.submit(form, { version: "1.2" })
   expect(ui.calls.find((call) => call.method === "action")!.body).toEqual({ extension: "tools", action: "install", sandbox: "demo", values: { version: "1.2", force: "false" } })
   expect(ui.text("#modal pre")).toBe("installed 1.2")
 })
 
 test("a stopped sandbox shows why it stopped, offers Start, and has no extension actions", async () => {
-  const ui = await page({ ...base, list: () => [sandbox({ status: "stopped", stopReason: "Stopped by the disk watch: it used 2.1 GB of its 2 GB." })] })
-  expect(ui.text("#sandboxes")).toContain("Stopped by the disk watch")
+  const ui = await page({ ...base, list: () => [sandbox({ status: "stopped", stopReason: "Stopped by the disk watch: it used 2.1 GB of its 2 GB." }), sandbox({ name: "idle", status: "stopped" })] })
+  expect(ui.text("#sandboxes .lrow[data-name=demo]")).toContain("Stopped by Asidee")
+  expect(ui.doc.querySelector("#sandboxes .lrow[data-name=demo] [data-tip]")!.getAttribute("data-tip")).toContain("Stopped by the disk watch")
+  expect(ui.text("#sandboxes .lrow[data-name=idle]")).toContain("Stopped")
+  expect(ui.doc.querySelector("#sandboxes .lrow[data-name=idle] .si.off")).not.toBe(null)
+  await ui.open("demo")
+  expect(ui.text("#sandbox-page")).toContain("Stopped by the disk watch")
   expect(ui.button("Start")).toBeDefined()
-  expect(ui.button("Install thing")).toBeUndefined()
+  expect(ui.doc.querySelector("#sandbox-page .part")).toBe(null)
+  expect(ui.text("#sandbox-page")).toContain("Start it to open agents, ports and its extensions.")
 })
 
-test("an enforcement failure is visible without opening historical checks", async () => {
+test("an enforcement failure is visible without opening the checks", async () => {
   const ui = await page({ ...base, list: () => [sandbox({ enforcementProblem: { at: "2026-11-12T00:00:00Z", message: "guard unreadable" } })] })
-  expect(ui.text("#sandboxes")).toContain("Enforcement problem at 2026-11-12T00:00:00Z: guard unreadable")
-  expect(ui.text("ul.checks")).toBe("")
+  expect(ui.text("#sandboxes .lrow[data-name=demo]")).toContain("Running · a limit is not being checked")
+  expect(ui.doc.querySelector("#sandboxes .lrow[data-name=demo] .si.part")).not.toBe(null)
+  await ui.open("demo")
+  expect(ui.text("#sandbox-page .banner.bad")).toContain("A limit was not checked at 2026-11-12T00:00:00Z: guard unreadable")
 })
 
-test("creating sends the form, and an error from the core is shown as it is", async () => {
+test("creating sends the form and opens the new sandbox; an error from the core is shown as it is", async () => {
   let made = false
   const ui = await page({ ...base, list: () => made ? [sandbox({ name: "fresh", lastVerify: undefined })] : [], create: (body) => {
     if (body.name === "bad") throw new Error("bad was not started: No host folders are mounted")
     made = true; return { sandbox: { name: "fresh" } }
   } })
   expect(ui.text("#sandboxes")).toContain("No sandboxes yet")
-  const form = ui.window.document.getElementById("create") as any
-  const submit = async (name: string) => { form.elements.namedItem("name").value = name; form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle() }
-  await submit("bad")
+  expect(ui.text("#sandboxes .cmd code")).toBe("asd create my-app")
+  await ui.click("New sandbox")
+  expect(ui.doc.getElementById("create-drawer")!.hidden).toBe(false)
+  const form = ui.doc.getElementById("create") as any
+  await ui.submit(form, { name: "bad" })
   expect(ui.text("#create-error")).toBe("bad was not started: No host folders are mounted")
-  await submit("fresh")
-  expect(ui.calls.find((call) => call.method === "create" && call.body.name === "fresh")!.body).toMatchObject({ name: "fresh", engine: "fake:1", image: "" })
-  expect(ui.text("#sandboxes")).toContain("fresh running")
+  await ui.submit(form, { name: "fresh" })
+  const body = ui.calls.find((call) => call.method === "create" && call.body.name === "fresh")!.body
+  expect(body).toMatchObject({ name: "fresh", engine: "fake:1", image: "" })
+  expect(body).not.toHaveProperty("template-pick")
+  expect(ui.doc.getElementById("create-drawer")!.hidden).toBe(true)
+  expect(ui.text("#sandbox-page h1")).toBe("fresh")
+  expect(ui.text("#sandbox-page")).toContain("Running · not checked")
 })
 
 test("without a token the page says how to open it", async () => {
   const ui = await page({ ...base, list: () => { throw new Error("Open the dashboard with the link from `asd ui`.") } }, "http://127.0.0.1:7717/")
   expect(ui.text("#notice")).toContain("asd ui")
+  expect(ui.text("#island")).toBe("Not connected")
 })
 
 test("a refresh that changes nothing leaves a half-filled form alone", async () => {
   const ui = await page({ ...base, list: () => [sandbox()] })
-  await ui.tile("Tools")
+  await ui.open("demo")
+  ;(ui.doc.querySelector("#sandbox-page .part[data-extension=tools] button") as any).click(); await ui.settle()
   const input = (ui.button("Install thing").closest("form") as any).elements.namedItem("version")
   input.value = "typing"
   // The page's own refresh, as its timer would call it.
   await (ui.window as any).asideeRefresh(); await ui.settle()
-  expect(ui.window.document.contains(input)).toBe(true)
+  expect(ui.doc.contains(input)).toBe(true)
 })
 
 test("an unknown-probe create refusal opens Settings and focuses the toggle without changing the requirement", async () => {
   const ui = await page({ ...base, list: () => [], create: () => { throw Object.assign(new Error("Cannot reach the host: helper unavailable. Use asd config set require-probes off."), { code: "probes-required" }) } })
-  const form = ui.window.document.getElementById("create") as any
-  form.elements.namedItem("name").value = "demo"
-  form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  await ui.submit(ui.doc.getElementById("create"), { name: "demo" })
   expect(ui.text("#create-error")).toContain("helper unavailable")
-  const toggle = ui.window.document.getElementById("require-probes") as any
+  const toggle = ui.doc.getElementById("require-probes") as any
   expect(toggle.checked).toBe(true)
-  ui.button("Open settings").click(); await ui.settle()
-  expect(ui.window.document.getElementById("settings-section")!.hasAttribute("hidden")).toBe(false)
-  expect(ui.window.document.getElementById("sandbox-section")!.hasAttribute("hidden")).toBe(true)
-  expect(ui.window.document.activeElement).toBe(toggle)
+  await ui.click("Open settings")
+  expect(ui.doc.getElementById("settings-section")!.hasAttribute("hidden")).toBe(false)
+  expect(ui.doc.getElementById("sandbox-section")!.hasAttribute("hidden")).toBe(true)
+  expect(ui.doc.getElementById("create-drawer")!.hidden).toBe(true)
+  expect(ui.doc.activeElement).toBe(toggle)
   expect(toggle.checked).toBe(true)
   expect(ui.calls.some((call) => call.method === "configSet")).toBe(false)
   ui.button("Sandboxes").click()
-  expect(ui.window.document.getElementById("sandbox-section")!.hasAttribute("hidden")).toBe(false)
+  expect(ui.doc.getElementById("sandbox-section")!.hasAttribute("hidden")).toBe(false)
 })
 
 test("Settings reads the daemon value, changes only on input, and restores the value on a refused write", async () => {
@@ -167,9 +248,10 @@ test("Settings reads the daemon value, changes only on input, and restores the v
     if (body.requireProbes === false) throw new Error("Settings could not be saved.")
     requireProbes = body.requireProbes; return { requireProbes }
   } })
-  ui.button("Settings").click()
-  expect(ui.text("#settings-section")).toContain("sandboxes can be created without their isolation probes having run; they show as not verified")
-  const toggle = ui.window.document.getElementById("require-probes") as any
+  await ui.click("Settings")
+  expect(ui.text("#settings-section")).toContain("sandboxes can be created without it having run; they show as not checked")
+  expect(ui.doc.querySelector("#settings-section [data-tip^=require-probes]")!.textContent).toBe("Require the network test")
+  const toggle = ui.doc.getElementById("require-probes") as any
   expect(toggle.checked).toBe(false); expect(toggle.disabled).toBe(false)
   toggle.checked = true; toggle.dispatchEvent(new ui.window.Event("change")); await ui.settle()
   expect(ui.calls.filter((call) => call.method === "configSet").map((call) => call.body)).toEqual([{ requireProbes: true }])
@@ -179,159 +261,181 @@ test("Settings reads the daemon value, changes only on input, and restores the v
   expect(toggle.checked).toBe(true); expect(toggle.disabled).toBe(false)
 })
 
-test("an unavailable setting cannot be changed and a sandbox with unknown probes is visibly not verified", async () => {
+test("an unavailable setting cannot be changed and a sandbox with unknown probes is visibly not checked", async () => {
   const ui = await page({ ...base, configGet: () => { throw new Error("config unreadable") }, list: () => [sandbox({ lastVerify: historical({ at: "2026-11-15T00:00:00Z", results: [{ id: "net-host", status: "unknown", evidence: "none", detail: "The control did not answer." }] }) })] })
-  expect((ui.window.document.getElementById("require-probes") as any).disabled).toBe(true)
+  expect((ui.doc.getElementById("require-probes") as any).disabled).toBe(true)
   expect(ui.text("#settings-error")).toContain("config unreadable")
-  expect(ui.text("#sandboxes")).toContain(": 1 unknown (past result; it may have changed since)")
-  expect(ui.text("#sandboxes")).not.toContain("✓")
-  ui.button("Checks…").click(); await ui.settle()
-  expect(ui.text("ul.checks")).toContain("— could not be checked then, noneThe control did not answer.")
+  expect(ui.text("#sandboxes .lrow[data-name=demo]")).toContain("Running · not checked")
+  expect(ui.doc.querySelector("#sandboxes .si.unk")).not.toBe(null)
+  expect(ui.doc.querySelector("#sandboxes .si.ok, #sandboxes .si.past")).toBe(null)
+  await ui.open("demo")
+  expect(ui.text("#checks-demo")).toContain("1 required check not checked")
+  expect(ui.text("#checks-demo")).toContain("Can't reach your MacNot checked")
+  expect(ui.doc.querySelector("#checks-demo .mk.unk")).not.toBe(null)
+  expect([...ui.doc.querySelectorAll("#checks-demo [data-tip]")].some((node) => node.getAttribute("data-tip")!.includes("The control did not answer."))).toBe(true)
 })
 
-
-test("a workspace row shows why the daemon stopped it and a disk watch it could not make; every control that acts on the Mac says it asks there", async () => {
+test("a workspace shows why the daemon stopped it and a disk check it could not make; every control that acts on the Mac says it asks there", async () => {
   const stopReason = "Stopped by the daemon at 2026-11-16T10:00:00Z: render uses 2.00 GB of its 1 GB disk limit. Free space in /w/render, or raise the limit: asd workspace set render disk N"
   const ui = await page({ ...base, list: () => [], summary: () => ({ workspaces: [{ name: "render", status: "idle", processes: 0, folder: "/w/render", spec: { hostTemp: false, diskGb: 1 }, disclosure: workspaceDisclosure(false), stopReason,
     enforcementProblem: { at: "2026-11-16T10:00:30Z", message: "Its size could not be measured." } }] }) })
-  const row = ui.window.document.querySelector("#workspaces .panel")!
+  const row = ui.doc.querySelector("#workspaces .item")!
   expect(row.textContent).toContain(stopReason)
-  expect(row.textContent).toContain("Disk watch unknown at 2026-11-16T10:00:30Z: Its size could not be measured.")
-  expect([...row.querySelectorAll("button")].map((node) => node.textContent).filter((label) => !["Terminal", "Verify", "Copy"].includes(label!) && !label!.endsWith(" (asks on the Mac)"))).toEqual([])
-  expect([...row.querySelectorAll("form")].every((form) => form.querySelector("button")!.textContent!.endsWith(" (asks on the Mac)"))).toBe(true)
+  expect(row.textContent).toContain("Disk limit not checked at 2026-11-16T10:00:30Z: Its size could not be measured.")
+  const plain = ["Terminal", "Check now", "Copy"]
+  expect([...row.querySelectorAll("button")].filter((node) => !plain.includes(node.textContent!) && !node.closest(".ask")).map((node) => node.textContent)).toEqual([])
+  expect([...row.querySelectorAll(".ask")].every((node) => node.textContent!.includes("Asks on your Mac"))).toBe(true)
+  expect([...row.querySelectorAll("form")].every((form) => form.querySelector(".ask") !== null)).toBe(true)
   expect(row.textContent).toContain("asd workspace stop render")
 })
 
-test("each workspace row shows host-temp state and the shared-temp disclosure", async () => {
+test("each workspace shows its shared temp folder and the shared-temp disclosure", async () => {
   const ui = await page({ ...base, list: () => [], summary: () => ({ workspaces: [false, true].map((hostTemp) => ({ name: hostTemp ? "shared" : "closed", status: "idle", spec: { hostTemp }, disclosure: workspaceDisclosure(hostTemp) })) }) })
-  const rows = [...ui.window.document.querySelectorAll("#workspaces .panel")].map((row) => row.textContent)
-  expect(rows[0]).toContain("host-temp off"); expect(rows[0]).not.toContain(HOST_TEMP_DISCLOSURE)
-  expect(rows[1]).toContain("host-temp on (shared, weaker)"); expect(rows[1]).toContain(HOST_TEMP_DISCLOSURE)
+  const rows = [...ui.doc.querySelectorAll("#workspaces .item")].map((row) => row.textContent)
+  expect(rows[0]).toContain("Shared temp folder off"); expect(rows[0]).not.toContain(HOST_TEMP_DISCLOSURE)
+  expect(rows[1]).toContain("Shared temp folder on (weaker)"); expect(rows[1]).toContain(HOST_TEMP_DISCLOSURE)
+  expect(ui.doc.querySelector("#workspaces [data-tip^=host-temp]")).not.toBe(null)
 })
 
-const usageOf = (over: object = {}) => ({ name: "demo", running: true, cpus: 2, memoryLimitBytes: 4 * 1024 ** 3, pidsLimit: 4096, diskLimitBytes: 20 * 1024 ** 3, cpuPercent: 37.5, memoryBytes: 512 * 1024 ** 2, tasks: 40, diskBytes: 3 * 1024 ** 3, diskMeasuredAt: "2026-11-18T10:00:00Z", ...over })
-
-test("live usage is written in place, so a form being typed in survives it", async () => {
+test("use is shown in the list and on the page, written in place, so a form being typed in survives it", async () => {
   let cpuPercent = 37.5
   const ui = await page({ ...base, list: () => [sandbox()], usage: () => [usageOf({ cpuPercent })] })
-  expect(ui.text("[data-usage=demo]")).toContain("CPU 37.5% of 200% · memory 512 MB of 4.00 GB · 40 of 4096 tasks · disk 3.00 GB of 20.00 GB")
-  await ui.tile("Resize")
+  expect(ui.text("#sandboxes [data-disk=demo]")).toBe("3.0 GB of 20.0 GB")
+  await ui.open("demo")
+  const use = () => ui.text("[data-usage=demo]")
+  expect(use()).toContain("CPU19% of 2 CPUs"); expect(use()).toContain("Memory512 MB of 4.0 GB"); expect(use()).toContain("Processes40 of 4096"); expect(use()).toContain("Disk3.0 GB of 20.0 GB")
+  await ui.click("Resize")
   const input = (ui.button("Resize").closest("form") as any).elements.namedItem("cpus")
   input.value = "3"
   cpuPercent = 180
   await (ui.window as any).asideeRefresh(); await ui.settle()
-  expect(ui.text("[data-usage=demo]")).toContain("CPU 180% of 200%")
-  expect(ui.window.document.contains(input)).toBe(true)
-  ui.button("Close").click(); await ui.settle()
-  ui.button("Usage").click(); await ui.settle()
-  const cells = [...ui.window.document.querySelectorAll("#usage tbody td")].map((cell) => cell.textContent)
-  expect(cells.slice(0, 5)).toEqual(["demo", "running", "180% of 200%", "512 MB of 4.00 GB", "40 of 4096"])
-  expect(cells[5]).toStartWith("3.00 GB of 20.00 GB at ")
+  expect(use()).toContain("CPU90% of 2 CPUs")
+  expect(ui.doc.contains(input)).toBe(true)
 })
 
 test("Terminal asks the daemon to open a window for that sandbox or workspace and shows what it ran", async () => {
   const ui = await page({ ...base, list: () => [sandbox()], summary: () => ({ workspaces: [{ name: "notes", status: "idle", spec: { hostTemp: false }, disclosure: "Workspace, not a sandbox." }] }),
     openTerminal: (body) => ({ opened: body.name, terminal: "ghostty", command: `'/x/asd' 'shell' '${body.name}'` }) })
-  ui.button("Terminal").click(); await ui.settle()
-  expect(ui.text("#sandboxes pre")).toContain("Opened in ghostty. If no window appeared, run: '/x/asd' 'shell' 'demo'")
-  ;(ui.window.document.querySelector("#workspaces button") as any).click(); await ui.settle()
+  await ui.open("demo")
+  await ui.click("Terminal")
+  expect(ui.text("#sandbox-page pre")).toContain("Opened in ghostty. If no window appeared, run: '/x/asd' 'shell' 'demo'")
+  ;(ui.doc.querySelector("#workspaces button") as any).click(); await ui.settle()
   expect(ui.calls.filter((call) => call.method === "openTerminal").map((call) => call.body)).toEqual([{ name: "demo", kind: "sandbox" }, { name: "notes", kind: "workspace" }])
 })
 
-test("a sandbox's tool cards resize, runs a command, adds a forward and a link, and saves a template", async () => {
-  const ui = await page({ ...base, list: () => [sandbox()], forwardList: () => [], linkList: () => [],
+test("a sandbox's tools resize, run a command, open a port, connect, and save a template", async () => {
+  const ui = await page({ ...base, list: () => [sandbox()], forwardList: () => [{ id: "f0", name: "demo", localPort: 3000, port: 3000, connections: 3 }], linkList: () => [],
     resize: () => ({ changes: [{ limit: "cpus", from: 2, to: 3, applies: "now" }], checks: [] }), exec: () => ({ exitCode: 0, stdout: "hi\n", stderr: "" }),
     forwardAdd: (body) => ({ id: "f1", name: "demo", localPort: 8080, port: Number(body.port), connections: 0 }), linkAdd: (body) => ({ ...body, address: "other:5432", trust: "trusted" }),
     snapshot: (body) => ({ template: { name: body.as }, contents: "files" }) })
-  const submit = async (card: string, label: string, values: Record<string, string>) => {
-    await ui.tile(card)
-    const form = ui.button(label).closest("form") as any
-    for (const [name, value] of Object.entries(values)) form.elements.namedItem(name).value = value
-    form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
-  }
-  await submit("Resize", "Resize", { cpus: "3" }); expect(ui.text("#modal pre")).toContain("cpus: 2 → 3, now")
-  await submit("Run a command", "Run", { command: "echo hi" }); expect(ui.text("#modal pre")).toBe("hi")
-  await submit("Ports", "Add forward", { port: "8080" })
-  await submit("Ports", "Add link", { to: "other", port: "5432" })
-  await submit("Save as a template", "Save", { as: "base" }); expect(ui.text("#modal pre")).toContain("Saved template base.")
+  await ui.open("demo")
+  // An open port is listed without a count of its sessions.
+  expect(ui.text("#sandbox-page")).toContain("1 port open on this Mac · :3000")
+  expect(ui.text("#sandbox-page")).not.toMatch(/\d+ connections?\b(?! with)/)
+  const use = async (item: string, label: string, values: Record<string, string>) => { await ui.pick(item); await ui.submit(ui.button(label).closest("form"), values) }
+  await use("Resize", "Resize", { cpus: "3" }); expect(ui.text("#modal pre")).toContain("cpus: 2 → 3, now")
+  await use("Run a command", "Run", { command: "echo hi" }); expect(ui.text("#modal pre")).toBe("hi")
+  await use("Ports", "Open port", { port: "8080" })
+  expect(ui.text("#modal")).not.toContain("connection ·")
+  await use("Ports", "Connect", { to: "other", port: "5432" })
+  await use("Save as template", "Save", { as: "base" }); expect(ui.text("#modal pre")).toContain("Saved template base.")
   const sent = ui.calls.filter((call) => ["resize", "exec", "forwardAdd", "linkAdd", "snapshot"].includes(call.method)).map((call) => [call.method, call.body])
   expect(sent).toEqual([["resize", { name: "demo", cpus: "3" }], ["exec", { name: "demo", argv: ["sh", "-c", "echo hi"] }], ["forwardAdd", { name: "demo", port: "8080" }],
     ["linkAdd", { from: "demo", to: "other", port: "5432" }], ["snapshot", { name: "demo", as: "base" }]])
-  await ui.tile("SSH and editors")
+  await ui.pick("SSH and editors")
   expect(ui.text("#modal")).toContain("asd ssh setup demo --write-config")
+  expect(ui.text("#modal")).toContain("Set up and add the Include line to ~/.ssh/configAsks on your Mac")
+  // Esc closes the form.
+  ui.doc.dispatchEvent(new ui.window.KeyboardEvent("keydown", { key: "Escape" })); await ui.settle()
+  expect(ui.doc.getElementById("modal")!.hidden).toBe(true)
 })
 
 test("Settings shows every setting; each saves on its own, and the defaults save together", async () => {
   let config: any = { defaults: { cpus: 1 }, requireProbes: true, experimental: false, workspaceFreeSpaceGb: 5, diskWatchSeconds: 5, terminal: "default" }
   const ui = await page({ ...base, list: () => [], about: () => ({ build: "0.4.0+1", builtInDefaults: { image: "img", cpus: 2, memoryGb: 4, pids: 4096, diskGb: 20, docker: false }, platform: "darwin", arch: "arm64", pid: 1, startedAt: "2026-11-18T00:00:00Z", stateDir: "/s", configDir: "/c", cli: "/x/asd" }),
     configGet: () => config, configSet: (body) => { config = { ...config, ...body }; for (const key of Object.keys(body)) if (body[key] === null) delete config[key]; if (body.defaults === null) config.defaults = {}; return config } })
-  ui.button("Settings").click(); await ui.settle()
-  const get = (id: string) => ui.window.document.getElementById(id) as any
+  await ui.click("Settings")
+  const get = (id: string) => ui.doc.getElementById(id) as any
   expect(get("disk-watch").value).toBe("5"); expect(get("terminal").value).toBe("default"); expect(get("d-cpus").value).toBe("1"); expect(get("d-memory").placeholder).toBe("4")
   expect(get("terminal").querySelector("option[value=custom]").disabled).toBe(true)
   expect(ui.text("#about")).toContain("/x/asd")
   get("disk-watch").value = "2"; get("disk-watch").dispatchEvent(new ui.window.Event("change")); await ui.settle()
   get("terminal").value = "ghostty"; get("terminal").dispatchEvent(new ui.window.Event("change")); await ui.settle()
   get("d-cpus").value = ""; get("d-docker").value = "true"; get("default-engine").value = "fake:1"
-  get("defaults").dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  await ui.submit(get("defaults"))
   expect(ui.calls.filter((call) => call.method === "configSet").map((call) => call.body)).toEqual([{ diskWatchSeconds: 2 }, { terminal: "ghostty" }, { defaults: { docker: true }, engine: "fake:1" }])
   expect(config).toMatchObject({ diskWatchSeconds: 2, terminal: "ghostty", defaults: { docker: true }, engine: "fake:1" })
   expect(ui.text("#settings-section")).toContain("asd config set terminal-command")
+  // Setup runs only in a terminal; the page shows its commands.
+  expect([...ui.doc.querySelectorAll("#engines .cmd code")].map((node) => node.textContent)).toEqual(["asd setup", "asd setup --docker", "asd setup --remove"])
+  expect(ui.text("#glossary")).toContain("Network testisolation probes")
 })
 
-test("extensions list their actions; a global action runs with no sandbox, a sandbox action asks which", async () => {
+test("extensions are optional; they list their actions, a global action runs with no sandbox, a sandbox action asks which", async () => {
   const global = { ...extension, id: "acct", name: "Accounts", actions: [{ id: "sync", label: "Sync", scope: "global", run: ["./sync"], fields: [] }, extension.actions[0]] }
   const ui = await page({ ...base, extensions: () => ({ extensions: [global], errors: ["broken: extension.json is not valid JSON"] }), list: () => [sandbox()], action: () => ({ exitCode: 0, stdout: "synced", stderr: "" }) })
-  ui.button("Extensions").click(); await ui.settle()
+  await ui.click("Extensions")
+  expect(ui.text("#extension-section")).toContain("None come installed.")
   expect(ui.text("#extensions")).toContain("broken: extension.json is not valid JSON")
-  const forms = [...ui.window.document.querySelectorAll("#extensions form")] as any[]
-  forms[0].dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  const forms = [...ui.doc.querySelectorAll("#extensions form")] as any[]
+  await ui.submit(forms[0])
   expect(forms[1].elements.namedItem("asidee-sandbox").value).toBe("demo")
-  forms[1].dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  await ui.submit(forms[1])
   expect(ui.calls.filter((call) => call.method === "action").map((call) => call.body)).toEqual([{ extension: "acct", action: "sync", values: {} }, { extension: "acct", action: "install", sandbox: "demo", values: { version: "latest", force: "false" } }])
   expect(ui.text("#extensions pre")).toBe("synced")
+  const none = await page({ ...base, extensions: () => ({ extensions: [], errors: [], available: [{ id: "logins", name: "Agent logins", installed: false }] }), list: () => [], extensionInstall: () => ({}) })
+  await none.click("Extensions")
+  expect(none.text("#extensions")).toContain("None installed. Asidee works without any.")
+  await none.click("Install")
+  expect(none.calls.find((call) => call.method === "extensionInstall")!.body).toEqual({ id: "logins" })
 })
 
 test("templates are listed, can seed a new sandbox, and can be removed", async () => {
   const template = { name: "base", engine: "fake:1", imageId: "sha256:x", source: "demo", sourceImage: "img", createdAt: "2026-11-18T00:00:00Z", sizeBytes: 2 * 1024 ** 3, loginsRemoved: [".claude"], dependants: [] }
   const ui = await page({ ...base, list: () => [], templateList: () => [template], templateRemove: () => ({ removed: "base", imageId: "x", dependants: [], note: "Removed." }) })
-  ui.button("Templates").click(); await ui.settle()
-  expect(ui.text("#templates")).toContain("base · 2.00 GB · from demo (img)")
-  ui.button("New sandbox from it").click(); await ui.settle()
-  expect((ui.window.document.getElementById("f-template") as any).value).toBe("base")
-  ui.button("Templates").click(); await ui.settle()
-  ;(ui.window.document.querySelector("#templates button.danger") as any).click(); await ui.settle()
+  await ui.click("Templates")
+  expect(ui.text("#templates")).toContain("base2.0 GB · from demo (img)")
+  await ui.click("New sandbox from it")
+  expect((ui.doc.getElementById("f-template") as any).value).toBe("base")
+  expect((ui.doc.querySelector("#template-pills input[value=base]") as any).checked).toBe(true)
+  expect(ui.text("#create-command")).toContain("--template base")
+  await ui.click("Cancel")
+  ;(ui.doc.querySelector("#templates button.dang") as any).click(); await ui.settle()
   expect(ui.calls.find((call) => call.method === "templateRemove")!.body).toEqual({ name: "base", engine: "fake:1" })
 })
 
-test("machines are off until experimental is on; then remote sandboxes are routed by host", async () => {
+test("machines are off until experimental is on; then remote sandboxes are routed by host, with their use and GPU containers under them", async () => {
   const off = await page({ ...base, list: () => [] })
-  off.button("Machines").click(); await off.settle()
+  off.doc.getElementById("machines-tab")!.click(); await off.settle()
   expect(off.text("#machines")).toContain("experimental and off")
   expect(off.calls.some((call) => call.method === "fleet")).toBe(false)
-  const remote = sandbox({ name: "soak" })
+  const remote = sandbox({ name: "soak" }), gpu = sandbox({ name: "cuda", spec: { name: "cuda", image: "x", cpus: 4, memoryGb: 8, pids: 4096, diskGb: 40, gpu: true } })
   const ui = await page({ ...base, list: () => [], configGet: () => ({ defaults: {}, requireProbes: true, experimental: true }), stop: () => ({}), usage: (body) => body.host ? [usageOf({ name: "soak" })] : [],
-    fleet: () => ({ machines: [{ machine: { host: { name: "local", machineId: "a" }, state: "online" }, stale: false }, { machine: { host: { name: "home-linux", ssh: "home-linux" }, state: "online", hello: { version: "0.4.0", service: "systemd" } }, cached: { sandboxes: [remote] }, stale: false }] }) })
-  ui.button("Machines").click(); await ui.settle()
-  expect(ui.text("#machines")).toContain("home-linux online")
-  ;(ui.window.document.querySelector("#machines button.small") as any).click(); await ui.settle()
+    fleet: () => ({ machines: [{ machine: { host: { name: "local", machineId: "a" }, state: "online" }, stale: false }, { machine: { host: { name: "home-linux", ssh: "home-linux" }, state: "online", hello: { version: "0.4.0", service: "systemd" } }, cached: { sandboxes: [remote, gpu] }, stale: false }] }) })
+  await ui.click("Machines")
+  expect(ui.text("#machines")).toContain("home-linuxLinux machineonline")
+  expect(ui.text("#machines")).toContain("memory 512 MB of 4.0 GB · disk 3.0 GB of 20.0 GB")
+  expect(ui.text("#machines .nested")).toContain("GPU containers on home-linux")
+  expect(ui.text("#machines .nested")).toContain("cuda")
+  expect(ui.text("#machines .nested")).not.toContain("soak")
+  ;(ui.doc.querySelector("#machines .item button.sm") as any).click(); await ui.settle()
   expect(ui.calls.find((call) => call.method === "stop")!.body).toEqual({ name: "soak", host: "home-linux" })
-  ui.button("Usage").click(); await ui.settle()
-  expect([...ui.window.document.querySelectorAll("#usage tbody td")].slice(0, 2).map((cell) => cell.textContent)).toEqual(["soak (home-linux)", "running"])
+  expect(ui.text("#machines")).toContain("ForgetAsks on your Mac")
 })
 
 test("the page calls only methods open to the dashboard", async () => {
-  const ui = await page({ ...base, list: () => [sandbox()], summary: () => ({ workspaces: [] }), usage: () => [], forwardList: () => [], linkList: () => [], templateList: () => [], about: () => ({}) })
-  for (const tab of ["Usage", "Workspaces", "Templates", "Machines", "Extensions", "Settings", "Sandboxes"]) { ui.button(tab).click(); await ui.settle() }
+  const ui = await page({ ...base, list: () => [sandbox()], summary: () => ({ workspaces: [] }), usage: () => [], forwardList: () => [], linkList: () => [], templateList: () => [], about: () => ({}), sshAccess: () => ({ alias: "demo.asidee" }) })
+  for (const tab of ["workspaces", "templates", "machines", "extensions", "settings", "sandboxes"]) { ui.doc.getElementById(`${tab}-tab`)!.click(); await ui.settle() }
+  await ui.open("demo")
   const used = [...new Set(ui.calls.map((call) => call.method))]
   expect(used.filter((method) => (CATALOG as Record<string, readonly string[]>)[method]?.[0] !== "dashboard")).toEqual([])
 })
 
 test("create sends Docker inside only when chosen, and shows the same create as a CLI command", async () => {
   const ui = await page({ ...base, list: () => [], create: (body) => ({ sandbox: { name: body.name } }) })
-  const form = ui.window.document.getElementById("create") as any
+  const form = ui.doc.getElementById("create") as any
   const submit = async (name: string, docker: string) => { form.elements.namedItem("name").value = name; form.elements.namedItem("dockerInside").value = docker; form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
-    const shown = ui.text("#create-command"); form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle(); return shown }
+    const shown = ui.text("#create-command"); await ui.submit(form); return shown }
   expect(await submit("one", "true")).toContain("asd create one --docker")
   expect(await submit("two", "")).toContain("asd create two")
   const bodies = ui.calls.filter((call) => call.method === "create").map((call) => call.body)
@@ -345,7 +449,7 @@ test("create runs the chosen setup steps after the create, in the CLI's order, a
     createStep: (body) => sandbox({ name: "fresh", ...(body.ok ? {} : { unfinished: { stage: "setup", reason: "x", removeAt: "2026-11-21T10:00:00Z", done: [] } }) }),
     action: (body) => body.action === "profiles" ? { exitCode: 0, stdout: `noise <b>\n${JSON.stringify({ agent: body.values.agent, profiles: ["work", "home", "../x", "<b>"], token: "s3cret" })}\n`, stderr: "" }
       : body.action === "clone" ? { exitCode: 2, stdout: "<i>no access</i>", stderr: "" } : { exitCode: 0, stdout: `${body.action} ok`, stderr: "" } })
-  const doc = ui.window.document as any
+  const doc = ui.doc as any
   expect([...doc.querySelectorAll('#create-setup input[data-agent="claude"]')].map((box: any) => box.dataset.profile)).toEqual(["work", "home"])
   expect(ui.text("#create-setup")).toContain("anything running there can read it")
   expect(ui.text("#create-setup")).not.toContain("s3cret")
@@ -360,11 +464,11 @@ test("create runs the chosen setup steps after the create, in the CLI's order, a
   // The browser sets T3 up first, so its one flag stands for both.
   doc.getElementById("setup-t3-browser").checked = true; form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
   expect(ui.text("#create-command")).toContain("--repo acme/app.git --t3-browserCopy")
-  form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  await ui.submit(form)
   expect(ui.text("#create-error")).toBe("Repository takes a GitHub OWNER/REPO.")
   expect(ui.calls.some((call) => call.method === "create")).toBe(false)
   doc.getElementById("setup-repo").value = "acme/app"
-  form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  await ui.submit(form)
   // The setup goes with the create, as the CLI's flags, so the daemon can keep it for a retry.
   const create = ui.calls.find((call) => call.method === "create")!.body
   expect(create.setup).toEqual({ gh: true, claude: ["work", "home"], codex: [], repo: "acme/app", t3: true, "t3-browser": true })
@@ -373,31 +477,49 @@ test("create runs the chosen setup steps after the create, in the CLI's order, a
   const steps = ui.calls.filter((call) => call.method === "action" && !["profiles", "list"].includes(call.body.action)).map((call) => call.body)
   expect(steps).toEqual([{ extension: "logins", action: "github", sandbox: "fresh", values: {} }, { extension: "logins", action: "import", sandbox: "fresh", values: { agent: "claude", profile: "work", setup: true } },
     { extension: "logins", action: "import", sandbox: "fresh", values: { agent: "claude", profile: "home", setup: true } }, { extension: "repo", action: "clone", sandbox: "fresh", values: { repository: "acme/app" } }])
-  const shown = ui.text("#sandboxes pre")
+  const shown = ui.text("#sandbox-page pre")
   expect(shown).toContain("GitHub login: done"); expect(shown).toContain("Claude login work: done")
   expect(shown).toContain("Clone acme/app: failed with exit 2 <i>no access</i>")
-  expect(shown).toContain("Clone acme/app failed; the steps after it did not run. fresh is kept. It is removed at ")
-  expect(shown).toContain("unless Retry finishes it; Keep as it is stops that.")
-  expect(doc.querySelector("#sandboxes pre i")).toBe(null)
+  expect(shown).toContain("Clone acme/app failed, so the steps after it did not run. fresh is kept. It is removed at ")
+  expect(shown).toContain("unless Retry finishes it or you choose Don't remove.")
+  expect(doc.querySelector("#sandbox-page pre i")).toBe(null)
 })
 
-test("a sandbox whose create did not finish says when it goes, and Retry runs the steps left from where it stopped", async () => {
-  const unfinished = { stage: "setup", reason: "Its setup step Clone acme/app failed.", removeAt: "2026-11-21T10:00:00Z", setup: { gh: true, repo: "acme/app", t3: true }, done: ["GitHub login"], failed: "Clone acme/app" }
+test("a sandbox whose setup did not finish says when it goes; Retry runs the steps left, and Don't remove keeps it", async () => {
+  const unfinished = { stage: "setup", reason: "Its setup step Clone acme/app failed.", removeAt: later(26), setup: { gh: true, repo: "acme/app", t3: true }, done: ["GitHub login"], failed: "Clone acme/app" }
   const bundled = ["logins", "repo", "t3"].map((id) => ({ id, name: id, actions: [] }))
-  const ui = await page({ ...base, list: () => [sandbox({ unfinished })], extensions: () => ({ extensions: bundled, errors: [] }),
+  const ui = await page({ ...base, list: () => [sandbox({ unfinished })], extensions: () => ({ extensions: bundled, errors: [] }), sshAccess: () => ({}),
     action: (body) => body.action === "profiles" || body.action === "list" ? { exitCode: 0, stdout: "", stderr: "" } : { exitCode: 0, stdout: `${body.action} ok`, stderr: "" },
     createRetry: () => ({ sandbox: sandbox(), setup: unfinished.setup, remaining: ["Clone acme/app", "T3 Code"] }), createStep: () => sandbox(), createKeep: () => sandbox() })
-  expect(ui.text("#sandboxes")).toContain("Its setup did not finish: Its setup step Clone acme/app failed. It is removed at ")
-  ui.button("Retry").click(); await ui.settle()
+  expect(ui.text("#sandboxes .lrow[data-name=demo]")).toContain("Setup did not finish")
+  await ui.open("demo")
+  const card = ui.text("#unfinished-demo")
+  expect(card).toContain("Setup stopped at step 2 of 3")
+  expect(card).toContain("Its setup step Clone acme/app failed.")
+  expect(card).toContain("Clone acme/appFailed")
+  expect(card).toContain("T3 Codedid not run")
+  expect(card).toMatch(/Removed at .+ \(in 2[56] mins\)/)
+  expect(card).not.toContain("Keep as it is")
+  await ui.click("Retry")
   expect(ui.calls.filter((call) => call.method === "action" && !["profiles", "list"].includes(call.body.action)).map((call) => call.body.action)).toEqual(["clone", "setup"])
   expect(ui.calls.filter((call) => call.method === "createStep").map((call) => call.body.step)).toEqual(["Clone acme/app", "T3 Code"])
-  ui.button("Keep as it is").click(); await ui.settle()
+  await ui.click("Don't remove")
   expect(ui.calls.find((call) => call.method === "createKeep")!.body).toEqual({ name: "demo" })
+  expect(ui.text("#sandbox-page pre")).toBe("demo stays as it is until you remove it. The steps left do not run.")
+})
+
+test("a sandbox that failed its checks at create says what happened, in plain words", async () => {
+  const lastVerify = historical({ at: "2026-11-21T10:00:00Z", results: [check("net-peers", "fail", "A connection reached 10.0.0.5.")] as CheckResult[] })
+  const ui = await page({ ...base, list: () => [sandbox({ status: "stopped", lastVerify, unfinished: { stage: "checks", reason: "A required check failed.", removeAt: later(30), done: [] } })], sshAccess: () => ({}) })
+  expect(ui.text("#sandboxes .lrow[data-name=demo]")).toContain("Did not pass its checks")
+  await ui.open("demo")
+  expect(ui.text("#unfinished-demo h3")).toBe("demo reached another sandbox. It was stopped.")
+  expect(ui.button("Don't remove").getAttribute("data-tip")).toContain("stopped if its checks failed")
 })
 
 test("setup inputs appear only for installed extensions", async () => {
   const ui = await page({ ...base, list: () => [], extensions: () => ({ extensions: [{ id: "repo", name: "repo", actions: [] }], errors: [] }) })
-  const doc = ui.window.document
+  const doc = ui.doc
   expect(doc.getElementById("setup-repo")).not.toBe(null)
   for (const id of ["gh", "claude", "codex", "t3"]) expect(doc.getElementById(`setup-${id}`)).toBe(null)
   expect(ui.text("#create-setup")).not.toContain("token")
@@ -408,23 +530,23 @@ test("the Prepare form starts from this machine's versions and sends one templat
   const done = { template: { name: "uitest", engine: "fake:1", sizeBytes: 2 * 1024 ** 3 }, versions: { claude: "2.1.310", codex: "0.164.0" }, tools: ["2.1.310 (Claude Code)"], default: false, lines: ["Creating the sandbox x…"] }
   const ui = await page({ ...base, list: () => [], templateList: () => [], templatePreparing: () => [], templatePrepare: () => done,
     templatePrepareInfo: () => ({ versions: { claude: "2.1.310", codex: "0.164.0" }, script: { path: "/Users/me/.config/asidee/agent-template.sh", exists: true } }) })
-  ui.button("Templates").click(); await ui.settle()
-  const form = ui.window.document.getElementById("prepare") as any
+  await ui.click("Templates")
+  expect(ui.text("#template-section h4")).toBe("Make a coding-tools template")
+  const form = ui.doc.getElementById("prepare") as any
   expect(form.elements.namedItem("claude").value).toBe("2.1.310")
   expect(ui.text("#p-script")).toContain("/Users/me/.config/asidee/agent-template.sh")
   form.elements.namedItem("name").value = "uitest"; form.elements.namedItem("script").value = "file"; form.elements.namedItem("replace").checked = true
   form.dispatchEvent(new ui.window.Event("input")); await ui.settle()
   expect(ui.text("#prepare-command")).toContain("asd template prepare uitest --claude 2.1.310 --codex 0.164.0 --script /Users/me/.config/asidee/agent-template.sh --replace")
-  form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  await ui.submit(form)
   expect(ui.calls.filter((call) => call.method === "templatePrepare").map((call) => call.body)).toEqual([{ name: "uitest", claude: "2.1.310", codex: "0.164.0", engine: "fake:1", replace: true, default: false, scriptFile: true }])
-  expect(ui.text("#prepare-progress")).toContain("Saved template uitest (2.00 GB) on fake:1")
-  form.elements.namedItem("script").value = "paste"; form.elements.namedItem("scriptText").value = "echo hi"
-  form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  expect(ui.text("#prepare-progress")).toContain("Saved template uitest (2.0 GB) on fake:1")
+  await ui.submit(form, { script: "paste", scriptText: "echo hi" })
   expect(ui.calls.filter((call) => call.method === "templatePrepare").at(-1)!.body).toMatchObject({ script: "echo hi" })
   expect(ui.calls.filter((call) => call.method === "templatePrepare").at(-1)!.body).not.toHaveProperty("scriptFile")
 })
 
-test("actions asked on the Mac say so before the click, show the wait, and offer the CLI command when refused", async () => {
+test("actions asked on the Mac say so beside the button, show the wait in the island, and offer the CLI command when refused", async () => {
   let answer!: (value: unknown) => void
   const refusal = Object.assign(new Error("No dialog can be shown on this Mac, so only the CLI can do this. From the CLI: asd config set terminal-command 'kitty sh -c {command}'"),
     { code: "forbidden", details: { approval: "unavailable", command: "asd config set terminal-command 'kitty sh -c {command}'" } })
@@ -432,49 +554,55 @@ test("actions asked on the Mac say so before the click, show the wait, and offer
   const ui = await page({ ...base, list: () => [sandbox()], summary: () => ({ workspaces: [workspace] }), usage: () => [], forwardList: () => [], linkList: () => [], templateList: () => [], about: () => ({ platform: "darwin" }),
     terminalCommandSet: () => new Promise((resolve, reject) => { answer = (value) => value instanceof Error ? reject(value) : resolve(value) }),
     workspaceStop: () => ({}), workspaceRemove: (body) => ({ removed: body.name, notRemoved: [] }), workspaceExec: () => ({ exitCode: 0, stdout: "hi", stderr: "" }) })
-  ui.button("Settings").click(); await ui.settle()
-  expect(ui.text("#terminal-custom")).toContain("A dialog on this Mac asks you to allow it first; no answer in 60 seconds denies it.")
-  const form = ui.window.document.querySelector("#terminal-custom form") as any
-  form.elements.namedItem("command").value = "kitty sh -c {command}"
-  form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
-  expect(ui.text("#terminal-custom")).toContain("Waiting for Allow on the Mac…")
+  expect(ui.text("#island")).toBe("Ready")
+  await ui.click("Settings")
+  expect(ui.text("#terminal-custom")).toContain("A dialog on this Mac asks you to allow it first. No answer within 60 s means no.")
+  await ui.submit(ui.doc.querySelector("#terminal-custom form"), { command: "kitty sh -c {command}" })
+  expect(ui.text("#terminal-custom")).toContain("Waiting for you on your Mac…")
+  expect(ui.text("#terminal-custom")).toContain("No answer within 60 s means no.")
+  expect(ui.text("#island")).toMatch(/^Allow on your MacSet · terminal-command · (60|59) s$/)
+  expect(ui.doc.querySelectorAll("#island .ring22.mac").length).toBe(1)
+  // There is no way to take the request back, so no Cancel is offered.
+  expect([...ui.doc.querySelectorAll("#terminal-custom button")].some((node) => node.textContent === "Cancel")).toBe(false)
   expect(ui.calls.find((call) => call.method === "terminalCommandSet")!.body).toEqual({ terminalCommand: "kitty sh -c {command}" })
   answer(refusal); await ui.settle()
   expect(ui.text("#terminal-custom pre")).toContain("only the CLI can do this")
-  expect([...ui.window.document.querySelectorAll("#terminal-custom code")].map((node) => node.textContent)).toContain("asd config set terminal-command 'kitty sh -c {command}'")
-  expect(ui.button("Set (asks on the Mac)")).toBeDefined()
+  expect([...ui.doc.querySelectorAll("#terminal-custom code")].map((node) => node.textContent)).toContain("asd config set terminal-command 'kitty sh -c {command}'")
+  expect(ui.text("#island")).toBe("✗Set · terminal-commanddid not finish")
+  expect(ui.button("Set").closest(".ask")!.textContent).toContain("Asks on your Mac")
   // Workspaces: each changing action is labelled, and remove sends the typed name.
-  ui.button("Workspaces").click(); await ui.settle()
-  expect(ui.text("#workspaces")).toContain("A dialog on this Mac asks you")
-  ui.button("Stop (asks on the Mac)").click(); await ui.settle()
-  ui.button("Remove (asks on the Mac)").click(); await ui.settle()
+  await ui.click("Workspaces")
+  expect(ui.text("#workspaces")).toContain("Asks on your Mac")
+  await ui.click("Stop")
+  await ui.click("Remove")
   expect(ui.calls.filter((call) => call.method.startsWith("workspace")).map((call) => [call.method, call.body])).toEqual([["workspaceStop", { name: "render" }], ["workspaceRemove", { name: "render", confirm: "demo" }]])
   expect(ui.prompts.at(-1)).toContain("/fixture/render")
   expect(ui.text("#workspace-commands")).toContain("It is not a sandbox.")
-  expect(ui.button("Create workspace (asks on the Mac)")).toBeDefined()
+  expect(ui.button("Create workspace").closest(".ask")!.textContent).toContain("Asks on your Mac")
 })
 
-test("on a machine without the dialog, the buttons say the CLI command is offered instead", async () => {
+test("on a machine without the dialog, the buttons say they are refused here and the command is offered", async () => {
   const ui = await page({ ...base, list: () => [], summary: () => ({ workspaces: [] }), usage: () => [], forwardList: () => [], linkList: () => [], templateList: () => [], about: () => ({ platform: "linux" }) })
-  ui.button("Settings").click(); await ui.settle()
+  await ui.click("Settings")
   expect(ui.text("#about")).toContain("This machine has no dialog to allow it, so it is refused and its CLI command offered.")
-  expect(ui.button("Stop the daemon (asks on the Mac)")).toBeDefined()
+  expect(ui.button("Stop the service").closest(".ask")!.textContent).toContain("Terminal only here")
 })
 
-test("the T3 card sets T3 up, then gives the SSH host to paste, and shows each result in its pop-up", async () => {
+test("the T3 part sets T3 up, then gives the SSH host to paste, and shows each result in its form", async () => {
   const t3 = { id: "t3", name: "T3 Code", actions: ["setup", "sync", "ssh"].map((id) => ({ id, label: id, scope: "sandbox", fields: [], run: ["./t3.ts", id] })) }
   const ui = await page({ ...base, list: () => [sandbox()], extensions: () => ({ extensions: [t3], errors: [] }), sshAccess: () => ({ alias: "demo.asidee", user: "root", home: "/root", batchReady: false, loopbackForwarding: true }),
     action: (body) => body.action === "setup" ? { exitCode: 0, stdout: JSON.stringify({ version: "1.2.3", runtime: "installed", claude: 2, codex: 1, ssh: {} }), stderr: "" } : { exitCode: 1, stdout: "", stderr: "" } })
-  expect(ui.text("#sandboxes")).toContain("Connect T3 CodeSet up SSH first")
-  await ui.tile("Connect T3 Code")
-  expect(ui.text("#modal")).toContain("Set up SSH (asks on the Mac)")
-  expect(ui.window.document.querySelector("#modal .cmd code")!.textContent).toBe("demo.asidee")
-  ui.button("Set up T3 Code").click(); await ui.settle()
+  await ui.open("demo")
+  expect(ui.text("#sandbox-page .part[data-extension=t3]")).toContain("T3 CodeSet up SSH first")
+  await ui.click("Connect T3 Code")
+  expect(ui.text("#modal")).toContain("Set up SSHAsks on your Mac")
+  expect(ui.doc.querySelector("#modal .cmd code")!.textContent).toBe("demo.asidee")
+  await ui.click("Set up T3 Code")
   expect(ui.text("#modal pre")).toBe("T3 1.2.3 installed. Logins it found: Claude 2, Codex 1.")
-  expect(ui.text("#sandboxes pre")).toBe("")
+  expect(ui.text("#sandbox-page pre")).toBe("")
 })
 
-test("the Logins pop-up lists the sandbox's logins as cards, re-imports or adds one, and tells T3", async () => {
+test("the Logins form lists the sandbox's logins as cards, re-imports or adds one, and tells T3", async () => {
   const logins = { id: "logins", name: "Agent logins", actions: ["import", "github", "list", "logout"].map((id) => ({ id, label: id, scope: "sandbox", fields: [], run: ["./login.ts", id] })) }
   const t3 = { id: "t3", name: "T3 Code", actions: [{ id: "sync", label: "sync", scope: "sandbox", fields: [], run: ["./t3.ts", "sync"] }] }
   let inside = "claude/~ (a@example.com)\nclaude/work (w@example.com)\ngithub/~ (me)\n"
@@ -483,33 +611,123 @@ test("the Logins pop-up lists the sandbox's logins as cards, re-imports or adds 
       : body.action === "list" ? { exitCode: 0, stdout: inside, stderr: "" }
       : body.action === "import" ? (inside += body.values.replace === "true" ? "" : `claude/${body.values.profile} (h@example.com)\n`, { exitCode: 0, stdout: "Imported.\nCopied 0 setup files.", stderr: "" })
       : { exitCode: 0, stdout: '{"claude":3,"codex":0}', stderr: "" } })
-  expect(ui.text("#sandboxes")).toContain("LoginsClaude: main login, work · GitHub")
-  await ui.tile("Logins")
-  const card = (title: string, section = 0) => [...ui.window.document.querySelectorAll("#modal .cards")[section]!.querySelectorAll(".card")].find((node) => node.querySelector(".t")!.textContent === title) as any
+  await ui.open("demo")
+  expect(ui.text("#sandbox-page")).toContain("Logins inside: Claude: main login, work · GitHub")
+  // Logins belong to the Agents card, not to an extension part.
+  expect(ui.doc.querySelector("#sandbox-page .part[data-extension=logins]")).toBe(null)
+  await ui.click("Manage logins")
+  const card = (title: string, section = 0) => [...ui.doc.querySelectorAll("#modal .cards")[section]!.querySelectorAll(".card")].find((node) => node.querySelector(".t")!.textContent === title) as any
   expect(card("Claude · work").textContent).toContain("w@example.com")
   // This Mac's work login is in the sandbox already, so only home is offered to add.
-  expect([...ui.window.document.querySelectorAll("#modal .cards")[1]!.querySelectorAll(".t")].map((node) => node.textContent)).toEqual(["Claude · home"])
+  expect([...ui.doc.querySelectorAll("#modal .cards")[1]!.querySelectorAll(".t")].map((node) => node.textContent)).toEqual(["Claude · home"])
   ;[...card("Claude · work").querySelectorAll("button")].find((node: any) => node.textContent === "Re-import")!.click(); await ui.settle()
   expect(ui.text("#modal pre")).toBe("Re-imported Claude · work. T3 Code sees it now.")
   ;[...card("Claude · home", 1).querySelectorAll("button")].find((node: any) => node.textContent === "Add")!.click(); await ui.settle()
   const sent = ui.calls.filter((call) => call.method === "action" && ["import", "sync"].includes(call.body.action)).map((call) => [call.body.action, call.body.values])
   expect(sent).toEqual([["import", { agent: "claude", profile: "work", target: "", setup: "false", replace: "true" }], ["sync", {}], ["import", { agent: "claude", profile: "home", target: "", setup: "false", replace: "false" }], ["sync", {}]])
   expect(card("Claude · home").textContent).toContain("h@example.com")
-  // With named logins, asd claude cannot pick the canonical one, so Open agent offers only the named ones.
-  ui.button("Close").click(); await ui.settle()
-  ui.button("Open agent…").click(); await ui.settle()
-  expect([...ui.window.document.querySelectorAll("#modal .card .t")].map((node) => node.textContent)).toEqual(["Claude · work", "Claude · home"])
-  ;(ui.window.document.querySelector("#modal .card") as any).click(); await ui.settle()
+  // With named logins, asd claude cannot pick the canonical one, so Pick a login offers only the named ones.
+  await ui.pick("Pick a login…")
+  expect([...ui.doc.querySelectorAll("#modal .card .t")].map((node) => node.textContent)).toEqual(["Claude · work", "Claude · home"])
+  ;(ui.doc.querySelector("#modal .card") as any).click(); await ui.settle()
   expect(ui.calls.find((call) => call.method === "openTerminal")!.body).toEqual({ name: "demo", kind: "claude", profile: "work" })
 })
 
 test("the default template is offered once, as itself, and creating with it sends no template", async () => {
   const template = (name: string) => ({ name, engine: "fake:1", sizeBytes: 1, source: "x", sourceImage: "y", createdAt: "2026-11-18T00:00:00Z", dependants: [], loginsRemoved: [] })
   const ui = await page({ ...base, list: () => [], configGet: () => ({ defaults: { template: "agent" }, requireProbes: true }), templateList: () => [template("agent"), template("other")], create: (body) => ({ sandbox: { name: body.name } }) })
-  const pills = [...ui.window.document.querySelectorAll("#template-pills label")].map((node) => node.textContent)
-  expect(pills).toEqual(["agent (default)", "other"])
-  const form = ui.window.document.getElementById("create") as any
-  form.elements.namedItem("name").value = "fresh"
-  form.dispatchEvent(new ui.window.Event("submit", { cancelable: true })); await ui.settle()
+  expect([...ui.doc.querySelectorAll("#template-pills label")].map((node) => node.textContent)).toEqual(["agent (default)", "other"])
+  await ui.submit(ui.doc.getElementById("create"), { name: "fresh" })
   expect(ui.calls.find((call) => call.method === "create")!.body).not.toHaveProperty("template")
+  const none = await page({ ...base, list: () => [], templateList: () => [template("other")] })
+  expect([...none.doc.querySelectorAll("#template-pills label")].map((node) => node.textContent)).toEqual(["Built-in image", "other"])
+})
+
+// First run.
+const passing = CHECKLIST.filter((entry) => entry.blocking).map((entry) => check(entry.id, "pass", "ok"))
+const setupRun = (over: Record<string, (body: any) => unknown> = {}) => {
+  let config: any = { defaults: {}, requireProbes: true }, made: string[] = []
+  return { ...base, list: () => made.map((name) => sandbox({ name })), summary: () => ({ workspaces: [] }), usage: () => [], forwardList: () => [], linkList: () => [], templateList: () => [], about: () => ({ platform: "darwin" }),
+    templatePreparing: () => [], templatePrepareInfo: () => ({ versions: { claude: "2.1.4", codex: "0.9.0" }, script: { path: "/x", exists: false } }),
+    configGet: () => config, templatePrepare: (body: any) => { config = { ...config, defaults: { template: body.name } }; return { template: { name: body.name, engine: "fake:1", sizeBytes: 1 }, tools: [], lines: [], default: true } },
+    create: (body: any) => { if (!body.name.startsWith("setup-check-")) made.push(body.name); return { sandbox: { name: body.name }, checks: passing } }, remove: () => ({}),
+    openTerminal: () => ({ terminal: "default", command: "x" }), sshAccess: () => ({}), ...over }
+}
+
+test("the first run opens by itself, tests a throwaway sandbox, makes the template and the first sandbox, and opens an agent", async () => {
+  const ui = await page(setupRun(), undefined, { setupDone: false })
+  const step = async (label: string) => { ([...ui.doc.querySelectorAll("#setup button")].find((node) => node.textContent === label) as any).click(); await ui.settle() }
+  expect(ui.doc.getElementById("setup-section")!.hidden).toBe(false)
+  expect(ui.doc.body.classList.contains("onboarding")).toBe(true)
+  expect([...ui.doc.querySelectorAll("#setup .rail button")].map((node) => node.textContent!.replace(/^\d/, ""))).toEqual(["Engine", "Set up", "Test it", "Coding tools", "First sandbox", "Open it", "Leave first run"])
+  // The engine is ready, so it starts at the test, with the step before it marked done (not passed).
+  expect(ui.text("#setup h1")).toBe("Test it")
+  expect(ui.doc.querySelectorAll("#setup .rail button.done").length).toBe(2)
+  expect(ui.text("#setup")).toContain("Settings · 8"); expect(ui.text("#setup")).toContain("Network test · 4")
+  await step("Run the test")
+  const test = ui.calls.find((call) => call.method === "create")!.body
+  expect(test.name).toMatch(/^setup-check-[0-9a-f]{6}$/)
+  expect(ui.calls.find((call) => call.method === "remove")!.body).toEqual({ name: test.name, confirm: test.name })
+  expect(ui.text("#setup")).toContain("All required checks passed. The test sandbox was removed.")
+  // Fresh results are the one place the green filled mark is used.
+  expect(ui.doc.querySelectorAll("#setup .mk.ok").length).toBe(12)
+  await step("Continue")
+  expect(ui.text("#setup h1")).toBe("Add coding tools")
+  expect(ui.text("#setup")).toContain("Claude Code 2.1.4")
+  await step("Make template")
+  expect(ui.calls.find((call) => call.method === "templatePrepare")!.body).toEqual({ name: "agent", claude: "2.1.4", codex: "0.9.0", replace: false, default: true })
+  await step("Continue")
+  expect(ui.text("#setup h1")).toBe("Make your first sandbox")
+  expect(ui.text("#setup")).toContain("Starts from the agent template, with coding tools")
+  expect(ui.text("#setup .cmd code")).toBe("asd create my-app")
+  await ui.submit(ui.doc.getElementById("first-form"))
+  expect(ui.calls.filter((call) => call.method === "create").at(-1)!.body).toEqual({ name: "my-app" })
+  expect(ui.text("#setup h1")).toBe("my-app is ready")
+  await step("Open")
+  expect(ui.calls.find((call) => call.method === "openTerminal")!.body).toEqual({ name: "my-app", kind: "claude" })
+  await step("Go to the list")
+  expect(ui.doc.getElementById("setup-section")!.hidden).toBe(true)
+  expect(ui.window.localStorage.getItem("asidee-setup-done")).toBe("1")
+  const used = [...new Set(ui.calls.map((call) => call.method))]
+  expect(used.filter((method) => (CATALOG as Record<string, readonly string[]>)[method]?.[0] !== "dashboard")).toEqual([])
+})
+
+test("the first run names only OrbStack, and shows setup as a command it waits for, never running it", async () => {
+  const none = await page(setupRun({ engines: () => [] }), undefined, { setupDone: false })
+  expect(none.text("#setup h1")).toBe("Get the engine ready")
+  expect(none.text("#setup")).toContain("No engine on this Mac")
+  expect((none.doc.querySelector("#setup a.btn") as any).href).toBe("https://orbstack.dev/download")
+  expect(none.text("body")).not.toMatch(/Docker Desktop|Colima|Podman|Rancher/)
+  const orb = { id: "docker:orbstack", label: "OrbStack", ready: false, data: { context: "orbstack" }, problems: ["OrbStack does not answer."] }
+  const stopped = await page(setupRun({ engines: () => [orb] }), undefined, { setupDone: false })
+  expect(stopped.text("#setup")).toContain("OrbStack is installed but not running")
+  expect(stopped.text("#setup .cmd code")).toBe("open -a OrbStack")
+  const unset = await page(setupRun({ engines: () => [{ ...orb, problems: ["Not set up for Asidee."] }] }), undefined, { setupDone: false })
+  expect(unset.text("#setup")).toContain("Running · not set up for Asidee yet")
+  await unset.click("Continue to setup")
+  expect(unset.text("#setup h1")).toBe("Set up the engine")
+  expect([...unset.doc.querySelectorAll("#setup .cmd code")].map((node) => node.textContent)).toEqual(["asd setup", "asd setup --docker", "asd setup --remove"])
+  expect(unset.text("#island")).toBe("Waiting for asd setupin your terminal")
+  // The test needs a ready engine.
+  await unset.click("3Test it")
+  expect(unset.button("Run the test").disabled).toBe(true)
+})
+
+test("a failed first-run test says what happened in plain words and still removes the test sandbox", async () => {
+  const lastVerify = historical({ at: "2026-11-21T10:00:00Z", results: [...passing.filter((entry) => entry.id !== "net-peers"), check("net-peers", "fail", "A connection reached 10.0.0.5.")] as CheckResult[] })
+  const ui = await page(setupRun({ create: () => { throw new Error("A required check failed: net-peers.") }, get: (body) => sandbox({ name: body.name, lastVerify }) }), undefined, { setupDone: false })
+  await ui.click("Run the test")
+  expect(ui.text("#setup .banner.bad")).toBe(`Setup is not done. The test sandbox reached another sandbox. The test sandbox was removed.`)
+  expect(ui.calls.some((call) => call.method === "remove")).toBe(true)
+  expect(ui.button("Retry")).toBeDefined()
+  const off = await page(setupRun({ configGet: () => ({ defaults: {}, requireProbes: false }), create: (body) => ({ sandbox: { name: body.name }, checks: passing.map((entry) => CHECKLIST.find((item) => item.id === entry.id)!.stage === "probe" ? check(entry.id, "unknown", "The network test did not run.") : entry) }) }), undefined, { setupDone: false })
+  await off.click("Run the test")
+  expect(off.text("#setup .banner.unk")).toContain("“Require the network test” is off in Settings")
+})
+
+test("the page is light only", async () => {
+  const html = await readFile(join(import.meta.dir, "..", "..", "ui", "index.html"), "utf8")
+  expect(html).not.toContain("prefers-color-scheme")
+  expect(html).toContain('<meta name="color-scheme" content="light">')
+  expect(html).toContain("prefers-reduced-motion")
 })
