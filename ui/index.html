@@ -550,8 +550,9 @@ const term = (text, tip, tag = "span") => el(tag, { class: "hv", tabindex: "0", 
 const quiet = (text, tip) => el("span", { class: "tp", tabindex: "0", "data-tip": tip }, text)
 // A value as one POSIX shell word: bare when it is safe, else in single quotes. A leading ~/ stays outside the quotes
 // so the shell still expands it.
-// No leading ~ or =: the shell would expand ~name and (zsh) =command.
-const SAFE = /^[A-Za-z0-9_@%+:,.\/-][A-Za-z0-9_@%+=:,.\/~-]*$/
+// No ~ (bash expands it after = or :, as in profile=~) and no leading = (zsh expands =command). A leading ~/ is kept
+// outside the quotes by shq so the home folder still expands.
+const SAFE = /^[A-Za-z0-9_@%+:,.\/-][A-Za-z0-9_@%+=:,.\/-]*$/
 const shq = (value) => { const text = String(value); if (SAFE.test(text)) return text; if (text.startsWith("~/")) return `~/${shq(text.slice(2))}`; return `'${text.replaceAll("'", "'\\''")}'` }
 const help = (tip) => el("span", { class: "help", tabindex: "0", "data-tip": tip, "aria-label": tip }, "?")
 // A command for the CLI, with a button that copies it. Used for everything the dashboard is not allowed to do.

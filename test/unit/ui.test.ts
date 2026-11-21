@@ -513,6 +513,7 @@ test("every copyable command quotes a value for the shell only when it needs it"
   // A leading ~name or =word would be expanded by the shell (zsh expands =command), so it is quoted.
   expect(await typed({ name: "x", image: "~root" })).toBe("asd create x --image '~root'")
   expect(await typed({ name: "x", image: "=ls" })).toBe("asd create x --image '=ls'")
+  expect(await typed({ name: "x", image: "a=~" })).toBe("asd create x --image 'a=~'")
   // The template form's command quotes its values too.
   const prepare = doc.getElementById("prepare")
   prepare.elements.namedItem("name").value = "agent"; prepare.elements.namedItem("claude").value = "2.1 beta"; prepare.dispatchEvent(new ui.window.Event("input")); await ui.settle()
