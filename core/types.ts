@@ -118,7 +118,7 @@ export type Manifest = {
   unfinished?: { stage: "checks" | "setup"; reason: string; removeAt: string; setup?: CreateSetup; done: string[]; failed?: string }
 }
 // The create's setup flags, as `asd create` takes them.
-export type CreateSetup = { gh?: boolean; claude?: string[]; codex?: string[]; repo?: string; skills?: string; t3?: boolean; "t3-browser"?: boolean }
+export type CreateSetup = { gh?: boolean; claude?: string[]; codex?: string[]; repo?: string; copy?: string[]; t3?: boolean; "t3-browser"?: boolean }
 // user and home: the login, the same as exec's. unlocked: its locked password was replaced by * (still no password),
 // since sshd refuses a locked account even with a key. hostKey: the public half of the key made inside. editorKey: the
 // fingerprint of the key this machine's editors log in with.

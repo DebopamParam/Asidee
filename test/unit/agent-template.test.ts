@@ -173,7 +173,7 @@ test("templatePrepare and its progress are open to the dashboard and can be rout
   expect(CATALOG.templatePrepareInfo).toEqual(["dashboard", "primary"])
 })
 
-test("a create's --gh, --claude, --codex, --repo, --skills, --t3 and --t3-browser become extension runs in dependency order, checked first", async () => {
+test("a create's --gh, --claude, --codex, --repo, --copy, --t3 and --t3-browser become extension runs in dependency order, checked first", async () => {
   const { createSteps, runCreateSteps } = await import("../../core/create-setup")
   expect(createSteps("demo", {})).toEqual([])
   expect(createSteps("demo", { t3: true, repo: "o/r", codex: ["work"], claude: ["deb", "work", "deb"], gh: true }).map((step) => step.argv)).toEqual([
@@ -184,7 +184,21 @@ test("a create's --gh, --claude, --codex, --repo, --skills, --t3 and --t3-browse
     ["repo", "clone", "demo", "o/r"],
     ["t3", "setup", "demo"],
   ])
-  expect(createSteps("demo", { t3: true, skills: "~/hq", repo: "o/r" }).map((step) => step.argv)).toEqual([["repo", "clone", "demo", "o/r"], ["skills", "import", "demo", "--source", "~/hq"], ["t3", "setup", "demo"]])
+  // Folders are copied after the clone, in the order given, each once; DEST follows the first : before ~ or /.
+  expect(createSteps("demo", { t3: true, copy: ["~/.agents", "~/my:notes:~/notes", "~/.agents", "/Users/me/kit:/opt/kit"], repo: "o/r" }).map((step) => [step.label, ...step.argv])).toEqual([
+    ["Clone o/r", "repo", "clone", "demo", "o/r"],
+    ["Copy ~/.agents", "folders", "copy", "demo", "--source", "~/.agents"],
+    ["Copy ~/my:notes to ~/notes", "folders", "copy", "demo", "--source", "~/my:notes", "--dest", "~/notes"],
+    ["Copy /Users/me/kit to /opt/kit", "folders", "copy", "demo", "--source", "/Users/me/kit", "--dest", "/opt/kit"],
+    ["T3 Code", "t3", "setup", "demo"],
+  ])
+  for (const copy of ["", ":~/x", "a\nb"]) expect(() => createSteps("demo", { copy: [copy] })).toThrow("--copy")
+  // A client's setup is checked as the flags are; the old skills flag is gone.
+  const { validSetup } = await import("../../core/create-setup")
+  expect(validSetup("demo", { copy: ["~/.agents"] })).toEqual({ copy: ["~/.agents"] })
+  expect(validSetup("demo", { copy: [] })).toBeUndefined()
+  expect(() => validSetup("demo", { copy: "~/.agents" })).toThrow("setup.copy must be a list of folders")
+  expect(() => validSetup("demo", { skills: "~/hq" })).toThrow("not skills")
   expect(createSteps("demo", { "t3-browser": true }).map((step) => step.argv)).toEqual([["t3", "setup", "demo"], ["t3", "browser", "demo"]])
   expect(createSteps("demo", { t3: true, "t3-browser": true }).map((step) => step.argv)).toEqual([["t3", "setup", "demo"], ["t3", "browser", "demo"]])
   for (const repo of ["o", "o/r.git", "-o/r", "o/r/x", "https://github.com/o/r"]) expect(() => createSteps("demo", { repo })).toThrow("--repo")

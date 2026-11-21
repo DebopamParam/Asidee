@@ -18,7 +18,7 @@ import { FORWARD_REACH, type ForwardView } from "../core/forwards"
 import { RELAY } from "../core/providers/gvisor"
 import { LINK_LIMITS, type LinkView } from "../core/links"
 import type { HostPlan } from "../core/hosts"
-import { hostOption, type FleetView, type HostView } from "../core/machines"
+import { FOLDERS_LOCAL, hostOption, type FleetView, type HostView } from "../core/machines"
 import { bounded, PROTOCOL, transportStdio } from "../core/transport"
 import { included, userConfig, type SshAccess } from "../core/ssh"
 import { systemRunner } from "../core/run"
@@ -39,9 +39,10 @@ const GROUPS: Array<[string, string[]]> = [
     "asd doctor                         engines on this machine and what each one needs",
     "asd create NAME [--docker | --gpu] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--disk GB] [--pids N] [--engine ID]",
     "           --gpu makes a GPU container, not a sandbox: runc on the host's own Linux kernel with its NVIDIA GPU, as uid 1000",
-    "           [--gh] [--claude PROFILE…] [--codex PROFILE…] [--repo OWNER/REPO] [--skills DIR] [--t3] [--t3-browser]",
+    "           [--gh] [--claude PROFILE…] [--codex PROFILE…] [--repo OWNER/REPO] [--copy DIR[:DEST]…] [--t3] [--t3-browser]",
     "           then, with the bundled extensions: this Mac's GitHub login, Claude or Codex logins with their setup (repeat",
-    "           a flag for several), a clone into ~/workspace, DIR's skills and plugins into ~/workspace, T3 Code, T3's",
+    "           a flag for several), a clone into ~/workspace, folders of your home copied in (to the same place under",
+    "           the sandbox's home, or DEST; login files, history and caches left out), T3 Code, T3's",
     "           browser (Chrome; sets T3 up too). Each token is copied into the sandbox, where anything running there can read it.",
     "asd create --retry NAME            finish a create that did not: its checks again if they failed, then the setup steps left",
     "asd create --keep NAME             keep a sandbox whose create did not finish as it is; otherwise it is removed 30 minutes after it stopped",
@@ -114,7 +115,7 @@ const GROUPS: Array<[string, string[]]> = [
   ]],
   ["Extensions, dashboard and daemon", [
     "asd ext list                       installed extensions, and the bundled ones you can install",
-    "asd ext install EXTENSION          install a bundled extension: logins, repo, skills, env-docs, t3, rotator",
+    "asd ext install EXTENSION          install a bundled extension: logins, folders, repo, env-docs, t3, rotator",
     "asd ext remove EXTENSION           remove a bundled extension asd installed",
     "asd ext run EXTENSION ACTION [SANDBOX] [--set FIELD=VALUE]…",
     "asd ui [--open]                    the dashboard's address",
@@ -606,7 +607,7 @@ async function main(argv: string[]): Promise<void> {
       }
       case "create": {
         const { values, positionals } = parse({ docker: { type: "boolean" }, gpu: { type: "boolean" }, image: { type: "string" }, template: { type: "string" }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" }, pids: { type: "string" }, engine: { type: "string" },
-          gh: { type: "boolean" }, claude: { type: "string", multiple: true }, codex: { type: "string", multiple: true }, repo: { type: "string" }, skills: { type: "string" }, t3: { type: "boolean" }, "t3-browser": { type: "boolean" },
+          gh: { type: "boolean" }, claude: { type: "string", multiple: true }, codex: { type: "string", multiple: true }, repo: { type: "string" }, copy: { type: "string", multiple: true }, t3: { type: "boolean" }, "t3-browser": { type: "boolean" },
           retry: { type: "boolean" }, keep: { type: "boolean" } })
         const name = need(positionals[0], "a name")
         // Runs the setup steps one by one, telling the daemon each result, so a failure is kept with the step it stopped at.
@@ -637,10 +638,10 @@ async function main(argv: string[]): Promise<void> {
         }
         // Checked before anything is made. The logins come from this Mac, and the extensions reach local sandboxes only.
         const steps = createSteps(name, values)
-        if (steps.length && selectedHost && selectedHost !== "local") throw new AsideeError("usage", "--gh, --claude, --codex, --repo, --skills, --t3 and --t3-browser work for sandboxes on this Mac only.")
+        if (steps.length && selectedHost && selectedHost !== "local") throw new AsideeError("usage", "--gh, --claude, --codex, --repo, --copy, --t3 and --t3-browser work for sandboxes on this Mac only.")
         creating = name; creatingGpu = Boolean(values.gpu)
         if (values.gpu && !asJson) console.error(`asd: ${GPU_WARNING}`)
-        const setup = { gh: values.gh, claude: values.claude, codex: values.codex, repo: values.repo, skills: values.skills, t3: values.t3, "t3-browser": values["t3-browser"] }
+        const setup = { gh: values.gh, claude: values.claude, codex: values.codex, repo: values.repo, copy: values.copy, t3: values.t3, "t3-browser": values["t3-browser"] }
         const made = await call<{ sandbox: SandboxView; checks: CheckResult[]; hooks: Array<{ extension: string; exitCode: number; output: string }>; warning?: string }>("create",
           { name, docker: values.docker, ...(values.gpu ? { gpu: true } : {}), image: values.image, template: values.template, cpus: values.cpus, memoryGb: values.memory, diskGb: values.disk, pids: values.pids, engine: values.engine, ...(steps.length ? { setup } : {}) }, watching(name))
         if (!asJson) {
@@ -892,6 +893,7 @@ async function main(argv: string[]): Promise<void> {
         let parsed
         try { parsed = parseArgs({ args: rest.slice(1), options: { set: { type: "string", multiple: true } }, allowPositionals: true }) } catch (error) { throw argumentError(error, "ext run") }
         const { values, positionals } = parsed
+        if (positionals[0] === "folders" && selectedHost && selectedHost !== "local") throw new AsideeError("usage", FOLDERS_LOCAL)
         const fields = Object.fromEntries((values.set ?? []).map((pair) => { const at = pair.indexOf("="); return at < 0 ? [pair, "true"] : [pair.slice(0, at), pair.slice(at + 1)] }))
         const output = await call<RunResult>("action", { extension: need(positionals[0], "an extension"), action: need(positionals[1], "an action"), sandbox: positionals[2], values: fields })
         return printRun(output, asJson)
