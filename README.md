@@ -90,7 +90,7 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   here, else latest; `--claude` and `--codex` choose), runs an optional `--script FILE` as the sandbox's user, checks
   each tool, saves the template `agent` and removes the sandbox. `--default`, or `asd config set default-template
   agent`, makes new sandboxes start from it when a create names neither an image nor a template. The dashboard's
-  Templates tab has the same form, with the versions filled in from this machine; its script is
+  Templates page has the same form, with the versions filled in from this machine; its script is
   `~/.config/asidee/agent-template.sh` or pasted text. Both call one daemon method, and the script runs only inside
   the sandbox being prepared.
 - One-step create: `asd create demo --gh --claude PROFILE --codex PROFILE --repo OWNER/REPO --t3` runs the bundled
@@ -101,12 +101,14 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   If its checks fail, or a setup step fails (the first failure stops the rest), the sandbox is kept for 30 minutes after
   its last progress and then removed by the daemon (not while a shell or forward is open in it). `asd create --retry
   NAME` finishes it: the checks again if they failed, then the steps left, from the one that failed. `asd create --keep
-  NAME` keeps it as it is. `asd list`, `asd get` and the dashboard (Retry, Keep as it is) show when it goes.
+  NAME` keeps it as it is. `asd list`, `asd get` and the dashboard (Retry, Don't remove) show when it goes.
 - `asd claude demo [PROFILE]` and `asd codex demo [PROFILE]` open the agent in `~/workspace` with an imported login.
   The dashboard opens the same in a terminal window on the Mac.
-- The daemon, the CLI with `--json`, a web dashboard, and extensions. What the dashboard does to the Mac itself
-  (workspaces, the custom terminal command, `~/.ssh/config`, machines, daemon stop) runs only after Allow in a dialog on
-  the Mac, which denies by itself after 60 seconds; where no dialog can be shown, the page offers the CLI command.
+- The daemon, the CLI with `--json`, a web dashboard, and extensions. The dashboard is a list of sandboxes with a page
+  for each, and a first run that tests the engine with a throwaway sandbox; terminal-only steps such as `asd setup` show
+  as a command it waits for. What it does to the Mac itself (workspaces, the custom terminal command, `~/.ssh/config`,
+  machines, daemon stop) is marked "Asks on your Mac" and runs only after Allow in a dialog there, which denies by itself
+  after 60 seconds; where no dialog can be shown, the page offers the CLI command.
 - Other machines are **experimental and off by default**: they are not yet proven on enough machines. While off, the
   daemon refuses every `host` command, `--host NAME` and `list --all`, contacts no registered machine and leaves the
   registry as it is; `asd config set experimental on` turns them on. A daemon that another machine reaches over

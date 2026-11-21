@@ -53,9 +53,10 @@ check results. Nonblocking unknown or unsupported checks remain disclosures.
 the dashboard's Terminal button opens: `default` (the Mac's app for `.command` files), `terminal`, `ghostty`, `iterm`
 (not tested) or `custom`, which runs `terminalCommand`, one line with `{command}` where the shell-quoted script path goes.
 With `requireProbes: false`, create accepts unknown blocking probes and reports them as unknown, never as passes.
-Failed and unsupported blocking probes still refuse create. The dashboard's **Settings** section has the same toggle.
-A create refused for unknown probes offers **Open settings**, which navigates and focuses the toggle without changing it.
-The sandbox list labels current isolation as **Not verified**; saved checks remain dated history.
+Failed and unsupported blocking probes still refuse create. The dashboard's **Settings** page has the same toggle, named
+**Require the network test**. A create refused for unknown probes offers **Open settings**, which navigates and focuses
+the toggle without changing it. The sandbox list shows such a sandbox as **not checked**, never as passed; saved checks
+remain dated history.
 
 The daemon API exposes `configGet` and `configSet`; the latter accepts only `requireProbes` and `experimental`, each a
 boolean, `workspaceFreeSpaceGb` and `diskWatchSeconds`, each a number, `defaults` and `engine` (`null` removes either)
@@ -109,8 +110,9 @@ Verification results are measurements at the recorded `at` time, not continuing 
 their newly measured checks. Every stored `lastVerify` returned by list/get, for sandboxes and workspaces, including
 after create/start/stop/resize, is historical (`historical` in `core/checks.ts`): its results have current status
 `unknown` and no current evidence, and the detail reads `Measured <at>: <status> (<evidence>). <detail>`. The dashboard
-shows that detail as it is, under the check's title and "current property unknown"; a remote sandbox whose host stopped
-answering adds "Last contact lost." in front. The CLI and dashboard label this even with the checklist collapsed. The saved
+reads the measured status from that detail and shows it as a past result with its time: a past pass is a grey outline,
+never the green mark it keeps for results just measured; a remote sandbox whose host stopped answering adds "Last
+contact lost." in front. The CLI and dashboard label this even with the checklist collapsed. The saved
 manifest retains the original measurement. This deliberately conservative rule also covers an engine restart with
 live restore, engine replacement/reconfiguration and a daemon restart without pretending that container start time
 alone proves continuity. Use verify for a new measurement; even a recent historical pass is not a claim about now.
@@ -134,7 +136,7 @@ a 1 GB limit three times: the sandbox was stopped 1.1 to 2.1 seconds after each 
 little data; a measurement walks the sandbox's files, so it takes longer on a large one, which was not measured).
 
 Each unsuccessful enforcement pass records a timestamp and warning on that sandbox, shown by CLI list/get output
-and the collapsed dashboard as "Enforcement problem at …". This includes thrown status/check/disk errors, unknown
+and the dashboard's list as "a limit is not being checked" (with "A limit was not checked at …" on its page). This includes thrown status/check/disk errors, unknown
 blocking checks, unmeasured watched disk use and a failed stop attempt. These consume the same four-pass unknown
 budget; a known blocking failure or a passed disk limit still requests a stop immediately. Once a stop succeeds, the
 warning is cleared and the sandbox's stop reason carries the explanation; a warning remains only while enforcement is
@@ -699,8 +701,8 @@ names on two machines have distinct identities. `machineId` can also be supplied
 routed call, stream, forward and SSH setup/access whose `machineId` differs from the host's record is refused before
 any connection is opened. An unknown host never falls back. Buffered sandbox operations, engines, templates, extensions, checklist,
 verify and daemon status/stop route over SSH. Streams, primary loopback forwards and SSH setup/access also select
-the remote daemon. The dashboard's Machines tab lists each machine with its cached sandboxes, and starts, stops,
-verifies and opens terminals in them by `host`.
+the remote daemon. The dashboard's Machines page lists each machine with its cached sandboxes and their use, GPU
+containers nested under their machine, and starts, stops, verifies and opens terminals in them by `host`.
 
 The gateway executes the registered absolute binary's fixed `transport stdio --protocol 1` command, with the state
 directory set explicitly. That command only relays bytes to an existing daemon socket; it cannot install, start or
@@ -988,7 +990,7 @@ have, or a different id from its folder's name, is reported as an extension erro
 Two daemon methods manage the markers. `extensionInstall` (`asd ext install NAME`) writes a missing folder or rewrites
 the same marker; `extensionRemove` (`asd ext remove NAME`) deletes only a marker folder. A user's own folder of the same
 name is never written over or removed: both refuse with code `conflict`. Both are open to the dashboard, whose
-Extensions tab has Install and Remove buttons, and are writes, so a request with `host` routes them like other writes.
+Extensions page has Install and Remove buttons, and are writes, so a request with `host` routes them like other writes.
 `extensions` also returns `available`: every bundled id with whether its marker is installed.
 
 They are clients of the daemon like any other extension. Their commands run on this machine as the user, with
@@ -1042,21 +1044,42 @@ mid-create goes the same way. Removal needs the daemon, which any `asd` command 
 
 `createRetry` (`asd create --retry NAME`, the dashboard's Retry) repeats the start and full verify for stage `checks`,
 or starts a stopped sandbox in stage `setup`, and returns the setup and the steps left, from the failed one; the
-client runs them. `createKeep` (`asd create --keep NAME`, Keep as it is) drops the record: the sandbox stays as it is
+client runs them. `createKeep` (`asd create --keep NAME`, Don't remove on the dashboard) drops the record: the sandbox stays as it is
 and is not removed. A step that runs for over 30 minutes without a report can see its sandbox removed under it.
 
 ## Dashboard
 
-`ui/index.html` is one page with no build step, a client of the API like any other. Its tabs: **Sandboxes** (each
-sandbox's controls and live use; under More, Claude Code or Codex in a terminal window, resize, a command run with `sh -c`, save as template, forwards, links,
-SSH access and CLI commands; and the create form, which also shows the same create as a CLI command), **Usage**,
-**Workspaces**, **Templates** (with the Prepare form above), **Machines** (with `experimental` on), **Extensions** (every installed extension's actions;
-a sandbox action asks which sandbox; Install for each bundled extension not installed, Remove for an installed one)
-and **Settings** (every setting above, the engines and what this daemon is).
+`ui/index.html` is one page with no build step, a client of the API like any other. Light theme only; Reduce motion
+turns its animation off. A sidebar holds five places and Settings:
+
+- **Sandboxes**: one row per sandbox (state, kind, disk use), and a page for each. The page has the Checks card (what
+  needs a look first; "Show all" gives every stored result, required and good to know), Use (CPU, memory, processes,
+  disk, live), Agents (Claude Code, Codex, Terminal, logins), Connect (ports open on this Mac, connections to other
+  sandboxes, SSH), and a part for each installed extension that acts on a sandbox. Resize, a command run with `sh -c`,
+  save as template, CLI commands and Remove are under ⋯. A create that did not finish shows what ran, what failed, when
+  it is removed (`unfinished.removeAt`), and Retry, Don't remove (`createKeep`) and Remove now.
+- **Workspaces**, **Templates** (with the coding-tools template form), **Extensions** (optional; none come installed;
+  every installed extension's actions, a sandbox action asks which sandbox; Install for each bundled extension not
+  installed, Remove for an installed one) and **Machines** (shown only with `experimental` on).
+- **Settings**: every setting above, the engines with `asd setup` as commands, what this daemon is, and a table of the
+  plain words the page uses with the exact terms.
+
+**New ▾** opens the create form on the right, which shows the same create as a CLI command, or goes to the workspace or
+template form. The page uses plain words; the exact term (a check's title, `forward`, `pids`, …) shows beside a word on
+hover or keyboard focus. "Walled off from your Mac" is said only of a sandbox on an engine with `kernelIsolation:
+gvisor`. One indicator at the top, the island, shows each wait: the newest one, as a ring that fills with progress or
+turns while it cannot be measured, and a ring that empties over 60 seconds while a dialog on the Mac waits.
+
+A first run opens by itself while no engine is ready, or while there is no sandbox and the browser has not finished it
+before (`localStorage`): the engine (OrbStack only: Download or open it), `asd setup` as a command the page waits for,
+a test that creates a throwaway `setup-check-XXXXXX` sandbox, shows its 12 required checks and removes it, the
+coding-tools template (or Skip), the first sandbox, and opening an agent in it. It uses only what the daemon returns.
+
 What acts on the Mac itself (workspace changes, SSH setup with `~/.ssh/config`, the custom terminal command, attaching
-and forgetting machines, daemon stop) has buttons labelled "(asks on the Mac)", with a note before the click that a
-dialog will appear there. What stays socket-only (`asd setup`, `host add`, shells and streamed sessions) is shown as the
-command, with a Copy button. A unit test fails if the page calls a method that is not open to the dashboard.
+and forgetting machines, daemon stop) has "Asks on your Mac" beside its button, explained on hover, and says while it
+waits that no answer within 60 seconds means no; there is no Cancel, since the API cannot take a request back. What
+stays socket-only (`asd setup`, `host add`, shells and streamed sessions) is shown as the command, with a Copy button.
+A unit test fails if the page calls a method that is not open to the dashboard.
 
 ### Approval on the Mac
 
