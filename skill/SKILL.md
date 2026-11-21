@@ -301,7 +301,8 @@ Create `~/.config/asidee/extensions/ID/extension.json`:
 
 - `run` and `postCreate` are commands as lists. A path starting with `./` is relative to the extension's folder. Make
   scripts executable.
-- Field types: `text`, `number`, `checkbox`, `select` (with `options`). Add `"required": true` when needed.
+- Field types: `text`, `number`, `checkbox`, `select` (with `options`), `folder` (a folder in this Mac's home, which the
+  dashboard picks with a folder browser). Add `"required": true` when needed.
 - The command runs on the user's machine, not in the sandbox, with `ASIDEE_SANDBOX` (for `scope: "sandbox"`),
   `ASIDEE_FIELD_<ID>` for each field, and `asd` on `PATH`. To act inside the sandbox, call
   `asd exec "$ASIDEE_SANDBOX" -- …`.
@@ -315,7 +316,7 @@ Create `~/.config/asidee/extensions/ID/extension.json`:
 
 ### Install a bundled extension
 
-Five extensions ship inside `asd`: `logins`, `repo`, `env-docs`, `t3` and `rotator`. `asd ext list` shows the ones not
+Six extensions ship inside `asd`: `logins`, `folders`, `repo`, `env-docs`, `t3` and `rotator`. `asd ext list` shows the ones not
 yet installed under "Bundled, not installed". `asd ext install NAME` writes `~/.config/asidee/extensions/NAME/` with an
 `extension.json` of only `{"bundled":"NAME"}`; its actions then run from the `asd` binary, so neither Bun nor the
 Asidee source is needed. `asd ext remove NAME` deletes only such a folder. If the user already has a folder of that
@@ -327,9 +328,9 @@ README in `extensions/NAME/` lists its actions and what they need.
 Copy the built-in page (`ui/index.html` in the Asidee source) to `~/.config/asidee/ui/index.html` and edit the copy.
 Other files in that folder are served next to it. The page calls `POST /api/METHOD` with a JSON body and the header
 `Authorization: Bearer TOKEN`; it reads the token from the `#token=` part of the link `asd ui` prints. Methods:
-`checklist`, `engines`, `list`, `get`, `create`, `createRetry`, `createStep`, `createKeep`, `start`, `stop`, `remove`, `verify`, `resize`, `snapshot`, `templateList`,
-`templateRemove`, `templatePrepare`, `templatePreparing`, `templatePrepareInfo`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `linkAdd`, `linkList`, `linkRemove`, `sshAccess`, `extensions`, `folderBrowse`, `folderPreview`, `extensionInstall`, `extensionRemove`, `action`, `summary`,
-`hostList`, `fleet`, `configGet`, `configSet`, `usage`, `about`, `openTerminal`. `linkAdd` and `linkRemove` take `from`, `to` and `port`; `linkList` takes an optional `name`. `folderBrowse` (`path`) and `folderPreview` (`source`, `logins`) read folder names and sizes in this Mac's home for the folders extension, never contents, and refuse `host`. `configGet` returns this machine's effective configuration. `configSet`
+`version`, `checklist`, `engines`, `list`, `get`, `create`, `createRetry`, `createStep`, `createKeep`, `start`, `stop`, `remove`, `verify`, `visibilitySet`, `resize`, `snapshot`, `templateList`,
+`templateRemove`, `templatePrepare`, `templatePreparing`, `templatePrepareInfo`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `linkAdd`, `linkList`, `linkRemove`, `sshAccess`, `extensions`, `folderBrowse`, `folderPreview`, `folderChoose`, `extensionInstall`, `extensionRemove`, `action`, `summary`,
+`hostList`, `fleet`, `configGet`, `configSet`, `usage`, `about`, `openTerminal`. `linkAdd` and `linkRemove` take `from`, `to` and `port`; `linkList` takes an optional `name`. `folderBrowse` (`path`) and `folderPreview` (`source`, `logins`) read folder names and sizes in this Mac's home for the folders extension, never contents; `folderChoose` opens Finder's own window on this Mac and returns the picked `path` (none when cancelled). All three refuse `host`. `configGet` returns this machine's effective configuration. `configSet`
 accepts only `requireProbes` and `experimental`, each a boolean, `workspaceFreeSpaceGb` and `diskWatchSeconds`, each a number, `defaults` and `engine` (`null` removes either) and `terminal`, saves them to `config.json` and returns the new
 effective configuration. `terminalCommandSet`, the `workspace*` changes, `sshSetup` with `writeConfig`, `hostAttach`, `hostRemove` and `shutdown` are also open,
 but each request first shows a dialog on the Mac and runs only when the person there clicks Allow; a refusal is 403 (409 when another is waiting) with
@@ -379,7 +380,8 @@ There is no secret proxy in a gVisor container: the token lives inside it and co
 Use `asd ext run logins list NAME` and `asd ext run logins logout NAME --set agent=all` (or an agent and
 `--set profile=PROFILE`); the machine stays logged in.
 Guest imported profiles use `CLAUDE_CONFIG_DIR="$HOME/.claude-PROFILE"` or `CODEX_HOME="$HOME/.codex-PROFILE"`.
-File-profile and `gh` sandbox imports were checked live once; the Claude Keychain guest path was not. Workspaces
+File-profile and `gh` sandbox imports were checked live once, and a Claude Keychain login with its setup once
+(2026-11-18), after which Claude Code inside answered a prompt. Workspaces
 separately measure the shared Keychain reader and Claude recognition. Extension unit tests run actual guest programs
 against temporary homes; core sandbox evals do not cover extensions. Missing setup commands are named
 only for settings sent, with bounded printable names and credential values withheld.

@@ -118,6 +118,8 @@ configuration directory. A stand-in `security` that always fails was placed firs
   and `list` then showed none.
 - While imports ran, `ps` on this machine was sampled about 200 times: no token appeared in any argument or environment.
 
-Not checked live: the Claude Keychain path (no prompt may be triggered), ending a running agent session at logout (the
-image has no Claude or Codex CLI), and whether an imported Claude or Codex login is accepted by its agent.
+Not checked live in that run: the Claude Keychain path (no prompt may be triggered), ending a running agent session at
+logout (the image has no Claude or Codex CLI), and whether an imported Claude or Codex login is accepted by its agent.
+On 2026-11-18 a Keychain Claude login with its setup (1050 files, 19 MB) was imported and Claude Code inside answered a
+prompt with it; Codex accepting an import was not checked.
 The later change to report only missing-command counts and escape rewritten home paths has unit coverage only.

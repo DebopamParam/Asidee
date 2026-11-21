@@ -1055,10 +1055,11 @@ bundled before (`RETIRED` in `extensions/catalog.ts`: `skills`, replaced by `fol
 and `asd ext remove` still takes its marker away.
 
 The folders extension copies a folder of this machine's home into a sandbox. `core/folders.ts` holds the rules, read by
-the extension and by two daemon methods the dashboard uses to pick a folder: `folderBrowse` (`path`, default `~`)
-returns the folder names in it and the quick picks that exist, and `folderPreview` (`source`, `logins`) returns the
-counts, size, what is left out and skipped, and warnings. Both read names, kinds and sizes only, accept only a folder in
-the home once links are resolved, and are refused with `host`: the folder is on this Mac. A walk leaves out login files
+the extension and by three daemon methods the dashboard uses to pick a folder: `folderBrowse` (`path`, default `~`)
+returns the folder names in it and the quick picks that exist, `folderPreview` (`source`, `logins`) returns the
+counts, size, what is left out and skipped, and warnings, and `folderChoose` opens Finder's own window on a Mac and
+returns the picked folder. They read names, kinds and sizes only, accept only a folder in the home once links are
+resolved, and are refused with `host`: the folder is on this Mac. A walk leaves out login files
 everywhere (the agents' token files, `hosts.yml`, `.git-credentials`, `.netrc`, `.ssh`, `.aws`, `.gnupg`, `.claude.json`,
 `.mcp.json`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `.env*`) unless `logins` is set, and history, sessions and caches
 directly inside an agent's own folder (`.claude*`, `.codex*`, `opencode`) always. A link is kept when it points inside
