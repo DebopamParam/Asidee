@@ -514,7 +514,8 @@ const term = (text, tip, tag = "span") => el(tag, { class: "hv", tabindex: "0", 
 const quiet = (text, tip) => el("span", { class: "tp", tabindex: "0", "data-tip": tip }, text)
 // A value as one POSIX shell word: bare when it is safe, else in single quotes. A leading ~/ stays outside the quotes
 // so the shell still expands it.
-const SAFE = /^[A-Za-z0-9_@%+=:,.\/~-]+$/
+// No leading ~ or =: the shell would expand ~name and (zsh) =command.
+const SAFE = /^[A-Za-z0-9_@%+:,.\/-][A-Za-z0-9_@%+=:,.\/~-]*$/
 const shq = (value) => { const text = String(value); if (SAFE.test(text)) return text; if (text.startsWith("~/")) return `~/${shq(text.slice(2))}`; return `'${text.replaceAll("'", "'\\''")}'` }
 const help = (tip) => el("span", { class: "help", tabindex: "0", "data-tip": tip, "aria-label": tip }, "?")
 // A command for the CLI, with a button that copies it. Used for everything the dashboard is not allowed to do.
@@ -592,7 +593,7 @@ function drawIsland() {
   let parts, words, ringed = false
   if (wait?.mac) {
     const left = Math.max(0, 60 - Math.floor((Date.now() - wait.started) / 1000))
-    parts = [ring(62.83 * (1 - left / 60), "mac")]; words = [`Allow on your Mac · ${wait.label} · ${left} s`, ""]; ringed = true
+    parts = [ring(62.83 * (1 - left / 60), "mac")]; words = [`Allow on your Mac · ${left} s · ${wait.label}`, ""]; ringed = true
   } else if (wait) {
     parts = [wait.total ? ring(62.83 * (1 - wait.done / wait.total), "") : ring(47, "spin")]; words = [wait.label, `${wait.value ?? ""}${count > 1 ? ` · ${count - 1} more` : ""}`]; ringed = true
   } else if (flash) {

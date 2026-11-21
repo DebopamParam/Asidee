@@ -466,6 +466,9 @@ test("every copyable command quotes a value for the shell only when it needs it"
   expect(await typed({ name: "my app", image: "img:$TAG", cpus: "" })).toBe("asd create 'my app' --image 'img:$TAG'")
   expect(await typed({ name: "it's", image: "a;rm -rf ~" })).toBe("asd create 'it'\\''s' --image 'a;rm -rf ~'")
   expect(await typed({ name: "x", image: "\"q\" `w` *" })).toBe("asd create x --image '\"q\" `w` *'")
+  // A leading ~name or =word would be expanded by the shell (zsh expands =command), so it is quoted.
+  expect(await typed({ name: "x", image: "~root" })).toBe("asd create x --image '~root'")
+  expect(await typed({ name: "x", image: "=ls" })).toBe("asd create x --image '=ls'")
   // The template form's command quotes its values too.
   const prepare = doc.getElementById("prepare")
   prepare.elements.namedItem("name").value = "agent"; prepare.elements.namedItem("claude").value = "2.1 beta"; prepare.dispatchEvent(new ui.window.Event("input")); await ui.settle()
@@ -593,7 +596,7 @@ test("actions asked on the Mac say so beside the button, show the wait in the is
   expect(ui.text("#terminal-custom")).toContain("Waiting for you on your Mac…")
   expect(ui.text("#terminal-custom")).toContain("No answer within 60 s means no.")
   // One sentence: the request, the action in plain words, and the time left.
-  expect(ui.text("#island")).toMatch(/^Allow on your Mac · Set the terminal command · (60|59) s$/)
+  expect(ui.text("#island")).toMatch(/^Allow on your Mac · (60|59) s · Set the terminal command$/)
   expect(ui.doc.querySelectorAll("#island .ring22.mac").length).toBe(1)
   // There is no way to take the request back, so no Cancel is offered.
   expect([...ui.doc.querySelectorAll("#terminal-custom button")].some((node) => node.textContent === "Cancel")).toBe(false)
@@ -622,7 +625,7 @@ test("actions asked on the Mac say so beside the button, show the wait in the is
   form.elements.namedItem("codex").value = "home"; form.elements.namedItem("codex").dispatchEvent(new ui.window.Event("input", { bubbles: true }))
   await ui.submit(form)
   expect(ui.calls.find((call) => call.method === "workspaceCreate")!.body).toEqual({ name: "art", copy: "~/My Projects/art", logins: { kind: "profiles", claude: "work", codex: "home" } })
-  expect(ui.text("#island")).toMatch(/^(Allow on your Mac · Create the workspace art · (60|59) s|✗Create the workspace artdid not finish)$/)
+  expect(ui.text("#island")).toMatch(/^(Allow on your Mac · (60|59) s · Create the workspace art|✗Create the workspace artdid not finish)$/)
 })
 
 test("on a machine without the dialog, the buttons say they are refused here and the command is offered", async () => {
