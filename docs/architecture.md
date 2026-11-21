@@ -30,6 +30,25 @@ recorded in the sandbox's state file before the engine starts it, and cleared on
 its first verify). A daemon that finds a running sandbox still marked, because the daemon that started it ended in
 between, stops it on its next pass instead of checking it then, since a check can fail to finish too (H16).
 
+## Owner decisions
+
+These were settled with the owner; a change to one is a product decision, not a refactor.
+
+- Sandboxes are gVisor **containers**, like a small machine rented from a cloud provider: they cannot reach the host,
+  each other (except through links) or the LAN; they have limits; they can run Docker inside, and inner containers
+  have internet.
+- What ships is OrbStack with gVisor on a Mac (`asd setup`) and experimental Linux machines. Nothing a user reads
+  (CLI, dashboard, README, docs, skill) names another engine or platform, not even as "not supported yet". Every new
+  option is still an engine *capability* (`Capabilities` in `core/types.ts`), so an engine can answer "not available
+  here".
+- One dashboard: the web one. No terminal dashboard.
+- Ports: a forwarded port appears only on the loopback of the machine the person sits at. No LAN publishing, and no
+  engine-level port publishing (`-p`) ever.
+- Several machines: one Asidee daemon per machine that has an engine; the primary machine reaches the others over
+  SSH (their Unix sockets). `asd host add` sets up a Linux machine and shows what it will do before doing it.
+- A sandbox made on a machine is private to it; one another machine makes there is public, and making them is off
+  until that machine turns it on (see Machines).
+
 ## The checklist
 
 `core/checks.ts` lists the checks. Providers supply the evidence for each one; a check a provider does not report comes
