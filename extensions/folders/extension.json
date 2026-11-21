@@ -1,0 +1,34 @@
+{
+  "name": "Folders",
+  "description": "Copy a folder of this Mac into a sandbox, such as ~/.agents with its skills, links kept. Login files, history and caches are left out.",
+  "actions": [
+    {
+      "id": "copy",
+      "label": "Copy a folder in",
+      "scope": "sandbox",
+      "description": "Copies a folder in your home into the sandbox, by default to the same place under the sandbox user's home. Copying it again updates it. Anything running in the sandbox can read the copy. It copies into sandboxes on this Mac only.",
+      "fields": [
+        { "id": "source", "label": "Folder on this Mac", "type": "folder", "required": true },
+        { "id": "dest", "label": "Into, in the sandbox (blank: the same place)", "type": "text" },
+        { "id": "logins", "label": "Also copy login files", "type": "checkbox", "default": false },
+        { "id": "replace", "label": "Replace files Asidee did not copy", "type": "checkbox", "default": false }
+      ],
+      "run": ["./folders.ts", "copy"]
+    },
+    {
+      "id": "list",
+      "label": "List copied folders",
+      "scope": "sandbox",
+      "fields": [],
+      "run": ["./folders.ts", "list"]
+    },
+    {
+      "id": "remove",
+      "label": "Remove a copied folder",
+      "scope": "sandbox",
+      "description": "Removes only the files and links Asidee copied there; anything else in that folder stays.",
+      "fields": [{ "id": "dest", "label": "Copied folder, in the sandbox", "type": "text", "required": true }],
+      "run": ["./folders.ts", "remove"]
+    }
+  ]
+}

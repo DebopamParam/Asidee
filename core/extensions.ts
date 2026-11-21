@@ -1,16 +1,17 @@
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { isAbsolute, join } from "node:path"
-import { BUNDLED } from "../extensions/catalog"
+import { BUNDLED, RETIRED } from "../extensions/catalog"
 import { AsideeError, type RunResult, type Runner } from "./types"
 import type { Dirs } from "./state"
 
 // Extensions are the flexible part: a folder with an extension.json that declares actions (a label, form fields, and a
 // command) and hooks. The core never loads their code. It runs their commands as separate processes on this machine,
 // which use the `asd` CLI like any other client, so an extension cannot change what a sandbox is or skip a check.
-// Each UI draws an action's form from the declaration, so an action is written once.
+// Each UI draws an action's form from the declaration, so an action is written once. A folder field is text holding a
+// folder of this Mac's home, which the dashboard lets the person pick.
 // An extension's commands do run with the user's own rights on this machine, like any script the user installs.
 
-export type Field = { id: string; label: string; type: "text" | "number" | "checkbox" | "select"; options?: string[]; default?: string | number | boolean; required?: boolean }
+export type Field = { id: string; label: string; type: "text" | "number" | "checkbox" | "select" | "folder"; options?: string[]; default?: string | number | boolean; required?: boolean }
 export type Action = { id: string; label: string; description?: string; scope: "sandbox" | "global"; fields: Field[]; run: string[] }
 export type Extension = { id: string; name: string; description?: string; dir: string; actions: Action[]; hooks: { postCreate?: string[] }; bundled?: boolean }
 export type Available = { id: string; name: string; description?: string; installed: boolean }
@@ -29,7 +30,7 @@ export function parseExtension(id: string, dir: string, raw: unknown): Extension
     if (!isCommand(entry.run)) fail(`action ${entry.id} needs run: a command as a list of strings`)
     const fields = (Array.isArray(entry.fields) ? entry.fields : []).map((field: Record<string, unknown>): Field => {
       if (typeof field.id !== "string" || !/^[a-z][a-z0-9_]{0,30}$/.test(field.id)) fail(`action ${entry.id}: every field needs an id of lowercase letters, digits and underscores`)
-      if (!["text", "number", "checkbox", "select"].includes(field.type as string)) fail(`action ${entry.id}: field ${field.id} has an unknown type`)
+      if (!["text", "number", "checkbox", "select", "folder"].includes(field.type as string)) fail(`action ${entry.id}: field ${field.id} has an unknown type`)
       if (field.type === "select" && !(Array.isArray(field.options) && field.options.every((option) => typeof option === "string"))) fail(`action ${entry.id}: field ${field.id} needs options`)
       return { id: field.id as string, label: typeof field.label === "string" ? field.label : field.id as string, type: field.type as Field["type"], options: field.options as string[] | undefined, default: field.default as Field["default"], required: field.required === true }
     })
@@ -49,6 +50,7 @@ export async function loadExtensions(dirs: Dirs): Promise<{ extensions: Extensio
       const raw: unknown = JSON.parse(await readFile(join(dir, "extension.json"), "utf8"))
       if (!marker(raw)) extensions.push(parseExtension(entry.name, dir, raw))
       else if (raw.bundled === entry.name && Object.hasOwn(BUNDLED, entry.name)) extensions.push(bundled(entry.name, dir))
+      else if (raw.bundled === entry.name && Object.hasOwn(RETIRED, entry.name)) throw new AsideeError("usage", `Extension ${entry.name}: ${RETIRED[entry.name]}`)
       else throw new AsideeError("usage", `Extension ${entry.name}: it names a bundled extension this asd does not have.`)
     }
     catch (error) { errors.push(error instanceof AsideeError ? error.message : `Extension ${entry.name}: ${(error as Error).message}`) }
@@ -94,7 +96,7 @@ export async function installExtension(dirs: Dirs, id: unknown): Promise<Extensi
 
 // Removes only what installExtension wrote; an extension of the user's own is theirs to delete.
 export async function removeExtension(dirs: Dirs, id: unknown): Promise<{ removed: string }> {
-  const name = bundledId(id); const dir = join(dirs.config, "extensions", name)
+  const name = typeof id === "string" && Object.hasOwn(RETIRED, id) ? id : bundledId(id); const dir = join(dirs.config, "extensions", name)
   const existing = await installedMarker(dir)
   if (!marker(existing) || existing.bundled !== name) {
     if (!await stat(dir).then(() => true, () => false)) throw new AsideeError("not-found", `${name} is not installed.`)

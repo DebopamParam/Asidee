@@ -50,3 +50,17 @@ test("a folder of the user's own is never written over or removed, and only bund
   expect(loaded.extensions.map((extension) => extension.id)).toEqual(["repo"])
   expect(loaded.errors.join(" ")).toContain("t3")
 })
+
+test("an installed extension that is no longer bundled is reported with what replaced it, and can still be removed", async () => {
+  const where = await dirs()
+  await mkdir(join(where.config, "extensions", "skills"), { recursive: true })
+  await writeFile(join(where.config, "extensions", "skills", "extension.json"), `{"bundled":"skills"}\n`)
+  await installExtension(where, "folders")
+  const loaded = await loadExtensions(where)
+  expect(loaded.extensions.map((extension) => extension.id)).toEqual(["folders"])
+  expect(loaded.errors).toEqual(["Extension skills: Skills and plugins is no longer bundled: Folders copies any folder in, such as ~/.agents. Remove it with `asd ext remove skills`, and install Folders with `asd ext install folders`."])
+  expect(availableExtensions(loaded.extensions).map((entry) => entry.id)).not.toContain("skills")
+  await expect(installExtension(where, "skills")).rejects.toThrow("No bundled extension")
+  expect(await removeExtension(where, "skills")).toEqual({ removed: "skills" })
+  expect((await loadExtensions(where)).errors).toEqual([])
+})
