@@ -965,7 +965,7 @@ test("the Folders page picks a folder from quick picks or the browser, previews 
   await ui.settle()
   expect(ui.text("#extensions")).toContain("Skills and plugins is no longer bundled")
   const card = doc.querySelector(".act-card[data-action=copy]")
-  expect(card.textContent).toContain("It copies into sandboxes on this Mac only.")
+  expect(card.textContent).toContain("It also copies into public sandboxes on other machines; the folder always comes from this Mac.")
   // Quick picks: the existing agent folders, by plain name, the path on hover.
   const picks = [...card.querySelectorAll(".folder-picker label.pill")]
   expect(picks.map((pill: any) => [pill.textContent, pill.title])).toEqual([["Shared skills (.agents)", "~/.agents"], ["Claude Code", "~/.claude"]])

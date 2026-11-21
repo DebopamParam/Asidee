@@ -6,7 +6,7 @@
       "id": "copy",
       "label": "Copy a folder in",
       "scope": "sandbox",
-      "description": "Copies a folder in your home into the sandbox, by default to the same place under the sandbox user's home. Copying it again updates it. Anything running in the sandbox can read the copy. It copies into sandboxes on this Mac only.",
+      "description": "Copies a folder in your home into the sandbox, by default to the same place under the sandbox user's home. Copying it again updates it. Anything running in the sandbox can read the copy. It also copies into public sandboxes on other machines; the folder always comes from this Mac.",
       "fields": [
         { "id": "source", "label": "Folder on this Mac", "type": "folder", "required": true },
         { "id": "dest", "label": "Into, in the sandbox (blank: the same place)", "type": "text" },

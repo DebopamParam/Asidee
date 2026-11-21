@@ -2,8 +2,9 @@
 
 Copies a folder of your home on this Mac into a running sandbox, such as `~/.agents` with its skills and plugins, or an
 agent's own folder. Install it with `asd ext install folders` (or the dashboard's Install button); `asd ext remove
-folders` takes it out again. It does not create, start or remove sandboxes. It copies into sandboxes on this Mac only:
-with `--host` it is refused.
+folders` takes it out again. It does not create, start or remove sandboxes. It also copies into a public sandbox on
+another machine (`asd --host NAME ext run folders …`, or that sandbox's page in the dashboard); the folder still comes
+from this Mac.
 
 ```sh
 asd ext run folders copy NAME --set source=~/.agents                   # to ~/.agents in the sandbox

@@ -31,10 +31,11 @@ export async function syncProviders(runner: Runner, name: string): Promise<{ cla
 
 // The core owns SSH access: `asd ssh setup NAME` prepares it, and this reads how the desktop app connects.
 export type SshAccess = { alias: string; user: string; home: string; batchReady: boolean; loopbackForwarding: boolean }
-export async function sshAccess(runner: Runner, name: string): Promise<SshAccess> {
+// For a sandbox on another machine (ASIDEE_HOST), the alias names that machine too.
+export async function sshAccess(runner: Runner, name: string, host = process.env.ASIDEE_HOST): Promise<SshAccess> {
   const reply = json(await checked(runner, ["asd", "ssh", "access", sandboxName(name), "--json"]))
   const data = object(reply) && reply.ok === true && object(reply.data) ? reply.data : undefined
-  if (!data || data.alias !== `${name}.asidee` || typeof data.user !== "string" || typeof data.home !== "string" || typeof data.batchReady !== "boolean" || typeof data.loopbackForwarding !== "boolean") throw new Error("Invalid SSH access response; contents withheld.")
+  if (!data || data.alias !== `${name}${host ? `.${host}` : ""}.asidee` || typeof data.user !== "string" || typeof data.home !== "string" || typeof data.batchReady !== "boolean" || typeof data.loopbackForwarding !== "boolean") throw new Error("Invalid SSH access response; contents withheld.")
   return { alias: data.alias, user: data.user, home: data.home, batchReady: data.batchReady, loopbackForwarding: data.loopbackForwarding }
 }
 

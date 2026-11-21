@@ -21,6 +21,10 @@ test("SSH access is read from the core and checked field by field", async () => 
   for (const reply of [{ ok: false, error: { code: "not-found", message: "x" } }, { ok: true, data: { ...access, alias: "other.asidee" } }, { ok: true, data: { ...access, batchReady: "yes" } }, { ok: true, data: { ...access, home: 1 } }])
     await expect(sshAccess(async () => ok(JSON.stringify(reply)), "demo")).rejects.toThrow("Invalid SSH access response")
   await expect(sshAccess(async () => ok("{}"), "../x")).rejects.toThrow("lowercase")
+  // A sandbox on another machine has that machine in its alias.
+  const remote = { ...access, alias: "demo.build.asidee" }
+  expect(await sshAccess(async () => ok(JSON.stringify({ ok: true, data: remote })), "demo", "build")).toEqual(remote)
+  await expect(sshAccess(async () => ok(JSON.stringify({ ok: true, data: remote })), "demo", "")).rejects.toThrow("Invalid SSH access response")
 })
 test("T3 setup only execs its installer and provider sync after resolving the host version", async () => {
   const home = await fixture(), calls: string[][] = []
