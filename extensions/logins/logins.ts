@@ -28,22 +28,22 @@ function diagnosticNames(setup: Setup | undefined, credential: string): string[]
   return [...new Set(names)].slice(0, 64)
 }
 
-export async function importLogin(host: Host, options: { name: string; agent: Agent; profile: string; target?: string; replace: boolean; setup: boolean }): Promise<Imported> {
+export async function importLogin(host: Host, options: { name: string; agent: Agent; profile: string; target?: string; setup: boolean }): Promise<Imported> {
   const target = profileName(options.target ?? options.profile)
   const credential = await readCredential(options.agent, options.profile, host)
   const setup = options.setup ? await collectSetup(options.agent, options.profile, host.home) : undefined
   const state = options.agent === "claude" ? (setup?.state ?? await claudeState(options.profile, host.home)) : undefined
   const names = options.agent === "claude" ? diagnosticNames(setup, credential) : []
-  const result = await execute(host.runner, options.name, GUEST, ["import", options.agent, target, options.replace ? "replace" : "create"], JSON.stringify({ credential, setup, account: state?.oauthAccount, commandNames: names }))
+  const result = await execute(host.runner, options.name, GUEST, ["import", options.agent, target], JSON.stringify({ credential, setup, account: state?.oauthAccount, commandNames: names }))
   if (!object(result) || typeof result.files !== "number" || !Number.isSafeInteger(result.files) || result.files < 0 || result.files > 2000 || typeof result.missingCommands !== "number" || !Number.isSafeInteger(result.missingCommands) || result.missingCommands < 0 || result.missingCommands > 1_000_000 || (result.missingCommands > 0 && !(setup?.files.some((file) => file.path === "settings.json") && options.agent === "claude"))) throw new Error("Invalid import response; contents withheld.")
   if (!Array.isArray(result.missingCommandNames) || result.missingCommandNames.length > 64 || result.missingCommandNames.length > result.missingCommands || !result.missingCommandNames.every((name: unknown) => typeof name === "string" && /^[\x20-\x7e]{1,160}$/.test(name) && names.includes(name))) throw new Error("Invalid import response; contents withheld.")
   return { agent: options.agent, profile: target, files: result.files, missingCommands: result.missingCommands, missingCommandNames: result.missingCommandNames }
 }
 
 export type GithubSource = { kind: "token"; value: string } | { kind: "host"; account?: string }
-export async function importGithub(runner: Runner, name: string, source: GithubSource, replace: boolean): Promise<Login> {
+export async function importGithub(runner: Runner, name: string, source: GithubSource): Promise<Login> {
   const token = source.kind === "host" ? await hostGithubToken(runner, source.account) : githubToken(source.value)
-  const result = await execute(runner, name, GUEST, ["github", "github", "~", replace ? "replace" : "create"], JSON.stringify({ token }))
+  const result = await execute(runner, name, GUEST, ["github", "github", "~"], JSON.stringify({ token }))
   if (!object(result) || typeof result.account !== "string" || !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(result.account)) throw new Error("Invalid GitHub import response; contents withheld.")
   return { agent: "github", profile: "~", account: result.account }
 }

@@ -31,7 +31,6 @@ export async function execute(runner: Runner, name: string, script: string, args
   let result: Result
   try { result = await runner(["asd", "exec", sandboxName(name), ...(stdin === undefined ? [] : ["--stream"]), "--", "node", "-e", script, ...args], stdin) }
   catch { throw new Error("The sandbox login command could not run. Check asd and that the sandbox is running with Node installed.") }
-  if (result.exitCode === 67) throw new Error("A guest login already exists. Choose --replace explicitly to replace it.")
   if (result.exitCode === 68) throw new Error("No matching sandbox login was found. List its logins first.")
   if (result.exitCode === 77) throw new Error("GitHub did not accept that token (HTTP 401). Nothing was written in the sandbox.")
   if (result.exitCode === 75) throw new Error("Another login operation holds ~/.asidee-logins.lock in the sandbox. If it was interrupted, remove that empty directory only after checking no login operation is running.")

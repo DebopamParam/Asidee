@@ -283,9 +283,9 @@ and a GitHub token from stdin, a hidden prompt, or this machine's `gh` login. It
 Install it with `asd ext install logins`, then use the dashboard or `asd ext run logins ACTION SANDBOX`. From the
 Asidee source, `bun extensions/logins/login.ts --help` with Bun and `asd` on PATH shows the direct commands, including
 a pasted GitHub token. It needs Node in an already running sandbox; GitHub also needs guest `gh` and `git`.
-Existing credentials require an explicit replace choice. **A login token imported into a sandbox can be read by
+An import overwrites an existing login of the same profile. **A login token imported into a sandbox can be read by
 anything running in that sandbox, which can also send it out. There is no host-side token proxy yet.** The sandbox and
-this machine then hold the same refresh token; when one side refreshes it, the other may be logged out (not measured).
+this machine then hold the same refresh token; when one side refreshes it, the other can be logged out (seen once); importing again fixes it.
 Logout leaves this machine logged in.
 Imports of file-backed Claude and Codex profiles and of this machine's `gh` login were checked live in one sandbox. On
 2026-11-18 a Keychain Claude login with its setup (1050 files, 19 MB) was imported and Claude Code inside answered a

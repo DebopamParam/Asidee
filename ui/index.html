@@ -1363,8 +1363,8 @@ function loginsModal(key) {
     const has = (agent, profile) => Boolean(list?.some((login) => login.agent === agent && login.profile === profile))
     const label = (agent, profile) => agent === "github" ? "GitHub" : `${AGENT[agent]} · ${profileLabel(profile)}`
     const add = (agent, profile) => agent === "github"
-      ? changeLogin(key, "github", { account: "", replace: String(has("github", "~")) }, `${has("github", "~") ? "Re-imported" : "Added"} GitHub.`)
-      : changeLogin(key, "import", { agent, profile, target: "", setup: String(copySetup), replace: String(has(agent, profile)) }, `${has(agent, profile) ? "Re-imported" : "Added"} ${label(agent, profile)}.`)
+      ? changeLogin(key, "github", { account: "" }, `${has("github", "~") ? "Re-imported" : "Added"} GitHub.`)
+      : changeLogin(key, "import", { agent, profile, target: "", setup: String(copySetup) }, `${has(agent, profile) ? "Re-imported" : "Added"} ${label(agent, profile)}.`)
     const inside = list === undefined ? [el("p", {}, "Reading…")] : list === null ? [el("p", { class: "error" }, "Could not read the logins."), button("Try again", "login:read", () => readLogins(key))]
       : !list.length ? [el("p", { class: "muted" }, "None yet. Add one from this Mac below.")]
       : [el("div", { class: "cards" }, ...list.map((login) => el("div", { class: "card" },

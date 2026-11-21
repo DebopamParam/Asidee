@@ -2,7 +2,7 @@
 export const GUEST = String.raw`
 const fs = require("fs"), path = require("path"), os = require("os"), crypto = require("crypto"), cp = require("child_process")
 const home = path.resolve(os.homedir()), files = { claude: ".credentials.json", codex: "auth.json" }
-const [mode, agent, profile, choice] = process.argv.slice(1)
+const [mode, agent, profile] = process.argv.slice(1)
 const fail = (code = 65) => { const error = new Error(); error.loginCode = code; throw error }
 const object = (x) => x !== null && typeof x === "object" && !Array.isArray(x)
 const validProfile = (p) => typeof p === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(p)
@@ -27,8 +27,7 @@ function json(p) {
   const value = JSON.parse(text); if (!object(value)) fail(66)
   return value
 }
-// Claude's own logout keeps .credentials.json with empty tokens: that is no login, so it is not listed and an import
-// replaces it without asking.
+// Claude's own logout keeps .credentials.json with empty tokens: that is no login, so it is not listed.
 function signedOut(a, f) {
   if (a !== "claude") return false
   try { const o = JSON.parse(read(f)).claudeAiOauth; return object(o) && !o.accessToken && !o.refreshToken } catch { return false }
@@ -41,13 +40,12 @@ function linked(p) {
   if (rel.startsWith("..") || path.isAbsolute(rel) || !info(real)?.isFile()) fail()
   return path.join(home, rel)
 }
-function atomic(p, data, mode = 0o600, replace = true) {
+function atomic(p, data, mode = 0o600) {
   safe(p); mkdir(path.dirname(p))
   const tmp = path.join(path.dirname(p), ".login-" + crypto.randomBytes(12).toString("hex"))
   try {
     fs.writeFileSync(tmp, data, { flag: "wx", mode }); fs.chmodSync(tmp, mode)
-    if (replace) fs.renameSync(tmp, p)
-    else { try { fs.linkSync(tmp, p) } catch (e) { if (e.code === "EEXIST") fail(67); throw e } }
+    fs.renameSync(tmp, p)
   } finally { try { fs.unlinkSync(tmp) } catch (e) { if (e.code !== "ENOENT") throw e } }
 }
 async function input() {
@@ -206,11 +204,9 @@ async function main() {
     return emit(targets.map(logout))
   }
   if (mode === "import") {
-    if (!Object.hasOwn(files, agent) || !validProfile(profile) || !["create", "replace"].includes(choice)) fail(64)
+    if (!Object.hasOwn(files, agent) || !validProfile(profile)) fail(64)
     const payload = await input(), root = dir(agent, profile), dest = path.join(root, files[agent])
     safe(dest)
-    const replace = choice === "replace" || (info(dest) !== undefined && signedOut(agent, dest))
-    if (info(dest) && !replace) fail(67)
     if (!object(payload) || typeof payload.credential !== "string" || Buffer.byteLength(payload.credential) > 1024 * 1024 || !object(JSON.parse(payload.credential))) fail(66)
     const setup = payload.setup ? installSetup(agent, profile, payload.setup) : undefined
     const settingsPath = linked(path.join(root, "settings.json"))
@@ -219,7 +215,7 @@ async function main() {
     let state, statePath
     if (agent === "claude" && object(payload.account)) { statePath = path.join(root, ".claude.json"); state = json(statePath); state.oauthAccount = payload.account }
     mkdir(root); fs.chmodSync(root, 0o700)
-    atomic(dest, payload.credential, 0o600, replace)
+    atomic(dest, payload.credential)
     if (statePath) atomic(statePath, JSON.stringify(state, null, 2) + "\n")
     const result = setup ? setup() : { files: 0, missingCommands: 0, missingCommandNames: [] }
     result.missingCommandNames = result.missingCommandNames.filter((name) => /^[\x20-\x7e]{1,160}$/.test(name) && Array.isArray(payload.commandNames) && payload.commandNames.includes(name)).slice(0, 64)
@@ -232,17 +228,15 @@ async function main() {
     return emit({ agent, profile, ...result })
   }
   if (mode === "github") {
-    if (!["create", "replace"].includes(choice)) fail(64)
     safe(ghFile)
     const before = githubSection(read(ghFile))
-    if (before.section && choice !== "replace") fail(67)
     const payload = await input(), token = payload?.token
     if (typeof token !== "string" || !/^[A-Za-z0-9_]{20,255}$/.test(token)) fail(66)
     for (const command of ["gh", "git"]) if (cp.spawnSync(command, ["--version"], { stdio: "ignore" }).status !== 0) fail(69)
     const user = await githubAccount(token)
     // gh consumes this file directly. There is no credential proxy in a gVisor container.
     const section = "github.com:\n    user: " + user + "\n    git_protocol: https\n    oauth_token: " + token + "\n    users:\n        " + user + ":\n            oauth_token: " + token + "\n"
-    atomic(ghFile, before.rest.trimEnd() + (before.rest.trim() ? "\n" : "") + section, 0o600, info(ghFile) ? true : choice === "replace")
+    atomic(ghFile, before.rest.trimEnd() + (before.rest.trim() ? "\n" : "") + section, 0o600)
     for (const host of ["https://github.com", "https://gist.github.com"]) {
       for (const value of ["", "!gh auth git-credential"]) {
         const args = ["config", "--global", value ? "--add" : "--replace-all", "credential." + host + ".helper", value]

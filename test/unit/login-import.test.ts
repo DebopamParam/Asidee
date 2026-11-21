@@ -51,11 +51,11 @@ test("bundled manifest loads and exposes no secret input field", () => {
   expect(parsed.actions.flatMap((action) => action.fields).some((field) => /token|secret/.test(field.id))).toBe(false)
 })
 
-test("imports one profile via stdin, writes 0600 atomically, requires replacement, and keeps host logged in", async () => {
+test("imports one profile via stdin, writes 0600 atomically, overwrites on a second import, and keeps host logged in", async () => {
   const h = await home(), g = await home(), transport = guestRunner(g)
   await put(h, ".codex-work/auth.json", credential); await put(h, ".codex-other/auth.json", '{"secret":"not-selected"}')
   expect(await discoverProfiles("codex", host(h, transport.runner))).toEqual(["other", "work"])
-  const options = { name: "demo", agent: "codex", profile: "work", replace: false, setup: false } satisfies Parameters<typeof importLogin>[1]
+  const options = { name: "demo", agent: "codex", profile: "work", setup: false } satisfies Parameters<typeof importLogin>[1]
   expect(await importLogin(host(h, transport.runner), options)).toEqual({ agent: "codex", profile: "work", files: 0, missingCommands: 0, missingCommandNames: [] })
   const dest = join(g, ".codex-work/auth.json")
   expect(await readFile(dest, "utf8")).toBe(credential)
@@ -64,9 +64,12 @@ test("imports one profile via stdin, writes 0600 atomically, requires replacemen
   expect(await readdir(join(g, ".codex-work"))).toEqual(["auth.json"])
   expect(existsSync(join(g, ".codex-other"))).toBe(false)
   expect(transport.calls[0]?.stdin).toContain(secret)
-  await expect(importLogin(host(h, transport.runner), options)).rejects.toThrow("--replace")
-  expect(await readFile(dest, "utf8")).toBe(credential)
-  await importLogin(host(h, transport.runner), { ...options, replace: true })
+  // Importing again is the choice to overwrite: a newer host login replaces the one inside.
+  const newer = credential.replace("refresh_token", "refresh_token_newer")
+  await put(h, ".codex-work/auth.json", newer)
+  await importLogin(host(h, transport.runner), options)
+  expect(await readFile(dest, "utf8")).toBe(newer)
+  await put(h, ".codex-work/auth.json", credential)
   expect(await listLogins(transport.runner, "demo")).toEqual([{ agent: "codex", profile: "work", account: "agent@example.com" }])
   expect(await logout(transport.runner, "demo", { agent: "codex", profile: "work" })).toEqual([{ agent: "codex", profile: "work", account: "agent@example.com", removed: true, stopped: 0 }])
   expect(existsSync(dest)).toBe(false)
@@ -101,7 +104,7 @@ test("Keychain takes precedence, supports canonical and trailing-slash hashes an
   const source: Host = { home: h, platform: "darwin", runner }
   expect(await discoverProfiles("claude", source)).toEqual(["work"])
   expect(calls.every((argv) => !argv.includes("-w"))).toBe(true)
-  await importLogin(source, { name: "demo", agent: "claude", profile: "work", replace: false, setup: false })
+  await importLogin(source, { name: "demo", agent: "claude", profile: "work", setup: false })
   expect(await readFile(join(g, ".claude-work/.credentials.json"), "utf8")).toBe(credential)
   const denied: Runner = async (argv) => ({ exitCode: argv.includes("-w") ? 51 : 0, stdout: secret, stderr: secret })
   await expect(readCredential("claude", "work", { ...source, runner: denied })).rejects.toThrow("denied or failed; contents withheld")
@@ -113,7 +116,7 @@ test("guest validates JSON itself, rejects credential symlinks and unsafe setup 
   expect(existsSync(join(g, ".codex-work/auth.json"))).toBe(false)
   await put(h, "auth.json", "untouched")
   await mkdir(join(g, ".codex-work")); await symlink(join(h, "auth.json"), join(g, ".codex-work/auth.json"))
-  await expect(execute(transport.runner, "demo", GUEST, ["import", "codex", "work", "replace"], JSON.stringify({ credential }))).rejects.toThrow("failed")
+  await expect(execute(transport.runner, "demo", GUEST, ["import", "codex", "work"], JSON.stringify({ credential }))).rejects.toThrow("failed")
   expect(await readFile(join(h, "auth.json"), "utf8")).toBe("untouched")
   await rm(join(g, ".codex-work/auth.json")); await symlink(h, join(g, ".codex-work/skills"))
   const setup = { hostHome: h, files: [{ path: "skills/a.md", data: Buffer.from("setup").toString("base64") }], homeFiles: [] }
@@ -142,7 +145,7 @@ test("copies only allowlisted symlinked Claude setup, scripts and state, rewrite
   expect(bundle.files.map((file) => file.path)).toEqual(["CLAUDE.md", "hooks/ok.sh", "keybindings.json", "settings.json", "skills/demo/SKILL.md"])
   expect(bundle.homeFiles.map((file) => file.path)).toEqual([".config/ai/status.sh", ".config/ccstatusline/settings.json"])
   expect(JSON.stringify(bundle)).not.toContain(secret)
-  const result = await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "work", replace: false, setup: true })
+  const result = await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "work", setup: true })
   expect(result.files).toBe(7); expect(result.missingCommands).toBe(1)
   expect(result.missingCommandNames).toEqual(["asidee-missing-unit-hook"])
   expect(await readFile(join(g, ".config/ai/status.sh"), "utf8")).toContain(`${g}/project`)
@@ -197,14 +200,13 @@ test("GitHub token and named host gh login travel only on stdin; guest storage i
     if (argv[0] !== "gh") return transport.runner(argv, stdin)
     hostCalls.push(argv); return { exitCode: 0, stdout: `${secret}\n`, stderr: secret }
   }
-  expect(await importGithub(runner, "demo", { kind: "host", account: "octocat" }, false)).toEqual({ agent: "github", profile: "~", account: "octocat" })
+  expect(await importGithub(runner, "demo", { kind: "host", account: "octocat" })).toEqual({ agent: "github", profile: "~", account: "octocat" })
   expect(hostCalls).toEqual([["gh", "auth", "token", "--hostname", "github.com", "--user", "octocat"]])
   const config = join(g, ".config/gh/hosts.yml")
   expect((await stat(config)).mode & 0o777).toBe(0o600)
   expect(await readFile(config, "utf8")).toContain(secret)
   expect(await readFile(join(g, "git-calls.jsonl"), "utf8")).not.toContain(secret)
-  await expect(importGithub(runner, "demo", { kind: "token", value: secret }, false)).rejects.toThrow("--replace")
-  await importGithub(runner, "demo", { kind: "token", value: secret }, true)
+  await importGithub(runner, "demo", { kind: "token", value: secret })
   expect(await listLogins(transport.runner, "demo")).toEqual([{ agent: "github", profile: "~", account: "octocat" }])
   await logout(transport.runner, "demo", { agent: "github", profile: "~" })
   expect(await readFile(config, "utf8")).toContain("keep-enterprise")
@@ -230,7 +232,7 @@ test("failed runner output, spawn errors, invalid JSON and CLI parsing never bec
   const outputRunner: Runner = async () => ({ exitCode: 1, stdout: secret, stderr: secret })
   await expect(hostGithubToken(errorRunner)).rejects.toThrow("Could not read")
   for (const runner of [errorRunner, outputRunner]) {
-    try { await importGithub(runner, "demo", { kind: "token", value: secret }, false); throw new Error("should fail") }
+    try { await importGithub(runner, "demo", { kind: "token", value: secret }); throw new Error("should fail") }
     catch (error) { expect(String(error)).not.toContain(secret) }
   }
   await expect(main(["github", "demo", "--token", secret])).rejects.toThrow("Never pass tokens in arguments")
@@ -262,7 +264,7 @@ test("terminal stdin and manifest fields work through a fake asd command without
 test("guest mutations refuse a concurrent writer and never advise replacing to bypass its lock", async () => {
   const g = await home(), transport = guestRunner(g)
   await mkdir(join(g, ".asidee-logins.lock"))
-  await expect(importGithub(transport.runner, "demo", { kind: "token", value: secret }, true)).rejects.toThrow("Another login operation")
+  await expect(importGithub(transport.runner, "demo", { kind: "token", value: secret })).rejects.toThrow("Another login operation")
   expect(existsSync(join(g, ".config/gh/hosts.yml"))).toBe(false)
 })
 
@@ -303,7 +305,7 @@ test("hidden token prompt never echoes input and restores terminal mode on compl
 test("GitHub rejects an invalid account token without storing it or returning response contents", async () => {
   const g = await home(), prefix = githubFixture.replace('res.statusCode = 200', 'res.statusCode = 401')
   const transport = guestRunner(g, prefix)
-  await expect(importGithub(transport.runner, "demo", { kind: "token", value: secret }, false)).rejects.toThrow("GitHub did not accept that token")
+  await expect(importGithub(transport.runner, "demo", { kind: "token", value: secret })).rejects.toThrow("GitHub did not accept that token")
   expect(existsSync(join(g, ".config/gh/hosts.yml"))).toBe(false)
   expect(existsSync(join(g, ".asidee-logins.lock"))).toBe(false)
 })
@@ -316,10 +318,10 @@ test("successful guest login responses cannot return arbitrary account text or m
   // A C1 control (single-byte CSI) in a label could rewrite the terminal that prints it.
   await expect(listLogins(response([{ agent: "claude", profile: "work", account: "agent@ex\u009b2Jample.com" }]), "demo")).rejects.toThrow("withheld")
   for (const missingCommands of [["\u001b]0;spoof\u0007"], [1], -1]) {
-    await expect(importLogin(host(h, response({ files: 0, missingCommands })), { name: "demo", agent: "codex", profile: "work", replace: false, setup: false })).rejects.toThrow("withheld")
+    await expect(importLogin(host(h, response({ files: 0, missingCommands })), { name: "demo", agent: "codex", profile: "work", setup: false })).rejects.toThrow("withheld")
   }
   // Without a copied setup there is no command for the guest to report.
-  await expect(importLogin(host(h, response({ files: 0, missingCommands: ["claude-statusline"] })), { name: "demo", agent: "codex", profile: "work", replace: false, setup: false })).rejects.toThrow("withheld")
+  await expect(importLogin(host(h, response({ files: 0, missingCommands: ["claude-statusline"] })), { name: "demo", agent: "codex", profile: "work", setup: false })).rejects.toThrow("withheld")
 })
 
 test("copied setup drops secret-named settings and TOML keys but keeps the rest", async () => {
@@ -338,7 +340,7 @@ test("Claude subscription imports clear a competing API key even without copying
   const h = await home(), g = await home(), transport = guestRunner(g)
   await put(h, ".claude-work/.credentials.json", credential)
   await put(g, ".claude-work/settings.json", JSON.stringify({ model: "keep", env: { OTHER: "keep", ANTHROPIC_API_KEY: secret } }))
-  await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "work", replace: false, setup: false })
+  await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "work", setup: false })
   expect(await json(join(g, ".claude-work/settings.json"))).toEqual({ model: "keep", env: { OTHER: "keep", ANTHROPIC_API_KEY: "" } })
 })
 
@@ -351,16 +353,15 @@ test("a profile whose settings.json links to a shared one is imported into, and 
   await symlink(join(g, ".claude/settings.json"), join(g, ".claude-deb/settings.json"))
   await put(g, ".claude-deb/.credentials.json", JSON.stringify({ claudeAiOauth: { accessToken: "", refreshToken: "", expiresAt: 0 } }))
   expect(await listLogins(transport.runner, "demo")).toEqual([])
-  await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "deb", replace: false, setup: false })
+  await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "deb", setup: false })
   expect(await readFile(join(g, ".claude-deb/.credentials.json"), "utf8")).toBe(credential)
   expect((await lstat(join(g, ".claude-deb/settings.json"))).isSymbolicLink()).toBe(true)
   expect(await json(join(g, ".claude/settings.json"))).toEqual({ model: "shared", env: { ANTHROPIC_API_KEY: "" } })
-  // A real login still needs replacing explicitly; a link out of the home is still refused.
-  await expect(importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "deb", replace: false, setup: false })).rejects.toThrow("already exists")
+  // A link out of the home is still refused, and nothing is written through it.
   const outside = await home()
   await put(outside, "settings.json", "{}")
   await rm(join(g, ".claude-deb/settings.json")); await symlink(join(outside, "settings.json"), join(g, ".claude-deb/settings.json"))
-  await expect(importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "deb", replace: true, setup: false })).rejects.toThrow()
+  await expect(importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "deb", setup: false })).rejects.toThrow()
   expect(await readFile(join(outside, "settings.json"), "utf8")).toBe("{}")
 })
 
@@ -384,7 +385,7 @@ test("a secret used as a missing hook name is withheld even in a successful setu
   const h = await home(), g = await home(), transport = guestRunner(g)
   await put(h, ".claude-work/.credentials.json", credential)
   await put(h, ".claude-work/settings.json", JSON.stringify({ statusLine: { command: secret } }))
-  const imported = await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "work", replace: false, setup: true })
+  const imported = await importLogin(host(h, transport.runner), { name: "demo", agent: "claude", profile: "work", setup: true })
   expect(imported.missingCommands).toBe(1)
   expect(JSON.stringify(imported)).not.toContain(secret)
 })
@@ -393,7 +394,7 @@ test("missing command diagnostics accept only bounded printable names from the s
   const h = await home(), g = await home(), transport = guestRunner(g)
   await put(h, ".claude-work/.credentials.json", credential)
   await put(g, ".claude-work/settings.json", JSON.stringify({ statusLine: { command: "old-missing-hook" } }))
-  const options = { name: "demo", agent: "claude", profile: "work", replace: false, setup: true } as const
+  const options = { name: "demo", agent: "claude", profile: "work", setup: true } as const
   expect((await importLogin(host(h, transport.runner), options)).missingCommands).toBe(0)
   await put(h, ".claude-work/settings.json", JSON.stringify({ statusLine: { command: "new-missing-hook" } }))
   for (const names of [[secret], ["not-sent"], ["bad\u001b"], ["a".repeat(161)], Array(65).fill("new-missing-hook")]) {
@@ -409,7 +410,7 @@ test("JSON and TOML home rewrites escape guest path characters", async () => {
   for (const agent of ["claude", "codex"] as const) {
     await put(h, `.${agent}-work/${agent === "claude" ? ".credentials.json" : "auth.json"}`, credential)
     await put(h, `.${agent}-work/${agent === "claude" ? "settings.json" : "config.toml"}`, agent === "claude" ? JSON.stringify({ model: "keep", extra: `${h}/project` }) : `cwd = ${JSON.stringify(`${h}/project`)}\n`)
-    await importLogin(host(h, transport.runner), { name: "demo", agent, profile: "work", replace: false, setup: true })
+    await importLogin(host(h, transport.runner), { name: "demo", agent, profile: "work", setup: true })
   }
   expect((await json(join(g, ".claude-work/settings.json"))).extra).toBe(`${g}/project`)
   expect(Bun.TOML.parse(await readFile(join(g, ".codex-work/config.toml"), "utf8"))).toEqual({ cwd: `${g}/project` })
@@ -420,7 +421,7 @@ test("GitHub import with missing gh or git fails before storing a token or makin
     const g = await home(), bin = join(g, "bin")
     await put(g, `bin/${missing === "gh" ? "git" : "gh"}`, "#!/bin/sh\nexit 0\n", 0o700)
     const prefix = `process.env.PATH = ${JSON.stringify(bin)}; require('https').get = () => { require('fs').writeFileSync(require('os').homedir() + '/network-called', 'bad'); throw new Error(); };`
-    await expect(importGithub(guestRunner(g, prefix).runner, "demo", { kind: "token", value: secret }, false)).rejects.toThrow("exit 69")
+    await expect(importGithub(guestRunner(g, prefix).runner, "demo", { kind: "token", value: secret })).rejects.toThrow("exit 69")
     expect(existsSync(join(g, ".config/gh/hosts.yml"))).toBe(false)
     expect(existsSync(join(g, "network-called"))).toBe(false)
     expect(existsSync(join(g, ".asidee-logins.lock"))).toBe(false)

@@ -371,7 +371,7 @@ After changing anything, run `asd verify NAME` on a sandbox. If you changed Asid
 Use the bundled [logins extension](../extensions/logins/README.md), which calls only `asd exec` and needs Node in an
 already running sandbox. Install it with `asd ext install logins`.
 `asd ext run logins import NAME --set agent=claude --set profile=work --set setup=true` imports a selected profile and
-its allowlisted setup; leave `setup` off for login only. Existing logins require `--set replace=true` explicitly.
+its allowlisted setup; leave `setup` off for login only. An existing login of that profile is overwritten.
 `asd ext run logins github NAME [--set account=ACCOUNT]` imports this machine's gh login. To import a pasted token,
 run `bun extensions/logins/login.ts github NAME` from the Asidee source; it reads the token from stdin or a hidden
 prompt. Never put a token in argv, `--set`, a manifest, or logs.

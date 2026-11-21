@@ -8,7 +8,8 @@ Install its actions with `asd ext install logins` (or the dashboard's Install bu
 `asd ext remove logins` takes them out again. Neither Bun nor the Asidee source is needed. An installed extension reads
 files and, for Claude on macOS, the login Keychain with your machine's rights. The token it copies into a sandbox can be
 read there by anything that runs in it, and there is no host-side token proxy yet. Both copies then hold the same refresh
-token: when one side refreshes it, the other may be logged out (not measured).
+token: when one side refreshes it, the other can be logged out (seen on 2026-11-20: Claude in the sandbox emptied its
+tokens). Importing again fixes it; an emptied file is not listed as a login.
 
 ```sh
 # After installation, the dashboard and extension CLI offer the same non-secret fields.
@@ -41,9 +42,10 @@ Every Claude import sets `env.ANTHROPIC_API_KEY` to an empty string in that prof
 sandbox-manager reference did, so an API key in the guest environment does not take precedence over the imported
 subscription login. Other `env` entries are kept.
 
-An existing credential requires `--replace` or the action's **Replace an existing login** checkbox. Credentials travel
+An import overwrites an existing login of the same profile: asking for it is the choice. A profile's `settings.json` that
+links to a shared one in the home, as profile launchers lay it out, has that shared file edited. Credentials travel
 only on stdin to `asd exec NAME --stdin -- …`. Guest writes use private temporary files and atomic publication with
-mode 0600. New credentials use an exclusive hard link so a concurrent writer cannot silently replace one. Subprocess
+mode 0600, under a lock that refuses a concurrent login operation. Subprocess
 output is withheld on errors. No token belongs in `--set`, an argument, an environment field, or an extension manifest.
 
 ## Copy the selected profile's setup
@@ -72,7 +74,7 @@ each. Names containing a credential value are withheld, as are names outside tha
 includes withheld names. JSON and the re-serialized TOML escape the rewritten home path, including quotes and backslashes.
 This is a static check of simple shell commands. Dynamic shell expressions, dependencies inside scripts, and commands
 fetched at runtime are not verified. Setup writes are atomic per file, not one transaction. An I/O failure can leave a
-partially copied setup or an imported login; list logins after a failure before retrying with `--replace`.
+partially copied setup or an imported login; list logins after a failure before importing again.
 
 ## Give the sandbox a GitHub login
 
@@ -110,7 +112,7 @@ configuration directory. A stand-in `security` that always fails was placed firs
   0600 with the same SHA-256 as the host file, `gh auth status` succeeded, Git's helper was `!gh auth git-credential`
   with no token in Git config, and Claude's `settings.json` had an empty `env.ANTHROPIC_API_KEY`. `--setup` reported a
   hook command missing in the guest.
-- A second import without `--replace` was refused; with it, it worked. A pasted token GitHub refused (HTTP 401) gives
+- A second import overwrote the first (since 2026-11-21; before, it needed `--replace`). A pasted token GitHub refused (HTTP 401) gives
   "GitHub did not accept that token" and leaves the guest's login as it was.
 - `list` showed the three logins. Logout of one agent, of GitHub, and of `all` removed them, kept Claude's other setup,
   and `list` then showed none.

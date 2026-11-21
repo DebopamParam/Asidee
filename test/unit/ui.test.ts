@@ -914,7 +914,7 @@ test("the Logins form lists the sandbox's logins as cards, re-imports or adds on
   const ui = await page({ ...base, list: () => [sandbox()], extensions: () => ({ extensions: [logins, t3], errors: [] }), sshAccess: () => ({ alias: "demo.asidee", batchReady: true }), openTerminal: () => ({ terminal: "default", command: "x" }),
     action: (body) => body.action === "profiles" ? { exitCode: 0, stdout: JSON.stringify({ agent: body.values.agent, profiles: body.values.agent === "claude" ? ["work", "home"] : [] }), stderr: "" }
       : body.action === "list" ? { exitCode: 0, stdout: inside, stderr: "" }
-      : body.action === "import" ? (inside += body.values.replace === "true" ? "" : `claude/${body.values.profile} (h@example.com)\n`, { exitCode: 0, stdout: "Imported.\nCopied 0 setup files.", stderr: "" })
+      : body.action === "import" ? (inside += inside.includes(`claude/${body.values.profile} `) ? "" : `claude/${body.values.profile} (h@example.com)\n`, { exitCode: 0, stdout: "Imported.\nCopied 0 setup files.", stderr: "" })
       : { exitCode: 0, stdout: '{"claude":3,"codex":0}', stderr: "" } })
   await ui.open("demo")
   expect(ui.text("#sandbox-page")).toContain("Logins inside: Claude: main login, work · GitHub")
@@ -929,7 +929,7 @@ test("the Logins form lists the sandbox's logins as cards, re-imports or adds on
   expect(ui.text("#modal pre")).toBe("Re-imported Claude · work. T3 Code sees it now.")
   ;[...card("Claude · home", 1).querySelectorAll("button")].find((node: any) => node.textContent === "Add")!.click(); await ui.settle()
   const sent = ui.calls.filter((call) => call.method === "action" && ["import", "sync"].includes(call.body.action)).map((call) => [call.body.action, call.body.values])
-  expect(sent).toEqual([["import", { agent: "claude", profile: "work", target: "", setup: "false", replace: "true" }], ["sync", {}], ["import", { agent: "claude", profile: "home", target: "", setup: "false", replace: "false" }], ["sync", {}]])
+  expect(sent).toEqual([["import", { agent: "claude", profile: "work", target: "", setup: "false" }], ["sync", {}], ["import", { agent: "claude", profile: "home", target: "", setup: "false" }], ["sync", {}]])
   expect(card("Claude · home").textContent).toContain("h@example.com")
   // With named logins, asd claude cannot pick the canonical one, so Pick a login offers only the named ones.
   await ui.pick("Pick a login…")
