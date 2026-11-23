@@ -40,6 +40,7 @@ asd forward add NAME --port P [--local-port L]  # 127.0.0.1:L here to 127.0.0.1:
 asd forward list [NAME] | asd forward remove ID
 asd link add FROM TO --port P            # programs in FROM connect to TO:P, reaching P on TO's loopback only
 asd link add FROM NAME --address IP --port P  # programs in FROM connect to NAME:P; the daemon relays to IP:P from this machine
+asd link add FROM TO --to-host HOST --port P  # TO is a public sandbox on the connected HOST; relayed over SSH
 asd link list [NAME] | asd link remove FROM TO --port P
 asd ssh setup NAME [--write-config]     # then `ssh NAME.asidee`; ask the user before --write-config
 asd ssh access NAME                     # alias, user, home, and whether ssh would log in now
@@ -178,8 +179,8 @@ persistence and automatic sandbox recovery are not measured.
   port answers; after a minute of silence the relay is ended.
 - To let one sandbox use a service in another (an app and its database), add a link: `asd link add FROM TO --port
   P`. Programs in FROM then connect to `TO:P` (the name TO resolves inside FROM through a line Asidee keeps in its
-  `/etc/hosts`); they reach port P on TO's loopback and nothing else of TO. It is one-way and TCP only, on this machine
-  only (`--host` is refused), up to 64 connections at once, 16 links per sandbox. Tell the user the trust consequence
+  `/etc/hosts`); they reach port P on TO's loopback and nothing else of TO. It is one-way and TCP only, FROM is on this
+  machine (`--host` is refused; for a TO on another machine see below), up to 64 connections at once, 16 links per sandbox. Tell the user the trust consequence
   the command prints: TO sees these connections as coming from its own 127.0.0.1, so a service there that trusts local
   connections (a database without a password, say) trusts FROM. The service in TO must listen on its loopback (or on
   all addresses). Links come back after a stop and start and after a daemon restart, are down while the daemon is not
@@ -194,6 +195,15 @@ persistence and automatic sandbox recovery are not measured.
   The measurement checks only that the daemon reaches the address, that FROM cannot reach it directly, and that a
   connection from FROM by NAME is relayed; if the daemon cannot reach the address (the VM is off), the link does not
   open with `require-probes` on. Remove it with `asd link remove FROM NAME --port 22`; removing FROM removes it.
+- To let a sandbox here reach a sandbox on a connected machine (an agent here driving a build box on `home-linux`,
+  say): `asd link add FROM TO --to-host HOST --port P`. TO must be public on HOST; a private one is refused, and only
+  its own machine can share it (`asd share TO` run on HOST — ask the user). Programs in FROM connect to `TO:P`; the
+  daemon relays each connection over SSH to HOST, whose daemon relays it to port P on TO's loopback. Tell the user what
+  it trusts: TO sees these connections as local, so whatever in TO trusts local connections trusts FROM, and the
+  connections go over Asidee's SSH link to HOST. The link waits (see `link list`) while HOST is unreachable or TO is
+  stopped or private, and opens again on its own; it goes when FROM, TO or HOST's record is removed, or TO is made again.
+  Its measurement checks that a connection by TO's name is relayed and that FROM cannot reach HOST directly; it cannot
+  check TO's other ports or whether a service answers there. Remove it with `asd link remove FROM TO --port P`.
   Link tests send replies through stdin. The target listener keeps the reply in its environment, outside its process arguments.
 - `asd ssh setup NAME` is for editors and tools that speak SSH. It installs OpenSSH's server from the image's
   package manager when it has none (the sandbox needs internet for that), and opens no port. `ssh NAME.asidee` logs in

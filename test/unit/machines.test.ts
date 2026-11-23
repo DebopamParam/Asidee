@@ -424,3 +424,43 @@ test("host list source mismatches name host add with the registered alias and SS
   expect(view?.error).not.toContain("put it in place")
   await machines.close()
 })
+
+test("a link's relay to a sandbox on a host is a renewed lease plus a dial session per connection, bound to the sandbox's identity", async () => {
+  const { machines, log } = await attached(answers()); machines.renewMs = 30
+  expect(await machines.linkMachine("build")).toBe(REMOTE.machineId)
+  expect(await machines.linkMachine("other")).toBeUndefined()
+  expect(await machines.linkIdentity("build", "demo")).toEqual({ machineId: REMOTE.machineId, sandboxId: ROW.sandboxId!, running: true })
+  expect(log.calls.filter((call) => call.method === "get")).toHaveLength(1)
+  let ended = ""
+  const relay = await machines.linkRelay({ host: "build", machineId: REMOTE.machineId, name: "demo", sandboxId: ROW.sandboxId! }, 5432, (reason) => { ended = reason })
+  expect(relay.generation).toBe("run-1")
+  await relay.dial(); await relay.dial()
+  await Bun.sleep(150)
+  const lease = opened.find((record) => record.request.kind === "lease")!
+  expect(lease.request).toMatchObject({ machineId: REMOTE.machineId, sandboxId: ROW.sandboxId, generation: "run-1", port: 5432 })
+  expect(lease.frames.filter((got) => got.kind === "stdin").length).toBeGreaterThanOrEqual(2)
+  const dials = opened.filter((record) => record.request.kind === "dial")
+  expect(dials).toHaveLength(2)
+  expect(dials.every((record) => record.request.leaseId === lease.request.leaseId && record.request.port === 5432)).toBe(true)
+  // Removing the host ends the lease, and the link hears why.
+  await machines.remove({ name: "build", confirm: "build" })
+  await lease.session.closed
+  expect(ended).toBe("The remote daemon, sandbox run or SSH control link ended.")
+  // A sandbox made again under the name, or a record now naming another machine, opens nothing.
+  const again = await attached(answers())
+  expect(await outcome(again.machines.linkRelay({ host: "build", machineId: REMOTE.machineId, name: "demo", sandboxId: "0".repeat(32) }, 5432, () => {}))).toMatchObject({ code: "identity-changed" })
+  expect(await outcome(again.machines.linkRelay({ host: "build", machineId: "0".repeat(32), name: "demo", sandboxId: ROW.sandboxId! }, 5432, () => {}))).toMatchObject({ code: "identity-changed" })
+  expect(opened.filter((record) => record.request.kind === "lease")).toHaveLength(1)
+  await machines.close(); await again.machines.close()
+})
+
+test("a link to a private sandbox on a host is refused with that machine's own words, and a link's lookups need other machines on", async () => {
+  const { privateThere } = await import("../../core/types")
+  const base = answers()
+  const { machines, dirs } = await attached((method, body, options) => { if (method === "get" || method === "sessionTarget") throw new AsideeError("not-found", privateThere("demo")); return base(method, body, options) })
+  expect(await outcome(machines.linkIdentity("build", "demo"))).toMatchObject({ code: "not-found", message: privateThere("demo") })
+  expect(await outcome(machines.linkRelay({ host: "build", machineId: REMOTE.machineId, name: "demo", sandboxId: ROW.sandboxId! }, 5432, () => {}))).toMatchObject({ message: privateThere("demo") })
+  expect(opened).toHaveLength(0)
+  await writeFile(join(dirs.config, "config.json"), JSON.stringify({ experimental: false }))
+  expect(await outcome(machines.linkIdentity("build", "demo"))).toMatchObject({ code: "dependency" })
+})

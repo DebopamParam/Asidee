@@ -7,10 +7,10 @@ import { join } from "node:path"
 import { CHECKLIST } from "../../core/checks"
 import { Core } from "../../core/core"
 import { FIN_QUIET_MS } from "../../core/forwards"
-import { addressTrust, dialTcp, LINK_CONNECTIONS, LINKS_PER_SANDBOX, pump, RETRY_MAX_MS, RETRY_MS, validAddress } from "../../core/links"
+import { addressTrust, dialTcp, hostedTrust, LINK_CONNECTIONS, LINKS_PER_SANDBOX, pump, RETRY_MAX_MS, RETRY_MS, validAddress, type RemoteLinks } from "../../core/links"
 import { readManifest } from "../../core/state"
 import { CATALOG, FOLDERS_LOCAL, LINKS_LOCAL, Machines, type Hello } from "../../core/machines"
-import { type CheckResult, type Engine, type LinkSupport, type Provider, type Session, type Stage } from "../../core/types"
+import { AsideeError, privateThere, type CheckResult, type Engine, type LinkSupport, type Provider, type Session, type Stage } from "../../core/types"
 
 const engine: Engine = { id: "fake:1", provider: "fake", label: "Fake engine", ready: true, problems: [], data: {}, capabilities: { kernelIsolation: "gvisor", diskLimit: "none", networkGuard: true, docker: false, execStream: true, loopbackRelay: true, resize: "live", snapshot: false } }
 const allPass = (stage: Stage): CheckResult[] => CHECKLIST.filter((item) => item.stage === stage).map((item) => ({ id: item.id, status: "pass", evidence: "inspected", detail: "ok" }))
@@ -592,3 +592,175 @@ test("the daemon's TCP dial is a session the relay can use: paused until resumed
     await expect(dialTcp("127.0.0.1", 1, 2000)).rejects.toThrow()
   } finally { service.close() }
 })
+
+// A connected host as Links sees it through Machines: its record, its public and private sandboxes, and the relays its
+// daemon holds. Each relay's dial is a session that greets the connection, as the service on the leased port would.
+function hostWorld() {
+  const BUILD = "d".repeat(32)
+  type Remote = { sandboxId: string; running: boolean; private: boolean; run: number }
+  const state = { machines: new Map<string, string>([["build", BUILD]]), reachable: true, addresses: ["192.168.1.20"] as string[], boxes: new Map<string, Remote>() }
+  const relays: Array<{ to: { name: string; sandboxId: string }; port: number; dials: FakeSession[]; closed?: string; onEnd: (reason: string) => void }> = []
+  const box = (host: string, name: string) => {
+    if (!state.reachable) throw new AsideeError("offline", `${host} is unreachable: fixture`)
+    const found = state.boxes.get(name)
+    if (!found) throw new AsideeError("not-found", `There is no sandbox named ${name}.`)
+    if (found.private) throw new AsideeError("not-found", privateThere(name))
+    return found
+  }
+  const remote: RemoteLinks = {
+    linkMachine: async (host) => state.machines.get(host),
+    linkIdentity: async (host, name) => { const found = box(host, name); return { machineId: state.machines.get(host)!, sandboxId: found.sandboxId, running: found.running } },
+    linkRelay: async (to, port, onEnd) => {
+      const found = box(to.host, to.name)
+      if (!found.running) throw new AsideeError("conflict", `${to.name} is not running. Start it with \`asd start ${to.name}\`.`)
+      if (found.sandboxId !== to.sandboxId) throw new AsideeError("identity-changed", `${to.name} on ${to.host} was made again since the link was added.`)
+      const relay: (typeof relays)[number] = { to, port, dials: [], onEnd }
+      relays.push(relay)
+      return { generation: `run-${found.run}`, close: (reason) => { relay.closed ??= reason },
+        dial: async () => { const session: FakeSession = new FakeSession(() => session.finish()); relay.dials.push(session); setTimeout(() => session.print("remote hello\n"), 1); return session } }
+    },
+    linkAddresses: async () => state.addresses,
+  }
+  return { state, relays, remote, BUILD }
+}
+
+test("a link to a public sandbox on a host opens measured, relays through the host's dial session, says what it trusts, and is removed", async () => {
+  const fake = world(); const core = await asidee(fake); const host = hostWorld()
+  core.links.remote = host.remote
+  host.state.boxes.set("db", { sandboxId: "e".repeat(32), running: true, private: false, run: 1 })
+  try {
+    await core.create({ name: "app" })
+    const made = await core.links.add("app", "db", 5432, undefined, "build")
+    expect(made).toMatchObject({ from: "app", to: "db", toHost: "build", port: 5432, address: "127.77.0.2", state: "open", measured: { status: "pass" } })
+    expect(made.toAddress).toBeUndefined()
+    expect(made.trust).toBe(hostedTrust("app", "db", "build"))
+    expect(made.trust).toContain("over Asidee's SSH link to it")
+    expect(made.measured!.detail).toContain("was carried by the daemon over SSH to build, whose daemon opened a relay to port 5432 on db's loopback")
+    expect(made.measured!.detail).toContain("app could not connect to build directly at 192.168.1.20 on port 5432 or 22")
+    expect(made.measured!.detail).toContain("Not checked: db's address on build's engine network")
+    expect(fake.boxes.get("app")!.hosts).toEqual(["127.77.0.2\tdb\t# asidee-link"])
+    // One relay, bound to db's identity and the link's port; the test connection went through its dial session.
+    expect(host.relays).toHaveLength(1)
+    expect(host.relays[0]).toMatchObject({ to: { name: "db", host: "build", machineId: host.BUILD, sandboxId: "e".repeat(32) }, port: 5432 })
+    const tested = host.relays[0]!.dials.length
+    expect(tested).toBeGreaterThan(0)
+    // A connection made in app goes through a new dial session, and what db's port says comes back.
+    fake.listen("app", "127.77.0.2", 5432)!.print("o 7\n")
+    for (let wait = 0; wait < 100 && !fake.attached.get(7)?.toClient.written.includes("remote hello"); wait++) await Bun.sleep(10)
+    expect(host.relays[0]!.dials.length).toBe(tested + 1)
+    expect(fake.attached.get(7)!.toClient.written).toBe("remote hello\n")
+    expect((await core.links.list("app"))[0]).toMatchObject({ toHost: "build", state: "open" })
+    const verified = await core.verify("app")
+    expect(verified.checks.find((check) => check.id === "links")!.detail).toContain(`To db on build on port 5432: open; inside app, db is 127.77.0.2. ${made.trust}`)
+    expect(verified.checks.find((check) => check.id === "link-scope")).toMatchObject({ status: "pass", evidence: "probed" })
+    expect(verified.checks.find((check) => check.id === "net-peers")!.detail).toContain("this sandbox reaches db on build on port 5432")
+    expect(await core.links.remove("app", "db", 5432)).toMatchObject({ removed: { from: "app", to: "db", port: 5432 }, measured: "Measured: 127.77.0.2:5432 now refuses connections inside app." })
+    expect(host.relays[0]!.closed).toBeDefined()
+    expect(await core.links.list()).toEqual([])
+  } finally { core.closeSessions() }
+}, 30_000)
+
+test("a link to a host is refused for a private sandbox, an unknown host, a name a sandbox here has, and one app reaches directly", async () => {
+  const fake = world(); const core = await asidee(fake); const host = hostWorld()
+  await core.create({ name: "app" }); await core.create({ name: "web" })
+  await expect(core.links.add("app", "db", 5432, undefined, "build")).rejects.toMatchObject({ code: "dependency", message: "This daemon cannot reach other machines." })
+  core.links.remote = host.remote
+  host.state.boxes.set("db", { sandboxId: "e".repeat(32), running: true, private: true, run: 1 })
+  await expect(core.links.add("app", "db", 5432, undefined, "build")).rejects.toMatchObject({ code: "not-found",
+    message: "db is private on build, so it cannot be linked to from this machine. To allow it, make it public on its own machine: run `asd share db` on build." })
+  await expect(core.links.add("app", "db", 5432, undefined, "other")).rejects.toMatchObject({ code: "not-found", message: expect.stringContaining("There is no host other") })
+  await expect(core.links.add("app", "db", 5432, "192.168.64.5", "build")).rejects.toMatchObject({ code: "usage" })
+  await expect(core.links.add("app", "db", 5432, undefined, "local")).rejects.toMatchObject({ code: "usage" })
+  await expect(core.links.add("app", "app", 5432, undefined, "build")).rejects.toMatchObject({ code: "usage" })
+  host.state.boxes.set("web", { sandboxId: "f".repeat(32), running: true, private: false, run: 1 })
+  await expect(core.links.add("app", "web", 80, undefined, "build")).rejects.toMatchObject({ code: "usage", message: expect.stringContaining("web is also the name of a sandbox on this machine") })
+  host.state.reachable = false
+  await expect(core.links.add("app", "web2", 80, undefined, "build")).rejects.toMatchObject({ code: "offline", message: expect.stringContaining("could not be looked up, so nothing was added") })
+  host.state.reachable = true
+  host.state.boxes.get("db")!.private = false
+  fake.state.direct = "192.168.1.20"
+  await expect(core.links.add("app", "db", 5432, undefined, "build")).rejects.toMatchObject({ code: "check-failed", message: expect.stringContaining("app opened a connection to build directly (192.168.1.20:5432, 192.168.1.20:22), not through the link.") })
+  expect(await core.links.list()).toEqual([])
+  expect(host.relays.every((relay) => relay.closed)).toBe(true)
+  core.closeSessions()
+}, 30_000)
+
+test("a link to a host waits while its sandbox is stopped, private or the host is unreachable, and opens again on its own", async () => {
+  const fake = world(); const core = await asidee(fake); const host = hostWorld()
+  core.links.remote = host.remote
+  host.state.boxes.set("db", { sandboxId: "e".repeat(32), running: false, private: false, run: 1 })
+  try {
+    await core.create({ name: "app" })
+    expect(await core.links.add("app", "db", 5432, undefined, "build")).toMatchObject({ state: "waiting", reason: "db is stopped on build" })
+    // Each try contacts the host, so a waiting link is not tried again on every pass; a start of app tries it now.
+    host.state.boxes.get("db")!.running = true
+    await core.links.sync()
+    expect((await core.links.list())[0]).toMatchObject({ state: "waiting" })
+    await core.links.sync("app")
+    expect((await core.links.list())[0]).toMatchObject({ state: "open" })
+    // The host's daemon ends the lease (db stopped there): the link closes, and waits while the host cannot be reached.
+    host.state.reachable = false
+    host.relays.at(-1)!.onEnd("The remote daemon, sandbox run or SSH control link ended.")
+    expect((await core.links.list())[0]).toMatchObject({ state: "closed", reason: expect.stringContaining("its relay to build ended") })
+    await core.links.sync("app")
+    expect((await core.links.list())[0]).toMatchObject({ state: "waiting", reason: expect.stringContaining("build cannot be used now: build is unreachable") })
+    host.state.reachable = true; host.state.boxes.get("db")!.private = true
+    await core.links.sync("app")
+    expect((await core.links.list())[0]).toMatchObject({ state: "waiting", reason: expect.stringContaining("db is private on build; it opens once it is made public there") })
+    host.state.boxes.get("db")!.private = false
+    await core.links.sync("app")
+    expect((await core.links.list())[0]).toMatchObject({ state: "open" })
+    // app stopping closes it like any link.
+    await core.stop("app")
+    expect((await core.links.list())[0]).toMatchObject({ state: "waiting", reason: "app is stopped" })
+  } finally { core.closeSessions() }
+}, 30_000)
+
+test("a link to a host goes when its sandbox is made again or removed there, or the host record goes, and counts against its sandbox", async () => {
+  const fake = world(); const core = await asidee(fake); const host = hostWorld()
+  core.links.remote = host.remote
+  host.state.boxes.set("db", { sandboxId: "e".repeat(32), running: true, private: false, run: 1 })
+  try {
+    await core.create({ name: "app" })
+    await core.links.add("app", "db", 5432, undefined, "build")
+    const file = join(core.dirs.state, "links.json")
+    expect(JSON.parse(await readFile(file, "utf8")).links[0].to).toEqual({ name: "db", host: "build", machineId: host.BUILD, sandboxId: "e".repeat(32) })
+    // A record naming a host and an address, or a host named local, is malformed.
+    const saved = JSON.parse(await readFile(file, "utf8"))
+    for (const to of [{ ...saved.links[0].to, address: "192.168.64.5" }, { ...saved.links[0].to, host: "local" }, { ...saved.links[0].to, machineId: "x" }]) {
+      await writeFile(file, JSON.stringify({ version: 1, links: [{ ...saved.links[0], to }] }))
+      await expect((await asidee(fake, core.dirs)).links.list()).rejects.toMatchObject({ code: "conflict", message: expect.stringContaining("a link record is malformed") })
+    }
+    await writeFile(file, JSON.stringify(saved))
+    const again = await asidee(fake, core.dirs); again.links.remote = host.remote
+    // Made again under its name on the host: dropped at the next try, never followed.
+    host.state.boxes.set("db", { sandboxId: "0".repeat(32), running: true, private: false, run: 2 })
+    await again.links.sync("app")
+    expect(await again.links.list()).toEqual([])
+    expect(fake.boxes.get("app")!.hosts).toEqual([])
+    // Removed there: dropped too.
+    await again.links.add("app", "db", 5432, undefined, "build")
+    host.state.boxes.delete("db")
+    host.relays.at(-1)!.onEnd("ended")
+    await again.links.sync("app")
+    expect(await again.links.list()).toEqual([])
+    // The host's record removed, or enrolled again as another machine: dropped.
+    host.state.boxes.set("db", { sandboxId: "0".repeat(32), running: true, private: false, run: 3 })
+    await again.links.add("app", "db", 5432, undefined, "build")
+    host.state.machines.delete("build")
+    await again.links.prune()
+    expect(await again.links.list()).toEqual([])
+    host.state.machines.set("build", host.BUILD)
+    await again.links.add("app", "db", 5432, undefined, "build")
+    host.state.machines.set("build", "1".repeat(32))
+    expect(await again.links.list()).toEqual([])
+    host.state.machines.set("build", host.BUILD)
+    // Links to a host count against the sandbox they start from.
+    for (let port = 1; port <= LINKS_PER_SANDBOX; port++) await again.links.add("app", "db", 1000 + port, undefined, "build")
+    await expect(again.links.add("app", "db", 2000, undefined, "build")).rejects.toMatchObject({ code: "conflict", message: expect.stringContaining(`app already has ${LINKS_PER_SANDBOX} links`) })
+    // Removing app removes them.
+    await again.remove("app", "app")
+    expect(await again.links.list()).toEqual([])
+    again.closeSessions()
+  } finally { core.closeSessions() }
+}, 120_000)

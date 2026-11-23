@@ -71,7 +71,9 @@ const GROUPS: Array<[string, string[]]> = [
     "asd link add FROM TO --port PORT   programs in FROM connect to TO:PORT and reach PORT on TO's loopback, nothing else",
     "asd link add FROM NAME --address IP --port PORT   programs in FROM connect to NAME:PORT, and the daemon relays each",
     "                                   connection to IP:PORT from this machine (an IPv4 address outside Asidee, not 127.x)",
-    "asd link list [NAME] | link remove FROM TO --port PORT   on this machine only; a link comes back after restarts",
+    "asd link add FROM TO --to-host HOST --port PORT   programs in FROM connect to TO:PORT and reach PORT on the loopback",
+    "                                   of TO, a public sandbox on the connected host HOST, through its daemon over SSH",
+    "asd link list [NAME] | link remove FROM TO --port PORT   FROM is on this machine; a link comes back after restarts",
     "asd ssh setup NAME [--write-config]   sshd inside, reached as NAME.asidee through the daemon, no port",
     "asd ssh access NAME                   the alias, user and home an editor uses, and whether it is ready",
   ]],
@@ -842,14 +844,17 @@ async function main(argv: string[]): Promise<void> {
         throw new AsideeError("usage", "Use `asd forward add NAME --port PORT`, `asd forward list [NAME]` or `asd forward remove ID`.")
       }
       case "link": {
-        const { values, positionals } = parse({ port: { type: "string" }, address: { type: "string" } }, rest.slice(1))
+        const { values, positionals } = parse({ port: { type: "string" }, address: { type: "string" }, "to-host": { type: "string" } }, rest.slice(1))
         const state = (link: LinkView) => link.state === "open" ? `open, ${link.connections} connection${link.connections === 1 ? "" : "s"}` : `${shown(link.state)}: ${shown(link.reason)}`
         if (rest[0] === "add") {
-          const made = await call<LinkView>("linkAdd", { from: need(positionals[0], "FROM"), to: need(positionals[1], values.address ? "NAME" : "TO"), port: need(values.port, "--port"), ...(values.address ? { address: values.address } : {}) })
+          const made = await call<LinkView>("linkAdd", { from: need(positionals[0], "FROM"), to: need(positionals[1], values.address ? "NAME" : "TO"), port: need(values.port, "--port"), ...(values.address ? { address: values.address } : {}), ...(values["to-host"] ? { toHost: values["to-host"] } : {}) })
           return out(made, () => {
             if (made.toAddress) console.log(made.state === "open"
               ? `Linked: programs in ${shown(made.from)} connect to ${shown(made.to)}:${made.port} (${shown(made.address)}:${made.port}), and the daemon relays each connection to ${shown(made.toAddress)}:${made.port} from this machine. Measured just now.`
               : `Linked ${shown(made.from)} to ${shown(made.to)}:${made.port} (${shown(made.toAddress)}:${made.port}). It opens, and is measured, once ${shown(made.from)} is running (${shown(made.reason)}).`)
+            else if (made.toHost) console.log(made.state === "open"
+              ? `Linked: programs in ${shown(made.from)} connect to ${shown(made.to)}:${made.port} (${shown(made.address)}:${made.port}) and reach port ${made.port} on the loopback of ${shown(made.to)} on ${shown(made.toHost)}, nothing else; the daemon relays each connection over SSH. Measured just now.`
+              : `Linked ${shown(made.from)} to ${shown(made.to)}:${made.port} on ${shown(made.toHost)}. It opens, and is measured, once ${shown(made.from)} runs here and ${shown(made.to)} runs on ${shown(made.toHost)} (${shown(made.reason)}).`)
             else console.log(made.state === "open"
               ? `Linked: programs in ${shown(made.from)} connect to ${shown(made.to)}:${made.port} (${shown(made.address)}:${made.port}) and reach port ${made.port} on ${shown(made.to)}'s loopback, nothing else. Measured just now.`
               : `Linked ${shown(made.from)} to ${shown(made.to)}:${made.port}. It opens, and is measured, once both are running (${shown(made.reason)}).`)
@@ -861,14 +866,14 @@ async function main(argv: string[]): Promise<void> {
           const list = await call<LinkView[]>("linkList", { name: positionals[0] })
           return out(list, () => {
             if (!list.length) console.log("No links. Add one with `asd link add FROM TO --port PORT`.")
-            for (const link of list) console.log(`${shown(link.from)} -> ${shown(link.to)}:${link.port}${link.toAddress ? ` (${shown(link.toAddress)}:${link.port})` : ""}  ${state(link)}${link.measured ? `; measured ${utc(link.measured.at)}: ${shown(link.measured.status)}` : ""}`)
+            for (const link of list) console.log(`${shown(link.from)} -> ${shown(link.to)}:${link.port}${link.toAddress ? ` (${shown(link.toAddress)}:${link.port})` : ""}${link.toHost ? ` on ${shown(link.toHost)}` : ""}  ${state(link)}${link.measured ? `; measured ${utc(link.measured.at)}: ${shown(link.measured.status)}` : ""}`)
           })
         }
         if (rest[0] === "remove" || rest[0] === "rm") {
           const removed = await call<{ removed: { from: string; to: string; port: number }; measured: string }>("linkRemove", { from: need(positionals[0], "FROM"), to: need(positionals[1], "TO"), port: need(values.port, "--port") })
           return out(removed, () => console.log(`Removed the link from ${shown(removed.removed.from)} to ${shown(removed.removed.to)}:${removed.removed.port}. ${shown(removed.measured)}`))
         }
-        throw new AsideeError("usage", "Use `asd link add FROM TO --port PORT`, `asd link add FROM NAME --address IP --port PORT`, `asd link list [NAME]` or `asd link remove FROM TO --port PORT`.")
+        throw new AsideeError("usage", "Use `asd link add FROM TO --port PORT`, `asd link add FROM NAME --address IP --port PORT`, `asd link add FROM TO --to-host HOST --port PORT`, `asd link list [NAME]` or `asd link remove FROM TO --port PORT`.")
       }
       case "ssh": {
         const { values, positionals } = parse({ "write-config": { type: "boolean" }, "sandbox-id": { type: "string" } }, rest.slice(1))

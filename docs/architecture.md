@@ -117,7 +117,7 @@ explicit checklist decision before it may report an engine ready.
 | The template it was made from | no | before start | The template recorded at creation and the image the container runs, which must be the template's; a disclosure. |
 | Cannot reach the host | yes | verify | Live probe with controls. |
 | Cannot reach other sandboxes | yes | verify | Live probe with controls. |
-| Links reach only the sandboxes and ports they name | yes | verify | Checked by the core: each open link from or to this sandbox is measured live (see Links); a fail cuts that link. Only a link that reaches what it does not name fails the check; one that does not carry what it names is reported and stops neither sandbox. The attempts from FROM use programs inside FROM, which its root could replace; independently, the daemon dials only the link's own port, and the guard drops traffic between sandbox networks. A link to an address is measured as Links to an address outside Asidee says. |
+| Links reach only the sandboxes and ports they name | yes | verify | Checked by the core: each open link from or to this sandbox is measured live (see Links); a fail cuts that link. Only a link that reaches what it does not name fails the check; one that does not carry what it names is reported and stops neither sandbox. The attempts from FROM use programs inside FROM, which its root could replace; independently, the daemon dials only the link's own port, and the guard drops traffic between sandbox networks. A link to an address is measured as Links to an address outside Asidee says, and one to a sandbox on another machine as Links to a sandbox on another machine says. |
 | Cannot reach LAN, tailnet, metadata, IPv6 | yes | verify | Live probe with controls of a stand-in address in each private range and the tailnet range; one attempt at the metadata address; IPv6 by the loaded rules. |
 | Internet access | no | verify | Live attempt; a disclosure. |
 | Logins inside | no | verify | Looks for the usual credential files with programs inside the sandbox, which its root could replace; a disclosure, not a guarantee. |
@@ -404,8 +404,9 @@ refused with the restart named and nothing recorded, and after a stop and start 
 ### Links
 
 `asd link add FROM TO --port P` lets programs in FROM connect to `TO:P` and reach port P on TO's loopback. It is
-one-way and TCP only, between two sandboxes of this machine: `route()` in `core/machines.ts` refuses `--host` before
-anything else. Nothing is shared at the network level. The guard is not changed, no engine network joins the two, and
+one-way and TCP only. FROM is always a sandbox of this machine: `route()` in `core/machines.ts` refuses `--host` before
+anything else. TO is a sandbox of this machine, an address outside Asidee (below), or a public sandbox on a connected
+host (below). Nothing is shared at the network level. The guard is not changed, no engine network joins the two, and
 nothing new listens on this machine, so "Cannot reach other sandboxes" keeps its meaning for a linked pair.
 
 Inside FROM, the daemon runs a listener as root through the engine's exec API: BusyBox `nc -lk` on a loopback address
@@ -497,6 +498,46 @@ NAME on a random port, through a temporary route, must be relayed by the daemon 
 and stops nothing, as a link that does not carry what it names). Not checked: what the service at the address does
 with the connections, and what that address can reach. FROM's checklist discloses the link with that trust: FROM can
 open connections to A.B.C.D:P as this machine, so whatever there trusts this machine trusts FROM.
+
+#### Links to a sandbox on another machine
+
+`asd link add FROM TO --to-host HOST --port P` lets programs in FROM, a sandbox on this machine, connect to `TO:P` and
+reach port P on the loopback of TO, a sandbox on the connected host HOST (see [Machines](#machines); other machines must
+be on). Inside FROM it works as any link does: the same listener on a `127.77.0.x` address that `/etc/hosts` names TO,
+the same bounds, rate, hostile-listener handling and retries. Each connection goes, instead of to a local relay, through
+the machinery a forward from this machine to a sandbox on a host uses (`hold()` in `core/machines.ts`, shared with
+`forwardAdd`): while the link is open the daemon holds a `lease` remote session on TO's run and port P, renewed every
+5 seconds and ended by either side after 15 seconds of silence, and opens a `dial` remote session per connection. HOST's
+daemon opens a dial only to the leased port of the leased run of TO. No remote protocol was added: the link uses `get`,
+`sessionTarget` and the `lease`/`dial` streams HOST's daemon already offers (feature `remote-forwards`).
+
+Only a sandbox the primary may use can be linked to: a public one. `link add` reads TO's identity with the routed `get`,
+which HOST's daemon refuses for a private sandbox; the link is then refused, saying TO must be made public on its own
+machine (`asd share TO` there). HOST must be reachable at `link add`, since TO's identity is read from it; TO may be
+stopped. The record holds `to: { name, host, machineId, sandboxId }` (`links.json` stays version 1). TO's name may not be
+FROM's, `localhost` or the name of a sandbox on this machine, and inside FROM one name means one place.
+
+The link is bound to FROM's id and run, HOST's machine identity and TO's sandbox id. Each time it opens, the daemon
+checks the host record still names that machine, and `sessionTarget` that the sandbox running as TO on HOST has that id,
+so a TO made again under the name, or another machine enrolled under the alias, never inherits it. It waits, with its
+reason in `link list`, while HOST cannot be reached or used (offline, another build, other machines off here), while TO
+is stopped there, or while TO is private there; such a link is tried again at most every 30 seconds (each try contacts
+HOST), and at once when FROM is started through Asidee. It closes when its lease ends (TO stopped or restarted on HOST,
+HOST's daemon stopped, the SSH link silent) and opens again on the next try. It is removed with FROM, with HOST's record
+(`host remove` drops it at once; a record removed otherwise, at the next pass), and when HOST answers that TO does not
+exist or is another sandbox. It counts against FROM's 16 links. Telling a private TO from a removed one relies on HOST's
+words for each, which are this build's own, since two machines talk only when they run the same build.
+
+No test listener can run in TO: HOST's daemon offers none, and adding one would change the remote protocol. So the
+measurement checks less than a link between sandboxes here, and says so. When the link opens and on FROM's verify:
+FROM must not connect to HOST directly at the IPv4 addresses this machine reaches it at (from `ssh -G` and a lookup
+here), on port P and port 22 (a connection cuts the link and fails FROM's check; if the address cannot be read, the
+measurement says that was not checked); and a connection made in FROM to TO on a random port, through a temporary
+route, must be relayed by the daemon through a dial session HOST's daemon opened (if not, the link is cut and stops
+nothing). Not checked, and said in every result: TO's address on HOST's engine network (HOST does not report it),
+whether a service answers on TO's port P, and that TO's other ports do not answer through the link. FROM's checklist
+discloses the link with its trust: TO sees these connections as local, so whatever in TO trusts local connections
+trusts FROM; and the connections go from this machine to HOST over Asidee's SSH link to it.
 
 ### SSH for editors
 
@@ -768,7 +809,7 @@ names on two machines have distinct identities. `machineId` can also be supplied
 routed call, stream, forward and SSH setup/access whose `machineId` differs from the host's record is refused before
 any connection is opened. An unknown host never falls back. Buffered sandbox operations, engines, templates, extensions, checklist,
 verify and daemon status/stop route over SSH. Streams, primary loopback forwards and SSH setup/access also select
-the remote daemon. The dashboard's Machines page lists each machine with its cached sandboxes and their use, GPU
+the remote daemon. A link from a sandbox here may go to a public sandbox on a host (`link add --to-host`, see Links). The dashboard's Machines page lists each machine with its cached sandboxes and their use, GPU
 containers nested under their machine, and starts, stops, verifies and opens terminals in them by `host`.
 
 ### Private and public sandboxes

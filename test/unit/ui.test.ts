@@ -1154,3 +1154,22 @@ test("on a Mac, the folder can be picked in Finder's own window; cancelling keep
   const elsewhere = await open(false)
   expect([...(elsewhere.doc as any).querySelectorAll(".act-card[data-action=copy] button")].map((node: any) => node.textContent)).not.toContain("Choose in Finder…")
 })
+
+test("a link to a public sandbox on another machine is added from the Ports form's sandbox choice, and listed with its machine on both ends", async () => {
+  const link = { from: "demo", to: "soak", toHost: "home-linux", port: 5432, address: "127.77.0.2", state: "open", connections: 0, trust: "soak on home-linux sees these connections as local" }
+  const ui = await page({ ...base, ...fleetReplies, list: () => [sandbox()], fleet: fleetOf([sandbox({ name: "soak" })]), linkList: () => [link],
+    linkAdd: (body) => ({ ...link, ...body, trust: "trusted" }) })
+  await ui.open("demo")
+  expect(ui.text("#sandbox-page")).toContain("1 connection with other sandboxes (some on other machines)")
+  await ui.pick("Ports")
+  expect(ui.text("#modal")).toContain("demo → soak:5432 on home-linux · open")
+  expect(ui.text("#modal")).toContain("soak on home-linux")
+  await ui.submit(ui.button("Connect").closest("form"), { to: "soak@home-linux", port: "5432" })
+  expect(ui.text("#modal")).toContain("Connected: programs in demo reach soak:5432 on home-linux at 127.77.0.2. trusted")
+  expect(ui.calls.filter((call) => call.method === "linkAdd").map((call) => call.body)).toEqual([{ from: "demo", to: "soak", port: "5432", toHost: "home-linux" }])
+  await ui.open("home-linux/soak")
+  expect(ui.text("#sandbox-page")).toContain("1 connection with other sandboxes")
+  await ui.pick("Ports")
+  expect(ui.text("#modal")).toContain("demo → soak:5432 on home-linux · open")
+  expect(ui.text("#modal")).toContain("Connections start from a sandbox on this Mac")
+})

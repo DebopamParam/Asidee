@@ -4,7 +4,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Agent, request } from "node:http"
-import { connect } from "node:net"
+import { lookup } from "node:dns/promises"
+import { connect, isIPv4 } from "node:net"
 import { Duplex } from "node:stream"
 import { EventEmitter } from "node:events"
 import { dataFrames, frame, FrameReader, MAX_MESSAGE, type Frame, type OpenRequest } from "./stream"
@@ -216,6 +217,17 @@ export async function sshIdentity(endpoint: Endpoint): Promise<{ user: string; h
     const key = capture.read(await probe.exited)
     return { user, hostKey: keyFingerprint(key), hostPublicKey: key }
   } finally { capture.remove() }
+}
+
+// The IPv4 addresses this machine reaches a destination at: the host name `ssh -G` resolves from the user's own
+// configuration, looked up here unless it is an address already. Through a ProxyJump it is the address beyond the jump.
+export async function hostAddresses(endpoint: Endpoint): Promise<string[]> {
+  const config = Bun.spawn(["ssh", "-G", sshDestination(endpoint.ssh)], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: process.env })
+  const [resolved, settings] = await Promise.all([config.exited, new Response(config.stdout).text()])
+  const name = settings.match(/^hostname (\S{1,253})$/m)?.[1]
+  if (resolved !== 0 || !name) throw new AsideeError("dependency", `SSH did not report the host name it uses for ${endpoint.ssh}.`)
+  if (isIPv4(name)) return [name]
+  return [...new Set((await lookup(name, { all: true, family: 4 })).map((entry) => entry.address))]
 }
 
 // This mode relays only to an existing private socket. It never starts or replaces a daemon.

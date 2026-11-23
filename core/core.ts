@@ -11,11 +11,11 @@ import { OUTPUT_LIMIT } from "./run"
 import { addInclude, alias, editorKey, GUEST_SETUP, GUEST_SSH, includeLine, included, keyFingerprint, parseGuestSetup, userConfig, validPublicKey, writeClientFiles, type SshAccess } from "./ssh"
 import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSizes, validSpec, validTemplateName, writeManifest, writeConfig, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
-import { AsideeError, type CheckResult, type CreateSetup, type DiskWarning, type Engine, type Limits, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage, type Template, type SshSetup, type Visibility } from "./types"
+import { AsideeError, type CheckResult, type CreateSetup, type DiskWarning, type Engine, type Limits, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage, type Template, type SshSetup, type Visibility, privateThere } from "./types"
 
 // Private: only this machine's own Asidee sees it. Public: other machines see and use it too, through routing.
 export const visibilityOf = (manifest: Pick<Manifest, "visibility">): Visibility => manifest.visibility ?? "public"
-export const privateThere = (name: string) => `${name} is private on its machine, so other machines cannot see or use it. To share it, run \`asd share ${name}\` on that machine.`
+export { privateThere } from "./types"
 
 // A running sandbox is stopped when a blocking check could not be made this many timer passes in a row.
 export const UNCHECKED_PASSES = 4

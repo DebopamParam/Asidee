@@ -121,6 +121,8 @@ export type Manifest = {
   visibility?: Visibility
 }
 export type Visibility = "private" | "public"
+// What a machine says when another asks for one of its private sandboxes.
+export const privateThere = (name: string) => `${name} is private on its machine, so other machines cannot see or use it. To share it, run \`asd share ${name}\` on that machine.`
 // The create's setup flags, as `asd create` takes them.
 export type CreateSetup = { gh?: boolean; claude?: string[]; codex?: string[]; repo?: string; copy?: string[]; t3?: boolean; "t3-browser"?: boolean }
 // user and home: the login, the same as exec's. unlocked: its locked password was replaced by * (still no password),

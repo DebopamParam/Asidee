@@ -78,6 +78,16 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   127.x). Whatever there trusts this machine trusts `agent`, and what that address can reach is outside Asidee's
   checks. The measurement checks that the daemon reaches the address, that `agent` does not reach it directly, and
   that a connection from `agent` by its name is relayed; it ends when `agent` is removed.
+- Links to a public sandbox on a connected Linux machine (other machines must be on): `asd link add agent box
+  --to-host home-linux --port 22` lets programs in `agent` connect to `box:22` and reach port 22 on the loopback of
+  `box` on `home-linux`. The daemon relays each connection over SSH the way a forward to that machine does: a lease on
+  `box`'s run and port, and a remote session per connection. A private `box` is refused; it must be made public on
+  its own machine (`asd share box` there). `box` sees these connections as local, so a service there that trusts local
+  connections trusts `agent`. The link waits while `home-linux` cannot be reached or `box` is stopped or private, and
+  opens again on its own; it goes when `agent`, the host record or `box` is removed, or `box` is made again. The
+  measurement checks that a connection from `agent` by the name `box` is relayed through `home-linux`'s daemon and that
+  `agent` cannot reach `home-linux` directly; no test listener runs in `box`, so its other ports and its service are
+  not checked.
 - SSH for editors: `asd ssh setup demo` prepares sshd inside and an alias, `demo.asidee`, whose ProxyCommand
   runs sshd in inetd mode through a daemon session, so no port is opened anywhere. It trusts only a key made for this
   machine's editors and the host key made inside that sandbox; scp, SFTP and `ssh -L` to the sandbox's loopback work.

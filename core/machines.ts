@@ -9,7 +9,7 @@ import { boundPort, LEASE_RENEW_MS, LEASE_TTL_MS, listenLoopback, relay, validPo
 import { readConfig, validName, validSpec, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
 import { addInclude, alias, editorKey, included, includeLine, parseSshSetup, remoteAliases, updateRemoteAlias, userConfig } from "./ssh"
-import { absolutePath, bounded, enrolledKeyHelp, hostPublicKey, HttpPeer, keyFingerprint, KILL_GRACE_MS, MUTATION_DEADLINE_MS, object, PROTOCOL, RemoteSession, sshDestination, sshIdentity, type Endpoint } from "./transport"
+import { absolutePath, bounded, enrolledKeyHelp, hostAddresses, hostPublicKey, HttpPeer, keyFingerprint, KILL_GRACE_MS, MUTATION_DEADLINE_MS, object, PROTOCOL, RemoteSession, sshDestination, sshIdentity, type Endpoint } from "./transport"
 import { AsideeError } from "./types"
 
 // Each method's access on the dashboard's port (open, asked first on this Mac, or never) and its routing.
@@ -33,7 +33,7 @@ export const CATALOG = {
 } as const
 export type MethodName = keyof typeof CATALOG
 export const EXPERIMENTAL_OFF = "Other machines are experimental and off on this machine: they are not yet proven on enough machines. To turn them on: asd config set experimental on"
-export const LINKS_LOCAL = "Links join two sandboxes on this machine only, so they cannot be used with --host."
+export const LINKS_LOCAL = "Links are made on the machine of the sandbox they start from, so they take no --host; to reach a sandbox on another machine from one here, use `asd link add FROM TO --to-host HOST --port PORT`."
 export const FOLDERS_LOCAL = "Folders are browsed and previewed on this Mac, where they are copied from, so this takes no --host."
 export const isMethod = (method: string): method is MethodName => Object.hasOwn(CATALOG, method)
 export const mutates = (method: MethodName) => CATALOG[method][1] === "write"
@@ -249,9 +249,12 @@ export type MachineIo = {
   connectPeer: (endpoint: Endpoint) => Peer
   openStream: (endpoint: Endpoint, request: OpenRequest) => Promise<RemoteSession>
   sshIdentity: (endpoint: Endpoint) => Promise<{ user: string; hostKey: string; hostPublicKey: string }>
+  hostAddresses: (endpoint: Endpoint) => Promise<string[]>
 }
 type Cached = { view: HostView & { host: HostRecord }; summary?: MachineSummary; pending?: Promise<void>; failures: number; retryAt: number }
-type Forward = { host: string; view: ForwardView & { host: string; machineId: string }; server: Server; lease: RemoteSession; connections: Set<RemoteSession>; timers: Array<ReturnType<typeof setInterval>> }
+type Target = { name: string; machineId: string; sandboxId: string; generation: string }
+type Held = { lease: RemoteSession; end: (reason: string) => void; live: () => boolean; dial: () => Promise<RemoteSession> }
+type Forward = { host: string; view: ForwardView & { host: string; machineId: string }; server: Server; held: Held; connections: Set<RemoteSession> }
 export class Machines {
   private readonly cache = new Map<string, Cached>()
   private registryWrite: Promise<unknown> = Promise.resolve()
@@ -265,7 +268,7 @@ export class Machines {
   private readonly io: MachineIo
   renewMs = LEASE_RENEW_MS
   constructor(readonly dirs: Dirs, readonly hello: Hello, private readonly localSummary: () => Promise<MachineSummary>, io: Partial<MachineIo> = {}) {
-    this.io = { connectPeer: (endpoint) => new HttpPeer(endpoint), openStream: (endpoint, request) => RemoteSession.open(endpoint, request), sshIdentity, ...io }
+    this.io = { connectPeer: (endpoint) => new HttpPeer(endpoint), openStream: (endpoint, request) => RemoteSession.open(endpoint, request), sshIdentity, hostAddresses, ...io }
   }
 
   // Other machines are experimental: with the setting off, this daemon refuses to act as a primary and contacts no host.
@@ -380,29 +383,39 @@ export class Machines {
     })
   }
 
+  // A held relay to one port of one run of a sandbox on a host: the lease, renewed every renewMs and ended when the host
+  // is silent for LEASE_TTL_MS, and a dial session per connection, which the remote daemon opens only to that port of
+  // that run. Forwards from this machine and links to a sandbox on a host both use it; onEnd hears why it ended.
+  private async hold(host: HostRecord, hello: Hello, target: Target, port: number, epoch: number, silent: string, onEnd: (reason: string) => void): Promise<Held> {
+    const leaseId = randomBytes(16).toString("hex")
+    const lease = await this.remoteSession(host, hello, { kind: "lease", ...target, port, leaseId }, epoch)
+    let heard = Date.now(); let ended = false
+    const end = (reason: string) => { if (ended) return; ended = true; for (const timer of timers) clearInterval(timer); lease.close(reason); onEnd(reason) }
+    const timers = [setInterval(() => { if (Date.now() - heard >= LEASE_TTL_MS) end(`The SSH control stream was silent for ${LEASE_TTL_MS / 1000} seconds${silent}.`) }, 1000),
+      // The renewal the remote daemon waits for: without it the remote lease ends on its own.
+      setInterval(() => { lease.write(Buffer.from([1])) }, this.renewMs)]
+    for (const timer of timers) timer.unref()
+    lease.on("output", () => { heard = Date.now() }); lease.on("end", () => end("The remote daemon, sandbox run or SSH control link ended.")); lease.resume()
+    return { lease, end, live: () => !ended && Date.now() - heard < LEASE_TTL_MS, dial: () => this.remoteSession(host, hello, { kind: "dial", ...target, port, leaseId }, epoch) }
+  }
+
   private async forwardAdd(host: HostRecord, body: Record<string, unknown>, signal?: AbortSignal): Promise<ForwardView> {
     const port = validPort(body.port, "The port"); const local = body.localPort === undefined ? undefined : validPort(body.localPort, "The local port"); const epoch = this.epoch(host.name)
     return this.peer(host, async (peer, hello) => {
       if (!hello.features.includes("remote-forwards")) throw new AsideeError("dependency", "The remote daemon does not offer hosted forwards.")
-      const target = await this.target(peer, host, body.name); const leaseId = randomBytes(16).toString("hex")
-      const lease = await this.remoteSession(host, hello, { kind: "lease", ...target, port, leaseId }, epoch)
+      const target = await this.target(peer, host, body.name); const forwardId = randomBytes(4).toString("hex")
+      const held = await this.hold(host, hello, target, port, epoch, "; add a new forward explicitly", (reason) => this.endForward(forwardId, reason))
       let server: Server
-      try { server = await listenLoopback(local) } catch (error) { lease.close(); await lease.closed; throw error }
+      try { server = await listenLoopback(local) } catch (error) { held.end("The forward could not listen."); await held.lease.closed; throw error }
       // The registry may have changed while this waited; nothing is registered for a host that was removed meanwhile.
-      if (this.closing || this.epoch(host.name) !== epoch) { server.close(); lease.close("The host was removed."); throw new AsideeError("conflict", `${host.name} was removed while the forward was being added. Nothing is listening.`) }
-      const forwardId = randomBytes(4).toString("hex"); let heard = Date.now()
-      const forward: Forward = { host: host.name, view: { id: forwardId, ...target, host: host.name, localAddress: "127.0.0.1" as const, localPort: boundPort(server), port, createdAt: new Date().toISOString(), connections: 0 }, server, lease, connections: new Set<RemoteSession>(),
-        timers: [setInterval(() => { if (Date.now() - heard >= LEASE_TTL_MS) this.endForward(forwardId, `The SSH control stream was silent for ${LEASE_TTL_MS / 1000} seconds; add a new forward explicitly.`) }, 1000),
-          // The renewal the remote daemon waits for: without it the remote lease ends on its own.
-          setInterval(() => { lease.write(Buffer.from([1])) }, this.renewMs)] }
-      for (const timer of forward.timers) timer.unref()
+      if (this.closing || this.epoch(host.name) !== epoch) { server.close(); held.end("The host was removed."); throw new AsideeError("conflict", `${host.name} was removed while the forward was being added. Nothing is listening.`) }
+      const forward: Forward = { host: host.name, view: { id: forwardId, ...target, host: host.name, localAddress: "127.0.0.1" as const, localPort: boundPort(server), port, createdAt: new Date().toISOString(), connections: 0 }, server, held, connections: new Set<RemoteSession>() }
       this.forwards.set(forwardId, forward)
-      lease.on("output", () => { heard = Date.now() }); lease.on("end", () => this.endForward(forwardId, "The remote daemon, sandbox run or SSH control link ended.")); lease.resume()
       server.on("connection", async (socket) => {
         socket.on("error", () => {})
-        if (!this.forwards.has(forwardId) || Date.now() - heard >= LEASE_TTL_MS) { this.endForward(forwardId, "The SSH control stream expired."); return socket.destroy() }
+        if (!this.forwards.has(forwardId) || !held.live()) { this.endForward(forwardId, "The SSH control stream expired."); return socket.destroy() }
         let session: RemoteSession
-        try { session = await this.remoteSession(host, hello, { kind: "dial", ...target, port, leaseId }, epoch) } catch { return socket.destroy() }
+        try { session = await held.dial() } catch { return socket.destroy() }
         if (!this.forwards.has(forwardId) || socket.destroyed) { session.close(); socket.destroy(); return }
         forward.connections.add(session)
         // A service closing normally ends only that connection. Transport failure ends the listener as well.
@@ -413,10 +426,55 @@ export class Machines {
     }, signal)
   }
 
+  // ---- links from a sandbox on this machine to a public sandbox on a host (core/links.ts, RemoteLinks)
+
+  // The host's machine identity in this machine's records: undefined when no record has that alias, so its links go.
+  async linkMachine(name: string): Promise<string | undefined> {
+    const registry = await readHosts(this.dirs)
+    const found = registry.hosts.find((host) => host.name === name)
+    if (found) return found.machineId
+    const unknown = registry.unknown.find((host) => host.name === name)
+    if (unknown) throw new AsideeError("incompatible", unknown.error)
+    return undefined
+  }
+
+  // The sandbox's identity on the host, stopped or running, through the routed `get`; a private one is refused there.
+  async linkIdentity(hostAlias: string, name: string): Promise<{ machineId: string; sandboxId: string; running: boolean }> {
+    await this.experimental()
+    const host = await this.resolve(hostAlias)
+    const row = await this.peer(host, async (peer, hello) => {
+      if (!hello.features.includes("remote-forwards")) throw new AsideeError("dependency", `The daemon on ${host.name} does not offer relays to its sandboxes.`)
+      return parseRow(await peer.call("get", { name: validName(name) }, this.options(host, "get")), hello)
+    })
+    if (row.status === "damaged" || !row.sandboxId) throw new AsideeError("incompatible", `${host.name} reported ${name} in a form this Asidee cannot read.`)
+    return { machineId: host.machineId, sandboxId: row.sandboxId, running: row.status === "running" }
+  }
+
+  // A held relay to `port` on the run of the sandbox now running on the host, if it is still the sandbox `to` names.
+  // A sandbox made again under the name is refused (identity-changed), so a link never follows a name.
+  async linkRelay(to: { host: string; machineId: string; name: string; sandboxId: string }, port: number, onEnd: (reason: string) => void): Promise<{ generation: string; dial: () => Promise<RemoteSession>; close: (reason: string) => void }> {
+    await this.experimental()
+    const host = await this.resolve(to.host); const epoch = this.epoch(host.name)
+    if (host.machineId !== to.machineId) throw new AsideeError("identity-changed", `${host.name} is now machine ${host.machineId}, not the ${to.machineId} the link was made for.`)
+    return this.peer(host, async (peer, hello) => {
+      if (!hello.features.includes("remote-forwards")) throw new AsideeError("dependency", `The daemon on ${host.name} does not offer relays to its sandboxes.`)
+      const target = await this.target(peer, host, to.name)
+      if (target.sandboxId !== to.sandboxId) throw new AsideeError("identity-changed", `${to.name} on ${host.name} was made again since the link was added.`)
+      const held = await this.hold(host, hello, target, port, epoch, "", onEnd)
+      return { generation: target.generation, dial: () => { if (!held.live()) throw new AsideeError("conflict", "The relay's SSH control stream expired."); return held.dial() }, close: held.end }
+    })
+  }
+
+  // This machine's IPv4 addresses for the host, from SSH's own resolution of its destination: what a sandbox here would
+  // dial to reach the host directly.
+  async linkAddresses(hostAlias: string): Promise<string[]> {
+    return this.io.hostAddresses(await this.resolve(hostAlias))
+  }
+
   private endForward(id: string, reason: string): void {
     const forward = this.forwards.get(id)
     if (!forward) return
-    this.forwards.delete(id); for (const timer of forward.timers) clearInterval(timer); forward.server.close(); forward.lease.close(reason)
+    this.forwards.delete(id); forward.server.close(); forward.held.end(reason)
     for (const session of forward.connections) session.close(reason)
   }
   forwardList(host: string, name?: unknown): ForwardView[] {

@@ -134,7 +134,7 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     // terminal; a dialog cannot show that, so it stays with the CLI.
     hostPlan: { run: async (body) => hosts?.plan(body), socketOnly: true },
     hostApply: { run: async (body) => hosts?.apply(body), socketOnly: true },
-    hostRemove: { run: async (body) => machines?.remove(body), approve: async (body) => {
+    hostRemove: { run: async (body) => { const removed = await machines?.remove(body); await core.links.prune().catch(() => {}); return removed }, approve: async (body) => {
       here(body); only(body, ["name", "confirm"]); await machines?.experimental()
       const name = hostName(body.name)
       if (body.confirm !== name) throw new AsideeError("usage", "Confirm removal with confirm NAME. A prepared daemon and all remote data are retained.")
@@ -203,7 +203,7 @@ export function methods(core: Core, shutdown: (keepSandboxes: boolean) => void, 
     forwardAdd: { run: (body) => core.forwardAdd(String(body.name), body.port, body.localPort) },
     forwardList: { run: async (body) => core.forwardList(body.name) },
     forwardRemove: { run: async (body) => machines?.forwardRemove(body.id) ?? core.forwardRemove(body.id) },
-    linkAdd: { run: (body) => core.links.add(body.from, body.to, body.port, body.address) },
+    linkAdd: { run: (body) => core.links.add(body.from, body.to, body.port, body.address, body.toHost) },
     linkList: { run: (body) => core.links.list(body.name) },
     linkRemove: { run: (body) => core.links.remove(body.from, body.to, body.port) },
     sshAccess: { run: (body) => core.sshAccess(String(body.name)) },
@@ -376,6 +376,8 @@ export async function runDaemon(dirs: Dirs, cliDir: string): Promise<void> {
   const hello: Hello = { machineId: identity, bootId: randomBytes(16).toString("hex"), version: VERSION, buildDigest: digest.digest("hex"), sourceDigest: SOURCE, protocols: [PROTOCOL], methods: Object.keys(CATALOG),
     features: ["machines", "remote-streams", "remote-forwards", "ssh", "lease-renewal"], listener: process.env.ASIDEE_SOCKET_ONLY === "1" ? "socket-only" : "dashboard", service: process.env.INVOCATION_ID ? "systemd" : "none" }
   const machines = new Machines(dirs, hello, async () => ({ hello, sandboxes: await core.list(), checkedAt: new Date().toISOString() }))
+  // Links from a sandbox here to a public sandbox on a connected host relay through it.
+  core.links.remote = machines
   const hosts = new Hosts(machines)
   const token = randomBytes(24).toString("hex")
   let stop: (keepSandboxes: boolean) => void = () => {}

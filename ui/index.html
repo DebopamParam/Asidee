@@ -560,6 +560,9 @@ const keyOf = (sandbox) => sandbox.host ? `${sandbox.host}/${sandbox.name}` : sa
 const ref = (key) => { const [first, second] = String(key).split("/"); return second === undefined ? { name: first } : { name: second, host: first } }
 const nameAt = (key) => { const { name, host } = ref(key); return host ? { name, host } : { name } }
 const shownName = (key) => { const { name, host } = ref(key); return host ? `${name} on ${host}` : name }
+// The links that start from a sandbox here or end at it: at a sandbox on another machine, the links from this Mac's
+// sandboxes to it.
+const linksOf = (name, host) => links.filter((link) => host ? link.toHost === host && link.to === name : link.from === name || (!link.toAddress && !link.toHost && link.to === name))
 const findSandbox = (key) => { const { name, host } = ref(key); return host ? remotes.find((entry) => entry.host === host && entry.name === name) : sandboxes.find((entry) => entry.name === name) }
 // An extension action aimed at a sandbox: one on another machine runs here, with its asd calls sent to that machine.
 const actionTarget = (key) => { const { name, host } = ref(key); return { sandbox: name, ...(host ? { machine: host } : {}) } }
@@ -1299,7 +1302,7 @@ function sandboxPage(sandbox) {
   if (sandbox.status === "damaged") return node
 
   // Ports to a sandbox of another machine open on this Mac too; connections join sandboxes of one machine only.
-  const mine = (host ? remoteForwards[host] ?? [] : forwards).filter((forward) => forward.name === name), myLinks = host ? [] : links.filter((link) => link.from === name || (!link.toAddress && link.to === name))
+  const mine = (host ? remoteForwards[host] ?? [] : forwards).filter((forward) => forward.name === name), myLinks = linksOf(name, host)
   const access = ssh[key]
   const right = el("div", { class: "col" },
     host ? null : visibilityCard(sandbox),
@@ -1312,7 +1315,7 @@ function sandboxPage(sandbox) {
       el("div", { class: "lp pad" }, el("h4", {}, "Connect"),
         el("div", { style: "line-height:1.8" },
           el("div", {}, mine.length ? [`${plural(mine.length, "port")} open on this Mac · `, el("span", { class: "mono" }, mine.map((forward) => `:${forward.localPort}`).join(" "))] : quiet("No ports open on this Mac", "forward: 127.0.0.1 on this Mac to a port inside the sandbox")),
-          myLinks.length ? el("div", {}, quiet(`${plural(myLinks.length, "connection")} with other sandboxes${myLinks.some((link) => link.toAddress) ? " or addresses" : ""}`, "link: one sandbox reaches one port of another, or of an address outside Asidee")) : null,
+          myLinks.length ? el("div", {}, quiet(`${plural(myLinks.length, "connection")} with other sandboxes${myLinks.some((link) => link.toAddress) ? " or addresses" : ""}${myLinks.some((link) => link.toHost) && !host ? " (some on other machines)" : ""}`, "link: one sandbox reaches one port of another, or of an address outside Asidee")) : null,
           el("div", {}, access === undefined ? "SSH: checking…" : access.error ? `SSH: ${access.error}` : sshReady(key) ? ["SSH ready · ", el("span", { class: "mono" }, aliasOf(key))] : "SSH not set up")),
         el("div", { class: "row", style: "margin-top:8px" }, el("button", { type: "button", class: "sm", onclick: () => toolModal(key, "ports") }, "Ports"), el("button", { type: "button", class: "sm", onclick: () => toolModal(key, "ssh") }, "SSH and editors"))))
   }
@@ -1590,7 +1593,8 @@ function toolModal(key, which) {
     if (which === "snapshot") return [el("p", { class: "muted" }, `Saves this sandbox's files, without the usual login files, as a template new sandboxes${host ? ` on ${host}` : ""} can start from. A running sandbox pauses for the copy.`),
       miniForm(key, "snapshot", "Save", [["as", "Template name"]], async (values) => { const done = await api("snapshot", { ...at, as: values.as }); return `Saved template ${done.template.name}.\n${done.contents}` })]
     if (which === "ports") {
-      const mine = (host ? remoteForwards[host] ?? [] : forwards).filter((forward) => forward.name === name), myLinks = host ? [] : links.filter((link) => link.from === name || (!link.toAddress && link.to === name)), others = sandboxes.filter((other) => other.name !== name)
+      const mine = (host ? remoteForwards[host] ?? [] : forwards).filter((forward) => forward.name === name), myLinks = linksOf(name, host), others = [...sandboxes.filter((other) => other.name !== name).map((other) => [other.name, other.status === "running" ? other.name : `${other.name} (${other.status})`]),
+        ...remotes.filter((other) => !sandboxes.some((local) => local.name === other.name)).map((other) => [`${other.name}@${other.host}`, `${other.name} on ${other.host}${other.status === "running" ? "" : ` (${other.status})`}`])]
       return [el("h4", {}, "Open on this Mac"),
         el("p", { class: "muted" }, `A port inside the sandbox, opened at 127.0.0.1 on this Mac. Any program on this Mac can connect. It closes when the sandbox or the Asidee service stops${host ? `, or ${host} cannot be reached` : ""}.`),
         ...mine.map((forward) => el("div", { class: "card", style: "flex-direction:row;align-items:center" }, el("span", { class: "grow" }, `127.0.0.1:${forward.localPort} → port ${forward.port} inside`),
@@ -1600,13 +1604,15 @@ function toolModal(key, which) {
           return `Port ${made.port} in ${shownName(key)} is open at 127.0.0.1:${made.localPort}.`
         }),
         el("h4", {}, "Connect to another sandbox"),
-        el("p", { class: "muted" }, host ? `Connections join two sandboxes of one machine, so ${name}'s are made on ${host}.` : "Programs in one sandbox reach one port of another, and nothing else of it. A connection comes back after restarts."),
-        ...myLinks.map((link) => el("div", { class: "card" }, el("div", { class: "row" }, el("span", { class: "grow" }, `${link.from} → ${link.to}:${link.port}${link.toAddress ? ` (${link.toAddress}:${link.port}, outside Asidee)` : ""} · ${link.state}${link.reason ? ` (${link.reason})` : ""} · reach it at ${link.address}`),
+        el("p", { class: "muted" }, host ? `Connections start from a sandbox on this Mac: open that sandbox and choose ${name} on ${host}. Those made to ${name} are listed here; ${host} relays them over SSH.` : "Programs in one sandbox reach one port of another, here or public on a connected machine, and nothing else of it. A connection comes back after restarts."),
+        ...myLinks.map((link) => el("div", { class: "card" }, el("div", { class: "row" }, el("span", { class: "grow" }, `${link.from} → ${link.to}:${link.port}${link.toAddress ? ` (${link.toAddress}:${link.port}, outside Asidee)` : ""}${link.toHost ? ` on ${link.toHost}` : ""} · ${link.state}${link.reason ? ` (${link.reason})` : ""} · reach it at ${link.address}`),
           button("Remove", `link-${link.from}-${link.to}-${link.port}`, () => api("linkRemove", { from: link.from, to: link.to, port: link.port }), { class: "sm dang" })), el("div", { class: "muted" }, link.trust))),
-        // The other sandboxes on this machine; a stopped one can be connected, and the connection opens when it runs.
-        host ? null : others.length ? miniForm(key, "link", "Connect", [["to", "To sandbox", "select", others.map((other) => [other.name, other.status === "running" ? other.name : `${other.name} (${other.status})`])], ["port", "Port", "number"]], async (values) => {
-          const made = await api("linkAdd", { from: name, to: values.to, port: values.port })
-          return `Connected: programs in ${made.from} reach ${made.to}:${made.port} at ${made.address}. ${made.trust}`
+        // The other sandboxes on this machine, and the public ones of connected machines (as NAME@HOST); a stopped one can
+        // be connected, and the connection opens when it runs.
+        host ? null : others.length ? miniForm(key, "link", "Connect", [["to", "To sandbox", "select", others], ["port", "Port", "number"]], async (values) => {
+          const [to, toHost] = values.to.split("@")
+          const made = await api("linkAdd", { from: name, to, port: values.port, ...(toHost ? { toHost } : {}) })
+          return `Connected: programs in ${made.from} reach ${made.to}:${made.port}${made.toHost ? ` on ${made.toHost}` : ""} at ${made.address}. ${made.trust}`
         }) : el("p", { class: "muted" }, "There is no other sandbox to connect to."),
         host ? null : el("h4", {}, "Connect to an address outside Asidee"),
         host ? null : el("p", { class: "muted" }, "Programs in this sandbox reach one port of an IPv4 address, such as a virtual machine, by a name you give it. Asidee relays each connection from this Mac, so whatever there trusts this Mac trusts the sandbox, and what that address can reach is outside Asidee's checks."),
