@@ -64,3 +64,8 @@ test("an installed extension that is no longer bundled is reported with what rep
   expect(await removeExtension(where, "skills")).toEqual({ removed: "skills" })
   expect((await loadExtensions(where)).errors).toEqual([])
 })
+
+test("a bundled extension's hooks run inside asd too", async () => {
+  const installed = await installExtension(await dirs(), "t3")
+  expect(installed.hooks).toEqual({ postCreate: undefined, postStart: ["asd", "extension-run", "t3", "ensure"] })
+})

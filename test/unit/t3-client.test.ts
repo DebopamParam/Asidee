@@ -3,7 +3,7 @@ import { chmod, lstat, readFile, rm, symlink } from "node:fs/promises"
 import { createHash } from "node:crypto"
 import { arch } from "node:os"
 import { join } from "node:path"
-import { browser, hostVersion, setup, sshAccess, syncProviders } from "../../extensions/t3/t3"
+import { browser, connect, hostVersion, setup, sshAccess, syncProviders } from "../../extensions/t3/t3"
 import { fixture, fakeExec, local, must, ok, put } from "./client-feature-fixtures"
 
 const version = "0.1.1-nightly.20261020.3401"
@@ -202,4 +202,19 @@ test("a failed browser install shows only the installer's own message", async ()
   await expect(browser(reply("token-secret\nt3-browser: Set up T3 Code first.\n"), "demo", home)).rejects.toThrow(/^Set up T3 Code first\.$/)
   await expect(browser(reply("token-secret\n"), "demo", home)).rejects.toThrow("T3's browser install failed; output withheld.")
   await expect(browser(reply("t3-browser: x"), "../x", home)).rejects.toThrow("lowercase")
+})
+
+test("T3 Connect says each state in plain words, and shows a sign-in link only on T3's own account page", async () => {
+  const home = await fixture(), calls: string[][] = []
+  const answer = (reply: unknown) => async (argv: string[]) => { calls.push(argv); return argv[0] === "t3" ? ok(`t3 ${version}`) : ok(JSON.stringify(reply)) }
+  const url = "https://accounts.t3.codes/device?user_code=ABCD-EF12"
+  expect(await connect(answer({ state: "approve", url, code: "ABCD-EF12" }), "demo", home, "connect")).toContain(`${url}\n  Code: ABCD-EF12`)
+  expect(calls.at(-1)!.slice(0, 6)).toEqual(["asd", "exec", "demo", "--", "node", "-e"])
+  expect(calls.at(-1)!.slice(-2)).toEqual(["connect", version])
+  for (const bad of [{ state: "approve", url: "https://evil.example/device?user_code=ABCD-EF12", code: "ABCD-EF12" }, { state: "approve", url, code: "abcd; rm" }, { state: 1 }])
+    await expect(connect(answer(bad), "demo", home, "connect")).rejects.toThrow("Invalid T3 Connect response")
+  expect(await connect(answer({ state: "connected", server: "started" }), "demo", home, "connect")).toBe("Connected: demo is in the T3 Code app under your T3 account. T3's server here was started.")
+  expect(await connect(answer({ state: "signed-in", server: "running", reason: "No room." }), "demo", home, "status")).toBe("Signed in to T3 Connect, but the T3 Code app cannot reach demo yet. No room. T3's server here is running.")
+  expect(await connect(answer({ state: "off" }), "demo", home, "disconnect")).toContain("its sign-in was removed")
+  await expect(connect(answer({ state: "not-set-up" }), "demo", home, "connect")).rejects.toThrow("Run Set up T3 Code first")
 })

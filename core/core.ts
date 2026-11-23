@@ -407,10 +407,16 @@ export class Core {
     return { sandbox: await this.get(spec.name).catch(() => this.view(manifest)), checks, hooks, ...(spec.gpu ? { warning: GPU_WARNING } : {}) }
   }
 
-  // Its links open once it runs, outside its lock: opening one touches the sandbox at its other end too.
+  // Its links open once it runs, outside its lock: opening one touches the sandbox at its other end too. Then each
+  // extension's postStart hook runs, as postCreate's do after a create; a hook that fails does not fail the start.
   async start(name: string): Promise<SandboxView> {
     const sandbox = await this.startOnly(name)
     await this.links.sync(name).catch(() => {})
+    for (const extension of (await loadExtensions(this.dirs).catch(() => ({ extensions: [] }))).extensions) {
+      if (!extension.hooks.postStart) continue
+      this.activity.set(name, `Running ${extension.name}'s start step`)
+      await runCommand(this.run, extension, extension.hooks.postStart, { ASIDEE_SANDBOX: name }, this.cliDir).catch(() => {}).finally(() => this.activity.delete(name))
+    }
     return sandbox
   }
 

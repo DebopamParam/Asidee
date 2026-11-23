@@ -605,7 +605,9 @@ function askButton(label, key, what, task, extra = {}, say = label) {
 }
 // Nothing yet is an empty string, which append() and el() both leave blank (append would print null).
 // With what, only the output of that button.
-const result = (key, what) => { const value = output[key]; if (value === undefined || what !== undefined && from[key] !== what) return ""; return typeof value === "string" ? el("pre", {}, value) : el("div", {}, el("pre", {}, value.text), command(value.command)) }
+// Web addresses in a result open in a new tab, such as a sign-in to approve; the rest stays text.
+const linked = (text) => el("pre", {}, ...String(text).split(/(https:\/\/[^\s"'<>]+)/).map((part, at) => at % 2 ? el("a", { href: part, target: "_blank", rel: "noopener noreferrer" }, part) : part))
+const result = (key, what) => { const value = output[key]; if (value === undefined || what !== undefined && from[key] !== what) return ""; return typeof value === "string" ? linked(value) : el("div", {}, linked(value.text), command(value.command)) }
 // A closed group that stays open across refreshes once opened.
 function group(key, label, ...children) {
   const node = el("details", { class: "more", ontoggle: () => { node.open ? expanded.add(key) : expanded.delete(key) } }, el("summary", {}, label), ...children)
@@ -1432,6 +1434,7 @@ function extensionPage(extension) {
       extension.bundled ? el("div", { class: "end" }, menu("⋯", [item("Remove", () => act(key, "remove", () => api("extensionRemove", { id: extension.id }).then(() => { if (extPage === extension.id) { extPage = null; replacePath = true } return `Removed ${extension.name}.` }), { label: extension.name, value: "remove" }), { class: "dang" })])) : null),
     el("p", { class: "sub" }, extension.description ?? actionCount(extension)),
     extension.hooks?.postCreate ? el("p", { class: "muted small", style: "margin-top:4px" }, `After each create it runs: ${extension.hooks.postCreate.join(" ")}`) : null,
+    extension.hooks?.postStart ? el("p", { class: "muted small", style: "margin-top:4px" }, `After each start it runs: ${extension.hooks.postStart.join(" ")}`) : null,
     result(key, "remove"))
   node.append(el("div", { class: "col", style: "margin-top:20px" }, ...extension.actions.map((action) => el("div", { class: "lp pad stack act-card", "data-action": action.id },
     el("div", { class: "item-head" }, el("h3", {}, quiet(action.label, `Runs ${action.run.join(" ")}`)), el("span", { class: "tag" }, actsOn(action))),

@@ -51,6 +51,31 @@ command only up to its interactive-only guard, hence the top. It needs bash as r
 running keeps its old environment until it restarts. As a normal user Chrome keeps its sandbox, which works under
 gVisor, and nothing is written. Without Chrome's sandbox, the pane should only open pages you trust.
 
+## The T3 Code app on your phone (T3 Connect)
+
+`asd ext run t3 connect NAME` (the dashboard's "Connect to the T3 Code app") turns on T3 Connect in the sandbox, so
+the T3 Code app on a phone or the web reaches it through T3's relay. Asidee opens no port: the sandbox's T3 server
+connects out. The first time it prints a link on `accounts.t3.codes` and a code; approve them with your T3 account on
+any device. Press it again to see whether the app can reach the sandbox; `connect-status` only reports.
+
+- **The T3 account's sign-in is then stored in the sandbox**, where anything running there can read it. T3's docs say a
+  relay token is never a login on another environment, but whether it lets a program there reach your other machines
+  on the account was not checked in T3's code.
+- T3 would run its server as a systemd user service, which a sandbox has none of ("Service setup failed:
+  user-manager-unavailable"). The extension starts `t3 serve --no-lan` itself (log in `~/.t3/asidee/serve.log`), and
+  its `postStart` hook starts it again after each `asd start`. A server already running before the sign-in, such as
+  one the desktop app started over SSH, applies the link only when it starts, so Connect restarts it once; that stops
+  agent turns running in it.
+- A T3 account allows 3 connected machines on the free plan. With no room the app cannot reach the sandbox, and the
+  extension says so; deregister one in the app (account menu → T3 Connect, or Settings → T3 Connect on a phone).
+- `asd ext run t3 disconnect NAME` runs `t3 connect logout` there (T3 Connect off, sign-in removed) and stops the
+  server Connect started. The sandbox stays on the T3 account until deregistered there.
+
+Checked live on 2026-11-23 in a throwaway arm64 sandbox on the `agent` template: sign-in approved from a phone, the
+account at its limit was reported, after a deregistration Connect restarted the server and the sandbox became
+reachable, and after `asd stop` and `asd start` the hook started the server and it was reachable again. Not checked
+live: Disconnect, and the desktop app's own SSH-started server alongside it.
+
 ## SSH access
 
 The core owns it: `asd ssh setup NAME` prepares it, `--write-config` adds its `Include` line to `~/.ssh/config`,

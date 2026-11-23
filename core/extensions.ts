@@ -13,7 +13,7 @@ import type { Dirs } from "./state"
 
 export type Field = { id: string; label: string; type: "text" | "number" | "checkbox" | "select" | "folder"; options?: string[]; default?: string | number | boolean; required?: boolean }
 export type Action = { id: string; label: string; description?: string; scope: "sandbox" | "global"; fields: Field[]; run: string[] }
-export type Extension = { id: string; name: string; description?: string; dir: string; actions: Action[]; hooks: { postCreate?: string[] }; bundled?: boolean }
+export type Extension = { id: string; name: string; description?: string; dir: string; actions: Action[]; hooks: { postCreate?: string[]; postStart?: string[] }; bundled?: boolean }
 export type Available = { id: string; name: string; description?: string; installed: boolean }
 
 const ID = /^[a-z0-9][a-z0-9-]{0,40}$/
@@ -22,7 +22,7 @@ const isCommand = (value: unknown): value is string[] => Array.isArray(value) &&
 export function parseExtension(id: string, dir: string, raw: unknown): Extension {
   const fail = (message: string): never => { throw new AsideeError("usage", `Extension ${id}: ${message}`) }
   if (!ID.test(id)) fail("its folder name must be lowercase letters, digits and hyphens")
-  const data = raw as { name?: unknown; description?: unknown; actions?: unknown; hooks?: { postCreate?: unknown } }
+  const data = raw as { name?: unknown; description?: unknown; actions?: unknown; hooks?: { postCreate?: unknown; postStart?: unknown } }
   if (typeof data !== "object" || data === null || typeof data.name !== "string") fail("extension.json needs a name")
   const actions = (Array.isArray(data.actions) ? data.actions : []).map((entry: Record<string, unknown>): Action => {
     if (typeof entry.id !== "string" || !ID.test(entry.id)) fail("every action needs an id of lowercase letters, digits and hyphens")
@@ -38,7 +38,10 @@ export function parseExtension(id: string, dir: string, raw: unknown): Extension
   })
   const postCreate = data.hooks?.postCreate
   if (postCreate !== undefined && !isCommand(postCreate)) fail("hooks.postCreate must be a command as a list of strings")
-  return { id, name: data.name as string, description: typeof data.description === "string" ? data.description : undefined, dir, actions, hooks: { postCreate: postCreate as string[] | undefined } }
+  const postStart = data.hooks?.postStart
+  if (postStart !== undefined && !isCommand(postStart)) fail("hooks.postStart must be a command as a list of strings")
+  return { id, name: data.name as string, description: typeof data.description === "string" ? data.description : undefined, dir, actions,
+    hooks: { postCreate: postCreate as string[] | undefined, postStart: postStart as string[] | undefined } }
 }
 
 export async function loadExtensions(dirs: Dirs): Promise<{ extensions: Extension[]; errors: string[] }> {
@@ -65,9 +68,11 @@ const marker = (raw: unknown): raw is { bundled: unknown } => typeof raw === "ob
 // An installed bundled extension is a folder holding only {"bundled": ID}. Its declaration comes from this binary and
 // each of its commands is run by asd itself, so it needs no Bun and an upgrade of asd updates it.
 function bundled(id: string, dir: string): Extension {
-  const declaration = BUNDLED[id] as { actions?: Array<{ run: string[] }> }
-  const actions = (declaration.actions ?? []).map((action) => ({ ...action, run: ["asd", BUNDLED_RUN, id, ...action.run.slice(1)] }))
-  return { ...parseExtension(id, dir, { ...declaration, actions }), bundled: true }
+  const declaration = BUNDLED[id] as { actions?: Array<{ run: string[] }>; hooks?: Record<string, string[]> }
+  const inside = (command: string[]) => ["asd", BUNDLED_RUN, id, ...command.slice(1)]
+  const actions = (declaration.actions ?? []).map((action) => ({ ...action, run: inside(action.run) }))
+  const hooks = Object.fromEntries(Object.entries(declaration.hooks ?? {}).map(([hook, command]) => [hook, Array.isArray(command) ? inside(command) : command]))
+  return { ...parseExtension(id, dir, { ...declaration, actions, hooks }), bundled: true }
 }
 
 export function availableExtensions(installed: readonly Extension[]): Available[] {

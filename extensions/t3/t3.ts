@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { checked, exec, json, object, run, sandboxName, type Runner } from "./client"
 // Embedded, so the extension also runs from inside the asd binary.
 import BROWSER from "./browser.cjs" with { type: "text" }
+import CONNECT from "./connect.cjs" with { type: "text" }
 import DOWNLOAD from "./download.cjs" with { type: "text" }
 import ENVIRONMENT from "./environment.cjs" with { type: "text" }
 import INSTALL from "./install.cjs" with { type: "text" }
@@ -67,15 +68,41 @@ export async function browser(runner: Runner, name: string, home: string): Promi
   return { chrome: value.chrome, browser: value.browser }
 }
 
+// T3 Connect, for the T3 Code app on a phone or the web. Each mode's answer is said in plain words; nothing else from the
+// guest is shown.
+export type ConnectMode = "connect" | "status" | "ensure" | "disconnect"
+export async function connect(runner: Runner, name: string, home: string, mode: ConnectMode): Promise<string> {
+  sandboxName(name)
+  const version = await hostVersion(runner, home)
+  const value = json(await exec(runner, name, ["node", "-e", CONNECT, mode, version]))
+  if (!object(value) || typeof value.state !== "string") throw new Error("Invalid T3 Connect response; contents withheld.")
+  const reason = typeof value.reason === "string" && value.reason ? ` ${value.reason}` : ""
+  const server = { started: "T3's server here was started.", restarted: "T3's server here was restarted so the link applies.", running: "T3's server here is running.", stopped: "T3's server here is not running; press Connect to start it." }[String(value.server)] ?? ""
+  switch (value.state) {
+    case "approve":
+      if (typeof value.url !== "string" || !/^https:\/\/accounts\.t3\.codes\/device\?user_code=[A-Z0-9-]{4,20}$/.test(value.url) || typeof value.code !== "string" || !/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(value.code)) throw new Error("Invalid T3 Connect response; contents withheld.")
+      return `Approve this sandbox with your T3 account, on your phone or any device:\n  ${value.url}\n  Code: ${value.code}\nIt expires in 10 minutes. Once approved, T3's server here starts and the sandbox shows up in the T3 Code app within a minute. Press Connect again to check.`
+    case "connected": return `Connected: ${name} is in the T3 Code app under your T3 account. ${server}`.trim()
+    case "signed-in": return `Signed in to T3 Connect, but the T3 Code app cannot reach ${name} yet.${reason} ${server}`.trim()
+    case "started": return `Started T3's server in ${name} for the T3 Code app.`
+    case "unchanged": return "Nothing to start."
+    case "off": return `T3 Connect is off in ${name}${mode === "disconnect" ? ", and its sign-in was removed. Deregister it in the T3 Code app (account menu → T3 Connect) to free its place on your account" : ""}.`
+    case "not-set-up": throw new Shown(`T3 Code is not set up in ${name}. Run Set up T3 Code first.`)
+    default: throw new Shown("T3 Connect did not answer; try again.")
+  }
+}
+
 export async function main(argv: string[], env = process.env): Promise<void> {
   const [action, direct] = argv, name = direct ?? env.ASIDEE_SANDBOX ?? ""
-  if (!action || action === "--help") { console.log("t3.ts setup|browser|sync|ssh NAME. Requires an already running sandbox with Node and tar. `asd ssh setup NAME` prepares the SSH access the app connects with."); return }
+  if (!action || action === "--help") { console.log("t3.ts setup|browser|sync|ssh|connect|connect-status|disconnect|ensure NAME. Requires an already running sandbox with Node and tar. `asd ssh setup NAME` prepares the SSH access the app connects with."); return }
   if (argv.length > 2) throw new Error("Unexpected T3 arguments.")
   if (action === "setup") console.log(JSON.stringify(await setup(run, name, homedir())))
   else if (action === "browser") console.log(JSON.stringify(await browser(run, name, homedir())))
   else if (action === "sync") console.log(JSON.stringify(await syncProviders(run, name)))
   else if (action === "ssh") console.log(JSON.stringify(await sshAccess(run, name)))
-  else throw new Error("Use setup, browser, sync or ssh.")
+  else if (action === "connect" || action === "disconnect" || action === "ensure") console.log(await connect(run, name, homedir(), action))
+  else if (action === "connect-status") console.log(await connect(run, name, homedir(), "status"))
+  else throw new Error("Use setup, browser, sync, ssh, connect, connect-status, disconnect or ensure.")
 }
 // The command line, run by Bun directly or from inside the asd binary for an installed extension.
 export const command = (argv: string[]) => main(argv).catch((error) => { console.error(error instanceof Shown ? error.message : "T3 operation failed. Check the running sandbox, tools, version, checksums and install/login locks. Subprocess output withheld."); process.exitCode = 1 })

@@ -756,6 +756,22 @@ test("a setup hook runs after the sandbox is free, so it can call back into it",
   expect((made as Awaited<ReturnType<Core["create"]>>).hooks).toEqual([{ extension: "setup", exitCode: 0, output: "true" }])
 })
 
+test("a start hook runs after each start through Asidee, and one that fails does not fail the start", async () => {
+  const { provider } = fakeProvider()
+  const root = await mkdtemp(join(tmpdir(), "asidee-hook-")); const dirs = { state: join(root, "state"), config: join(root, "config") }
+  await mkdir(join(dirs.config, "extensions", "serve"), { recursive: true })
+  await writeFile(join(dirs.config, "extensions", "serve", "extension.json"), JSON.stringify({ name: "Serve", hooks: { postStart: ["./serve.sh"] } }))
+  const ran: string[] = []; let fail = false
+  const asidee = new Core([provider], dirs, async (argv, options) => { ran.push(`${argv.at(-1)} ${options!.env!.ASIDEE_SANDBOX}`); if (fail) throw new Error("hook broke"); return { exitCode: 0, stdout: "", stderr: "" } }, "/nowhere")
+  await asidee.create({ name: "demo" })
+  expect(ran).toEqual([])
+  await asidee.stop("demo"); await asidee.start("demo")
+  expect(ran).toEqual([`${join(dirs.config, "extensions", "serve", "serve.sh")} demo`])
+  fail = true
+  await asidee.stop("demo")
+  expect((await asidee.start("demo")).status).toBe("running")
+})
+
 test("a session is refused on a stopped sandbox without starting it, and ends when its sandbox stops or goes", async () => {
   const { provider, state } = fakeProvider(); const closed: string[] = []
   provider.openExec = async () => ({ tty: false, write: () => true, end: () => {}, resize: async () => {}, pause: () => {}, resume: () => {}, close: (reason?: string) => { closed.push(reason ?? "") }, on: () => {} }) as never

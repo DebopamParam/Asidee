@@ -18,6 +18,7 @@ asd setup [--docker]                    # macOS, once: give OrbStack gVisor afte
 asd doctor                              # whether an engine is ready, and what it needs
 asd create NAME [--docker] [--image IMAGE | --template TEMPLATE] [--cpus N] [--memory GB] [--pids N] [--disk GB]
 asd create NAME --gh --claude PROFILE --codex PROFILE --repo OWNER/REPO --t3  # then logins, clone, T3; this Mac only
+asd ext run t3 connect NAME   # the T3 Code app on a phone reaches it via T3 Connect; approve the printed link once
 asd create --retry NAME                 # finish a create whose checks or a setup step failed; unfinished ones go after 30 minutes
 asd create --keep NAME                  # keep an unfinished create as it is instead
 asd claude NAME [PROFILE] [-- ARG…]   # Claude Code in ~/workspace with an imported login; also asd codex
@@ -309,8 +310,9 @@ Create `~/.config/asidee/extensions/ID/extension.json`:
 }
 ```
 
-- `run` and `postCreate` are commands as lists. A path starting with `./` is relative to the extension's folder. Make
-  scripts executable.
+- `run`, `postCreate` and `postStart` are commands as lists. A path starting with `./` is relative to the extension's
+  folder. Make scripts executable. `postCreate` runs after each create; `postStart` after each `asd start` (a failing
+  one does not fail the start), with `ASIDEE_SANDBOX` set.
 - Field types: `text`, `number`, `checkbox`, `select` (with `options`), `folder` (a folder in this Mac's home, which the
   dashboard picks with a folder browser). Add `"required": true` when needed.
 - The command runs on the user's machine, not in the sandbox, with `ASIDEE_SANDBOX` (for `scope: "sandbox"`),

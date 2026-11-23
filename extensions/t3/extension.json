@@ -1,10 +1,14 @@
 {
   "name": "T3 Code",
-  "description": "Install this machine's exact T3 runtime, sync guest login providers, and report the core's SSH access for the app.",
+  "description": "Install this machine's exact T3 runtime, sync guest login providers, report the core's SSH access for the app, and connect the sandbox to the T3 Code app on your phone through T3 Connect.",
   "actions": [
     { "id": "setup", "label": "Set up T3 Code", "scope": "sandbox", "run": ["./t3.ts", "setup"] },
     { "id": "browser", "label": "Install T3's browser (Chrome)", "scope": "sandbox", "run": ["./t3.ts", "browser"] },
     { "id": "sync", "label": "Refresh T3 login providers", "scope": "sandbox", "run": ["./t3.ts", "sync"] },
-    { "id": "ssh", "label": "Show SSH access for T3", "scope": "sandbox", "run": ["./t3.ts", "ssh"] }
-  ]
+    { "id": "ssh", "label": "Show SSH access for T3", "scope": "sandbox", "run": ["./t3.ts", "ssh"] },
+    { "id": "connect", "label": "Connect to the T3 Code app", "scope": "sandbox", "description": "For the T3 Code app on your phone or the web, through T3 Connect. The first time, it shows a link and code to approve with your T3 account on any device. Your T3 account's sign-in is then stored in this sandbox, where anything running there can read it. T3's server here is kept running, and starts again with the sandbox; if one was already running before the sign-in, it restarts once, which stops agent turns running in it. Press again to see whether it is connected.", "run": ["./t3.ts", "connect"] },
+    { "id": "connect-status", "label": "T3 Code app connection", "scope": "sandbox", "run": ["./t3.ts", "connect-status"] },
+    { "id": "disconnect", "label": "Disconnect from the T3 Code app", "scope": "sandbox", "description": "Turns T3 Connect off here and removes the T3 account sign-in from this sandbox. The sandbox stays on your T3 account until you deregister it there.", "run": ["./t3.ts", "disconnect"] }
+  ],
+  "hooks": { "postStart": ["./t3.ts", "ensure"] }
 }
