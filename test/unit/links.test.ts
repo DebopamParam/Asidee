@@ -1,12 +1,14 @@
 import { expect, test } from "bun:test"
 import { EventEmitter } from "node:events"
 import { mkdtemp, readFile, writeFile } from "node:fs/promises"
+import { createServer, type Server } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { CHECKLIST } from "../../core/checks"
 import { Core } from "../../core/core"
 import { FIN_QUIET_MS } from "../../core/forwards"
-import { LINK_CONNECTIONS, LINKS_PER_SANDBOX, pump, RETRY_MAX_MS, RETRY_MS } from "../../core/links"
+import { addressTrust, dialTcp, LINK_CONNECTIONS, LINKS_PER_SANDBOX, pump, RETRY_MAX_MS, RETRY_MS, validAddress } from "../../core/links"
+import { readManifest } from "../../core/state"
 import { CATALOG, FOLDERS_LOCAL, LINKS_LOCAL, Machines, type Hello } from "../../core/machines"
 import { type CheckResult, type Engine, type LinkSupport, type Provider, type Session, type Stage } from "../../core/types"
 
@@ -36,7 +38,8 @@ function world() {
   const listeners = new Map<string, FakeSession>()
   const attached = new Map<number, { fromClient: FakeSession; toClient: FakeSession }>()
   const dialed: Array<{ name: string; port: number; session: FakeSession }> = []
-  const state = { leak: false, nextPid: 100, refuseBind: false }
+  // direct: an address outside Asidee that programs in a sandbox reach without the link, as if the guard let them.
+  const state = { leak: false, nextPid: 100, refuseBind: false, direct: "" }
   const box = (name: string) => boxes.get(name)!
   const listen = (name: string, address: string, port: number) => listeners.get(`${name} ${address}:${port}`)
   const support: LinkSupport = {
@@ -62,6 +65,7 @@ function world() {
       const line = box(manifest.name).hosts.find((entry) => entry.split("\t")[1] === host)
       const address = line ? line.split("\t")[0]! : host
       if (!address.startsWith("127.77.")) {
+        if (state.direct && address === state.direct) return { connected: true, received: "" }
         const peer = [...boxes.values()].find((entry) => entry.canaries.get(port)?.everywhere)
         return state.leak && peer ? { connected: true, received: `${peer.canaries.get(port)!.reply}\n` } : { connected: false, received: "" }
       }
@@ -436,4 +440,155 @@ test("links are refused for another machine in one sentence, before any machine 
     await expect(machines.route(method, { host: "build", source: "~/.agents" })).rejects.toMatchObject({ code: "usage", message: FOLDERS_LOCAL })
   expect(contacted).toBe(0)
   expect(LINKS_LOCAL.split(". ").length).toBe(1)
+})
+
+// A TCP service on this machine's loopback standing in for an address outside Asidee: it greets each connection and
+// echoes what it is sent. Links refuse 127.0.0.0/8, so tests reach it through Links.dialAddress.
+async function outsideService() {
+  const dialed: Array<[string, number]> = []
+  const server: Server = createServer({ allowHalfOpen: true }, (socket) => { socket.write("hello\n"); socket.on("data", (bytes) => socket.write(bytes)); socket.on("end", () => socket.end()) })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const port = (server.address() as { port: number }).port
+  const dial = (address: string, wanted: number) => { dialed.push([address, wanted]); return dialTcp("127.0.0.1", port) }
+  return { dial, dialed, close: () => server.close() }
+}
+
+test("an address link's address and name are validated in the daemon before anything is recorded", async () => {
+  const core = await asidee()
+  await core.create({ name: "app" }); await core.create({ name: "db" })
+  for (const address of ["vm.local", "192.168.64", "192.168.064.5", "256.1.1.1", "::1", " 192.168.64.5", 3232252933])
+    await expect(core.links.add("app", "vm", 22, address)).rejects.toMatchObject({ code: "usage", message: expect.stringContaining("must be an IPv4 address") })
+  await expect(core.links.add("app", "vm", 22, "127.0.0.1")).rejects.toMatchObject({ code: "usage", message: expect.stringContaining("whether to allow that is not decided yet") })
+  await expect(core.links.add("app", "vm", 22, "127.200.1.1")).rejects.toMatchObject({ code: "usage" })
+  for (const address of ["0.0.0.0", "0.1.2.3", "224.0.0.1", "239.255.255.250", "255.255.255.255"])
+    await expect(core.links.add("app", "vm", 22, address)).rejects.toMatchObject({ code: "usage" })
+  // Its name is one a sandbox could have, is not localhost or the linking sandbox, and is not a sandbox's.
+  for (const name of ["VM", "vm;rm", "localhost", "app"]) await expect(core.links.add("app", name, 22, "192.168.64.5")).rejects.toMatchObject({ code: "usage" })
+  await expect(core.links.add("app", "db", 22, "192.168.64.5")).rejects.toMatchObject({ code: "usage", message: expect.stringContaining("db is the name of a sandbox") })
+  await expect(core.links.add("nobody", "vm", 22, "192.168.64.5")).rejects.toMatchObject({ code: "not-found" })
+  expect(await core.links.list()).toEqual([])
+  for (const address of ["192.168.64.5", "10.0.0.1", "172.16.0.1", "8.8.8.8", "169.254.1.1"]) expect(validAddress(address)).toBe(address)
+})
+
+test("an address link opens measured, relays each connection to its address from the daemon, says what it trusts, and is removed", async () => {
+  const fake = world(); const core = await asidee(fake); const service = await outsideService()
+  core.links.dialAddress = service.dial
+  try {
+    await core.create({ name: "app" })
+    const made = await core.links.add("app", "vm", 22, "192.168.64.5")
+    expect(made).toMatchObject({ from: "app", to: "vm", toAddress: "192.168.64.5", port: 22, address: "127.77.0.2", state: "open", measured: { status: "pass" } })
+    expect(made.measured!.detail).toContain("The daemon opened a connection to 192.168.64.5:22 from this machine; a test connection from app to vm:")
+    expect(made.measured!.detail).toContain("and app could not connect to 192.168.64.5:22 directly.")
+    expect(made.measured!.detail).toContain("Not checked: what the service at 192.168.64.5:22 does with the connections, and what that address can reach (the internet, the local network); that is outside Asidee's checks.")
+    expect(made.trust).toBe(addressTrust("app", "192.168.64.5", 22))
+    expect(made.trust).toBe("app can open connections to 192.168.64.5:22 as this machine, so whatever there trusts this machine trusts app; and what that address can reach (the internet, the local network) is outside Asidee's checks.")
+    expect(fake.boxes.get("app")!.hosts).toEqual(["127.77.0.2\tvm\t# asidee-link"])
+    expect([...fake.listeners.keys()]).toEqual(["app 127.77.0.2:22"])
+    // The daemon dialed only the link's address and port, for its own check and for the test connection.
+    expect(service.dialed.every(([address, port]) => address === "192.168.64.5" && port === 22)).toBe(true)
+    // A connection made in app is relayed to the address, and what the service says comes back.
+    const dials = service.dialed.length
+    fake.listen("app", "127.77.0.2", 22)!.print("o 7\n")
+    for (let wait = 0; wait < 100 && !fake.attached.get(7)?.toClient.written.includes("hello"); wait++) await Bun.sleep(10)
+    expect(service.dialed.length).toBe(dials + 1)
+    const halves = fake.attached.get(7)!
+    halves.fromClient.print("ping\n")
+    for (let wait = 0; wait < 100 && !halves.toClient.written.includes("ping"); wait++) await Bun.sleep(10)
+    expect(halves.toClient.written).toBe("hello\nping\n")
+    expect((await core.links.list("app"))[0]).toMatchObject({ toAddress: "192.168.64.5", state: "open", connections: 1 })
+    // Its checks: the disclosure names the address and the trust; verify measures it again.
+    const verified = await core.verify("app")
+    expect(verified.checks.find((check) => check.id === "links")!.detail).toContain(`To vm (192.168.64.5, outside Asidee) on port 22: open; inside app, vm is 127.77.0.2. ${made.trust}`)
+    expect(verified.checks.find((check) => check.id === "link-scope")).toMatchObject({ status: "pass", evidence: "probed" })
+    expect(verified.checks.find((check) => check.id === "net-peers")!.detail).toContain("this sandbox reaches 192.168.64.5 (named vm, outside Asidee) on port 22")
+    expect(await core.links.remove("app", "vm", 22)).toMatchObject({ removed: { from: "app", to: "vm", port: 22 }, measured: "Measured: 127.77.0.2:22 now refuses connections inside app." })
+    expect(await core.links.list()).toEqual([])
+    expect(fake.boxes.get("app")!.hosts).toEqual([])
+  } finally { core.closeSessions(); service.close() }
+}, 20_000)
+
+test("an address link the daemon cannot reach is not added unmeasured, and one the sandbox reaches directly is refused", async () => {
+  const fake = world(); const core = await asidee(fake)
+  await core.create({ name: "app" })
+  core.links.dialAddress = async () => { throw new Error("connect ECONNREFUSED 192.168.64.5:22") }
+  await expect(core.links.add("app", "vm", 22, "192.168.64.5")).rejects.toMatchObject({ code: "probes-required",
+    message: expect.stringContaining("the daemon could not open a TCP connection to 192.168.64.5:22 from this machine (connect ECONNREFUSED 192.168.64.5:22), so a blocked attempt from app would prove nothing") })
+  expect(await core.links.list()).toEqual([])
+  const service = await outsideService(); core.links.dialAddress = service.dial
+  try {
+    fake.state.direct = "192.168.64.5"
+    await expect(core.links.add("app", "vm", 22, "192.168.64.5")).rejects.toMatchObject({ code: "check-failed", message: expect.stringContaining("app opened a connection to 192.168.64.5:22 directly, not through the link.") })
+    expect(await core.links.list()).toEqual([])
+    expect(fake.listeners.size).toBe(0)
+    // Measured again on verify: the link is cut and app, which reached the address itself, is stopped.
+    fake.state.direct = ""
+    await core.links.add("app", "vm", 22, "192.168.64.5")
+    fake.state.direct = "192.168.64.5"
+    const verified = await core.verify("app")
+    expect(verified.checks.find((check) => check.id === "link-scope")).toMatchObject({ status: "fail", detail: expect.stringContaining("The link was cut.") })
+    expect((await core.get("app")).status).toBe("stopped")
+    expect((await core.links.list())[0]).toMatchObject({ state: "cut" })
+  } finally { core.closeSessions(); service.close() }
+}, 20_000)
+
+test("a links.json from before address links loads; an address link is recorded with its kind, counts against its sandbox, and goes with it", async () => {
+  const fake = world(); const core = await asidee(fake); const service = await outsideService()
+  core.links.dialAddress = service.dial
+  try {
+    await core.create({ name: "app" }); await core.create({ name: "db" })
+    const file = join(core.dirs.state, "links.json")
+    // Written as the daemon wrote it before address links existed.
+    const id = async (name: string) => (await readManifest(core.dirs, name)).id
+    const old = { version: 1, links: [{ id: "0a1b2c3d", from: { name: "app", sandboxId: await id("app") }, to: { name: "db", sandboxId: await id("db") }, port: 5432, address: "127.77.0.2", createdAt: "2026-11-01T00:00:00.000Z" }] }
+    await writeFile(file, JSON.stringify(old))
+    const again = await asidee(fake, core.dirs); again.links.dialAddress = service.dial
+    expect(await again.links.list()).toMatchObject([{ from: "app", to: "db", port: 5432, address: "127.77.0.2" }])
+    expect((await again.links.list())[0]!.toAddress).toBeUndefined()
+    await again.links.add("app", "vm", 22, "192.168.64.5")
+    const saved = JSON.parse(await readFile(file, "utf8"))
+    expect(saved.version).toBe(1)
+    expect(saved.links[1]).toMatchObject({ from: { name: "app" }, to: { name: "vm", address: "192.168.64.5" }, port: 22, address: "127.77.0.3" })
+    expect(saved.links[1].to.sandboxId).toBeUndefined()
+    again.closeSessions()
+    // A record naming both kinds, or an address a link may not dial, makes the file unreadable rather than guessed at.
+    for (const to of [{ name: "vm", address: "192.168.64.5", sandboxId: "a".repeat(32) }, { name: "vm", address: "127.0.0.1" }, { name: "vm", address: "vm.local" }]) {
+      await writeFile(file, JSON.stringify({ version: 1, links: [{ ...saved.links[1], to }] }))
+      await expect((await asidee(fake, core.dirs)).links.list()).rejects.toMatchObject({ code: "conflict", message: expect.stringContaining("a link record is malformed") })
+    }
+    await writeFile(file, JSON.stringify(saved))
+    const third = await asidee(fake, core.dirs); third.links.dialAddress = service.dial
+    // One name means one place inside a sandbox.
+    await expect(third.links.add("app", "vm", 2222, "192.168.64.6")).rejects.toMatchObject({ code: "conflict", message: expect.stringContaining("Inside app, vm already names the address 192.168.64.5") })
+    await third.create({ name: "vm" })
+    await expect(third.links.add("app", "vm", 22)).rejects.toMatchObject({ code: "conflict", message: expect.stringContaining("Inside app, vm already names the address 192.168.64.5") })
+    // The address link stays when a sandbox takes its name, and is bound to app only.
+    expect((await third.links.list("app")).map((link) => `${link.to}:${link.port}`)).toEqual(["db:5432", "vm:22"])
+    await third.remove("vm", "vm")
+    expect((await third.links.list("app")).map((link) => `${link.to}:${link.port}`)).toEqual(["db:5432", "vm:22"])
+    // Address links count against their sandbox's links.
+    for (let port = 1; port <= LINKS_PER_SANDBOX - 2; port++) await third.links.add("app", "vm", 1000 + port, "192.168.64.5")
+    await expect(third.links.add("app", "vm2", 22, "192.168.64.7")).rejects.toMatchObject({ code: "conflict", message: expect.stringContaining(`app already has ${LINKS_PER_SANDBOX} links`) })
+    // Removing app removes its address links.
+    await third.remove("app", "app")
+    expect(await third.links.list()).toEqual([])
+    expect(JSON.parse(await readFile(file, "utf8")).links).toEqual([])
+    third.closeSessions()
+  } finally { core.closeSessions(); service.close() }
+}, 60_000)
+
+test("the daemon's TCP dial is a session the relay can use: paused until resumed, its end a half-close", async () => {
+  const service = await outsideService()
+  try {
+    const session = await service.dial("192.168.64.5", 22)
+    let received = ""; let exit: { code?: number; error?: string } | undefined
+    session.on("output", (stream, bytes) => { if (stream === "stdout") received += Buffer.from(bytes).toString() })
+    session.on("end", (value) => { exit = value })
+    await Bun.sleep(50)
+    expect(received).toBe("")
+    session.resume(); session.write(Buffer.from("ping\n")); session.end()
+    for (let wait = 0; wait < 100 && !exit; wait++) await Bun.sleep(10)
+    expect(received).toBe("hello\nping\n")
+    expect(exit).toEqual({ code: 0 })
+    await expect(dialTcp("127.0.0.1", 1, 2000)).rejects.toThrow()
+  } finally { service.close() }
 })

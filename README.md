@@ -72,6 +72,12 @@ Built features (engine measurements are recorded in [the Mac scorecard](evals/SC
   ports and `db`'s network address do not answer), and one that fails is cut. A link comes back after either
   sandbox restarts and after a daemon restart, is down while the daemon is not running, carries TCP only, up to 64
   connections at once, and ends when either sandbox is removed.
+- Links to an address outside Asidee, such as a virtual machine on this Mac: `asd link add agent vm --address
+  192.168.64.5 --port 22` lets programs in `agent` connect to `vm:22`, and the daemon relays each connection to
+  192.168.64.5:22 from this machine. The guard is unchanged. The address must be an IPv4 address (no host names, not
+  127.x). Whatever there trusts this machine trusts `agent`, and what that address can reach is outside Asidee's
+  checks. The measurement checks that the daemon reaches the address, that `agent` does not reach it directly, and
+  that a connection from `agent` by its name is relayed; it ends when `agent` is removed.
 - SSH for editors: `asd ssh setup demo` prepares sshd inside and an alias, `demo.asidee`, whose ProxyCommand
   runs sshd in inetd mode through a daemon session, so no port is opened anywhere. It trusts only a key made for this
   machine's editors and the host key made inside that sandbox; scp, SFTP and `ssh -L` to the sandbox's loopback work.

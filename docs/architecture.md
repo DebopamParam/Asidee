@@ -35,7 +35,7 @@ between, stops it on its next pass instead of checking it then, since a check ca
 These were settled with the owner; a change to one is a product decision, not a refactor.
 
 - Sandboxes are gVisor **containers**, like a small machine rented from a cloud provider: they cannot reach the host,
-  each other (except through links) or the LAN; they have limits; they can run Docker inside, and inner containers
+  each other or the LAN (except through links); they have limits; they can run Docker inside, and inner containers
   have internet.
 - What ships is OrbStack with gVisor on a Mac (`asd setup`) and experimental Linux machines. Nothing a user reads
   (CLI, dashboard, README, docs, skill) names another engine or platform, not even as "not supported yet". Every new
@@ -111,13 +111,13 @@ explicit checklist decision before it may report an engine ready.
 | No engine-published ports; requested forwards are loopback-only | yes | before start | Engine configuration. Forwards are the daemon's, not the engine's. |
 | Forwards to this machine's loopback | no | before start | Checked by the core: each active forward's address, its port inside, and its id; a disclosure. |
 | SSH access for editors | no | before start | Checked by the core: whether `asd ssh setup` was run for this sandbox, its user, and the editor key's fingerprint; a disclosure. |
-| Links to other sandboxes | no | before start | Checked by the core: each link from or to this sandbox, its state and last measurement, and what the other side trusts; a disclosure. |
+| Links to other sandboxes | no | before start | Checked by the core: each link from or to this sandbox, including links to addresses outside Asidee, its state and last measurement, and what the other side trusts; a disclosure. |
 | Memory, process, CPU limits | yes | before start | Engine configuration: the values must be the spec's (as created or resized), with json-file host log rotation (10 MiB, two files) for every sandbox. |
 | Disk limit | no | before start | The engine's capability: hard, watched or none. Watched needs a runtime with `--overlay2=none`. |
 | The template it was made from | no | before start | The template recorded at creation and the image the container runs, which must be the template's; a disclosure. |
 | Cannot reach the host | yes | verify | Live probe with controls. |
 | Cannot reach other sandboxes | yes | verify | Live probe with controls. |
-| Links reach only the sandboxes and ports they name | yes | verify | Checked by the core: each open link from or to this sandbox is measured live (see Links); a fail cuts that link. Only a link that reaches what it does not name fails the check; one that does not carry what it names is reported and stops neither sandbox. The attempts from FROM use programs inside FROM, which its root could replace; independently, the daemon dials only the link's own port, and the guard drops traffic between sandbox networks. |
+| Links reach only the sandboxes and ports they name | yes | verify | Checked by the core: each open link from or to this sandbox is measured live (see Links); a fail cuts that link. Only a link that reaches what it does not name fails the check; one that does not carry what it names is reported and stops neither sandbox. The attempts from FROM use programs inside FROM, which its root could replace; independently, the daemon dials only the link's own port, and the guard drops traffic between sandbox networks. A link to an address is measured as Links to an address outside Asidee says. |
 | Cannot reach LAN, tailnet, metadata, IPv6 | yes | verify | Live probe with controls of a stand-in address in each private range and the tailnet range; one attempt at the metadata address; IPv6 by the loaded rules. |
 | Internet access | no | verify | Live attempt; a disclosure. |
 | Logins inside | no | verify | Looks for the usual credential files with programs inside the sandbox, which its root could replace; a disclosure, not a guarantee. |
@@ -467,6 +467,37 @@ On verify, the two kinds of failure count differently, in both directions:
 A measurement whose controls failed is unknown; with `require-probes` on, the link stays closed. Both sandboxes' checklists disclose each link and the trust it gives:
 TO sees FROM's connections as local.
 
+#### Links to an address outside Asidee
+
+`asd link add FROM NAME --address A.B.C.D --port P` lets programs in FROM connect to `NAME:P`, and the daemon relays
+each connection to A.B.C.D:P from this machine, with a plain TCP connection of its own. The use it is for is a
+virtual machine on this Mac (Tart, say, at 192.168.64.5) that a sandbox should reach over SSH. The guard drops private
+ranges from sandboxes, so the connection must come from the daemon; the guard is not changed. Inside FROM it works as a
+link to a sandbox does: the same listener on a `127.77.0.x` address that `/etc/hosts` names NAME, the same bounds,
+rate, hostile-listener handling and retries, and the destination is the record's address and port, never anything FROM
+writes. The record holds `to: { name, address }` with no sandbox id (`links.json` stays version 1; a record is one kind
+or the other, and a file from before still loads).
+
+The address is an IPv4 literal: host names are refused, so DNS cannot re-point a link. 0.0.0.0/8, 224.0.0.0 and up
+(multicast, reserved and broadcast) and 127.0.0.0/8 are refused. A link to this machine's own loopback would hand the
+sandbox this machine's local services, and whether to allow that is a product decision not yet made. Private ranges
+are allowed; they are the point. This machine's own addresses on other interfaces are not refused, so a link to one
+reaches whatever listens there. NAME follows the rules of a sandbox name; it may not be `localhost`, FROM's name or the
+name of a sandbox, and inside FROM one name means one place: a second link by that name must go to the same address.
+
+Such a link is bound to FROM's id and run only. Removing FROM removes it; a sandbox made later under NAME does not
+change it. It counts against FROM's 16 links.
+
+No test listener can run at the address, so the measurement checks less than a link between sandboxes, and says so.
+When the link opens and on FROM's verify: the daemon must open a TCP connection to A.B.C.D:P (if it cannot, the
+measurement is unknown, since a blocked attempt from FROM would prove nothing; with `require-probes` on the link does
+not open, and `link add` is refused); FROM must not connect to A.B.C.D:P directly (a connection there cuts the link and
+fails FROM's check; a failure shows only that the connection failed, not why); and a connection made in FROM to
+NAME on a random port, through a temporary route, must be relayed by the daemon to A.B.C.D:P (if not, the link is cut
+and stops nothing, as a link that does not carry what it names). Not checked: what the service at the address does
+with the connections, and what that address can reach. FROM's checklist discloses the link with that trust: FROM can
+open connections to A.B.C.D:P as this machine, so whatever there trusts this machine trusts FROM.
+
 ### SSH for editors
 
 `asd ssh setup NAME` runs a script as root inside the running sandbox (`GUEST_SETUP` in `core/ssh.ts`). It
@@ -580,6 +611,10 @@ uses is deleted at once (C05, C07). A stopped sandbox can be saved without start
   connections without a password accepts FROM's. The measurement covers the link's address, TO's name on another port,
   and TO's network address, each from FROM's own namespace; it does not repeat them from containers of FROM's inner
   Docker (the network checks do). A link carries whatever bytes FROM sends to that one port.
+- **A link to an address makes the address trust FROM as much as it trusts this machine.** The daemon opens FROM's
+  connections from this machine, so a service there that lets this machine in lets FROM in. What that address can
+  reach (the internet, the local network) is outside Asidee's checks: a link to a virtual machine with internet gives
+  FROM a way out that the guard does not see.
 - **The editor key logs in.** Anything that can read `ssh/editor_ed25519` in the state folder, which is anything
   running as you, can log in to every sandbox set up for SSH as its user, run any command there, copy files in and out,
   and reach the sandbox's loopback with `ssh -L`. It cannot reach this machine or other addresses through sshd. The

@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto"
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
+import { EventEmitter } from "node:events"
+import { connect, type Socket } from "node:net"
 import { join } from "node:path"
 import { FIN_QUIET_MS, validPort } from "./forwards"
 import { listManifests, readConfig, validName, type Dirs } from "./state"
@@ -9,7 +11,8 @@ import { AsideeError, type CheckResult, type LinkSupport, type Manifest, type Pr
 // `from`, a listener on a loopback address of the link's own, which /etc/hosts there names `to`, hands each connection
 // to the daemon; the daemon relays it to `to` the way a forward does. No network is shared, the guard is not touched and
 // nothing listens on this machine, so every network check keeps its meaning. A link is bound to both sandboxes' ids,
-// and while open to both sandboxes' runs.
+// and while open to both sandboxes' runs. A link can instead name an IPv4 address outside Asidee (to.address): the
+// daemon then dials that address from this machine, and the link is bound to `from` only.
 
 // Open at once per link; each costs `from` five processes, `to` one relay process and the daemon three engine sessions
 // (docs/architecture.md says what that came to in tasks).
@@ -36,22 +39,29 @@ const ADDRESSES = "127.77.0."
 const MARK = "# asidee-link"
 
 type End = { name: string; sandboxId: string }
-export type LinkRecord = { id: string; from: End; to: End; port: number; address: string; createdAt: string; cut?: { at: string; reason: string } }
+// An address outside Asidee, called `name` inside `from`.
+type Outside = { name: string; address: string }
+const outside = (to: End | Outside): to is Outside => "address" in to
+const toId = (link: LinkRecord) => outside(link.to) ? undefined : link.to.sandboxId
+export type LinkRecord = { id: string; from: End; to: End | Outside; port: number; address: string; createdAt: string; cut?: { at: string; reason: string } }
 // fromOnly: the failure was seen only by what ran inside `from`, with nothing `from` could not have made up itself.
 // unavailable: the link does not carry what it names (as opposed to reaching what it does not name).
 export type Measure = { at: string; status: "pass" | "fail" | "unknown"; detail: string; fromOnly?: boolean; unavailable?: boolean }
 export type LinkView = {
-  from: string; to: string; port: number; address: string; createdAt: string
+  // toAddress: the address outside Asidee a link to one dials; to is then only its name inside `from`.
+  from: string; to: string; toAddress?: string; port: number; address: string; createdAt: string
   state: "open" | "opening" | "waiting" | "closed" | "cut"; reason?: string; measured?: Measure; connections: number
   // The trust consequence, said with every link.
   trust: string
 }
 
 export const linkTrust = (from: string, to: string) => `${to} sees these connections as local (from 127.0.0.1 inside ${to}), so a service in ${to} that trusts local connections trusts ${from}.`
+export const addressTrust = (from: string, address: string, port: number) => `${from} can open connections to ${address}:${port} as this machine, so whatever there trusts this machine trusts ${from}; and what that address can reach (the internet, the local network) is outside Asidee's checks.`
 export const LINK_LIMITS = `A link carries TCP only, up to ${LINK_CONNECTIONS} connections at once, and is down while the daemon is not running.`
 
 type Conn = { pid: number; sessions: Session[]; done: boolean }
-type Route = { record: LinkRecord; port: number; fromGen: string; toGen: string; listener: Session; conns: Map<number, Conn>; opens: number[]; lines: number[]; ended: boolean; gone: boolean
+// relayed: connections the daemon joined to their destination.
+type Route = { record: LinkRecord; port: number; relayed: number; fromGen: string; toGen: string; listener: Session; conns: Map<number, Conn>; opens: number[]; lines: number[]; ended: boolean; gone: boolean
   finished: Promise<void>; markFinished: () => void; heartbeat: ReturnType<typeof setInterval> }
 
 export class Links {
@@ -69,6 +79,8 @@ export class Links {
   private watch?: ReturnType<typeof setInterval>
   opensPerSecond = OPENS_PER_SECOND
   now = () => Date.now()
+  // How the daemon reaches an address outside Asidee; tests replace it.
+  dialAddress: (address: string, port: number) => Promise<Session> = dialTcp
   constructor(private readonly dirs: Dirs, private readonly providerOf: (manifest: Manifest) => Provider) {}
 
   private get file() { return join(this.dirs.state, "links.json") }
@@ -88,11 +100,13 @@ export class Links {
     const damaged = (why: string) => new AsideeError("conflict", `${this.file} cannot be read (${why}). No link opens until it is fixed or deleted.`)
     let data: unknown
     try { data = JSON.parse(text) } catch { throw damaged("it is not JSON") }
-    const end = (value: unknown): value is End => typeof value === "object" && value !== null && typeof (value as End).name === "string" && /^[a-z0-9][a-z0-9-]{0,30}$/.test((value as End).name) && typeof (value as End).sandboxId === "string" && /^[0-9a-f]{32}$/.test((value as End).sandboxId)
+    const end = (value: unknown): value is End => typeof value === "object" && value !== null && !("address" in value) && typeof (value as End).name === "string" && /^[a-z0-9][a-z0-9-]{0,30}$/.test((value as End).name) && typeof (value as End).sandboxId === "string" && /^[0-9a-f]{32}$/.test((value as End).sandboxId)
+    const address = (value: unknown): value is Outside => typeof value === "object" && value !== null && !("sandboxId" in value) && typeof (value as Outside).name === "string" && /^[a-z0-9][a-z0-9-]{0,30}$/.test((value as Outside).name)
+      && (() => { try { return validAddress((value as Outside).address) === (value as Outside).address } catch { return false } })()
     const links = (data as { version?: unknown; links?: unknown })?.links
     if ((data as { version?: unknown })?.version !== 1 || !Array.isArray(links)) throw damaged("unknown version")
     for (const link of links as LinkRecord[]) {
-      if (typeof link !== "object" || link === null || typeof link.id !== "string" || !/^[0-9a-f]{8}$/.test(link.id) || !end(link.from) || !end(link.to) || !Number.isInteger(link.port) || link.port < 1 || link.port > 65_535
+      if (typeof link !== "object" || link === null || typeof link.id !== "string" || !/^[0-9a-f]{8}$/.test(link.id) || !end(link.from) || !(end(link.to) || address(link.to)) || !Number.isInteger(link.port) || link.port < 1 || link.port > 65_535
         || typeof link.address !== "string" || !new RegExp(`^${ADDRESSES.replaceAll(".", "\\.")}\\d{1,3}$`).test(link.address) || typeof link.createdAt !== "string")
         throw damaged("a link record is malformed")
     }
@@ -114,12 +128,12 @@ export class Links {
   }
   private generation(manifest: Manifest): Promise<string | undefined> { return this.providerOf(manifest).generation(manifest).catch(() => undefined) }
 
-  // Records whose two sandboxes still exist with the ids they were linked with; the rest are dropped, so a sandbox
-  // made again under a name never inherits a link.
+  // Records whose sandboxes still exist with the ids they were linked with (for a link to an address, `from` only); the
+  // rest are dropped, so a sandbox made again under a name never inherits a link.
   private async current(): Promise<{ records: LinkRecord[]; manifests: Map<string, Manifest> }> {
     const manifests = new Map((await listManifests(this.dirs)).map((manifest) => [manifest.name, manifest]))
     const records = await this.load()
-    const kept = records.filter((link) => manifests.get(link.from.name)?.id === link.from.sandboxId && manifests.get(link.to.name)?.id === link.to.sandboxId)
+    const kept = records.filter((link) => manifests.get(link.from.name)?.id === link.from.sandboxId && (outside(link.to) || manifests.get(link.to.name)?.id === link.to.sandboxId))
     if (kept.length !== records.length) {
       for (const link of records) if (!kept.includes(link)) this.forgetRuntime(link.id, "The link ended: one of its sandboxes was removed.")
       await this.save(kept)
@@ -127,28 +141,37 @@ export class Links {
     return { records: kept, manifests }
   }
 
-  async add(fromName: unknown, toName: unknown, portValue: unknown): Promise<LinkView> {
+  // With an address, `to` is the name `from` uses for it, and the daemon dials address:port from this machine.
+  async add(fromName: unknown, toName: unknown, portValue: unknown, addressValue?: unknown): Promise<LinkView> {
     const from = validName(fromName); const to = validName(toName); const port = validPort(portValue, "The port")
-    if (from === to) throw new AsideeError("usage", "A sandbox cannot be linked to itself; its own loopback already reaches its ports.")
-    if (to === "localhost") throw new AsideeError("usage", "A sandbox named localhost cannot be linked to: inside the other sandbox that name means its own loopback.")
+    const address = addressValue === undefined || addressValue === null || addressValue === "" ? undefined : validAddress(addressValue)
+    if (from === to) throw new AsideeError("usage", address ? `A link's name cannot be ${from}'s own name.` : "A sandbox cannot be linked to itself; its own loopback already reaches its ports.")
+    if (to === "localhost") throw new AsideeError("usage", address ? "localhost cannot name a link: inside the sandbox that name means its own loopback." : "A sandbox named localhost cannot be linked to: inside the other sandbox that name means its own loopback.")
     return this.queued(async () => {
       const { records, manifests } = await this.current()
-      const fromManifest = manifests.get(from); const toManifest = manifests.get(to)
-      if (!fromManifest || !toManifest) throw new AsideeError("not-found", `There is no sandbox named ${!fromManifest ? from : to}.`)
+      const fromManifest = manifests.get(from); const toManifest = address ? undefined : manifests.get(to)
+      if (!fromManifest || (!address && !toManifest)) throw new AsideeError("not-found", `There is no sandbox named ${!fromManifest ? from : to}.`)
+      if (address && manifests.has(to)) throw new AsideeError("usage", `${to} is the name of a sandbox. Give the address another name, so that inside ${from} ${to} means one thing.`)
+      const ends = toManifest ? [fromManifest, toManifest] : [fromManifest]
       // A GPU container is refused first, whichever end it is.
-      for (const manifest of [fromManifest, toManifest]) if (manifest.spec.gpu) this.support(manifest)
-      this.support(fromManifest); this.support(toManifest)
-      const existing = records.find((link) => link.from.sandboxId === fromManifest.id && link.to.sandboxId === toManifest.id && link.port === port)
+      for (const manifest of ends) if (manifest.spec.gpu) this.support(manifest)
+      for (const manifest of ends) this.support(manifest)
+      const target: End | Outside = address ? { name: to, address } : { name: to, sandboxId: toManifest!.id }
+      const same = (other: End | Outside) => outside(other) ? outside(target) && other.address === target.address : !outside(target) && other.sandboxId === target.sandboxId
+      // Inside `from` one name is one place: /etc/hosts there has one line for it.
+      const named = records.find((link) => link.from.sandboxId === fromManifest.id && link.to.name === to && !same(link.to))
+      if (named) throw new AsideeError("conflict", `Inside ${from}, ${to} already names ${outside(named.to) ? `the address ${named.to.address}` : `the sandbox ${to}`} (a link on port ${named.port}). Remove that link first with \`asd link remove ${from} ${to} --port ${named.port}\`.`)
+      const existing = records.find((link) => link.from.sandboxId === fromManifest.id && link.to.name === to && same(link.to) && link.port === port)
       const others = records.filter((link) => link !== existing)
-      for (const manifest of [fromManifest, toManifest]) {
-        if (others.filter((link) => link.from.sandboxId === manifest.id || link.to.sandboxId === manifest.id).length >= LINKS_PER_SANDBOX)
+      for (const manifest of ends) {
+        if (others.filter((link) => link.from.sandboxId === manifest.id || toId(link) === manifest.id).length >= LINKS_PER_SANDBOX)
           throw new AsideeError("conflict", `${manifest.name} already has ${LINKS_PER_SANDBOX} links, the most a sandbox may have. Remove one with \`asd link remove FROM TO --port PORT\`.`)
       }
       if (existing && !existing.cut && this.live.has(existing.id)) return this.view(existing, manifests)
       const used = new Set(others.filter((link) => link.from.sandboxId === fromManifest.id).map((link) => link.address))
-      const address = others.find((link) => link.from.sandboxId === fromManifest.id && link.to.sandboxId === toManifest.id)?.address
+      const listenAddress = others.find((link) => link.from.sandboxId === fromManifest.id && link.to.name === to)?.address
         ?? Array.from({ length: 250 }, (_, at) => `${ADDRESSES}${at + 2}`).find((candidate) => !used.has(candidate))!
-      const record: LinkRecord = { id: existing?.id ?? randomBytes(4).toString("hex"), from: { name: from, sandboxId: fromManifest.id }, to: { name: to, sandboxId: toManifest.id }, port, address, createdAt: existing?.createdAt ?? new Date().toISOString() }
+      const record: LinkRecord = { id: existing?.id ?? randomBytes(4).toString("hex"), from: { name: from, sandboxId: fromManifest.id }, to: target, port, address: listenAddress, createdAt: existing?.createdAt ?? new Date().toISOString() }
       await this.save([...others, record])
       this.why.delete(record.id); this.retries.delete(record.id)
       const outcome = await this.open(record, manifests)
@@ -158,7 +181,7 @@ export class Links {
       await this.save((await this.load()).filter((link) => link.id !== record.id))
       this.forgetRuntime(record.id)
       await this.writeHosts(fromManifest).catch(() => {})
-      const refused = `The link from ${from} to ${to}:${port} was not added`
+      const refused = `The link from ${from} to ${to}:${port}${address ? ` (${address}:${port})` : ""} was not added`
       if (outcome === "cut") throw new AsideeError("check-failed", `${refused}: its test found that ${reason}`)
       if (outcome === "unmeasured") throw new AsideeError("probes-required", `${refused}: it could not be measured (${reason}). Only to allow links without that measurement: \`asd config set require-probes off\`.`)
       throw new AsideeError("runtime", `${refused}: ${reason}`)
@@ -190,11 +213,11 @@ export class Links {
     })
   }
 
-  // A removed sandbox takes its links with it, whichever end it was.
+  // A removed sandbox takes its links with it, whichever end it was, and its links to addresses.
   forget(manifest: Manifest): Promise<void> {
     return this.queued(async () => {
       const records = await this.load()
-      const gone = records.filter((link) => link.from.sandboxId === manifest.id || link.to.sandboxId === manifest.id)
+      const gone = records.filter((link) => link.from.sandboxId === manifest.id || toId(link) === manifest.id)
       if (!gone.length) return
       for (const link of gone) this.forgetRuntime(link.id, `The link ended: ${manifest.name} was removed.`)
       await this.save(records.filter((link) => !gone.includes(link)))
@@ -209,7 +232,7 @@ export class Links {
   // A sandbox is stopping or being removed: every link touching it closes now. They open again at the next sync.
   end(name: string, reason: string): void {
     for (const route of [...this.live.values()]) {
-      if (route.record.from.name !== name && route.record.to.name !== name) continue
+      if (route.record.from.name !== name && (outside(route.record.to) || route.record.to.name !== name)) continue
       this.live.delete(route.record.id); this.why.set(route.record.id, `${name} stopped`)
       void this.closeRoute(route, reason)
     }
@@ -236,16 +259,15 @@ export class Links {
   private async open(record: LinkRecord, manifests: Map<string, Manifest>): Promise<"open" | "waiting" | "cut" | "unmeasured" | "failed"> {
     if (record.cut) return "cut"
     if (this.live.has(record.id)) return "open"
-    const from = manifests.get(record.from.name)!; const to = manifests.get(record.to.name)!
-    const [fromGen, toGen] = await Promise.all([this.generation(from), this.generation(to)])
-    if (!fromGen || !toGen) { this.why.set(record.id, `${!fromGen ? from.name : to.name} is stopped`); return "waiting" }
+    const from = manifests.get(record.from.name)!; const to = outside(record.to) ? undefined : manifests.get(record.to.name)!
+    const [fromGen, toGen] = await Promise.all([this.generation(from), to ? this.generation(to) : ""])
+    if (!fromGen || toGen === undefined) { this.why.set(record.id, `${!fromGen ? from.name : to!.name} is stopped`); return "waiting" }
     if (this.now() < (this.retries.get(record.id)?.at ?? 0)) return "failed"
     this.opening.add(record.id)
     try {
-      const fromProvider = this.providerOf(from); const toProvider = this.providerOf(to)
-      await fromProvider.prepareLoopback(from); await toProvider.prepareLoopback(to)
+      await this.providerOf(from).prepareLoopback(from); if (to) await this.providerOf(to).prepareLoopback(to)
       await this.writeHosts(from)
-      const measured = await this.measure(record, from, to, fromGen, toGen)
+      const measured = to ? await this.measure(record, from, to, fromGen, toGen) : await this.measureOutside(record, from, fromGen)
       this.measured.set(record.id, measured)
       if (measured.status === "fail") { await this.cut(record, measured.detail, from); return "cut" }
       if (measured.status === "unknown" && (await readConfig(this.dirs)).requireProbes) { this.failed(record.id, `it could not be measured: ${measured.detail}`); return "unmeasured" }
@@ -305,7 +327,7 @@ export class Links {
     const unknown = (detail: string): Measure => ({ at, status: "unknown", detail: `Not checked: ${detail}, so a blocked attempt would prove nothing.` })
     const fromSupport = this.support(from); const toSupport = this.support(to)
     // Not a port any link from `from` or to `to` names: one answering through another link is not this link reaching it.
-    const named = new Set((await this.load()).filter((link) => link.from.sandboxId === from.id || link.to.sandboxId === to.id).map((link) => link.port))
+    const named = new Set((await this.load()).filter((link) => link.from.sandboxId === from.id || toId(link) === to.id).map((link) => link.port))
     const [near, far] = randomPorts(named)
     const [one, two] = [randomBytes(8).toString("hex"), randomBytes(8).toString("hex")]
     const canaries: Session[] = []
@@ -338,16 +360,45 @@ export class Links {
     } finally { for (const canary of canaries) canary.close("The link's test ended.") }
   }
 
+  // The test of a link to an address outside Asidee, where no test listener can run. The daemon must reach the address
+  // (else a blocked attempt from `from` proves nothing); `from` must not reach it directly; and a connection made in
+  // `from` through a test route, by the link's name, must be relayed by the daemon to the address.
+  private async measureOutside(record: LinkRecord, from: Manifest, fromGen: string): Promise<Measure> {
+    const at = new Date().toISOString()
+    const { name, address } = record.to as Outside; const port = record.port
+    const unknown = (detail: string): Measure => ({ at, status: "unknown", detail: `Not checked: ${detail}.` })
+    const fromSupport = this.support(from)
+    try {
+      try { (await this.dialAddress(address, port)).close("The link's test ended.") }
+      catch (error) { return unknown(`the daemon could not open a TCP connection to ${address}:${port} from this machine (${(error as Error).message}), so a blocked attempt from ${from.name} would prove nothing`) }
+      if ((await fromSupport.dial(from, address, port)).connected) return { at, status: "fail", detail: `${from.name} opened a connection to ${address}:${port} directly, not through the link.` }
+      // A test route on a port no link from `from` names, relayed to the link's own address and port.
+      const [near] = randomPorts(new Set((await this.load()).filter((link) => link.from.sandboxId === from.id).map((link) => link.port)))
+      const route = await this.route(record, from, undefined, fromGen, "", near)
+      let carried: boolean
+      try { carried = await retry(async () => { await fromSupport.dial(from, name, near); return route.relayed > 0 }) }
+      finally { await this.closeRoute(route, "The link's test ended.") }
+      if (!carried) {
+        const shadowed = this.shadowed.get(from.id)?.includes(name) ? ` (another line of /etc/hosts in ${from.name} names ${name} first)` : ""
+        return { at, status: "fail", unavailable: true, detail: `a test connection from ${from.name} to ${name}:${near} was not relayed to ${address}:${port}${shadowed}, though the daemon reached ${address}:${port} itself.` }
+      }
+      return { at, status: "pass", detail: `The daemon opened a connection to ${address}:${port} from this machine; a test connection from ${from.name} to ${name}:${near} was relayed by the daemon to ${address}:${port}; and ${from.name} could not connect to ${address}:${port} directly. The attempts from ${from.name} used programs inside it, which its root could replace, and the direct one shows only that it failed, not why. Independently, the daemon dials only the link's own address and port. Not checked: what the service at ${address}:${port} does with the connections, and what that address can reach (the internet, the local network); that is outside Asidee's checks.` }
+    } catch (error) {
+      return unknown(`the test could not run (${(error as Error).message})`)
+    }
+  }
+
   // A listener in `from` whose connections are relayed to `port` on `to`'s loopback, for one run of each. The listener's
   // output is treated as hostile: it may only say "r", "e REASON" and "o PID", in short lines, at a bounded rate, and
   // the destination is never taken from it.
-  private async route(record: LinkRecord, from: Manifest, to: Manifest, fromGen: string, toGen: string, port: number): Promise<Route> {
+  // For a link to an address (no `to`), they are relayed to the link's own address and port, whatever `port` is.
+  private async route(record: LinkRecord, from: Manifest, to: Manifest | undefined, fromGen: string, toGen: string, port: number): Promise<Route> {
     const support = this.support(from)
     const dir = `/.asidee/links/${record.id}.${port}`
     const listener = await support.listen(from, dir, record.address, port)
     let markFinished: () => void = () => {}
     const finished = new Promise<void>((resolve) => { markFinished = resolve })
-    const route: Route = { record, port, fromGen, toGen, listener, conns: new Map(), opens: [], lines: [], ended: false, gone: false, finished, markFinished,
+    const route: Route = { record, port, relayed: 0, fromGen, toGen, listener, conns: new Map(), opens: [], lines: [], ended: false, gone: false, finished, markFinished,
       heartbeat: setInterval(() => { if (!route.ended) listener.write(Buffer.from("p\n")) }, HEARTBEAT_MS) }
     route.heartbeat.unref?.()
     let ready = false; let buffer = ""
@@ -382,7 +433,7 @@ export class Links {
     return route
   }
 
-  private accept(route: Route, pid: number, from: Manifest, to: Manifest): void {
+  private accept(route: Route, pid: number, from: Manifest, to: Manifest | undefined): void {
     const now = Date.now(); route.opens = route.opens.filter((time) => now - time < 1000)
     if (route.conns.size >= LINK_CONNECTIONS || this.total >= LINK_CONNECTIONS_TOTAL || route.opens.length >= this.opensPerSecond) return this.deny(route, pid)
     route.opens.push(now)
@@ -390,13 +441,15 @@ export class Links {
     route.conns.set(pid, conn); this.total++
     void (async () => {
       // As a forward does, each connection first checks that `to` is still the run the link was opened for.
-      if (await this.generation(to) !== route.toGen) return this.finish(route, conn)
+      if (to && await this.generation(to) !== route.toGen) return this.finish(route, conn)
       // Each half is held as it arrives, so what it prints, or its end, while the other is still connecting waits for the pump.
+      const end = route.record.to
       const [halves, target] = await Promise.allSettled([this.support(from).attach(from, `/.asidee/links/${route.record.id}.${route.port}`, pid),
-        this.providerOf(to).dialLoopback(to, route.port, true)])
+        outside(end) ? this.dialAddress(end.address, route.record.port) : this.providerOf(to!).dialLoopback(to!, route.port, true)])
       if (halves.status === "fulfilled") conn.sessions.push(halves.value.fromClient, halves.value.toClient)
       if (target.status === "fulfilled") conn.sessions.push(target.value)
       if (halves.status !== "fulfilled" || target.status !== "fulfilled" || conn.done || route.ended) return this.finish(route, conn)
+      route.relayed++
       pump(halves.value.fromClient, halves.value.toClient, target.value, () => this.finish(route, conn))
     })().catch(() => this.finish(route, conn))
   }
@@ -439,9 +492,10 @@ export class Links {
       try {
         const manifests = new Map((await listManifests(this.dirs).catch(() => [])).map((manifest) => [manifest.name, manifest]))
         for (const route of [...this.live.values()]) {
-          const from = manifests.get(route.record.from.name); const to = manifests.get(route.record.to.name)
-          const current = from?.id === route.record.from.sandboxId && to?.id === route.record.to.sandboxId
-            && await this.generation(from) === route.fromGen && await this.generation(to) === route.toGen
+          const end = route.record.to
+          const from = manifests.get(route.record.from.name); const to = outside(end) ? undefined : manifests.get(end.name)
+          const current = from?.id === route.record.from.sandboxId && (outside(end) || to?.id === end.sandboxId)
+            && await this.generation(from) === route.fromGen && (outside(end) || await this.generation(to!) === route.toGen)
           if (current || this.live.get(route.record.id) !== route) continue
           this.live.delete(route.record.id); this.why.set(route.record.id, "a sandbox it joins stopped or restarted; it opens again within 30 seconds of both running")
           void this.closeRoute(route, "The link ended: a sandbox it joins stopped or restarted.")
@@ -452,13 +506,15 @@ export class Links {
   }
 
   private async view(record: LinkRecord, manifests: Map<string, Manifest>): Promise<LinkView> {
-    const base = { from: record.from.name, to: record.to.name, port: record.port, address: record.address, createdAt: record.createdAt, measured: this.measured.get(record.id), trust: linkTrust(record.from.name, record.to.name) }
+    const end = record.to
+    const base = { from: record.from.name, to: end.name, ...(outside(end) ? { toAddress: end.address } : {}), port: record.port, address: record.address, createdAt: record.createdAt, measured: this.measured.get(record.id),
+      trust: outside(end) ? addressTrust(record.from.name, end.address, record.port) : linkTrust(record.from.name, end.name) }
     const route = this.live.get(record.id)
     if (record.cut) return { ...base, state: "cut", reason: `cut ${record.cut.at}: ${record.cut.reason}`, connections: 0 }
     if (route) return { ...base, state: "open", connections: route.conns.size }
     if (this.opening.has(record.id)) return { ...base, state: "opening", connections: 0 }
     const stopped = [] as string[]
-    for (const end of [record.from, record.to]) { const manifest = manifests.get(end.name); if (!manifest || !await this.generation(manifest)) stopped.push(end.name) }
+    for (const end of outside(record.to) ? [record.from] : [record.from, record.to]) { const manifest = manifests.get(end.name); if (!manifest || !await this.generation(manifest)) stopped.push(end.name) }
     if (stopped.length) return { ...base, state: "waiting", reason: `${stopped.join(" and ")} ${stopped.length > 1 ? "are" : "is"} stopped`, connections: 0 }
     return { ...base, state: "closed", reason: this.why.get(record.id) ?? "it opens within 30 seconds", connections: 0 }
   }
@@ -466,15 +522,15 @@ export class Links {
   // The disclosure on both ends' checklists, from the records and the links open now.
   async check(manifest: Manifest): Promise<CheckResult> {
     let records: LinkRecord[]
-    try { records = (await this.load()).filter((link) => link.from.sandboxId === manifest.id || link.to.sandboxId === manifest.id) }
+    try { records = (await this.load()).filter((link) => link.from.sandboxId === manifest.id || toId(link) === manifest.id) }
     catch (error) { return { id: "links", status: "info", evidence: "inspected", detail: (error as Error).message } }
-    if (!records.length) return { id: "links", status: "info", evidence: "none", detail: "None. `asd link add FROM TO --port PORT` lets programs in one sandbox reach one port on another's loopback through the daemon; no network is shared." }
+    if (!records.length) return { id: "links", status: "info", evidence: "none", detail: "None. `asd link add FROM TO --port PORT` lets programs in one sandbox reach one port on another's loopback through the daemon, and `--address` one port of an address outside Asidee; no network is shared." }
     const manifests = new Map((await listManifests(this.dirs)).map((entry) => [entry.name, entry]))
     const lines = await Promise.all(records.map(async (link) => {
       const view = await this.view(link, manifests)
       const state = view.state === "open" ? "open" : `${view.state}, ${view.reason}`
       return link.from.sandboxId === manifest.id
-        ? `To ${link.to.name} on port ${link.port}: ${state}; inside ${manifest.name}, ${link.to.name} is ${link.address}.${this.shadowed.get(manifest.id)?.includes(link.to.name) ? ` Another line in /etc/hosts also names ${link.to.name}; programs may resolve it there first.` : ""} ${view.trust}`
+        ? `To ${link.to.name}${outside(link.to) ? ` (${link.to.address}, outside Asidee)` : ""} on port ${link.port}: ${state}; inside ${manifest.name}, ${link.to.name} is ${link.address}.${this.shadowed.get(manifest.id)?.includes(link.to.name) ? ` Another line in /etc/hosts also names ${link.to.name}; programs may resolve it there first.` : ""} ${view.trust}`
         : `From ${link.from.name} on port ${link.port}: ${state}. ${view.trust}`
     }))
     return { id: "links", status: "info", evidence: "inspected", detail: `${lines.join(" ")} ${LINK_LIMITS}` }
@@ -492,22 +548,22 @@ export class Links {
       let records: LinkRecord[]; let manifests: Map<string, Manifest>
       try { ({ records, manifests } = await this.current()) }
       catch (error) { return { id: "link-scope", status: "unknown", evidence: "none", detail: (error as Error).message } as CheckResult }
-      const mine = records.filter((link) => (link.from.sandboxId === manifest.id || link.to.sandboxId === manifest.id) && !link.cut)
+      const mine = records.filter((link) => (link.from.sandboxId === manifest.id || toId(link) === manifest.id) && !link.cut)
       if (!mine.length) return { id: "link-scope", status: "info", evidence: "none", detail: "No links: nothing to measure. Other sandboxes are covered by \"Cannot reach other sandboxes\"." }
       const open = mine.filter((link) => this.live.has(link.id))
       if (!open.length) return { id: "link-scope", status: "info", evidence: "none", detail: `No open links to measure now: ${(await Promise.all(mine.map((link) => this.view(link, manifests)))).map((view) => `${view.from} to ${view.to}:${view.port} is ${view.state} (${view.reason})`).join("; ")}. Each is measured when it opens.` }
       const results: Array<{ link: LinkRecord; measured: Measure }> = []
       for (const link of open) {
         const route = this.live.get(link.id)!
-        const from = manifests.get(link.from.name)!; const to = manifests.get(link.to.name)!
+        const from = manifests.get(link.from.name)!; const to = outside(link.to) ? undefined : manifests.get(link.to.name)!
         // Puts back Asidee's lines in `from`'s /etc/hosts if they were changed, and notes any other line naming `to`.
         await this.writeHosts(from).catch(() => {})
-        const measured = await this.measure(link, from, to, route.fromGen, route.toGen)
+        const measured = to ? await this.measure(link, from, to, route.fromGen, route.toGen) : await this.measureOutside(link, from, route.fromGen)
         this.measured.set(link.id, measured)
         if (measured.status === "fail") await this.cut(link, measured.detail, from)
         results.push({ link, measured })
       }
-      const excused = ({ link, measured }: { link: LinkRecord; measured: Measure }) => measured.status === "fail" && !measured.unavailable && measured.fromOnly === true && link.to.sandboxId === manifest.id
+      const excused = ({ link, measured }: { link: LinkRecord; measured: Measure }) => measured.status === "fail" && !measured.unavailable && measured.fromOnly === true && toId(link) === manifest.id
       const blocking = (entry: { link: LinkRecord; measured: Measure }) => entry.measured.status === "fail" && !entry.measured.unavailable && !excused(entry)
       const status = results.some(blocking) ? "fail" : results.some((entry) => entry.measured.status === "unknown") ? "unknown"
         : results.some((entry) => entry.measured.status === "pass") ? "pass" : "info"
@@ -518,9 +574,9 @@ export class Links {
 
   // For the net-peers detail: links are paths through the daemon, not network paths.
   async peers(manifest: Manifest): Promise<string> {
-    const records = (await this.load().catch(() => [])).filter((link) => !link.cut && (link.from.sandboxId === manifest.id || link.to.sandboxId === manifest.id))
+    const records = (await this.load().catch(() => [])).filter((link) => !link.cut && (link.from.sandboxId === manifest.id || toId(link) === manifest.id))
     if (!records.length) return ""
-    return ` Links are not network paths: through the daemon, ${records.map((link) => link.from.sandboxId === manifest.id ? `this sandbox reaches ${link.to.name} on port ${link.port}` : `${link.from.name} reaches this sandbox on port ${link.port}`).join(", ")}; see "Links reach only the sandboxes and ports they name".`
+    return ` Links are not network paths: through the daemon, ${records.map((link) => link.from.sandboxId === manifest.id ? outside(link.to) ? `this sandbox reaches ${link.to.address} (named ${link.to.name}, outside Asidee) on port ${link.port}` : `this sandbox reaches ${link.to.name} on port ${link.port}` : `${link.from.name} reaches this sandbox on port ${link.port}`).join(", ")}; see "Links reach only the sandboxes and ports they name".`
   }
 }
 
@@ -567,4 +623,48 @@ function randomPorts(avoid: Set<number>): [number, number] {
   let near = pick(); while (avoid.has(near)) near = pick()
   let far = pick(); while (avoid.has(far) || far === near) far = pick()
   return [near, far]
+}
+
+// An IPv4 literal a link may dial. Host names are refused, so nothing can re-point a link through DNS.
+export function validAddress(value: unknown): string {
+  const parts = typeof value === "string" ? /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value)?.slice(1) : undefined
+  if (!parts || parts.some((part) => Number(part) > 255 || (part.length > 1 && part.startsWith("0"))))
+    throw new AsideeError("usage", "The address must be an IPv4 address such as 192.168.64.5. Host names are refused, so DNS cannot point a link somewhere else.")
+  const first = Number(parts[0])
+  if (first === 0) throw new AsideeError("usage", `${value} is in 0.0.0.0/8, which no connection can go to.`)
+  if (first === 127) throw new AsideeError("usage", `${value} is this machine's own loopback. A link there would hand the sandbox this machine's local services; whether to allow that is not decided yet, so it is refused.`)
+  if (first >= 224) throw new AsideeError("usage", `${value} is a multicast, reserved or broadcast address (224.0.0.0 and up); a link goes to one machine.`)
+  return value as string
+}
+
+// A TCP connection from this machine to address:port, as a session the pump can use: it comes back paused, and ending
+// its input half-closes the connection. Exported for tests.
+export function dialTcp(address: string, port: number, timeoutMs = 10_000): Promise<Session> {
+  return new Promise((resolve, reject) => {
+    const socket = connect({ host: address, port, allowHalfOpen: true })
+    const timer = setTimeout(() => { socket.destroy(); reject(new Error(`no answer within ${timeoutMs / 1000} seconds`)) }, timeoutMs)
+    socket.once("error", (error) => { clearTimeout(timer); reject(error) })
+    socket.once("connect", () => { clearTimeout(timer); socket.removeAllListeners("error"); resolve(new SocketSession(socket)) })
+  })
+}
+
+class SocketSession extends EventEmitter implements Session {
+  readonly tty = false
+  private ended = false
+  constructor(private readonly socket: Socket) {
+    super()
+    socket.pause()
+    socket.on("data", (bytes) => this.emit("output", "stdout", bytes))
+    socket.on("drain", () => this.emit("drain"))
+    socket.on("end", () => this.finish({ code: 0 }))
+    socket.on("error", (error) => this.finish({ error: error.message }))
+    socket.on("close", () => this.finish({ error: "The connection closed." }))
+  }
+  private finish(exit: { code?: number; error?: string }) { if (this.ended) return; this.ended = true; this.emit("end", exit) }
+  write(bytes: Uint8Array) { return this.socket.write(bytes) }
+  end() { this.socket.end() }
+  async resize() {}
+  pause() { this.socket.pause() }
+  resume() { this.socket.resume() }
+  close(reason = "The connection was closed.") { this.socket.destroy(); this.finish({ error: reason }) }
 }

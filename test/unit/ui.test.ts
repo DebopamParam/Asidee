@@ -407,6 +407,26 @@ test("Terminal asks the daemon to open a window for that sandbox or workspace an
   expect(ui.calls.filter((call) => call.method === "openTerminal").map((call) => call.body)).toEqual([{ name: "demo", kind: "sandbox" }, { name: "notes", kind: "workspace" }])
 })
 
+test("links to addresses outside Asidee are listed with their address, removed, and added from the Ports form", async () => {
+  const link = { from: "demo", to: "vm", toAddress: "192.168.64.5", port: 22, address: "127.77.0.2", state: "open", connections: 0, trust: "demo can open connections to 192.168.64.5:22 as this machine" }
+  // A sandbox named like the address link is not taken for its other end.
+  const ui = await page({ ...base, list: () => [sandbox(), sandbox({ name: "vm", status: "stopped" })], forwardList: () => [], linkList: () => [link], linkRemove: () => ({ removed: { from: "demo", to: "vm", port: 22 }, measured: "ok" }),
+    linkAdd: (body) => ({ ...link, ...body, toAddress: body.address, trust: "trusted" }) })
+  await ui.open("demo")
+  expect(ui.text("#sandbox-page")).toContain("1 connection with other sandboxes or addresses")
+  await ui.pick("Ports")
+  expect(ui.text("#modal")).toContain("demo → vm:22 (192.168.64.5:22, outside Asidee) · open")
+  expect(ui.text("#modal")).toContain("demo can open connections to 192.168.64.5:22 as this machine")
+  await ui.submit(ui.button("Connect address").closest("form"), { to: "mac", address: "192.168.64.6", port: "22" })
+  expect(ui.text("#modal")).toContain("Connected: programs in demo reach mac:22, relayed to 192.168.64.6:22. trusted")
+  await ui.pick("Ports")
+  await ui.click("Remove")
+  expect(ui.calls.filter((call) => ["linkAdd", "linkRemove"].includes(call.method)).map((call) => [call.method, call.body])).toEqual([
+    ["linkAdd", { from: "demo", to: "mac", address: "192.168.64.6", port: "22" }], ["linkRemove", { from: "demo", to: "vm", port: 22 }]])
+  await ui.open("vm")
+  expect(ui.text("#sandbox-page")).not.toContain("connection with other sandboxes")
+})
+
 test("a sandbox's tools resize, run a command, open a port, connect, and save a template", async () => {
   const ui = await page({ ...base, list: () => [sandbox(), sandbox({ name: "other", status: "stopped" })], forwardList: () => [{ id: "f0", name: "demo", localPort: 3000, port: 3000, connections: 3 }], linkList: () => [],
     resize: () => ({ changes: [{ limit: "cpus", from: 2, to: 3, applies: "now" }], checks: [] }), exec: () => ({ exitCode: 0, stdout: "hi\n", stderr: "" }),

@@ -38,6 +38,7 @@ asd start NAME | asd stop NAME
 asd forward add NAME --port P [--local-port L]  # 127.0.0.1:L here to 127.0.0.1:P in the sandbox
 asd forward list [NAME] | asd forward remove ID
 asd link add FROM TO --port P            # programs in FROM connect to TO:P, reaching P on TO's loopback only
+asd link add FROM NAME --address IP --port P  # programs in FROM connect to NAME:P; the daemon relays to IP:P from this machine
 asd link list [NAME] | asd link remove FROM TO --port P
 asd ssh setup NAME [--write-config]     # then `ssh NAME.asidee`; ask the user before --write-config
 asd ssh access NAME                     # alias, user, home, and whether ssh would log in now
@@ -183,6 +184,15 @@ persistence and automatic sandbox recovery are not measured.
   all addresses). Links come back after a stop and start and after a daemon restart, are down while the daemon is not
   running, and end when either sandbox is removed. If `link list` shows a link `cut`, its test failed (its reason says
   whether it reached something it does not name or did not carry a test value); tell the user, and `link add` it again only once they agree, since that runs the test again.
+- To let a sandbox reach a machine outside Asidee, such as a virtual machine on this Mac for building and testing an
+  app, add a link to its address: `asd link add FROM NAME --address 192.168.64.5 --port 22`. Programs in FROM then
+  connect to `NAME:22` and the daemon relays each connection to 192.168.64.5:22 from this machine; the guard is not
+  changed. The address must be an IPv4 address (no host names; 127.x, 0.x and 224.x and up are refused); NAME may not
+  be a sandbox's name. Tell the user what it trusts: FROM connects as this machine, so whatever there trusts this
+  machine trusts FROM, and what that address can reach (the internet, the local network) is outside Asidee's checks.
+  The measurement checks only that the daemon reaches the address, that FROM cannot reach it directly, and that a
+  connection from FROM by NAME is relayed; if the daemon cannot reach the address (the VM is off), the link does not
+  open with `require-probes` on. Remove it with `asd link remove FROM NAME --port 22`; removing FROM removes it.
   Link tests send replies through stdin. The target listener keeps the reply in its environment, outside its process arguments.
 - `asd ssh setup NAME` is for editors and tools that speak SSH. It installs OpenSSH's server from the image's
   package manager when it has none (the sandbox needs internet for that), and opens no port. `ssh NAME.asidee` logs in
@@ -330,7 +340,7 @@ Other files in that folder are served next to it. The page calls `POST /api/METH
 `Authorization: Bearer TOKEN`; it reads the token from the `#token=` part of the link `asd ui` prints. Methods:
 `version`, `checklist`, `engines`, `list`, `get`, `create`, `createRetry`, `createStep`, `createKeep`, `start`, `stop`, `remove`, `verify`, `visibilitySet`, `resize`, `snapshot`, `templateList`,
 `templateRemove`, `templatePrepare`, `templatePreparing`, `templatePrepareInfo`, `exec`, `forwardAdd`, `forwardList`, `forwardRemove`, `linkAdd`, `linkList`, `linkRemove`, `sshAccess`, `extensions`, `folderBrowse`, `folderPreview`, `folderChoose`, `extensionInstall`, `extensionRemove`, `action`, `summary`,
-`hostList`, `fleet`, `configGet`, `configSet`, `usage`, `about`, `openTerminal`. `linkAdd` and `linkRemove` take `from`, `to` and `port`; `linkList` takes an optional `name`. `folderBrowse` (`path`) and `folderPreview` (`source`, `logins`) read folder names and sizes in this Mac's home for the folders extension, never contents; `folderChoose` opens Finder's own window on this Mac and returns the picked `path` (none when cancelled). All three refuse `host`. `configGet` returns this machine's effective configuration. `configSet`
+`hostList`, `fleet`, `configGet`, `configSet`, `usage`, `about`, `openTerminal`. `linkAdd` and `linkRemove` take `from`, `to` and `port`, and `linkAdd` an optional `address` (`to` is then the link's name); `linkList` takes an optional `name`. `folderBrowse` (`path`) and `folderPreview` (`source`, `logins`) read folder names and sizes in this Mac's home for the folders extension, never contents; `folderChoose` opens Finder's own window on this Mac and returns the picked `path` (none when cancelled). All three refuse `host`. `configGet` returns this machine's effective configuration. `configSet`
 accepts only `requireProbes` and `experimental`, each a boolean, `workspaceFreeSpaceGb` and `diskWatchSeconds`, each a number, `defaults` and `engine` (`null` removes either) and `terminal`, saves them to `config.json` and returns the new
 effective configuration. `terminalCommandSet`, the `workspace*` changes, `sshSetup` with `writeConfig`, `hostAttach`, `hostRemove` and `shutdown` are also open,
 but each request first shows a dialog on the Mac and runs only when the person there clicks Allow; a refusal is 403 (409 when another is waiting) with

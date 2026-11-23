@@ -511,6 +511,17 @@ test("link add says what it reaches and what the other side trusts; list and rem
   expect((await asidee("link", "add", "web", "db")).err).toContain("Missing --port")
 })
 
+test("a link to an address says where the daemon relays it and what that address trusts", async () => {
+  const link = { from: "agent", to: "vm", toAddress: "192.168.64.5", port: 22, address: "127.77.0.2", createdAt: "2026-11-15T20:16:00.000Z", state: "open", connections: 0,
+    measured: { at: "2026-11-15T20:16:00.000Z", status: "pass", detail: "ok" }, trust: "agent can open connections to 192.168.64.5:22 as this machine, so whatever there trusts this machine trusts agent; and what that address can reach (the internet, the local network) is outside Asidee's checks." }
+  const asidee = await daemon({ linkAdd: { ok: true, data: link }, linkList: { ok: true, data: [link] } })
+  const added = (await asidee("link", "add", "agent", "vm", "--address", "192.168.64.5", "--port", "22")).out
+  expect(added).toContain("Linked: programs in agent connect to vm:22 (127.77.0.2:22), and the daemon relays each connection to 192.168.64.5:22 from this machine. Measured just now.")
+  expect(added).toContain("what that address can reach (the internet, the local network) is outside Asidee's checks.")
+  expect((await asidee("link", "list")).out.trim()).toBe("agent -> vm:22 (192.168.64.5:22)  open, 0 connections; measured 2026-11-15 20:16 UTC: pass")
+  expect((await asidee("link", "add", "--help")).out).toContain("asd link add FROM NAME --address IP --port PORT")
+})
+
 test("ssh access says why it is not ready and what to run", async () => {
   const access = (user: string) => ({ alias: "demo.asidee", user, home: user ? "/home/agent" : "", batchReady: false, loopbackForwarding: Boolean(user) })
   const unset = await (await daemon({ sshAccess: { ok: true, data: access("") } }))("ssh", "access", "demo")
