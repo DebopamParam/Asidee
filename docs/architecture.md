@@ -1110,9 +1110,17 @@ nodes that NVIDIA's hook mounts, which `docker inspect` does not show. The probe
 
 **What is refused.** An engine reports `gpu` only when Docker lists an `nvidia.com/gpu` CDI device or an `nvidia`
 runtime; elsewhere (the Mac) create is refused. Also refused: `--gpu` with `--docker`, a template made from a GPU
-container, links to or from one, SSH setup (sshd cannot switch users without capabilities), and `exec`, `shell` or a
-stream with any user but uid 1000. Asidee's own steps inside run as uid 0 without capabilities (the DNS fallback, the
-credentials disclosure), or as uid 1000 (the relay, forwards).
+container, links to or from one, and `exec`, `shell` or a stream with any user but uid 1000. Asidee's own steps
+inside run as uid 0 without capabilities (the DNS fallback, the credentials disclosure), or as uid 1000 (the relay,
+forwards, SSH).
+
+**SSH runs as its user.** sshd cannot switch users without capabilities, so `asd ssh setup` on a GPU container runs as
+uid 1000 and installs nothing: the image must already have OpenSSH's server, or setup is refused saying so. Its host
+key, the editor's key and the configuration (the same one a sandbox gets) are in `~/.asidee/ssh`, which only that user
+can write, and each connection runs `sshd -i` as uid 1000, which logs in only that user. Unlike a sandbox's, these
+files are not root's, so a program in the container can change them; that gives it nothing it does not have already,
+since it is that user. Measured on home-linux with a plain container run the same way (uid 1000, every capability
+dropped, `no-new-privileges`): login, SFTP and `-L` worked, and another key and root were refused.
 
 **Where the guarantee ends.** The kernel is the host's. A bug in it, or in the NVIDIA driver that the container
 reaches through the device nodes, is a way out of the container onto the host, which gVisor would have stood in front

@@ -48,27 +48,10 @@ export async function editorKey(dirs: Dirs): Promise<{ path: string; publicKey: 
   return { path: key, publicKey, fingerprint: (await run(["ssh-keygen", "-l", "-E", "sha256", "-f", `${key}.pub`])).split(/\s+/)[1] ?? "" }
 }
 
-// Run as root inside the sandbox with the login user and the editor's public key as $1 and $2. It installs OpenSSH's
-// server from the image's own package manager when there is none, makes a fresh host key whose private half never
-// leaves the sandbox, and writes a configuration that accepts only that key and forwards only to the sandbox's loopback.
-export const GUEST_SETUP = `set -eu
-user=$1; key=$2; dir=${GUEST_SSH}
-home=$(awk -F: -v u="$user" '$1 == u { print $6 }' /etc/passwd)
-[ -n "$home" ] || { echo "The user $user is not in /etc/passwd." >&2; exit 3; }
-sshd=$(command -v sshd || true); [ -n "$sshd" ] || { [ -x /usr/sbin/sshd ] && sshd=/usr/sbin/sshd; } || true
-if [ -z "$sshd" ]; then
-  if command -v apk >/dev/null; then apk add --no-cache -q openssh-server >&2
-  elif command -v apt-get >/dev/null; then export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >&2 && apt-get install -y -qq --no-install-recommends openssh-server >&2
-  elif command -v dnf >/dev/null; then dnf install -y -q openssh-server >&2
-  else echo "The image has no sshd and no apk, apt-get or dnf to install one." >&2; exit 4; fi
-  sshd=/usr/sbin/sshd
-fi
-[ -x "$sshd" ] || { echo "OpenSSH's server was not installed." >&2; exit 4; }
-mkdir -p /run/sshd /var/empty "$dir"; chmod 755 /.asidee "$dir"
-rm -f "$dir/host_ed25519" "$dir/host_ed25519.pub"
-ssh-keygen -q -t ed25519 -N "" -C asidee-guest -f "$dir/host_ed25519"
-printf '%s\\n' "$key" > "$dir/authorized_keys"; chmod 644 "$dir/authorized_keys"
-cat > "$dir/sshd_config" <<EOF
+// Shared by both setups: finds sshd, and writes a configuration that accepts only the editor's key and forwards only
+// to the sandbox's loopback, in $dir for $user.
+const FIND_SSHD = `sshd=$(command -v sshd || true); [ -n "$sshd" ] || { [ -x /usr/sbin/sshd ] && sshd=/usr/sbin/sshd; } || true`
+const WRITE_CONFIG = `cat > "$dir/sshd_config" <<EOF
 HostKey $dir/host_ed25519
 AuthorizedKeysFile $dir/authorized_keys
 AllowUsers $user
@@ -92,11 +75,53 @@ EOF
 # Sessions get the PATH exec gets (the image's), not sshd's own; an sshd older than 8.7 lacks SetEnv, so it goes without.
 printf 'SetEnv "PATH=%s"\\n' "$PATH" >> "$dir/sshd_config"
 "$sshd" -t -f "$dir/sshd_config" 2>/dev/null || sed -i '$d' "$dir/sshd_config"
-# sshd refuses even a key for an account whose password is locked (a leading !). * still allows no password.
+`
+
+// Run as root inside the sandbox with the login user and the editor's public key as $1 and $2. It installs OpenSSH's
+// server from the image's own package manager when there is none, makes a fresh host key whose private half never
+// leaves the sandbox, and writes a configuration that accepts only that key and forwards only to the sandbox's loopback.
+export const GUEST_SETUP = `set -eu
+user=$1; key=$2; dir=${GUEST_SSH}
+home=$(awk -F: -v u="$user" '$1 == u { print $6 }' /etc/passwd)
+[ -n "$home" ] || { echo "The user $user is not in /etc/passwd." >&2; exit 3; }
+${FIND_SSHD}
+if [ -z "$sshd" ]; then
+  if command -v apk >/dev/null; then apk add --no-cache -q openssh-server >&2
+  elif command -v apt-get >/dev/null; then export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >&2 && apt-get install -y -qq --no-install-recommends openssh-server >&2
+  elif command -v dnf >/dev/null; then dnf install -y -q openssh-server >&2
+  else echo "The image has no sshd and no apk, apt-get or dnf to install one." >&2; exit 4; fi
+  sshd=/usr/sbin/sshd
+fi
+[ -x "$sshd" ] || { echo "OpenSSH's server was not installed." >&2; exit 4; }
+mkdir -p /run/sshd /var/empty "$dir"; chmod 755 /.asidee "$dir"
+rm -f "$dir/host_ed25519" "$dir/host_ed25519.pub"
+ssh-keygen -q -t ed25519 -N "" -C asidee-guest -f "$dir/host_ed25519"
+printf '%s\\n' "$key" > "$dir/authorized_keys"; chmod 644 "$dir/authorized_keys"
+${WRITE_CONFIG}# sshd refuses even a key for an account whose password is locked (a leading !). * still allows no password.
 unlocked=no
 if [ -w /etc/shadow ] && grep -q "^$user:!" /etc/shadow; then sed -i "s/^$user:![^:]*:/$user:*:/" /etc/shadow; unlocked=yes; fi
 "$sshd" -t -f "$dir/sshd_config"
 printf '%s\\n%s\\n%s\\n%s\\n' "$unlocked" "$home" "$sshd" "$(cat "$dir/host_ed25519.pub")"
+`
+
+// A GPU container's setup, run as its only user (uid 1000): nothing there runs as root, so it installs nothing and
+// changes no system file. The image must already have OpenSSH's server. Its files are in the user's home, which only
+// that user can write, and sshd later runs as that user, which logs in only itself.
+export const GUEST_USER_SSH = ".asidee/ssh"
+export const GUEST_SETUP_USER = `set -eu
+user=$1; key=$2
+home=$(awk -F: -v u="$user" '$1 == u { print $6 }' /etc/passwd)
+[ -n "$home" ] || { echo "The user $user is not in /etc/passwd." >&2; exit 3; }
+[ "$(id -un)" = "$user" ] || { echo "This setup runs as $user only." >&2; exit 3; }
+${FIND_SSHD}
+[ -n "$sshd" ] && [ -x "$sshd" ] || { echo "The image has no sshd, and a GPU container cannot install one: nothing there runs as root. Use an image with OpenSSH's server (the openssh-server package)." >&2; exit 4; }
+dir=$home/${GUEST_USER_SSH}
+mkdir -p "$dir"; chmod 700 "$home/.asidee" "$dir"
+rm -f "$dir/host_ed25519" "$dir/host_ed25519.pub"
+ssh-keygen -q -t ed25519 -N "" -C asidee-guest -f "$dir/host_ed25519"
+printf '%s\\n' "$key" > "$dir/authorized_keys"; chmod 600 "$dir/authorized_keys"
+${WRITE_CONFIG}"$sshd" -t -f "$dir/sshd_config"
+printf '%s\\n%s\\n%s\\n%s\\n' no "$home" "$sshd" "$(cat "$dir/host_ed25519.pub")"
 `
 
 export function parseGuestSetup(output: string): { unlocked: boolean; home: string; sshd: string; hostKey: string } {

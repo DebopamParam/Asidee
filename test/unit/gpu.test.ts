@@ -2,10 +2,11 @@ import { afterEach, expect, test } from "bun:test"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { blockers, CHECKLIST, GPU_CHECKLIST, GPU_KIND, GPU_WARNING } from "../../core/checks"
+import { blockers, CHECKLIST, GPU_CHECKLIST, GPU_KIND, GPU_USER, GPU_WARNING } from "../../core/checks"
 import { Core } from "../../core/core"
 import { CATALOG, Machines, type Hello, type HostRecord } from "../../core/machines"
 import { configChecks, confinement, GvisorProvider, gpuListing, gpuRequestProblem, hostDriver, hostKernel, insideSections, LABEL_ID, network } from "../../core/providers/gvisor"
+import { GUEST_SETUP, GUEST_SETUP_USER } from "../../core/ssh"
 import { validSpec } from "../../core/state"
 import { AsideeError, type CheckResult, type Engine, type Manifest, type Provider, type RunResult, type Stage } from "../../core/types"
 
@@ -75,7 +76,7 @@ test("a GPU container is refused on an engine without the gpu capability, and wi
   expect(state.exists).toBe(false)
 })
 
-test("a GPU container is labelled, warned about, and refuses templates, links, SSH and other users", async () => {
+test("a GPU container is labelled, warned about, and refuses templates, links and other users", async () => {
   const { provider, state } = fakeProvider()
   const asidee = await core(provider)
   const made = await asidee.create({ name: "gpu", gpu: true })
@@ -91,7 +92,6 @@ test("a GPU container is labelled, warned about, and refuses templates, links, S
   await expect(asidee.snapshot("gpu", "base")).rejects.toMatchObject({ code: "usage", message: expect.stringContaining("GPU container") })
   await expect(asidee.links.add("box", "gpu", 5432)).rejects.toThrow("links to or from one are refused")
   await expect(asidee.links.add("gpu", "box", 5432)).rejects.toThrow("links to or from one are refused")
-  await expect(asidee.sshSetup("gpu")).rejects.toMatchObject({ code: "usage", message: expect.stringContaining("sshd cannot switch") })
   for (const user of ["0", "root", "0:0", "agent", "1001"]) await expect(asidee.exec("gpu", ["id"], { user })).rejects.toMatchObject({ code: "usage" })
   await expect(asidee.openSession({ kind: "exec", name: "gpu", argv: ["sh"], tty: true, user: "root" })).rejects.toMatchObject({ code: "usage" })
   expect(state.execs).toEqual([]); expect(state.sessions).toEqual([])
@@ -99,6 +99,35 @@ test("a GPU container is labelled, warned about, and refuses templates, links, S
   // A sandbox's user is not limited.
   await asidee.exec("box", ["id"], { user: "0" })
   expect(state.execs).toEqual([undefined, "1000", "0"])
+})
+
+test("a GPU container's SSH is prepared and served by its own user, and a sandbox's by root as before", async () => {
+  const { provider } = fakeProvider()
+  const runs: Array<{ argv: readonly string[]; user?: string }> = []; const opened: Array<{ argv: readonly string[]; user?: string }> = []
+  provider.exec = async (manifest, argv, options) => {
+    runs.push({ argv, user: options?.user })
+    if (argv[0] === "id") return { exitCode: 0, stdout: "agent\n", stderr: "" }
+    const home = manifest.spec.gpu ? "/home/agent" : "/root"
+    return { exitCode: 0, stdout: `no\n${home}\n/usr/sbin/sshd\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEU61N7KJmkiTPSmrOfaemXZu/1hocrAC0WXPcRUyjQ8 asidee-guest\n`, stderr: "" }
+  }
+  provider.openExec = async (_manifest, argv, options) => { opened.push({ argv, user: options.user }); throw new AsideeError("dependency", "no sessions in the fake") }
+  const asidee = await core(provider)
+  await asidee.create({ name: "gpu", gpu: true }); await asidee.create({ name: "box" })
+  const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEU61N7KJmkiTPSmrOfaemXZu/1hocrAC0WXPcRUyjQ8"
+  const setup = async (name: string) => {
+    runs.length = 0; opened.length = 0
+    await asidee.sshSetup(name, false, key)
+    await expect(asidee.openSession({ kind: "ssh", name })).rejects.toThrow("no sessions")
+    return { setup: runs.at(-1), session: opened[0] }
+  }
+  expect(await setup("gpu")).toEqual({
+    setup: { argv: ["sh", "-c", GUEST_SETUP_USER, "sh", "agent", key], user: GPU_USER },
+    session: { argv: ["/usr/sbin/sshd", "-i", "-e", "-f", "/home/agent/.asidee/ssh/sshd_config"], user: GPU_USER },
+  })
+  expect(await setup("box")).toEqual({
+    setup: { argv: ["sh", "-c", GUEST_SETUP, "sh", "agent", key], user: "0" },
+    session: { argv: ["/usr/sbin/sshd", "-i", "-e", "-f", "/.asidee/ssh/sshd_config"], user: "0" },
+  })
 })
 
 // docker create's arguments, from a runner that answers every other engine command with success.
