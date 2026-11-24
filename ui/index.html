@@ -490,7 +490,7 @@
         </div>
       </div></div>
       <div id="create-gpu" hidden><label class="check"><input type="checkbox" id="f-gpu" name="gpu" value="true"> <span class="kind gpu">GPU container</span></label>
-        <p class="muted" style="margin-top:6px">Not a sandbox: it runs on this engine's own Linux kernel, so a bug in that kernel or in the NVIDIA driver is a way onto the machine. It runs as uid 1000 with no admin powers and gets the NVIDIA GPU; its network limits, memory, process and CPU limits and disk limit check are a sandbox's. No Docker inside, templates, connections or SSH.</p></div>
+        <p class="muted" style="margin-top:6px">Not a sandbox: it runs on this engine's own Linux kernel, so a bug in that kernel or in the NVIDIA driver is a way onto the machine. It runs as uid 1000 with no admin powers and gets the NVIDIA GPU; its network limits, memory, process and CPU limits and disk limit check are a sandbox's. No Docker inside, templates or connections; SSH only when its image has OpenSSH's server.</p></div>
       <div id="create-setup"></div>
       <div><label>The same in a terminal</label><div id="create-command"></div></div>
       <div class="row"><button class="acc" type="submit">Create and check</button><button type="button" class="ghost" id="create-cancel">Cancel</button></div>

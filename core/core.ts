@@ -8,7 +8,7 @@ import { homeFolder } from "./folders"
 import { boundPort, FORWARD_REACH, LEASE_TTL_MS, listenLoopback, relay, validPort, type ForwardView } from "./forwards"
 import { Links } from "./links"
 import { OUTPUT_LIMIT } from "./run"
-import { addInclude, alias, editorKey, GUEST_SETUP, GUEST_SSH, includeLine, included, keyFingerprint, parseGuestSetup, userConfig, validPublicKey, writeClientFiles, type SshAccess } from "./ssh"
+import { addInclude, alias, editorKey, GUEST_SETUP, GUEST_SETUP_USER, GUEST_SSH, GUEST_USER_SSH, includeLine, included, keyFingerprint, parseGuestSetup, userConfig, validPublicKey, writeClientFiles, type SshAccess } from "./ssh"
 import { deleteManifest, listManifests, readConfig, readManifest, scanManifests, validName, validSizes, validSpec, validTemplateName, writeManifest, writeConfig, type Dirs } from "./state"
 import type { OpenRequest } from "./stream"
 import { AsideeError, type CheckResult, type CreateSetup, type DiskWarning, type Engine, type Limits, type Manifest, type Provider, type RunResult, type Runner, type Session, type Stage, type Template, type SshSetup, type Visibility, privateThere } from "./types"
@@ -627,7 +627,8 @@ export class Core {
     // sshd in inetd mode serves this one connection; -e sends its complaints to the client's stderr.
     if (request.kind === "ssh" && !manifest.ssh) throw new AsideeError("conflict", `SSH is not set up for ${request.name}. Run \`asd ssh setup ${request.name}\`.`)
     if (request.kind === "exec") gpuUser(manifest, request.user)
-    const session = request.kind === "ssh" ? await provider.openExec(manifest, [manifest.ssh!.sshd, "-i", "-e", "-f", `${GUEST_SSH}/sshd_config`], { user: "0", tty: false })
+    // A GPU container's sshd runs as its only user, from that user's files (sshSetup).
+    const session = request.kind === "ssh" ? await provider.openExec(manifest, [manifest.ssh!.sshd, "-i", "-e", "-f", `${manifest.spec.gpu ? `${manifest.ssh!.home}/${GUEST_USER_SSH}` : GUEST_SSH}/sshd_config`], { user: manifest.spec.gpu ? GPU_USER : "0", tty: false })
       : await provider.openExec(manifest, request.argv, request)
     this.trackSession(request.name, session)
     return session
@@ -721,7 +722,6 @@ export class Core {
   sshSetup(name: string, writeConfig = false, publicKey?: string): Promise<SshAccess & { config: string; include: string; included: boolean; editorKey: string; keyFile: string; sandboxId: string; setup: SshSetup }> {
     return this.exclusive(validName(name), async () => {
       const manifest = await readManifest(this.dirs, name); const provider = this.provider(manifest)
-      if (manifest.spec.gpu) throw new AsideeError("usage", `${name} is a GPU container, where sshd cannot switch to its user: no process there has the capabilities to. Use \`asd shell ${name}\`.`)
       if (manifest.engine.capabilities?.execStream === false) throw new AsideeError("dependency", `${manifest.engine.label} cannot relay a session's bytes, which SSH needs.`)
       if ((await provider.status(manifest)) !== "running") throw new AsideeError("conflict", `${name} is not running. Start it with \`asd start ${name}\`, then set up SSH.`)
       if (publicKey !== undefined && !validPublicKey(publicKey)) throw new AsideeError("usage", "SSH preparation needs an Ed25519 public key.")
@@ -731,7 +731,9 @@ export class Core {
         const who = await provider.exec(manifest, ["id", "-un"])
         const user = who.stdout.trim()
         if (who.exitCode !== 0 || !/^[a-z_][a-z0-9_.-]{0,31}$/i.test(user)) throw new AsideeError("runtime", `Could not tell which user exec runs as in ${name}: ${who.stderr.trim() || user}`)
-        const done = await provider.exec(manifest, ["sh", "-c", GUEST_SETUP, "sh", user, key.publicKey], { user: "0" })
+        // A GPU container has no root to run it: its own user prepares an sshd that runs as itself.
+        const done = manifest.spec.gpu ? await provider.exec(manifest, ["sh", "-c", GUEST_SETUP_USER, "sh", user, key.publicKey], { user: GPU_USER })
+          : await provider.exec(manifest, ["sh", "-c", GUEST_SETUP, "sh", user, key.publicKey], { user: "0" })
         if (done.exitCode !== 0) throw new AsideeError(done.exitCode === 4 ? "dependency" : "runtime", `Could not prepare sshd in ${name}: ${done.stderr.trim().split("\n").slice(-3).join(" ")}`)
         // A second setup finds the password already unlocked; the first one's word for it is kept.
         const guest = parseGuestSetup(done.stdout)
