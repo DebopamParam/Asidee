@@ -902,11 +902,11 @@ function folderPicker(id, { name = id, logins = () => false, dest = () => "", gu
     api("folderPreview", { source: state.value, logins: logins() }).then((data) => ({ key, data }), (error) => ({ key, error: error.message }))
       .then((done) => { if (state.preview?.key === key) { state.preview = done; state.redraw() } })
   }
-  const drawPicks = () => picks.replaceChildren(...(folderPicks ?? []).map((pick) => el("label", { class: "pill", title: pick.path },
+  const drawPicks = () => picks.replaceChildren(...[...(folderPicks ?? []).map((pick) => el("label", { class: "pill", title: pick.path },
     el("input", { type: "radio", name: `${id}-pick`, value: pick.path, ...(pick.path === state.value ? { checked: "" } : {}), onchange: () => set(pick.path) }), pick.label)),
     finder ? el("button", { type: "button", class: "sm", ...(state.choosing ? { disabled: "" } : {}), onclick: choose }, state.choosing ? "Waiting for Finder…" : "Choose in Finder…") : null,
     el("button", { type: "button", class: "sm", "aria-expanded": String(Boolean(state.browse)), onclick: () => state.browse ? (state.browse = null, drawBrowser()) : open(state.value || "~") }, state.browse ? "Close the browser" : "Browse…"),
-    state.chooseError ? el("p", { class: "error", style: "flex-basis: 100%; margin: 0" }, state.chooseError) : null)
+    state.chooseError ? el("p", { class: "error", style: "flex-basis: 100%; margin: 0" }, state.chooseError) : null].filter(Boolean))
   // Finder's window opens on this Mac, over the browser; cancelling it leaves the folder as it was.
   const choose = () => {
     state.choosing = true; state.chooseError = undefined; drawPicks()

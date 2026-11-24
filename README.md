@@ -4,6 +4,8 @@ Sandboxes for coding agents that are checked instead of assumed.
 
 "Asidee" (Agent Sandbox IDE) is a working name. This is an early alpha (0.4.0): the structure is in place and one engine works end to end.
 
+![A sandbox's page in the dashboard: its checks, its use, the agents inside and how to connect](docs/images/sandbox.png)
+
 ## What it does
 
 `asd create demo` makes a sandbox, starts it, and runs a fixed checklist against it: it runs on an isolated kernel,
@@ -32,6 +34,22 @@ from the engine's configuration):
 | – | This engine cannot provide it. |
 | ? | Could not be checked. |
 | i | A disclosure, such as which logins are inside the sandbox. |
+
+## The dashboard
+
+`asd ui --open` opens it in a browser. Your sandboxes, and the ones your other machines share, each tagged with its machine:
+
+![The Sandboxes list](docs/images/sandboxes.png)
+
+A new sandbox starts from a template, then can copy in logins, clone a repository and copy folders in:
+
+![The New sandbox form](docs/images/new-sandbox.png)
+
+Other Linux machines that run Asidee, reached over SSH, with their sandboxes and GPU containers:
+
+![The Machines page](docs/images/machines.png)
+
+The screenshots use demo names.
 
 ## Status
 
