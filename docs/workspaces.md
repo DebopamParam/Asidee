@@ -1,5 +1,39 @@
 # macOS workspaces
 
+## In short
+
+`asd workspace create render --copy /absolute/project` makes a disposable `~/Asidee/render` folder. Commands
+started through `asd workspace shell render` or `workspace exec render -- COMMAND` inherit a Seatbelt profile.
+They run directly on the Mac and can use its GPU; K06 measured Metal compute and hardware-only HEVC VideoToolbox
+encoding on Apple M5. Chrome's own sandbox cannot start inside a workspace, so Chrome-based tools need `--no-sandbox`
+(workspaces tell HyperFrames so).
+`workspace stop` ends processes identified by their kernel profile. `workspace remove render --confirm render` stops
+them and deletes the folder, leaving the original project alone. Asidee never copies with hard links.
+
+A workspace is **not a sandbox**. It shares this Mac's kernel and user, has no CPU, memory or process limits, and keeps
+the network and loopback open. Its disk use is watched, not capped: while the daemon runs it stops a workspace's
+processes within about 30 seconds of passing its `--disk` limit (default 20 GiB), or when free space falls below
+`asd config set workspace-free-space GiB` (default 5). Reads outside home are open. Remote effects, unified logs, existing backups and changes through
+externally supplied hard links can survive removal. Apple events and permission-gated capabilities are not covered.
+Asidee passes no flags to change agents' own sandboxes. Entering the folder from an ordinary shell applies no profile.
+
+Creation imports the `default` agent profiles, with explicit `--claude-profile NAME` and `--codex-profile NAME`
+selection or `--no-logins`. Claude's macOS Keychain login uses the shared sandbox credential reader, with a 15-second
+timeout; it may prompt. Product-path `claude auth status` reported logged in after import. Authenticated calls and
+refresh remain **unverified**; no login or logout is attempted. Create and verify probe hardware-only VideoToolbox
+when ffmpeg is available. Command launches run only blocking checks, and dashboard summaries do no tree walks or repairs.
+
+Workspace size, disk limits and free-space floors use GiB (1024³ bytes). Create and verify text shows at most eight
+distinct `port (process)` listeners; `--json` keeps the full detail. When stop, remove or the disk watch ends a command,
+its stderr says why before the session ends. Signal exits use 128 plus the signal number (137 for SIGKILL).
+
+Workspaces require macOS and Bun, without a Docker engine. The separate workspace checklist never weakens the
+sandbox checklist. The dashboard shows workspaces in their own section. Reading and verifying one are open to it; a
+create, change, command, stop or remove from it first shows a dialog on the Mac that must be allowed (see [Approval on the Mac](architecture.md#approval-on-the-mac)).
+A shell stays with the CLI and the Terminal button.
+See the sections below and [their separate K scorecard](../evals/SCORECARD.workspace.md) for controls,
+removal limits and login status. The full sandbox scorecards were not regenerated for this feature.
+
 A workspace is **not a sandbox**. It runs programs as your user on this Mac's kernel, under an inherited Seatbelt
 profile. There is no VM, container, or CPU, memory, GPU or process limit; disk use is watched, not capped (see
 [Disk use and free space](#disk-use-and-free-space)). Network and loopback are open. Use a sandbox when you need an
