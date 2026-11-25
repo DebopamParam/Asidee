@@ -40,10 +40,16 @@ async function main() {
       browser = "installed"
     } finally { fs.rmSync(staging, { recursive: true, force: true }) }
   }
-  // T3's own setup installs the browser's libraries and fonts with apt, which needs root.
+  // T3's own setup installs the browser's libraries and fonts with apt, which needs root. An image that already has them
+  // needs none, as in a GPU container, where nothing runs as root, so a user first runs it as itself. T3 exits 0 either
+  // way, and says "This needs root" when it does.
   const root0 = process.getuid() === 0, setup = [t3, "browser", "setup", "--base-dir", path.join(os.homedir(), ".t3")]
-  const ran = cp.spawnSync(root0 ? setup[0] : "sudo", root0 ? setup.slice(1) : ["-n", "--preserve-env=DEBIAN_FRONTEND", ...setup], { stdio: "ignore", env: { ...process.env, DEBIAN_FRONTEND: "noninteractive" }, timeout: 15 * 60 * 1000 })
-  if (ran.status !== 0) fail(root0 ? "T3's browser setup could not install the browser's libraries and fonts." : "T3's browser setup needs root for the browser's libraries and fonts, and sudo asked for a password.")
+  const env = { ...process.env, DEBIAN_FRONTEND: "noninteractive" }, timeout = 15 * 60 * 1000
+  const own = root0 ? undefined : cp.spawnSync(setup[0], setup.slice(1), { stdio: ["ignore", "pipe", "ignore"], encoding: "utf8", env, timeout })
+  if (!own || own.status !== 0 || /needs root/i.test(own.stdout || "")) {
+    const ran = cp.spawnSync(root0 ? setup[0] : "sudo", root0 ? setup.slice(1) : ["-n", "--preserve-env=DEBIAN_FRONTEND", ...setup], { stdio: "ignore", env, timeout })
+    if (ran.status !== 0) fail(root0 ? "T3's browser setup could not install the browser's libraries and fonts." : "T3's browser setup needs root for the browser's libraries and fonts, and sudo asked for a password. A GPU container has no root: use an image that has them.")
+  }
   process.stdout.write(JSON.stringify({ chrome: chrome.version, browser }) + "\n")
 }
 // Only messages written here reach the user: the client prints a line with this prefix and withholds the rest.

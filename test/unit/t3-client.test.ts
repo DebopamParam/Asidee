@@ -196,6 +196,25 @@ test("the browser install takes T3's pinned Chrome only when it matches T3's che
   expect((await readFile(join(home, "downloads"), "utf8")).split("\n").length).toBe(3)
 })
 
+test("a user runs T3's browser setup as itself, and asks sudo only when T3 says it needs root", async () => {
+  const home = await fixture(), run = local(home)
+  // The browser is present, and T3 says it needs root only while needs-root exists.
+  await put(home, ".t3/tools/chrome-headless-shell/linux-arm64/157.0.8103.38/chrome-headless-shell", "#!/bin/sh\n")
+  await put(home, `.t3/runtime/versions/${version}/t3`, `#!/bin/sh\necho "$(id -u) $@" >> "$HOME/setup-ran"\n[ -e "$HOME/needs-root" ] && echo "This needs root. Run:"\nexit 0\n: 'var init_PreviewBrowser = x;\n\tVERSION = "157.0.8103.38";\n\tARCHIVES = {\n\t\t"linux-arm64": {\n\t\t\tbytes: 1,\n\t\t\tsha256: "${"0".repeat(64)}"\n\t\t}\n\t};\n\turl: \`https://storage.googleapis.com/chrome-for-testing-public/\${VERSION}/\${chrome}/chrome-headless-shell-\${chrome}.zip\`'\n`)
+  await chmod(join(home, `.t3/runtime/versions/${version}/t3`), 0o755)
+  // sudo is recorded, and asks for a password.
+  const fake = `require("os").platform = () => "linux"; require("os").arch = () => "arm64"; process.getuid = () => 1000;
+    { const cp = require("child_process"), spawn = cp.spawnSync; cp.spawnSync = (file, argv, options) => file === "sudo" ? (require("fs").appendFileSync(require("path").join(require("os").homedir(), "sudo-ran"), argv.slice(0, 2).join(" ") + "\\n"), { status: 1 }) : spawn(file, argv, options) }\n`
+  const script = await guest("download.cjs") + fake + await guest("browser.cjs")
+  expect(JSON.parse(await must(run, ["node", "-e", script, version]))).toEqual({ chrome: "157.0.8103.38", browser: "present" })
+  expect((await readFile(join(home, "setup-ran"), "utf8")).split("\n").filter(Boolean)).toHaveLength(1)
+  expect(await Bun.file(join(home, "sudo-ran")).exists()).toBe(false)
+  await put(home, "needs-root", "")
+  const refused = await run(["node", "-e", script, version])
+  expect(refused.exitCode).not.toBe(0); expect(refused.stderr).toContain("t3-browser: T3's browser setup needs root")
+  expect(await readFile(join(home, "sudo-ran"), "utf8")).toBe("-n --preserve-env=DEBIAN_FRONTEND\n")
+})
+
 test("a failed browser install shows only the installer's own message", async () => {
   const home = await fixture()
   const reply = (stderr: string) => async (argv: string[]) => argv[0] === "t3" ? ok(`t3 ${version}`) : { exitCode: 1, stdout: "", stderr }
