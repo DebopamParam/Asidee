@@ -927,6 +927,21 @@ test("the T3 part sets T3 up, then gives the SSH host to paste, and shows each r
   expect(ui.text("#sandbox-page pre")).toBe("")
 })
 
+test("every running sandbox has a T3 Code app button that connects it through T3 Connect", async () => {
+  const t3 = { id: "t3", name: "T3 Code", actions: ["setup", "connect", "connect-status", "disconnect"].map((id) => ({ id, label: id, scope: "sandbox", fields: [], run: ["./t3.ts", id] })) }
+  const asked: string[] = []
+  const ui = await page({ ...base, list: () => [sandbox()], extensions: () => ({ extensions: [t3], errors: [] }), sshAccess: () => ({ alias: "demo.asidee", batchReady: true }),
+    action: (body) => { asked.push(`${body.action} ${body.sandbox}`); return { exitCode: 0, stdout: body.action === "connect" ? "Approve this sandbox with your T3 account" : "Connected: demo is in the T3 Code app", stderr: "" } } })
+  await ui.open("demo")
+  await ui.click("T3 Code app")
+  expect(ui.text("#modal")).toContain("through T3 Connect")
+  await ui.click("Connect to the T3 Code app")
+  expect(ui.text("#modal pre")).toBe("Approve this sandbox with your T3 account")
+  await ui.click("Check")
+  expect(ui.text("#modal pre")).toBe("Connected: demo is in the T3 Code app")
+  expect(asked).toEqual(["connect demo", "connect-status demo"])
+})
+
 test("the Logins form lists the sandbox's logins as cards, re-imports or adds one, and tells T3", async () => {
   const logins = { id: "logins", name: "Agent logins", actions: ["import", "github", "list", "logout"].map((id) => ({ id, label: id, scope: "sandbox", fields: [], run: ["./login.ts", id] })) }
   const t3 = { id: "t3", name: "T3 Code", actions: [{ id: "sync", label: "sync", scope: "sandbox", fields: [], run: ["./t3.ts", "sync"] }] }

@@ -1317,7 +1317,8 @@ function sandboxPage(sandbox) {
           el("div", {}, mine.length ? [`${plural(mine.length, "port")} open on this Mac · `, el("span", { class: "mono" }, mine.map((forward) => `:${forward.localPort}`).join(" "))] : quiet("No ports open on this Mac", "forward: 127.0.0.1 on this Mac to a port inside the sandbox")),
           myLinks.length ? el("div", {}, quiet(`${plural(myLinks.length, "connection")} with other sandboxes${myLinks.some((link) => link.toAddress) ? " or addresses" : ""}${myLinks.some((link) => link.toHost) && !host ? " (some on other machines)" : ""}`, "link: one sandbox reaches one port of another, or of an address outside Asidee")) : null,
           el("div", {}, access === undefined ? "SSH: checking…" : access.error ? `SSH: ${access.error}` : sshReady(key) ? ["SSH ready · ", el("span", { class: "mono" }, aliasOf(key))] : "SSH not set up")),
-        el("div", { class: "row", style: "margin-top:8px" }, el("button", { type: "button", class: "sm", onclick: () => toolModal(key, "ports") }, "Ports"), el("button", { type: "button", class: "sm", onclick: () => toolModal(key, "ssh") }, "SSH and editors"))))
+        el("div", { class: "row", style: "margin-top:8px" }, el("button", { type: "button", class: "sm", onclick: () => toolModal(key, "ports") }, "Ports"), el("button", { type: "button", class: "sm", onclick: () => toolModal(key, "ssh") }, "SSH and editors"),
+          installed("t3") ? el("button", { type: "button", class: "sm", title: "The T3 Code app on your phone or the web, through T3 Connect", onclick: () => t3AppModal(key) }, "T3 Code app") : null)))
   }
   node.append(el("div", { class: "grid" }, checksCard(sandbox), right))
   if (!running) { node.append(el("p", { class: "muted", style: "margin-top:16px" }, "Start it to open agents, ports and its extensions.")); return node }
@@ -1395,6 +1396,23 @@ function loginsModal(key) {
   })
 }
 
+// T3 Connect: the T3 Code app on a phone or the web reaches the sandbox through T3's relay, with no SSH.
+function t3Connect(key) {
+  const button = sandboxButton(key), run = (action) => api("action", { extension: "t3", action, ...actionTarget(key), values: {} })
+  const said = (reply) => `${reply.stdout}${reply.stderr}`.trim() || `Failed (exit ${reply.exitCode}).`
+  return [el("span", { class: "muted" }, "The first time, it shows a link and a code to approve with your T3 account on any device. That sign-in is then kept in the sandbox, where anything running there can read it. T3 Code must be set up first."),
+    el("div", { class: "row", style: "margin-top:6px" },
+      button("Connect to the T3 Code app", "t3:connect", async () => said(await run("connect")), { class: "sm" }),
+      button("Check", "t3:connect-status", async () => said(await run("connect-status")), { class: "sm" }),
+      button("Disconnect", "t3:disconnect", async () => said(await run("disconnect")), { class: "sm" }))]
+}
+
+function t3AppModal(key) {
+  sandboxModal(key, `T3 Code app for ${shownName(key)}`, () => [
+    el("p", {}, "Reach this sandbox from the T3 Code app on your phone or the web, through T3 Connect."),
+    ...t3Connect(key), resultFrom(key, "t3:")])
+}
+
 function t3Modal(key) {
   sandboxModal(key, `T3 Code for ${shownName(key)}`, (sandbox) => {
     const button = sandboxButton(key), run = (action) => api("action", { extension: "t3", action, ...actionTarget(key), values: {} })
@@ -1416,7 +1434,8 @@ function t3Modal(key) {
       el("li", {}, el("b", {}, "SSH. "), sshReady(key) ? el("span", { class: "word ok" }, "Ready.") : access?.error ? el("span", { class: "error" }, access.error)
         : el("span", { class: "muted" }, access ? "Set up SSH in the sandbox and add Asidee's Include line to your ~/.ssh/config." : "Checking…"),
         !sshReady(key) && access ? el("div", { class: "row", style: "margin-top:6px" }, askButton("Set up SSH", key, "t3:ssh", () => sshSetup(key, true), { class: "sm" }, `Set up SSH for ${shownName(key)}`), busy.has(`${key}:t3:ssh`) ? null : askLegend()) : null),
-      el("li", {}, el("b", {}, "Connect. "), "In T3 Code: Settings → Connections → Machine over SSH. Paste this as the SSH host:", command(aliasOf(key)))),
+      el("li", {}, el("b", {}, "Connect. "), "In T3 Code: Settings → Connections → Machine over SSH. Paste this as the SSH host:", command(aliasOf(key))),
+      el("li", {}, el("b", {}, "Phone or web (optional). "), ...t3Connect(key))),
       resultFrom(key, "t3:"),
       el("p", { class: "muted" }, "Logins added or removed under Logins reach T3 by themselves. ", button("Refresh T3 logins", "t3:sync", async () => {
         const reply = await run("sync"); if (reply.exitCode !== 0) return failed(reply)

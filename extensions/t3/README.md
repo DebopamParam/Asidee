@@ -53,7 +53,7 @@ gVisor, and nothing is written. Without Chrome's sandbox, the pane should only o
 
 ## The T3 Code app on your phone (T3 Connect)
 
-`asd ext run t3 connect NAME` (the dashboard's "Connect to the T3 Code app") turns on T3 Connect in the sandbox, so
+`asd ext run t3 connect NAME` (in the dashboard, a running sandbox's **T3 Code app** button) turns on T3 Connect in the sandbox, so
 the T3 Code app on a phone or the web reaches it through T3's relay. Asidee opens no port: the sandbox's T3 server
 connects out. The first time it prints a link on `accounts.t3.codes` and a code; approve them with your T3 account on
 any device. Press it again to see whether the app can reach the sandbox; `connect-status` only reports.
